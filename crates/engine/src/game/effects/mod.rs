@@ -3983,7 +3983,10 @@ fn declined_gate_reduced_to_surviving_instructions(
 /// still happen when the optional action before it was DECLINED, in printed
 /// order. Empty when nothing survives, or when `gate` is not a plain positive
 /// `OptionalEffectPerformed` gate (an `else` branch, a `player_scope` or a
-/// nested "if you don't" clause has its own decline authority).
+/// nested "if you don't" clause has its own decline authority), or when its
+/// repeat would repeat or re-prompt the later instructions (a `repeat_until`,
+/// or a counted repeat the outermost repeat driver runs around the whole
+/// chain).
 ///
 /// The gate governs its own resolution steps and every later instruction that
 /// refers to something only the gated action produced (a token it created, a
@@ -3997,6 +4000,13 @@ fn declined_gate_reduced_to_surviving_instructions(
 /// haste"), and CR 608.2c lets later text modify earlier text, so a created
 /// object and its rider are kept or skipped together.
 fn declined_gate_surviving_instructions(gate: &ResolvedAbility) -> Vec<&ResolvedAbility> {
+    // CR 118.12 + CR 608.2c: the declined gate's process, its repeat
+    // included, does not happen (CR 118.12), so the repeat is not carried
+    // onto the instructions that follow (CR 608.2c). The reduced gate keeps
+    // the gate's repeat fields, so a gate carrying any `repeat_until`, or a
+    // counted repeat that the outermost repeat driver runs around the whole
+    // chain (`repeat_for_outermost_with_scope_or_unless`), is not reduced. It
+    // keeps the base reading, a fail-safe that is not the Oracle reading.
     let plain_performed_gate = gate
         .condition
         .as_ref()
@@ -4004,7 +4014,9 @@ fn declined_gate_surviving_instructions(gate: &ResolvedAbility) -> Vec<&Resolved
         && gate.else_ability.is_none()
         && gate.player_scope.is_none()
         && nested_optional_decline_clause(gate).is_none()
-        && !matches!(gate.effect, Effect::Unimplemented { .. });
+        && !matches!(gate.effect, Effect::Unimplemented { .. })
+        && gate.repeat_until.is_none()
+        && !repeat_for_outermost_with_scope_or_unless(gate);
     if !plain_performed_gate {
         return Vec::new();
     }
@@ -19665,6 +19677,105 @@ mod tests {
         assert_eq!(
             surviving(vec![&token, &rider, &gain_life]),
             vec![gain_life.effect.clone()]
+        );
+    }
+
+    /// Phase 7F, JF-3 (the building block): a declined "if you do" gate whose
+    /// repeat would repeat or re-prompt the instructions printed after it is not
+    /// reduced, so it keeps no later instruction: a `repeat_until` in each of its
+    /// three forms, and a counted repeat with an "unless" payment, which the
+    /// outermost repeat driver runs around the whole chain. The declined gate's
+    /// process, its repeat included, does not happen (CR 118.12), so the repeat
+    /// is not carried onto the instructions that follow (CR 608.2c). Each
+    /// refused case is red at base, the `repeat_until` cases under M-F1 and the
+    /// counted "unless" case under M-F2. GREEN AT BASE: the control (no repeat),
+    /// red under M-F4; and each counted repeat the driver does not run around the
+    /// whole chain, whose declined board already resolves the later instruction
+    /// once, red under M-F3 (and the counter-kind "unless" case also under M-F5).
+    #[test]
+    fn a_declined_gate_that_would_repeat_its_later_instructions_keeps_none() {
+        fn gain_life(amount: i32) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        }
+        fn kept(repeat: fn(&mut ResolvedAbility)) -> usize {
+            let mut later = gain_life(3);
+            later.sub_link = SubAbilityLink::SequentialSibling;
+            let mut gate = gain_life(1);
+            gate.condition = Some(AbilityCondition::effect_performed());
+            repeat(&mut gate);
+            declined_gate_surviving_instructions(&gate.sub_ability(later)).len()
+        }
+        fn unless_pay_life() -> Option<UnlessPayModifier> {
+            Some(UnlessPayModifier {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                payer: TargetFilter::Controller,
+            })
+        }
+        fn per_counter_kind() -> Option<QuantityExpr> {
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong {
+                    filter: TargetFilter::Any,
+                },
+            })
+        }
+        let cases: [(&str, fn(&mut ResolvedAbility)); 8] = [
+            ("no repeat", |_| {}),
+            ("counted", |gate| {
+                gate.repeat_for = Some(QuantityExpr::Fixed { value: 2 })
+            }),
+            ("per counter kind", |gate| {
+                gate.repeat_for = per_counter_kind()
+            }),
+            ("per counter kind unless", |gate| {
+                gate.repeat_for = per_counter_kind();
+                gate.unless_pay = unless_pay_life();
+            }),
+            ("while", |gate| {
+                gate.repeat_until = Some(RepeatContinuation::WhileCondition {
+                    condition: Box::new(AbilityCondition::IsYourTurn),
+                    max_iterations: Some(2),
+                })
+            }),
+            ("controller choice", |gate| {
+                gate.repeat_until = Some(RepeatContinuation::ControllerChoice)
+            }),
+            ("until stop", |gate| {
+                gate.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+                    stop_on_put_to_hand: false,
+                    stop_on_duplicate_exiled_names: false,
+                })
+            }),
+            ("counted unless", |gate| {
+                gate.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+                gate.unless_pay = unless_pay_life();
+            }),
+        ];
+        let readings: Vec<(&str, usize)> = cases
+            .into_iter()
+            .map(|(label, repeat)| (label, kept(repeat)))
+            .collect();
+        assert_eq!(
+            readings,
+            vec![
+                ("no repeat", 1),
+                ("counted", 1),
+                ("per counter kind", 1),
+                ("per counter kind unless", 1),
+                ("while", 0),
+                ("controller choice", 0),
+                ("until stop", 0),
+                ("counted unless", 0),
+            ]
         );
     }
 

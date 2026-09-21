@@ -15,6 +15,7 @@
 //! corpus does not reach.
 
 use engine::game::combat::{build_declare_attackers_waiting_for, AttackTarget};
+use engine::game::effects::resolve_ability_chain;
 use engine::game::game_object::BackFaceData;
 use engine::game::keywords::has_keyword;
 use engine::game::layers::evaluate_layers;
@@ -22,7 +23,11 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::specialize::SpecializeFaceMap;
 use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::{ContinuousModification, EffectKind, TargetFilter, TargetRef};
+use engine::types::ability::{
+    AbilityCondition, AbilityCost, ContinuousModification, Effect, EffectKind, QuantityExpr,
+    RepeatContinuation, ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
+    UnlessPayModifier,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::events::GameEvent;
@@ -741,6 +746,17 @@ fn syn_exile_that_declined_resolves_nothing() {
 /// declined gate, so the Goblin sentence is skipped with it: declined, nothing
 /// happens (the base reading), never a Goblin without haste. GREEN AT BASE;
 /// red under M-11b (the coupling disabled: a Goblin without haste; measured).
+///
+/// KNOWN-BAD (phase 7F; residue #35). The Oracle reading, declined: "If you
+/// do" governs only "draw a card" (CR 118.12), and the next two sentences are
+/// independent instructions followed in the order written, "It" naming the
+/// Goblin they create (CR 608.2c): one Goblin with haste, and no card drawn.
+/// Measured at phase 7F's base: no Goblin, no haste, the library still holds
+/// two cards, and no effect resolves. The engine falls back to the base reading
+/// because phase 7's declined-gate audit refuses the rider "It gains haste",
+/// and the producer-rider coupling then drops the Goblin sentence with it
+/// (integration review 2 measured two independent causes of the refusal, the
+/// `LastCreated` referent and the keyword grant; a lead).
 #[test]
 fn syn_rider_declined_creates_no_goblin_without_its_rider() {
     let board = combat_board("SynRider", SYN_RIDER, false);
@@ -1047,4 +1063,112 @@ fn iroh_declined_creates_no_ally() {
     assert!(!resolved(&events).contains(&EffectKind::Token));
     assert!(tokens_named(&runner, "Ally").is_empty());
     assert_eq!(runner.state().objects[&c1].controller, P0);
+}
+
+/// JF-2 (phase 7F), KNOWN-BAD. The board has no card behind it and is built
+/// from typed ability nodes rather than text: an optional head, then an "if you
+/// do" gate that gains 1 life and carries a repeat, then an independent
+/// instruction that gains 3 life. The Oracle reading, declined: the gated
+/// process, its repeat included, does not happen (CR 118.12), and the
+/// independent instruction resolves once, in the order written (CR 608.2c):
+/// life +3, with no choice to repeat. The engine does not reduce a declined
+/// gate whose repeat would repeat or re-prompt the later instruction. It falls
+/// back to the base reading, which resolves nothing after the gate: life +0, no
+/// repeat choice, and the game continues. That is not the Oracle reading;
+/// residue #36 records it. Each repeat case is red at base, the `repeat_until`
+/// cases under M-F1 and the counted "unless" case under M-F2. The control (no
+/// repeat) is GREEN AT BASE: the reach guard showing that the decline keeps the
+/// independent instruction on this board, red under M-F4.
+#[test]
+fn a_declined_gate_that_would_repeat_its_later_instructions_resolves_nothing_after_it() {
+    fn declined(repeat: fn(&mut ResolvedAbility)) -> (i32, &'static str) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_creature(P0, "Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let gain_life = |amount: i32| {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            )
+        };
+        let mut later = gain_life(3);
+        later.sub_link = SubAbilityLink::SequentialSibling;
+        let mut gate = gain_life(1);
+        gate.condition = Some(AbilityCondition::effect_performed());
+        repeat(&mut gate);
+        let mut head = gain_life(0);
+        head.optional = true;
+        let head = head.sub_ability(gate.sub_ability(later));
+        let life = runner.life(P0);
+        resolve_ability_chain(runner.state_mut(), &head, &mut Vec::new(), 0)
+            .expect("the chain starts resolving");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "reach guard: the optional action is offered, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .expect("the decline is accepted");
+        let waiting = match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => "priority",
+            WaitingFor::RepeatDecision { .. } => "repeat choice",
+            WaitingFor::GameOver { .. } => "game over",
+            _ => "other",
+        };
+        (runner.life(P0) - life, waiting)
+    }
+    let cases: [(&str, fn(&mut ResolvedAbility)); 5] = [
+        ("no repeat", |_| {}),
+        ("while", |gate| {
+            gate.repeat_until = Some(RepeatContinuation::WhileCondition {
+                condition: Box::new(AbilityCondition::IsYourTurn),
+                max_iterations: Some(2),
+            })
+        }),
+        ("controller choice", |gate| {
+            gate.repeat_until = Some(RepeatContinuation::ControllerChoice)
+        }),
+        ("until stop", |gate| {
+            gate.repeat_until = Some(RepeatContinuation::UntilStopConditions {
+                stop_on_put_to_hand: false,
+                stop_on_duplicate_exiled_names: false,
+            })
+        }),
+        ("counted unless", |gate| {
+            gate.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+            gate.unless_pay = Some(UnlessPayModifier {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                payer: TargetFilter::Controller,
+            });
+        }),
+    ];
+    let readings: Vec<(&str, i32, &str)> = cases
+        .into_iter()
+        .map(|(label, repeat)| {
+            let (life, waiting) = declined(repeat);
+            (label, life, waiting)
+        })
+        .collect();
+    assert_eq!(
+        readings,
+        vec![
+            ("no repeat", 3, "priority"),
+            ("while", 0, "priority"),
+            ("controller choice", 0, "priority"),
+            ("until stop", 0, "priority"),
+            ("counted unless", 0, "priority"),
+        ]
+    );
 }
