@@ -91,7 +91,7 @@ function MoveToZoneForm({ onDispatch }: Props) {
       <CheckboxInput
         checked={simulate}
         onChange={setSimulate}
-        label="Simulate (run triggers + SBAs)"
+        label="Simulate (ETB effects, triggers + SBAs)"
       />
       <SubmitButton
         disabled={objectId == null}

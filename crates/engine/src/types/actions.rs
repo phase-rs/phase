@@ -1146,8 +1146,10 @@ pub enum DebugCardCreationKind {
 pub enum DebugAction {
     // ── Object Zone Manipulation ──────────────────────────────────────────
     /// Move an existing object to a different zone.
-    /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs).
-    /// When false, raw placement with no triggers or SBAs.
+    /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs);
+    /// a `Battlefield` destination also consults ETB replacements (enters tapped,
+    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`.
+    /// When false, raw placement with no replacements, triggers, or SBAs.
     MoveToZone {
         object_id: ObjectId,
         to_zone: Zone,
