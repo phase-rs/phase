@@ -1,6 +1,3 @@
-import type Peer from "peerjs";
-import type { DataConnection } from "peerjs";
-
 import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
@@ -44,6 +41,7 @@ import {
 } from "./ws-adapter";
 import { dialPeer, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
 import { createPeerSession, type PeerSession } from "../network/peer";
+import type { TransportConnection, TransportPeer } from "../network/transport";
 import type { P2PMessage } from "../network/protocol";
 import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
 import type {
@@ -1013,7 +1011,7 @@ export class P2PHostAdapter implements EngineAdapter {
 
   constructor(
     private readonly hostDeckData: unknown,
-    private readonly hostPeer: Peer,
+    private readonly hostPeer: TransportPeer,
     /**
      * Subscribe to inbound guest `DataConnection`s via `hostRoom()`'s
      * documented API. Using this (instead of `hostPeer.on("connection")`
@@ -1022,7 +1020,7 @@ export class P2PHostAdapter implements EngineAdapter {
      * adapter was still under construction.
      */
     private readonly onGuestConnected: (
-      handler: (conn: DataConnection) => void,
+      handler: (conn: TransportConnection) => void,
     ) => () => void,
     private readonly playerCount: number,
     private readonly formatConfig?: FormatConfig,
@@ -1818,7 +1816,7 @@ export class P2PHostAdapter implements EngineAdapter {
     }
   }
 
-  private handleNewConnection(conn: DataConnection): void {
+  private handleNewConnection(conn: TransportConnection): void {
     if (!this.ownsAuthority()) {
       const session = createPeerSession(conn, {});
       this.rejectSuperseded(session);
@@ -3842,9 +3840,9 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   constructor(
     private readonly deckData: unknown,
-    private readonly hostPeer: Peer,
+    private readonly hostPeer: TransportPeer,
     private readonly hostPeerId: string,
-    private readonly initialConn: DataConnection,
+    private readonly initialConn: TransportConnection,
     existingPlayerToken?: string,
     private readonly displayName?: string,
     private readonly reservationToken?: string,
@@ -3904,7 +3902,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     }
   }
 
-  private attachSession(conn: DataConnection): void {
+  private attachSession(conn: TransportConnection): void {
     if (this.terminated) {
       conn.close();
       return;

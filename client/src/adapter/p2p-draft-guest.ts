@@ -9,9 +9,6 @@
  * authoritative state — everything is server-said (host-said).
  */
 
-import type Peer from "peerjs";
-import type { DataConnection } from "peerjs";
-
 import type { DraftPlayerView, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import {
   createDraftPeerSession,
@@ -22,6 +19,7 @@ import {
   RECONNECT_DIAL_TIMEOUT_MS,
   parseRoomCode,
 } from "../network/connection";
+import type { TransportConnection, TransportPeer } from "../network/transport";
 import {
   deckSubmissionFingerprint,
   DRAFT_PROTOCOL_VERSION,
@@ -188,9 +186,9 @@ export class P2PDraftGuest {
   } | null = null;
 
   constructor(
-    private readonly guestPeer: Peer,
+    private readonly guestPeer: TransportPeer,
     private readonly hostPeerId: string,
-    private readonly initialConn: DataConnection,
+    private readonly initialConn: TransportConnection,
     private readonly connection: DraftGuestConnection,
   ) {
     if (connection.kind === "reconnect") {
@@ -240,7 +238,7 @@ export class P2PDraftGuest {
     throw abortError();
   }
 
-  private attachSession(conn: DataConnection): DraftPeerSession {
+  private attachSession(conn: TransportConnection): DraftPeerSession {
     const session = createDraftPeerSession(conn, {
       onSessionEnd: () => {
         this.handleSessionEnd(session);
@@ -255,7 +253,7 @@ export class P2PDraftGuest {
     return session;
   }
 
-  private async handshakeOn(conn: DataConnection, signal?: AbortSignal, reconnect = true): Promise<void> {
+  private async handshakeOn(conn: TransportConnection, signal?: AbortSignal, reconnect = true): Promise<void> {
     if (signal?.aborted) throw abortError();
     if (this.session) this.retireSession(this.session);
     const session = this.attachSession(conn);
@@ -993,7 +991,7 @@ export class P2PDraftGuest {
     });
   }
 
-  private openReconnectConnection(signal?: AbortSignal): Promise<DataConnection> {
+  private openReconnectConnection(signal?: AbortSignal): Promise<TransportConnection> {
     if (signal?.aborted) return Promise.reject(abortError());
     // Ordered delivery is not the default: without `reliable: true` PeerJS
     // builds this channel with `ordered: false`, which a TURN relay will
