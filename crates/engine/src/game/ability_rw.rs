@@ -3324,10 +3324,10 @@ fn legacy_effect(x: &Effect) -> bool {
             target_player,
             ..
         } => legacy_target_filter(filter) || legacy_quantity_expr(count) || otf(target_player),
-        // M-f: `keeper_constraint`'s `ExactCount { count }` and
+        // `keeper_constraint`'s `ExactCount { count }` and
         // `keeper_counter`'s `KeeperCounterMark::count` are both unread
         // `QuantityExpr` positions closed together here — the pre-existing
-        // `keeper_constraint` omission is the same fail-open shape U1's new
+        // `keeper_constraint` omission is the same fail-open shape the new
         // `keeper_counter` field would otherwise introduce.
         Effect::ChooseAndSacrificeRest {
             choose_filter,

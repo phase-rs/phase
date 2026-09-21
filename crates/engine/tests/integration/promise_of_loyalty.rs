@@ -46,10 +46,10 @@ const LIMITED_RESOURCES: &str =
     "When this enchantment enters, each player chooses five lands they control and sacrifices the rest.";
 /// Winding Constrictor, verbatim. Regenerate with
 /// `jq -r '.["winding constrictor"].oracle_text' client/public/card-data.json`.
-/// U1's F1 fixture: a real counter-doubling multiplier, controlled by the same
-/// player as the vow-counter recipient, that is itself among the sacrificed
-/// permanents — the exact shape CR 608.2c + CR 614.1 require the keeper mark
-/// to be placed BEFORE the sacrifice for.
+/// A real counter-doubling multiplier, controlled by the same player as the
+/// vow-counter recipient, that is itself among the sacrificed permanents —
+/// the exact shape CR 608.2c + CR 614.1 require the keeper mark to be placed
+/// BEFORE the sacrifice for.
 const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
 /// Doubling Season, verbatim. A second, non-commuting counter multiplier,
 /// used together with Winding Constrictor to force a CR 616.1
@@ -489,11 +489,14 @@ fn promise_of_loyalty_keeper_attacks_after_vow_counter_removed() {
         .remove(&VOW());
 
     // Cross-seat control: the caster's own keeper ("Caster Keeper") still carries
-    // its own vow counter, untouched by p1_keeper's removal above. Moving it to
-    // P1's control lets P1 legally declare it as an attacker against P0 — CR
-    // 508.1a's active-team exclusion, which normally makes "a creature attacks
-    // its own controller" untestable, no longer applies once P0 isn't P1's
-    // teammate — so its restriction becomes observable in the SAME window
+    // its own vow counter, untouched by p1_keeper's removal above. CR 506.2: an
+    // attacking creature must be controlled by the active player and its attack
+    // target must be the nonactive (defending) player, so a creature can never
+    // legally attack its own controller. Moving p0_keeper to P1's control (the
+    // active player for this window) is what makes declaring it against P0
+    // legal at all — `game/combat.rs::attacker_can_attack_target` refuses any
+    // `AttackTarget::Player` on the active team, and P0 is never on that team —
+    // so the vow restriction's effect becomes observable in the SAME window
     // p1_keeper's restriction just expired. A regression that gave the whole
     // printed instruction one shared expiry (instead of a separate duration
     // check per marked creature) would wrongly lift this restriction too.
@@ -516,18 +519,12 @@ fn promise_of_loyalty_keeper_attacks_after_vow_counter_removed() {
     runner.state_mut().layers_dirty.mark_full();
 
     advance_to_declare_attackers_for(&mut runner, P1);
-    // Non-vacuous against CR 302.6 summoning sickness, the obvious alternative
-    // source of a refusal right after a control change: the refusal is the CR
-    // 508.1c/d attack restriction with `summoning_sick` false at the check —
-    // `advance_to_declare_attackers_for` crosses into P1's own turn, and
-    // `start_next_turn`'s CR 302.6 handling has already cleared sickness for
-    // every object P1 controls by then, this keeper included.
     let refusal = runner
         .declare_attackers(&[(p0_keeper, AttackTarget::Player(P0))])
         .expect_err("the caster's own keeper still has its own vow counter");
     assert!(
-        !format!("{refusal:?}").contains("not controlled by the active player"),
-        "the refusal must come from the prohibition, not from a control mismatch: {refusal:?}"
+        format!("{refusal:?}").contains("CR 508.1c/d attack restriction"),
+        "the refusal must come from the vow prohibition: {refusal:?}"
     );
     runner
         .declare_attackers(&[(p1_keeper, AttackTarget::Player(P0))])
@@ -1058,7 +1055,7 @@ fn planetary_annihilation_deals_six_to_each_surviving_creature() {
 }
 
 // ---------------------------------------------------------------------------
-// U1 (F1, CR 608.2c) — the keeper mark precedes the sacrifice.
+// CR 608.2c — the keeper mark precedes the sacrifice.
 // ---------------------------------------------------------------------------
 
 /// CR 616.1: a redirect replacement forcing a CR 616.1 ordering choice when
@@ -1392,7 +1389,7 @@ fn build_pause_board(multipliers: bool, double_pause: bool) -> PauseBoard {
 }
 
 /// V-F1g + MO-2 + MO-3 — sentence two still binds to the keepers after the
-/// anaphor's label flip (§1: `ChooseAndSacrificeRest` is not a member of
+/// anaphor's label flip (`ChooseAndSacrificeRest` is not a member of
 /// `publishes_tracked_set_from_resolution`, so the grant's `affected` is
 /// `ParentTarget`, not `TrackedSet`), on all three pause shapes.
 ///
@@ -1480,12 +1477,11 @@ fn promise_of_loyalty_sentence_two_binds_to_the_keepers_on_every_pause_path() {
 /// OBSERVABLE THIRD `EffectResolved{ChooseAndSacrificeRest}` push beyond the
 /// pre-existing baseline, on every pause shape.
 ///
-/// MEASURED, and NOT the plan's predicted "exactly 1 on every board": a real
-/// interactive exact-keeper choice emits TWO such events even at BASE_SHA,
-/// for reasons unrelated to U1 — `step_exact_count` pushes one when it first
-/// raises `WaitingFor::KeepExactPermanentsChoice` (unchanged by this plan),
-/// and `perform_player_scope_sacrifices`'s completion tail pushes a second
-/// when the sacrifice actually finishes (also unchanged). BASELINE = 2 on
+/// MEASURED: a real interactive exact-keeper choice emits TWO such events
+/// even at BASE_SHA — `step_exact_count` pushes one when it first raises
+/// `WaitingFor::KeepExactPermanentsChoice`, and
+/// `perform_player_scope_sacrifices`'s completion tail pushes a second when
+/// the sacrifice actually finishes. BASELINE = 2 on
 /// every board, including "unpaused": `add_object_counters_then`'s inline
 /// path never constructs a completion frame at all, so neither mode is even
 /// consulted there.

@@ -576,11 +576,17 @@ pub enum KeeperConstraint {
 /// instruction as the disposal, not a following one, so it rides on
 /// [`Effect::ChooseAndSacrificeRest`] rather than a chained `PutCounterAll`.
 ///
-/// CR 608.2h: `count` is resolved once, when the effect is applied — every
-/// printed count in this class is `QuantityExpr::Fixed`, so "resolve at
-/// `resolve`" and "resolve at placement" are observationally identical today
-/// and the resolved value is carried on `WaitingFor::KeepExactPermanentsChoice`.
-/// A future dynamic count would have to be re-derived at placement instead.
+/// CR 608.2h: `count` is resolved once, when the effect is applied, and the
+/// resolved value is carried on `WaitingFor::KeepExactPermanentsChoice`.
+/// Promise of Loyalty is currently the only card in this class — `jq -r
+/// 'to_entries[] | select(.value.oracle_text != null) |
+/// select(.value.oracle_text | test("counter"; "i")) |
+/// select(.value.oracle_text | test("sacrifices? the rest|destroys? the
+/// rest"; "i")) | .key' client/public/card-data.json` returns it alone once
+/// Ajani, Nacatl Avenger's unrelated `+1/+1`-counter loyalty ability is
+/// excluded — and its printed count is `QuantityExpr::Fixed(1)`, so "resolve
+/// at `resolve`" and "resolve at placement" are observationally identical
+/// today. A dynamic count would have to be re-derived at placement instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeeperCounterMark {
     pub counter_type: CounterType,

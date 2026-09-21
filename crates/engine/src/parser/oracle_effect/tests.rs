@@ -69973,7 +69973,7 @@ fn keeper_dispose_head_captures_printed_counter_count() {
     );
 }
 
-/// V-F1f — U1 (F1, CR 608.2c): the chain is now TWO clauses, not three. The
+/// V-F1f — CR 608.2c: the chain is now TWO clauses, not three. The
 /// printed counter rides on `Effect::ChooseAndSacrificeRest`'s own
 /// `keeper_counter` field rather than a chained `PutCounterAll`, and the link
 /// into sentence two is unchanged (`SequentialSibling`, since the keeper
@@ -70479,8 +70479,8 @@ fn keeper_dispose_controller_branch_ast_unchanged() {
 
 /// V16 — Promise of Loyalty's built AST binds as designed, end to end.
 ///
-/// U1 (F1, CR 608.2c) deletes the chained `PutCounterAll` clause: the printed
-/// vow counter now rides on `Effect::ChooseAndSacrificeRest`'s own
+/// This lowering deletes the chained `PutCounterAll` clause (CR 608.2c): the
+/// printed vow counter now rides on `Effect::ChooseAndSacrificeRest`'s own
 /// `keeper_counter` field, so sentence one's root effect IS the whole first
 /// printed instruction and sentence two (the grant) is its direct
 /// `sub_ability`. This also flips the grant's anaphor label from `TrackedSet`
@@ -70585,7 +70585,7 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
     assert_eq!(
         installer.affected,
         Some(TargetFilter::ParentTarget),
-        "U1 (§1): with the `PutCounterAll` chain clause gone, \
+        "with the `PutCounterAll` chain clause gone, \
          `publishes_tracked_set_from_resolution` no longer sees a publisher \
          ahead of the grant, so the anaphor keeps its `ParentTarget` label \
          instead of `TrackedSet`"
@@ -70615,8 +70615,8 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
     );
 }
 
-/// N13 — the class boundary of the sentence-two branch. Since U1 (F1, CR
-/// 608.2c) moved the printed counter onto `ChooseAndSacrificeRest`'s own
+/// N13 — the class boundary of the sentence-two branch. Since this lowering
+/// (CR 608.2c) moved the printed counter onto `ChooseAndSacrificeRest`'s own
 /// `keeper_counter` field, `ChooseAndSacrificeRest` is not itself a member of
 /// `publishes_tracked_set_from_resolution` (see that predicate's doc), so
 /// EVERY keeper-and-dispose sibling — counter head or not — lowers sentence
@@ -70637,7 +70637,7 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
 ///   strictly better for a "can't attack" restriction.
 ///
 /// The two labels agree exactly when `state.chain_tracked_set_id` is `Some`
-/// at install time AND every member of that set is still a live object. U1's
+/// at install time AND every member of that set is still a live object. This
 /// funnel (`sacrifice_unchosen`) makes the first condition structural: every
 /// path to sentence two passes through `publish_fresh_tracked_set` first. The
 /// second condition — a departed keeper — is a NAMED ACCEPTED DIVERGENCE: the
@@ -70808,8 +70808,7 @@ fn keeper_dispose_sentence_two_requires_a_bare_defended_scope() {
         "a bare prohibition with no defended scope must be claimed by parse_restriction_modes, \
          not left as a gap"
     );
-    // MEASURED, and NOT what the "… this turn" row of the plan predicted: a
-    // trailing duration phrase is peeled by `strip_trailing_duration` BEFORE
+    // MEASURED: a trailing duration phrase is peeled by `strip_trailing_duration` BEFORE
     // this branch runs, so `eof` never sees it and the branch claims the
     // duration-scoped form too. That is rules-correct (CR 611.2a: the grant
     // lasts as long as the spell states) and no printed card reaches it — every

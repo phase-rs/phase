@@ -832,16 +832,11 @@ pub(crate) fn continue_player_scope_sacrifice(
         Ok(super::PendingPlayerScopeSacrificeOutcome::Completed { .. }) => true,
         // A live prompt is installed; do not let the counter drain continue past it.
         Ok(super::PendingPlayerScopeSacrificeOutcome::PausedForReplacement) => false,
-        // UNREACHABLE THROUGH THIS CALLEE (B-2), and mapped the SAFE way.
+        // UNREACHABLE THROUGH THIS CALLEE, and mapped the SAFE way.
         // MEASURED: `perform_collected_player_scope_sacrifices_with_completion`
         // matches over `PlayerScopeSacrificePerformOutcome`, which has exactly TWO
         // variants, and maps them one-to-one onto `Completed` /
-        // `PausedForReplacement`; it can never yield this third variant. The variant
-        // is constructed only inside `advance_pending_player_scope_sacrifice_choice`
-        // and in `effects/sacrifice.rs`, none of which this callee reaches.
-        // Direction: at its live construction site it is returned immediately AFTER
-        // `set_player_scope_sacrifice_waiting_for` installs a prompt — the same
-        // condition as `PausedForReplacement` — so `false` is the only safe mapping.
+        // `PausedForReplacement`; it can never yield this third variant.
         // `true` would let `drain_pending_counter_additions` keep draining and emit
         // the terminal event over a live prompt. DECLARED MUTATION NULL: no test can
         // redden this arm — it is unreachable through this callee by construction.

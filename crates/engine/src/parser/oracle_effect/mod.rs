@@ -15965,8 +15965,6 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
             KeeperDisposalVerb::Destroy,
         ) => {}
         // CR 101.4 + CR 701.21a: the per-player keeper-and-sacrifice class.
-        // Single Combat, Razia's Purification, Planetary Annihilation, Limited
-        // Resources, No One Will Hear Your Cries, Promise of Loyalty.
         (
             KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
             _,
@@ -15999,9 +15997,20 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
         (KeeperChooserScope::Controller, _, KeeperQuantifier::Exact(_), _) => {
             return Err(oracle_err(start))
         }
-        // Zero-card axis: same subject, sacrifice tail. The controller-scope
-        // lowering is `DestroyAll` over the tracked-set complement; no
-        // controller-scope sacrifice primitive with that complement exists.
+        // Zero-card axis: no printed card reaches this combination. A `jq -r
+        // 'to_entries[] | select(.value.oracle_text != null) |
+        // select(.value.oracle_text | test("choose[s]? up to"; "i")) |
+        // select(.value.oracle_text | test("sacrifices? the rest"; "i")) |
+        // .key' client/public/card-data.json` census over "choose(s) up to
+        // ... sacrifice(s) the rest" finds three cards: Archfiend of
+        // Depravity's "that player chooses" declines earlier, at the
+        // head-verb step, on its unmodelled subject
+        // (`keeper_dispose_head_declines_an_unmodelled_subject`); Covetous
+        // Elegy and Stick Together both print an `each player`/`each
+        // opponent` subject, landing in the EachPlayer/EachOpponent arm below
+        // instead. The controller-scope lowering is also `DestroyAll` over
+        // the tracked-set complement; no controller-scope sacrifice primitive
+        // with that complement exists.
         (
             KeeperChooserScope::Controller,
             _,
@@ -16064,8 +16073,7 @@ pub(crate) fn is_keeper_dispose_head(lower: &str) -> bool {
 /// * `Controller` → `ChooseObjectsIntoTrackedSet` + `DestroyAll` over the same
 ///   typed filter minus the tracked set (Duneblast, Mount Doom).
 /// * `EachPlayer` / `EachOpponent` → one `ChooseAndSacrificeRest` scoped per
-///   player (Single Combat, Razia's Purification, Planetary Annihilation,
-///   Limited Resources, No One Will Hear Your Cries, Promise of Loyalty).
+///   player.
 ///
 /// CR 608.2c: "The controller of the spell or ability follows its instructions
 /// in the order written. However, replacement effects may modify these actions."
