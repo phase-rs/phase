@@ -71982,7 +71982,7 @@ fn p3e_anchored() -> StaticCondition {
 /// SUBJECT-CARRIED fixture, where the two derivations disagree, and a
 /// no-adverbial negative control.
 ///
-/// Measured over the 55 corpus lines that print the CR 702.3b tail: every one of
+/// Measured over the 56 corpus lines that print the CR 702.3b tail: every one of
 /// them that prints `"this turn"` OUTSIDE the segment does so in an
 /// `"As long as ... this turn,"` prefix and parses to the PRINTED-STATIC
 /// production (a `StaticDefinition` carrying the condition and no duration at
@@ -72043,8 +72043,9 @@ fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_pr
     // THE DISCRIMINATING FIXTURE for the WHOLE-CLAUSE derivation: `"this turn"`
     // sits in the SUBJECT and the interposed segment is EMPTY, so the classifier
     // answers `Unrestricted` and a SEGMENT-derived duration would be `None`.
-    // Neither fixture above can red on that narrowing, because in both of them
-    // the adverbial IS the segment.
+    // Neither fixture above can red on that narrowing: in the duration-form
+    // fixture the adverbial IS the segment, and the reach-guard carries no
+    // adverbial at all and asserts no duration.
     let subject_carried = parse_oracle_text(
         "Target creature that was dealt damage this turn can attack as though it didn't have defender.",
         "Probe",
