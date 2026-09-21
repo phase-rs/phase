@@ -14737,6 +14737,7 @@ mod tests {
                 enters_under: None,
                 enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
+                up_to: false,
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: Vec::new(),
                 face_down_profile: None,
