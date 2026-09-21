@@ -5,6 +5,8 @@ use super::oracle_trigger::NthEventTimingKind;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_nom::defender_exception;
+use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::types::ability::PlayerFilter;
 use nom::character::complete::{alphanumeric1, char, digit1, one_of};
 use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
@@ -692,7 +694,8 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // standard predicate path's `strip_suffix_turn_condition`), companion gated
     // Not(DuringYourTurn). Hunter's Blowgun: "Equipped creature has deathtouch
     // during your turn. Otherwise, it has reach."
-    type VE<'a> = OracleError<'a>;
+    // (The `type VE<'a>` alias this function carried was consumed only by the
+    // CR 702.3b two-`tag` `alt` that now delegates to the shared recognizer.)
     if let Some((head_tp, tail_tp)) = pred_tp
         .split_around(". otherwise, ")
         .or_else(|| pred_tp.split_around(". otherwise "))
@@ -834,20 +837,28 @@ pub(crate) fn parse_enchanted_equipped_predicate(
             .description(description.to_string())];
     }
 
-    // CR 702.3b: "can attack as though <pronoun> didn't have defender" →
-    // CanAttackWithDefender. Accepts both pronoun forms so plural subjects
-    // ("Creatures you control …they didn't…") routed through the
-    // creatures-you-control prefix handler (line ~620) land here.
-    if alt((
-        tag::<_, _, VE>("can attack as though it didn't have defender"),
-        tag::<_, _, VE>("can attack as though they didn't have defender"),
-    ))
-    .parse(pred_lower.as_str())
-    .is_ok()
+    // CR 702.3b (:3915): "can attack [<class>] as though <pronoun> didn't have
+    // defender" on an attached subject (and on the plural subjects the
+    // creatures-you-control prefix handler at line ~620 routes here). Shares ONE
+    // recognizer with the non-attached static production, the effect-side
+    // production and both conjunctive grammars.
+    //
+    // The consuming policy is a PREFIX match, PRESERVED from base: this arm sits
+    // ABOVE the trailing-condition split below, so a trailing rider is (still) not
+    // peeled here. Measured: no corpus card reaching this arm carries one — the only
+    // one is Animate Wall, whose tail is ".". See the phase plan's F1.
+    if let Some((segment, _rest)) =
+        defender_exception::parse_defender_exception_predicate(pred_lower.as_str())
     {
-        return vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
-            .affected(affected)
-            .description(description.to_string())];
+        if !matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+            let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                .affected(affected)
+                .description(description.to_string());
+            if let Some(condition) = segment.permission_condition() {
+                def = def.condition(condition);
+            }
+            return vec![def];
+        }
     }
 
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature

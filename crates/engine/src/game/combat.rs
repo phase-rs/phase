@@ -10963,32 +10963,35 @@ mod tests {
         );
     }
 
-    // ===== ROW 10's cheap paired control, run FIRST when the corpus row is red =====
+    // ===== ROW 1 — charter row 1 (PHASE 3) · C3.1 (AFTER half) + C3.2 =====
 
-    /// #8785 IS STILL LIVE AT THIS PHASE, and that is deliberate: Phase 2 emits
-    /// NOTHING from the parser, and charter row 10 asserts the card-data artifact
-    /// is byte-identical to base. Widening the defender-exception productions is
-    /// `DEFERRED(phase 3)` (Phase 3 rows 1-2).
+    /// CR 702.3b (docs/MagicCompRules.txt:3915) + CR 508.6 (:2327) + CR 609.4
+    /// (:2854): the target card's printed SECOND LINE parses to a
+    /// `CanAttackWithDefender` carrying the ANCHORED
+    /// `AnyPlayerAttackedYouLastTurn { scope: AttackedPlayer }`.
     ///
-    /// This unit assertion exists so a red corpus diff is diagnosed in seconds
-    /// rather than after a ~10-minute regeneration: if the target card's printed
-    /// second line has started parsing differently, the artifact moved for a
-    /// reason inside this phase's diff. It lives here because this `mod tests`
-    /// already imports `parse_static_line` / `parse_static_line_multi`, so it adds
-    /// no authored path and does not touch `crates/engine/src/parser/`, which
-    /// this phase does not edit at all.
+    /// **THIS TEST IS THE REWRITTEN PHASE 2 CANARY**, in place, and its flip is
+    /// PLANNED rather than discovered. It shipped at Phase 2 as
+    /// `weathered_sentinels_second_line_still_parses_to_its_base_shape`, pinning
+    /// `parse_static_line == None` AND `parse_static_line_multi == []` for exactly
+    /// the line Phase 3 teaches the parser to accept. **The canary DID its job**: it
+    /// held the Phase 2 tree honest — Phase 2 emitted nothing from the parser and
+    /// charter row 10 required the card-data artifact to be byte-identical to base —
+    /// and its failure at PHASE_BASE_SHA 8cd2aa58c IS the measurement that Phase 3
+    /// moved the parse. Its two negative assertions become the positive shape
+    /// assertions below; its CONTROL block is KEPT VERBATIM as this row's paired
+    /// positive control.
     ///
-    /// MEASURED AT `PHASE_BASE_SHA` (032c71408), and NOT what the Phase 2 plan
-    /// predicted: the static-side entry points DECLINE the interposed-segment
-    /// line outright — `parse_static_line` yields `None` and
-    /// `parse_static_line_multi` yields `[]`. (The plan described this row's base
-    /// shape as "a `Defender` grant"; that grant comes from the card's FIRST
-    /// printed line, not from this one.) The PAIRED POSITIVE CONTROL is the plain
-    /// contiguous form on the SAME production, which parses to an UNCONDITIONED
-    /// `CanAttackWithDefender` — without it these two negatives would be
-    /// satisfied by a production that was never reached at all.
+    /// **It stays in `combat.rs`, deliberately.** A parser row could live in
+    /// `oracle_static/tests.rs` (and the production-attribution twin does), but this
+    /// one is the PARSER -> COMBAT SEAM assertion: the two runtime rows below stand
+    /// on this exact shape, and asserting it at the CONSUMER is what stops them from
+    /// silently passing against a hand-made static if the parse ever regresses.
+    ///
+    /// Reverting the classifier, the normalization, the `AttackedPlayer` anchoring
+    /// map, or production (b)'s widened scan each fires a named assertion here.
     #[test]
-    fn weathered_sentinels_second_line_still_parses_to_its_base_shape() {
+    fn weathered_sentinels_line_parses_to_anchored_can_attack_with_defender() {
         // Verbatim Oracle text (Scryfall, re-verified at Phase 1's Step 0).
         const LINE: &str = "This creature can attack players who attacked you during \
                             their last turn as though it didn't have defender.";
@@ -11001,22 +11004,336 @@ mod tests {
                 |def| def.mode == StaticMode::CanAttackWithDefender && def.condition.is_none()
             ),
             "CONTROL: the plain contiguous defender-exception form must still parse \
-             to an UNCONDITIONED `CanAttackWithDefender` — otherwise the negatives \
+             to an UNCONDITIONED `CanAttackWithDefender` — otherwise the assertions \
              below say nothing about the interposed segment; got {control:?}"
         );
 
+        let def = parse_static_line(LINE).expect(
+            "the line must now parse: the interposed player class is recognized by the \
+             shared defender-exception classifier and consumed by the static-side \
+             production",
+        );
+        assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
+        // BOTH static-side entry points, because the canary this row replaces pinned
+        // BOTH at Phase 2's base (`parse_static_line == None` AND
+        // `parse_static_line_multi == []`). Asserting only the first would leave the
+        // canary's other half un-replaced.
+        let multi = parse_static_line_multi(LINE);
         assert_eq!(
-            parse_static_line(LINE),
+            multi.len(),
+            1,
+            "the multi entry point must also now yield the permission; got {multi:?}"
+        );
+        assert_eq!(multi[0].mode, StaticMode::CanAttackWithDefender);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                scope: crate::types::ability::AttackedYouScope::AttackedPlayer,
+            }),
+            "CR 508.1b (:2268) + CR 508.6 (:2327): the class is answerable PER PROPOSED \
+             PAIRING, so it carries the ANCHORED scope, not the existential default"
+        );
+        // POSITIVE SHAPE, not merely the absence of the Defender grant: at
+        // PHASE_BASE_SHA this line produced `Continuous{[AddKeyword(Defender)]}` — the
+        // exact INVERSE of the printed clause (issue #8785).
+        assert!(
+            def.modifications.is_empty(),
+            "the CR 702.3b permission must carry no AddKeyword modification; got {:?}",
+            def.modifications
+        );
+
+        // HOSTILE FIXTURE, paired in this same test: the SAME line with a CURLY
+        // apostrophe must parse to `None`. The parser lowercases and every
+        // defender-exception tag is ASCII `didn't`, so this proves the row above is
+        // not passing on some apostrophe-insensitive path.
+        const CURLY: &str = "This creature can attack players who attacked you during \
+                             their last turn as though it didn\u{2019}t have defender.";
+        assert_eq!(
+            parse_static_line(CURLY),
             None,
-            "PHASE 2 EMITS NOTHING FROM THE PARSER: the interposed-segment line must \
-             still be DECLINED by the static-side production (base shape at \
-             PHASE_BASE_SHA 032c71408). Producing the anchored \
-             `CanAttackWithDefender` here is Phase 3's row 1."
+            "the tags are ASCII: a curly apostrophe must decline"
+        );
+    }
+
+    /// Weathered Sentinels' VERBATIM three-line Oracle text (Step-0 verified
+    /// against the base card-data artifact's `oracle_text` field). Line 1 is the
+    /// keyword line, line 2 is the CR 702.3b permission this phase teaches the
+    /// parser, line 3 is an attack trigger neither phase touches.
+    const P3_WEATHERED_SENTINELS_ORACLE: &str = "Defender, reach, vigilance, trample\nThis creature can attack players who attacked you during their last turn as though it didn't have defender.\nWhenever this creature attacks, it gets +3/+3 and gains indestructible until end of turn.";
+
+    /// The `mtgjson_keyword_names` the EXPORT frame supplies for this card, in
+    /// printed order. **THE ARGUMENT IS LOAD-BEARING AND IT IS MEASURED.** With
+    /// `&[]`, line 1 is NOT absorbed into `extracted_keywords` — it survives as
+    /// `Unimplemented{name:"unknown"}` and `abilities.len()` is 2, so an emptiness
+    /// assertion on `abilities` would FAIL for a reason that has nothing to do with
+    /// this phase. Supplying the names puts these rows in the EXPORT frame, which is
+    /// the frame the corpus-regeneration row measures.
+    fn p3_weathered_sentinels_keyword_names() -> Vec<String> {
+        vec![
+            "Defender".to_string(),
+            "Reach".to_string(),
+            "Vigilance".to_string(),
+            "Trample".to_string(),
+        ]
+    }
+
+    /// Parse the real card and return its printed statics, asserting the routing
+    /// facts both runtime rows stand on. **No row borrows another row's fixture**;
+    /// this is a shared RECIPE, re-run per row.
+    fn p3_weathered_sentinels_statics() -> Vec<StaticDefinition> {
+        let parsed = crate::parser::parse_oracle_text(
+            P3_WEATHERED_SENTINELS_ORACLE,
+            "Weathered Sentinels",
+            &p3_weathered_sentinels_keyword_names(),
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Wall".to_string()],
+        );
+        // REACH-GUARD: these rows are driven by the REAL CARD, so the parse must have
+        // produced the static. Without this, an empty `statics` would silently make a
+        // row assert about a creature with no permission at all.
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "the real card's line 2 must produce exactly one printed static; got {:?}",
+            parsed.statics
+        );
+        assert_eq!(parsed.statics[0].mode, StaticMode::CanAttackWithDefender);
+        assert_eq!(
+            parsed.statics[0].condition,
+            Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                scope: crate::types::ability::AttackedYouScope::AttackedPlayer,
+            })
+        );
+        // LINE 1's CONTROL: line 1 really is Defender, so `dp_create_defender`'s
+        // hand-push is not substituting for a keyword the card must carry on its own.
+        // Paired with the emptiness assertion below — the keyword argument is what
+        // makes `abilities.is_empty()` a statement about LINE 2, and this is what
+        // proves the argument was actually consumed rather than ignored.
+        assert!(
+            parsed.extracted_keywords.contains(&Keyword::Defender),
+            "line 1's Defender must be REAL, not supplied by the fixture; got {:?}",
+            parsed.extracted_keywords
+        );
+        // With line 1 absorbed, `abilities` is empty IFF line 2 moved to `statics`.
+        // At PHASE_BASE_SHA this vec was
+        // `[GenericEffect{Continuous, SelfRef, [AddKeyword(Defender)]}]` — the INVERSE
+        // of the printed clause — so this is a POSITIVE direction assertion, not a
+        // tautology.
+        assert!(
+            parsed.abilities.is_empty(),
+            "line 2 must no longer land in `abilities` as an AddKeyword(Defender) grant; \
+             got {:?}",
+            parsed.abilities
+        );
+        // Line 3 is untouched by this phase.
+        assert_eq!(
+            parsed.triggers.len(),
+            1,
+            "line 3's attack trigger is unmoved"
+        );
+        parsed.statics
+    }
+
+    // ===== ROW 2 — charter row 2 (PHASE 3): integration FROM THE REAL CARD =====
+
+    /// CR 508.1a (docs/MagicCompRules.txt:2266) + CR 508.1c (:2270) + CR 508.6
+    /// (:2327): with the card's OWN PARSED statics on the board, the Defender
+    /// creature is OFFERED as an attacker and its PUBLISHED per-attacker target list
+    /// equals EXACTLY the qualifying player set — a PROPER SUBSET of the attackable
+    /// universe.
+    ///
+    /// **This row is why Phase 3 follows Phase 2.** Nothing in `game/` is edited by
+    /// this phase; the row is the proof that the PARSE OUTPUT is the shape Phase 2's
+    /// authority already consumes. Phase 2 row 1 hand-built this carrier shape; this
+    /// row drives the same seam from `parse_oracle_text`.
+    ///
+    /// The published surface is `WaitingFor::DeclareAttackers`'s
+    /// `valid_attack_targets_by_attacker`, built from the PRIVATE
+    /// `AttackDeclarationConstraints::selectable_targets_by_attacker` — which is why
+    /// the row lives in this file.
+    ///
+    /// BINDING FIXTURE RULE: the static is pushed with `dp_push_static` (BOTH lists,
+    /// so the first `evaluate_layers` flush cannot wipe it) and `dp_assert_survived`
+    /// runs immediately after the flush, BEFORE any assertion. A row whose static was
+    /// wiped would observe "creature not offered" and be mistaken for a genuine
+    /// negative.
+    #[test]
+    fn real_card_anchored_permission_offers_and_scopes_the_published_target_list() {
+        let mut state = setup_multiplayer_combat(3);
+        // P1 attacked P0 last turn; P2 did NOT. P2 stays attackable.
+        dp_seed_attacked(&mut state, PlayerId(1), PlayerId(0));
+        let wall = dp_create_defender(&mut state, PlayerId(0), "Weathered Sentinels");
+        let bear = create_creature(&mut state, PlayerId(0), "Grizzly Bears", 2, 2);
+        // HOSTILE FIXTURE, SAME BOARD: a second Defender creature with NO permission.
+        // Its ABSENCE is the negative proving the offering is CAUSED by the
+        // permission, paired with `wall`'s presence as its control.
+        let inert_wall = dp_create_defender(&mut state, PlayerId(0), "Plain Wall");
+
+        for def in p3_weathered_sentinels_statics() {
+            dp_push_static(&mut state, wall, def);
+        }
+        crate::game::layers::evaluate_layers(&mut state);
+        dp_assert_survived(&state, wall, &StaticMode::CanAttackWithDefender, "row 2");
+
+        let waiting = build_declare_attackers_waiting_for(&state);
+        let crate::types::game_state::WaitingFor::DeclareAttackers {
+            valid_attack_targets_by_attacker,
+            ..
+        } = &waiting
+        else {
+            panic!("expected DeclareAttackers, got {waiting:?}");
+        };
+        let by_attacker = valid_attack_targets_by_attacker
+            .as_ref()
+            .expect("new prompts always publish the per-attacker map");
+
+        // PAIRED POSITIVE CONTROLS, SAME FIXTURE — the PROPER-SUBSET guard. Without
+        // them the wall's `{P1}` could be an artefact of P2 being unattackable.
+        let attackable = attackable_defender_targets(&state);
+        assert!(
+            attackable.contains(&AttackTarget::Player(PlayerId(2))),
+            "control: P2 is attackable on this board"
         );
         assert!(
-            parse_static_line_multi(LINE).is_empty(),
-            "and the conjunctive-split entry point must decline it too; got {:?}",
-            parse_static_line_multi(LINE)
+            by_attacker[&bear].contains(&AttackTarget::Player(PlayerId(2))),
+            "control: a vanilla creature on this board may attack P2"
+        );
+
+        // (a) OFFERED.
+        assert!(
+            by_attacker.contains_key(&wall),
+            "CR 508.1a (:2266): the creature must be offered; published map = {by_attacker:?}"
+        );
+        // (b) SCOPED — an EQUALITY against a PROPER SUBSET of {P1, P2}.
+        assert_eq!(
+            by_attacker[&wall],
+            vec![AttackTarget::Player(PlayerId(1))],
+            "CR 508.6 (:2327) + CR 508.1c (:2270): only the player who attacked P0 qualifies"
+        );
+        // the hostile fixture's verdict.
+        assert!(
+            !by_attacker.contains_key(&inert_wall),
+            "a Defender creature with NO permission must NOT be offered — the offering \
+             is caused by the permission, not by being a Wall"
+        );
+    }
+
+    // ===== ROW 3 — charter row 3 (PHASE 3) · C3.8 =====
+
+    /// CR 508.1a (:2266) + CR 508.1c (:2270): the PUBLISHED display surface AGREES,
+    /// WHOLE. ONE read of `build_declare_attackers_waiting_for` shows all three
+    /// observables together — the creature in the eligible-attacker set, NO
+    /// `CantAttack` badge on it, and its published per-attacker list equal to the
+    /// qualifying set.
+    ///
+    /// They come from ONE published snapshot rather than three independent probes,
+    /// which is the property the charter asks this row to buy: the frontend computes
+    /// nothing, so "display agreeing" is exactly "the engine published a consistent
+    /// snapshot".
+    ///
+    /// BOTH paired positive controls are MANDATORY, or the badge half is vacuous:
+    /// without a creature that IS badged, "no `CantAttack` badge" passes for a
+    /// fixture whose badge list is empty because badges are not published on this
+    /// board at all.
+    ///
+    /// CONTAINMENT: this row is the PERMISSION polarity and adds nothing to the badge
+    /// walk. Phase 2 row 9 owns the PROHIBITION-polarity display gap and holds it
+    /// unchanged.
+    #[test]
+    fn real_card_published_combat_constraints_agree_whole() {
+        let mut state = setup_multiplayer_combat(3);
+        dp_seed_attacked(&mut state, PlayerId(1), PlayerId(0));
+        let wall = dp_create_defender(&mut state, PlayerId(0), "Weathered Sentinels");
+        let bear = create_creature(&mut state, PlayerId(0), "Grizzly Bears", 2, 2);
+
+        // CONTROL 1 — a creature that IS badged, so the badge surface is proved to be
+        // READ at all. CR 508.1c: the carrier is a DISTINCT restricting object.
+        let badged = create_creature(&mut state, PlayerId(0), "Restricted Bear", 2, 2);
+        let restrictor = create_creature(&mut state, PlayerId(0), "Pacifism Source", 0, 1);
+        state
+            .objects
+            .get_mut(&restrictor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SpecificObject { id: badged }),
+            );
+        // CONTROL 2 — a creature ABSENT from the eligible set, so the eligibility
+        // instrument is proved to fire. CR 302.6: summoning sickness.
+        let sick = create_creature(&mut state, PlayerId(0), "Freshly Cast Bear", 2, 2);
+        // The engine reads the persistent `summoning_sick` flag (CR 302.6), set at
+        // zone change and cleared at the controller's untap step — not the
+        // `entered_battlefield_turn` bookkeeping field.
+        state.objects.get_mut(&sick).unwrap().summoning_sick = true;
+
+        for def in p3_weathered_sentinels_statics() {
+            dp_push_static(&mut state, wall, def);
+        }
+        crate::game::layers::evaluate_layers(&mut state);
+        dp_assert_survived(&state, wall, &StaticMode::CanAttackWithDefender, "row 3");
+
+        // ONE published snapshot, three observables.
+        let waiting = build_declare_attackers_waiting_for(&state);
+        let crate::types::game_state::WaitingFor::DeclareAttackers {
+            valid_attacker_ids,
+            valid_attack_targets_by_attacker,
+            attacker_constraints,
+            ..
+        } = &waiting
+        else {
+            panic!("expected DeclareAttackers, got {waiting:?}");
+        };
+        let by_attacker = valid_attack_targets_by_attacker
+            .as_ref()
+            .expect("new prompts always publish the per-attacker map");
+
+        // the two controls, first — so the instruments are known to fire.
+        assert!(
+            matches!(
+                attacker_constraints.get(&badged),
+                Some(CombatRequirement::CantAttack { .. })
+            ),
+            "control 1: the badge surface must be published on this board; got {:?}",
+            attacker_constraints.get(&badged)
+        );
+        assert!(
+            !valid_attacker_ids.contains(&sick),
+            "control 2: the eligibility instrument must exclude a summoning-sick creature"
+        );
+
+        // (i) ELIGIBLE.
+        assert!(
+            valid_attacker_ids.contains(&wall),
+            "CR 508.1a (:2266): the permitted Defender creature must be in the \
+             eligible-attacker set; got {valid_attacker_ids:?}"
+        );
+        // (ii) NOT BADGED — the display must not contradict (i).
+        assert!(
+            !matches!(
+                attacker_constraints.get(&wall),
+                Some(CombatRequirement::CantAttack { .. })
+            ),
+            "CR 508.1c (:2270): a creature the engine offers must not also carry a \
+             CantAttack badge; got {:?}",
+            attacker_constraints.get(&wall)
+        );
+        // (iii) SCOPED, with this board's OWN proper-subset guard rebuilt (no row
+        // borrows another row's fixture).
+        let attackable = attackable_defender_targets(&state);
+        assert!(
+            attackable.contains(&AttackTarget::Player(PlayerId(2))),
+            "control: P2 is attackable on this board"
+        );
+        assert!(
+            by_attacker[&bear].contains(&AttackTarget::Player(PlayerId(2))),
+            "control: a vanilla creature on this board may attack P2"
+        );
+        assert_eq!(
+            by_attacker[&wall],
+            vec![AttackTarget::Player(PlayerId(1))],
+            "CR 508.6 (:2327): the published list is the qualifying set, a PROPER SUBSET"
         );
     }
 

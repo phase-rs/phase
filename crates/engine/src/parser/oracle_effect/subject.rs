@@ -28,6 +28,7 @@ use crate::types::statics::{ProhibitionScope, StaticMode};
 
 use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::defender_exception;
 use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -2268,36 +2269,50 @@ fn try_parse_subject_restriction_clause(
     build_restriction_clause(application, predicate)
 }
 
-/// CR 702.3b: "[subject] can attack [this turn] as though it/they didn't have defender"
+/// CR 702.3b: "[subject] can attack [<segment>] as though it/they didn't have defender"
 /// Produces a GenericEffect with CanAttackWithDefender static mode.
 fn try_parse_can_attack_with_defender(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-    let pos = tp.find(" can attack")?;
-    if !is_can_attack_despite_defender_predicate(&lower[pos + 1..]) {
-        return None;
-    }
-    let subject = text[..pos].trim();
+    // The all-consuming policy is (c)'s base behaviour and it is NOT respelled
+    // here: `split_defender_exception_predicate_all_consuming` applies the module's
+    // single `all_consuming_defender_tail`, the same policy 8a applies. At
+    // PHASE_BASE_SHA (c) likewise carries no policy of its own — it shares 8a's
+    // predicate (M-23) — so this preserves base's topology rather than adding a
+    // second spelling. This also REPLACES base's `tp.find(" can attack")`, a
+    // non-combinator dispatch, with a word-boundary combinator scan.
+    let (subject_lower, segment) =
+        defender_exception::split_defender_exception_predicate_all_consuming(&lower)?;
+    // ASCII lowercasing preserves byte lengths, so the LOWER prefix's length
+    // indexes the original-case text.
+    let subject = text[..subject_lower.len()].trim();
     let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    // Determine duration: "this turn" implies UntilEndOfTurn.
+    // Duration is derived from the WHOLE clause, NOT from the segment: the subject
+    // can carry "this turn" with an empty segment (measured: three corpus cards), and
+    // narrowing this to the segment would move those lines (M-12). UNCHANGED from
+    // base — value EXTRACTION from already-accepted text, not parsing dispatch.
     let duration = if lower.contains("this turn") {
         Some(Duration::UntilEndOfTurn)
     } else {
         None
     };
     let affected = static_affected_for_application(&application);
+    let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
+        .affected(affected)
+        .modifications(vec![ContinuousModification::AddStaticMode {
+            mode: StaticMode::CanAttackWithDefender,
+        }])
+        .description(text.to_string());
+    // C3.9: NEVER an unconditioned CanAttackWithDefender for an interposed line.
+    if let Some(condition) = segment.permission_condition() {
+        def = def.condition(condition);
+    }
     Some(ParsedEffectClause {
         unlowered_guard: None,
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CanAttackWithDefender,
-                }])
-                .description(text.to_string())],
+            static_abilities: vec![def],
             duration: duration.clone(),
             target: application.target,
             end_cost: None,
@@ -2390,22 +2405,37 @@ pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
     .is_ok()
 }
 
-/// CR 702.3b: predicate-only "can attack [this turn] as though [it|they]
+/// CR 702.3b: predicate-only "can attack [<segment>] as though [it|they]
 /// didn't have defender" — the subjectless conjunct left after the sequence
 /// splitter peels it off a "<subject> gets +N/-M ... and ..." compound. Mirrors
 /// `is_can_block_extra_predicate`; used by `combat_requirement_conjunct_prepend`
 /// to re-attach the subject so `try_parse_can_attack_with_defender` can fire.
+///
+/// Delegates to the ONE shared recognizer
+/// (`oracle_nom::defender_exception`), so this predicate and every production
+/// that emits a `CanAttackWithDefender` agree about the grammar.
+///
+/// Widening this predicate widens its TWO remaining consumers at this candidate:
+/// `build_defender_attack_continuous_compound`'s GATE (the loop below it calls
+/// `defender_exception_predicate_all_consuming` directly, see 8c.2) and
+/// `sequence::combat_requirement_conjunct_prepend` (unedited). At
+/// `PHASE_BASE_SHA` there were three; `try_parse_can_attack_with_defender` moved
+/// to `split_defender_exception_predicate_all_consuming` in this same commit.
+/// Every grammar site that EMITS a `CanAttackWithDefender` must carry the
+/// interposed class's condition onto it — an unconditioned one on an interposed
+/// line is the issue #8785 defect shape reappearing on a sibling grammar.
+/// Re-materialize either figure with
+/// `grep -rn "is_can_attack_despite_defender_predicate" crates/ --include=*.rs`;
+/// the count is a command's output, not a remembered list.
 pub(super) fn is_can_attack_despite_defender_predicate(lower: &str) -> bool {
-    all_consuming((
-        tag::<_, _, OracleError<'_>>("can attack"),
-        opt(tag(" this turn")),
-        tag(" as though "),
-        alt((tag("it"), tag("they"))),
-        tag(" didn't have defender"),
-        opt(tag(".")),
-    ))
-    .parse(lower.trim())
-    .is_ok()
+    // `lower.trim()` is BASE's own trim, preserved verbatim: base was
+    // `all_consuming(..).parse(lower.trim())`. The classifier module does NOT
+    // trim on the caller's behalf.
+    //
+    // 8a.2: the choice of `defender_exception_predicate_all_consuming` over the
+    // bare `parse_defender_exception_predicate` IS this line's retained
+    // all-consuming policy. Row 8 arm 12 fails if it is dropped (M-24, MODE 5).
+    defender_exception::defender_exception_predicate_all_consuming(lower.trim()).is_some()
 }
 
 /// CR 509.1b: predicate-only "can't be blocked [this turn] [except by … | by …]"
@@ -6419,15 +6449,31 @@ fn build_defender_attack_continuous_compound(
             continue;
         }
         let lower = segment.to_lowercase();
-        if is_can_attack_despite_defender_predicate(&lower) {
-            static_abilities.push(
-                StaticDefinition::new(StaticMode::CanAttackWithDefender)
-                    .affected(affected.clone())
-                    .modifications(vec![ContinuousModification::AddStaticMode {
-                        mode: StaticMode::CanAttackWithDefender,
-                    }])
-                    .description(segment.to_string()),
-            );
+        // 8c.2 — THE CALL-SITE CHOICE. This calls the ALL-CONSUMING entry point, not
+        // the bare `parse_defender_exception_predicate`. SIBLING of 8a.2 and of
+        // 1.24 / 8b.2: three call sites apply one policy, and all three carry a row.
+        // Reverting THIS one to the bare adapter is DISCRIMINATION 8c.2, bought by
+        // Row 8 arm 13 (M-27). The GATE above runs 8a; this LOOP is a DIFFERENT call
+        // site of a DIFFERENT function.
+        //
+        // The branch is not an optimization: the fallback below is
+        // `parse_continuous_modifications`, which for this exact grammar returns
+        // `[AddKeyword(Defender)]` — the INVERSE of the printed clause (M-17).
+        if let Some(class) = defender_exception::defender_exception_predicate_all_consuming(&lower)
+        {
+            let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                .affected(affected.clone())
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CanAttackWithDefender,
+                }])
+                .description(segment.to_string());
+            // C3.9: NEVER an unconditioned CanAttackWithDefender for an interposed
+            // line. The CONDITION comes from the classification of the SAME string
+            // the `description` carries.
+            if let Some(condition) = class.permission_condition() {
+                def = def.condition(condition);
+            }
+            static_abilities.push(def);
             continue;
         }
 

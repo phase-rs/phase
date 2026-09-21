@@ -4,6 +4,8 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_nom::defender_exception;
+use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 
 /// CR 509.1b / CR 702.111b: "<N> or more creatures" minimum-blocker phrase.
 /// Composed from `parse_number` + `tag(" or more creatures")`.
@@ -887,18 +889,32 @@ pub(crate) fn try_split_and_can_attack_despite_defender(
     // `scan_preceded` advances past each space so `remaining` always starts on
     // a word — so the tag begins at "and", not at the leading space. We then
     // strip the trailing space of `before` to produce clean Line A text.
-    let (before, matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        alt((
-            tag::<_, _, VE>("and can attack as though it didn't have defender"),
-            tag::<_, _, VE>("and can attack as though they didn't have defender"),
-        ))
+    //
+    // CR 702.3b (:3915): the SHARED recognizer, so the interposed class cannot be
+    // supported on the non-conjunctive shape and misparsed here. NOTE the third
+    // binding: base DISCARDED `rest` as `_rest`; the widened form MUST bind it,
+    // because the combinator's output type is no longer a `&str` with a length.
+    let (before, segment, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        preceded(
+            tag::<_, _, VE>("and "),
+            defender_exception::defender_exception_ir,
+        )
         .parse(i)
     })?;
+    // Base declined the duration form here too — its `alt` had no `this turn` arm.
+    if matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+        return None;
+    }
 
-    // ASCII lowercasing preserves byte lengths, so `before`/`matched` byte
-    // offsets into `lower` also index into the original-case `text`.
+    // ASCII lowercasing preserves byte lengths, so `before`, the consumed span and
+    // `rest` all index `lower` and therefore also index the original-case `text`.
     let before_len = before.len();
-    let matched_len = matched.len();
+    // The consumed span is everything the scanner neither skipped nor left over.
+    // It CANNOT be `matched.len()` any more: the combinator's output is a
+    // `DefenderExceptionSegment`, whose payload is a `StaticCondition` or an owned
+    // `String` — neither is a slice of `lower`, and an offset computed from either
+    // would splice at the wrong byte. (DISCRIMINATION 6.5.)
+    let matched_len = lower.len() - before.len() - rest.len();
     // Drop the trailing space that precedes the "and" marker so Line A doesn't
     // end up with " ." before its terminating period.
     let cut_end = if before.ends_with(' ') {
@@ -924,8 +940,16 @@ pub(crate) fn try_split_and_can_attack_despite_defender(
     if let Some(affected) = template.affected.clone() {
         companion = companion.affected(affected);
     }
-    if let Some(cond) = template.condition.clone() {
-        companion = companion.condition(cond);
+    // CR 508.1c (:2270): the interposed class and Line A's OWN condition are
+    // INDEPENDENT gates and both must hold, so they conjoin rather than one
+    // replacing the other. SAME helper and SAME `(Some, Some)` arm as production
+    // (b) — DISCRIMINATION 6.3, bought by Row 8 arm 5b (Spire Serpent, whose Line A
+    // carries its own `QuantityComparison`). With no interposed segment this
+    // degenerates to `(None, Some)` and reproduces base exactly (Row 8 arm 4).
+    if let Some(condition) =
+        combine_conditions(segment.permission_condition(), template.condition.clone())
+    {
+        companion = companion.condition(condition);
     }
     defs.push(companion);
     Some(defs)
@@ -3022,22 +3046,20 @@ pub(crate) fn parse_can_attack_despite_defender(
         None => (*tp, None),
     };
 
-    let (subject_prefix, _) = nom_primitives::scan_split_at_phrase(body_tp.lower, |i| {
-        tag::<_, _, OracleError<'_>>("can attack as though").parse(i)
-    })?;
-
-    // Verify the rest of the phrase: " it didn't have defender" or
-    // " they didn't have defender". Guards against "can attack as though
-    // it had haste" reaching subject dispatch.
-    type VE<'a> = OracleError<'a>;
-    let after_phrase = &body_tp.lower[subject_prefix.len() + "can attack as though".len()..];
-    let tail_ok = alt((
-        tag::<_, _, VE>(" it didn't have defender"),
-        tag::<_, _, VE>(" they didn't have defender"),
-    ))
-    .parse(after_phrase)
-    .is_ok();
-    if !tail_ok {
+    // CR 702.3b (:3915) + CR 609.4 (:2854): ONE recognizer for this grammar, shared
+    // with the attached-subject arm, the effect-side production, the conjunctive
+    // static splitter and the effect-side continuous compound — so the class cannot
+    // be supported on one printed shape and misparsed on another.
+    //
+    // The consuming policy is UNCHANGED: the scanner returns a remainder and this
+    // production IGNORES it, exactly as its base prefix tail-check did. Expedition
+    // Lookout's `"...didn't have defender and it can't be blocked."` depends on
+    // that (Row 8 arm 9).
+    let (subject_prefix, segment, _rest) =
+        defender_exception::split_defender_exception_predicate(body_tp.lower)?;
+    // A duration adverbial is not a player class and has no static-line reading —
+    // declined here exactly as at base, where the contiguous-phrase scan missed it.
+    if matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
         return None;
     }
 
@@ -3060,15 +3082,35 @@ pub(crate) fn parse_can_attack_despite_defender(
     let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
         .affected(affected)
         .description(description.to_string());
-    if let Some(cond_tp) = condition_tp {
+    // CR 508.1c (:2270): the interposed class and a trailing " as long as " gate are
+    // INDEPENDENT restrictions and both must hold, so they compose with `And` rather
+    // than one replacing the other. `needs_defending_player_anchor` walks leaves
+    // (`any_leaf`), so the compound still defers correctly at creature level.
+    let interposed = segment.permission_condition();
+    let trailing = condition_tp.map(|cond_tp| {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                text: cond_text.to_string(),
-            });
+        parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
+            text: cond_text.to_string(),
+        })
+    });
+    if let Some(condition) = combine_conditions(interposed, trailing) {
         def = def.condition(condition);
     }
     Some(def)
+}
+
+/// CR 508.1c (:2270): two independent gates on one static conjoin.
+fn combine_conditions(
+    a: Option<StaticCondition>,
+    b: Option<StaticCondition>,
+) -> Option<StaticCondition> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(c), None) | (None, Some(c)) => Some(c),
+        (Some(x), Some(y)) => Some(StaticCondition::And {
+            conditions: vec![x, y],
+        }),
+    }
 }
 
 /// CR 602.5a: parse "[You may ]activate abilities of <subject> as though

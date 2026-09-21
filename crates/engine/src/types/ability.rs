@@ -12249,6 +12249,54 @@ impl StaticCondition {
         })
     }
 
+    /// CR 508.1b (docs/MagicCompRules.txt:2268) announces which player each chosen
+    /// creature is attacking — THE PAIRING THIS WHOLE MAP IS RELATIVE TO; CR 508.1c
+    /// (:2270) then checks restrictions against that pairing. CR 611.3a (:2926)
+    /// keeps a STATIC-ability continuous effect unlocked, and CR 611.2c (:2913)
+    /// does the same for a RESOLUTION-generated one (a `CanAttackWithDefender`
+    /// grant modifies neither characteristics nor controller, so it is
+    /// rules-modifying and its affected set is not locked in) — both are needed
+    /// because this map serves production (c) and the continuous compound as well
+    /// as the static productions.
+    ///
+    /// This condition's reading ANCHORED to the player an attacking creature is
+    /// proposed to attack, if it has one.
+    ///
+    /// The other half of [`Self::needs_defending_player_anchor`], and deliberately
+    /// adjacent to it: that predicate answers "can this be answered at creature
+    /// level?", this map answers "what IS the per-pairing reading?". Split across
+    /// files they would drift — a condition could report `true` there with no
+    /// production able to produce it, or the reverse.
+    ///
+    /// An OPT-IN ALLOWLIST with a `_ => None` default, NOT an exhaustive match.
+    /// `StaticCondition` carries ~100 variants and the default here is the
+    /// FAIL-CLOSED direction: a condition with no anchored reading routes to the
+    /// permanently-inert marker and the card stays red, never to a silent
+    /// mis-anchoring. (This is the OPPOSITE choice from
+    /// `StaticMode::defending_player_anchor_polarity`, whose default was the
+    /// dangerous direction and which is therefore exhaustive. Do not "fix" this one
+    /// to match.)
+    ///
+    /// A pass-through arm for conditions that ALREADY report
+    /// `needs_defending_player_anchor` (e.g. `DefendingPlayerControls`) was
+    /// considered and rejected: no interposed segment can normalize to one —
+    /// `parse_inner_condition` declines "a player controls a creature" — so the arm
+    /// would be unreachable and undiscriminated.
+    ///
+    /// KIND-PRESERVING by inheritance (CR 506.3 :2208): the anchored scope answers
+    /// false for a planeswalker or battle target. See
+    /// `game::combat::attacked_player_for_target`.
+    pub(crate) fn defending_player_anchored_form(&self) -> Option<StaticCondition> {
+        match self {
+            StaticCondition::AnyPlayerAttackedYouLastTurn { .. } => {
+                Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                    scope: AttackedYouScope::AttackedPlayer,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Returns the text of every [`StaticCondition::Unrecognized`] leaf found
     /// anywhere in this condition tree, for use in coverage gap labels.
     /// Derived from [`Self::walk_leaves`] — the same single traversal
