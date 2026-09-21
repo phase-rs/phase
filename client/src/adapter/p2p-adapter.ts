@@ -1415,7 +1415,8 @@ export class P2PHostAdapter implements EngineAdapter {
     during: string,
     owner: HostSessionOwner | null = this.wasmHostOwner,
   ): Promise<never> {
-    await this.wasm.releaseHostSession(claimed, owner ?? undefined);
+    if (owner) await this.wasm.releaseHostSession(claimed, owner);
+    else await this.wasm.releaseHostSession(claimed);
     if (owner === this.wasmHostOwner) this.wasmHostOwner = null;
     throw new AdapterError("P2P_ERROR", `Host session disposed during ${during}`, true);
   }
@@ -3053,7 +3054,8 @@ export class P2PHostAdapter implements EngineAdapter {
       sharedEngineHost = null;
       if (owner) void this.wasm.releaseHostSession(true, owner);
     } else {
-      void this.wasm.releaseHostSession(false, owner ?? undefined);
+      if (owner) void this.wasm.releaseHostSession(false, owner);
+      else void this.wasm.releaseHostSession(false);
     }
     releaseP2PHostLease(this.authority);
     // Close the broker only when the adapter owns it. When the multiplayer

@@ -1203,7 +1203,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await flushPromises();
 
     expect(ownsP2PHostLease(authority)).toBe(false);
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
     expect(await reconnect.getSentMessages()).toEqual([]);
   });
 
@@ -4288,7 +4288,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
 
     adapter.dispose();
 
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
   });
 
   it("leaves the engine untouched when a host that never started tears down", async () => {
@@ -4312,7 +4312,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
 
     mocks.releaseHostSession.mockClear();
     claimant.dispose();
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
   });
 
   function occupiedRefusal(): AdapterError {
@@ -4338,7 +4338,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     // A refused claim installed nothing, so there is nothing to compensate.
     // `releaseHostSession(true)` here would run `resetGameState()` on the
     // shared engine and destroy the live local game the refusal just protected.
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false, expect.any(Symbol));
     expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
     expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
     adapter.dispose();
@@ -4368,7 +4368,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     gate.resolve(undefined);
 
     await expect(start).rejects.toThrow(/disposed during start/);
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false, expect.any(Symbol));
     expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
   });
 
@@ -4392,7 +4392,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     install.resolve({ events: [] });
 
     await expect(start).rejects.toThrow(/disposed during start/);
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
   });
 
   it("leaves the engine untouched when the start call rejects for any other reason", async () => {
@@ -4409,7 +4409,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     await expect(adapter.initializeGame()).rejects.toThrow(refusal);
 
     expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false, expect.any(Symbol));
     expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
     adapter.dispose();
   });
