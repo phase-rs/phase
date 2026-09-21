@@ -422,6 +422,7 @@ mod hundred_battle_veteran_counter_kind_gate;
 mod hunters_insight_combat_draw;
 mod ichneumon_druid;
 mod idol_of_false_gods_counter_animation;
+mod if_you_do_declined_gate_later_instruction_p7;
 mod inevitable_betrayal_no_mana_cost;
 mod infantry_shield_mobilize_grant;
 mod inherent_rule_trigger_display_name;
