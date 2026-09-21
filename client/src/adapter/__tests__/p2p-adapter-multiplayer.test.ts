@@ -3971,7 +3971,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
     await adapter.initialize();
 
+    const setupRejection = expect(adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: "Host disconnected before game setup completed",
+    });
     conn.simulateClose();
+    await setupRejection;
     adapter.dispose();
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -4023,6 +4028,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       reconnectPeer as unknown as Peer,
       "host-peer",
       conn as unknown as DataConnection,
+      "seat-token",
     );
     await adapter.initialize();
 
