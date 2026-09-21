@@ -1882,6 +1882,73 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockSubmitAction).not.toHaveBeenCalled();
   });
 
+  it("routes an open guest connection by its current seat after pregame renumbering", async () => {
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+
+    // Seat 1 is removed while the guest occupies seat 2. The real reducer
+    // compacts the seat map and moves that same connection to seat 1.
+    mocks.applySeatMutation.mockImplementationOnce(async (stateJson: string, mutationJson: string) => {
+      const state = JSON.parse(stateJson) as { seats: unknown[]; tokens: string[] };
+      const mutation = JSON.parse(mutationJson) as {
+        data: { kind: unknown };
+      };
+      state.seats[1] = mutation.data.kind;
+      return {
+        state,
+        delta: {
+          mutatedSeats: [1],
+          invalidatedTokens: [],
+          removedAi: [],
+          newAi: [[1, "Medium", { main_deck: [], sideboard: [], commander: [] }]],
+          renumbering: null,
+          nowStarted: false,
+        },
+      };
+    });
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } },
+      },
+    });
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+
+    mocks.applySeatMutation.mockImplementationOnce(async (stateJson: string) => {
+      const state = JSON.parse(stateJson) as { seats: unknown[]; tokens: string[] };
+      state.seats.splice(1, 1);
+      state.tokens.splice(1, 1);
+      return {
+        state,
+        delta: {
+          mutatedSeats: [1],
+          invalidatedTokens: [],
+          removedAi: [1],
+          newAi: [],
+          renumbering: { removedIndex: 1, remapping: [[2, 1]] },
+          nowStarted: false,
+        },
+      };
+    });
+    await adapter.applySeatMutation({ type: "Remove", data: { seatIndex: 1 } });
+    await adapter.initializeGame();
+
+    mockSubmitAction.mockClear();
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    adapter.dispose();
+  });
+
   it("separates engine rejections from host operational action failures", async () => {
     const { adapter, emitConnection } = makeHost(2);
     await adapter.initialize();

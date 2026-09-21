@@ -2012,7 +2012,7 @@ export class P2PHostAdapter implements EngineAdapter {
       await this.refreshPregameSeatView();
       this.saveSession();
 
-      session.onMessage((msg) => this.handleGuestMessage(pid, session, msg));
+      session.onMessage((msg) => this.handleGuestMessage(session, msg));
 
       this.broadcastSeatSnapshot();
       this.syncLobbyMetadata(reservationToken ? [reservationToken] : []);
@@ -3082,11 +3082,22 @@ export class P2PHostAdapter implements EngineAdapter {
     this.dispose();
   }
 
+  private guestPlayerIdForSession(sourceSession: PeerSession): PlayerId | null {
+    for (const [pid, session] of this.guestSessions) {
+      if (session === sourceSession) return pid;
+    }
+    return null;
+  }
+
   private async handleGuestMessage(
-    pid: PlayerId,
     sourceSession: PeerSession,
     msg: P2PMessage,
   ): Promise<void> {
+    // Seat mutations can compact the guest map while the PeerJS channel stays
+    // open. Resolve the actor from the current session map at receive time;
+    // the seat captured when the callback was installed may now be stale.
+    const pid = this.guestPlayerIdForSession(sourceSession);
+    if (pid === null) return;
     const session = this.guestSessions.get(pid);
     // A reconnecting channel is intentionally not installed in
     // `guestSessions` until its ACK has been delivered. Keep every control
@@ -3526,7 +3537,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.pendingReconnectSessions.delete(pid);
       this.disconnectedSeats.delete(pid);
       this.guestSessions.set(pid, session);
-      session.onMessage((msg) => this.handleGuestMessage(pid, session, msg));
+      session.onMessage((msg) => this.handleGuestMessage(session, msg));
       this.publishPlayerLatencies();
 
       for (const [otherPid, otherSession] of this.guestSessions) {
