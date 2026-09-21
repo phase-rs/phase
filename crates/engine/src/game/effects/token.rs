@@ -4288,19 +4288,17 @@ pub(super) fn inject_resolved_token_abilities(
 
 /// CR 111.3 + CR 111.4: Grant catalog `rules_text` when token creation resolved
 /// a `token_image_ref` preset whose abilities are not already covered by the
-/// predefined path (e.g. SOS Pest attack life gain).
+/// predefined path (e.g. SOS Pest attack life gain). CR 111.10: A predefined
+/// token (Treasure, Food, Clue, …) already received its abilities at creation,
+/// so the single authority `materialize_token_ability_payload` short-circuits
+/// on it and nothing catalog-derived is re-granted.
 pub(crate) fn inject_catalog_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let Some(preset) = state.objects.get(&obj_id).and_then(|obj| {
-        obj.token_image_ref.as_ref().and_then(|image_ref| {
-            crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
-        })
-    }) else {
+    let Some(materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
         return;
     };
-    let materialized = materialize_catalog_token_payload(preset);
     if materialized.source == TokenAbilitySource::CatalogRulesText
         && materialized.has_functional_payload()
     {
@@ -6031,6 +6029,85 @@ mod tests {
             obj.token_rules_text.as_deref(),
             Some("Whenever this token attacks, you gain 1 life.")
         );
+    }
+
+    /// CR 111.10a: A Treasure token has exactly one ability. Linking a catalog
+    /// preset after creation (the debug preset-spawn path, which defers
+    /// `token_image_ref` until after `inject_resolved_token_abilities` ran) must
+    /// not re-grant that ability from the preset's catalog `rules_text`.
+    #[test]
+    fn catalog_injection_keeps_single_predefined_treasure_ability() {
+        // M20 Treasure preset: `PredefinedArtifact { kind: Treasure }` whose
+        // catalog rules_text is the CR 111.10a ability.
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "0060ce13-67e2-5607-a29b-721c743e6770",
+        )
+        .expect("M20 Treasure preset");
+        // Reach-guard: the catalog text on its own yields a functional payload,
+        // so a single ability below is the predefined short-circuit, not a parse gap.
+        assert!(
+            materialize_catalog_token_payload(preset).has_functional_payload(),
+            "Treasure catalog rules_text must parse to a functional payload"
+        );
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+        }
+        // Every functional object channel `apply_token_ability_payload` can write
+        // (`modifications` land in the static pair; the catalog path never writes
+        // `back_face`).
+        let channels = |obj: &GameObject| {
+            (
+                obj.abilities.len(),
+                obj.base_abilities.len(),
+                obj.static_definitions.len(),
+                obj.base_static_definitions.len(),
+                obj.trigger_definitions.len(),
+                obj.base_trigger_definitions.len(),
+                obj.keywords.len(),
+                obj.base_keywords.len(),
+            )
+        };
+
+        // Creation-time injection, before the preset image ref is linked.
+        inject_resolved_token_abilities(&mut state, obj_id);
+        assert_eq!(
+            state.objects[&obj_id].abilities.len(),
+            1,
+            "creation must install the predefined Treasure ability"
+        );
+        let before = channels(&state.objects[&obj_id]);
+        let rules_text_before = state.objects[&obj_id].token_rules_text.clone();
+
+        state.objects.get_mut(&obj_id).unwrap().token_image_ref = preset.token_image_ref.clone();
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(
+            channels(obj),
+            before,
+            "catalog injection must not grow any functional channel"
+        );
+        assert_eq!(
+            obj.abilities.len(),
+            1,
+            "catalog injection must not duplicate the predefined Treasure ability"
+        );
+        assert_eq!(obj.base_abilities.len(), 1);
+        // Parity with the normal creation path: a predefined token keeps the
+        // predefined display text (none for Treasure), not the catalog text.
+        assert_eq!(obj.token_rules_text, rules_text_before);
     }
 
     #[test]
