@@ -2831,15 +2831,26 @@ fn resume_loaded_stack_automation(
 /// entry point. Callers must clear any existing state first.
 #[wasm_bindgen]
 pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue> {
+    resume_multiplayer_host_state_inner(json_str)
+        .map(|presentation| to_js(&presentation))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// The natively-callable body of [`resume_multiplayer_host_state`].
+///
+/// Keep the fallible engine path separate from the WASM shell so native tests
+/// can assert restore failures without constructing `JsValue` off-wasm32.
+fn resume_multiplayer_host_state_inner(
+    json_str: &str,
+) -> Result<RestoredStackAutomationPresentation, String> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
-        return Err(JsValue::from_str(
-            "resume_multiplayer_host_state refused: multiplayer mode already set",
-        ));
+        return Err("resume_multiplayer_host_state refused: multiplayer mode already set".into());
     }
     if game_state_present() {
-        return Err(JsValue::from_str(
-            "resume_multiplayer_host_state refused: engine already initialized; call clear_game_state first",
-        ));
+        return Err(
+            "resume_multiplayer_host_state refused: engine already initialized; call clear_game_state first"
+                .into(),
+        );
     }
 
     let restored = decode_and_rehydrate_restored_game_state(json_str, |state| {
@@ -2851,8 +2862,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue>
         state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
         state.rng_word_pos = 0;
         Ok(())
-    })
-    .map_err(|error| JsValue::from_str(&error))?;
+    })?;
     let mut state = restored.state;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, true);
 
@@ -2864,8 +2874,6 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue>
     // session, and no caller can observe the hosted snapshot until this
     // returns its bounded engine presentation.
     resume_loaded_stack_automation(true)
-        .map(|presentation| to_js(&presentation))
-        .map_err(|error| JsValue::from_str(&error))
 }
 
 #[cfg(test)]
@@ -2951,20 +2959,17 @@ mod restored_card_db_requirements_tests {
         state.format_config = FormatConfig::commander_draft();
         let json = serde_json::to_string(&state).unwrap();
 
-        restore_game_state(&json).expect("legacy local restore must remain compatible");
+        restore_game_state_inner(&json).expect("legacy local restore must remain compatible");
         clear_game_state();
         set_multiplayer_mode(false);
 
-        let error = resume_multiplayer_host_state(&json)
+        let error = resume_multiplayer_host_state_inner(&json)
             .expect_err("P2P host resume must reject an invalid seat count before broadcast");
         assert!(
-            error
-                .as_string()
-                .unwrap_or_default()
-                .contains("player_count"),
+            error.contains("player_count"),
             "resume error must identify the seat-count boundary"
         );
-        assert!(GAME_STATE.with(|cell| cell.borrow().is_none()));
+        assert!(!game_state_present());
         assert!(!is_multiplayer_mode());
     }
 }
