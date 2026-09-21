@@ -117,6 +117,10 @@
     "tokenToughnessPlaceholder": "タフネス",
     "sourceDefinedPtRequired": "この定義済みトークンのパワーとタフネスを入力してください。"
   },
+  "debugMove": {
+    "runEtbEffects": "ETB効果を実行",
+    "simulate": "シミュレート（ETB効果、誘発 + 状況起因処理）"
+  },
   "debugLibrary": {
     "openActions": "{{name}}のデバッグ操作を開く"
   },

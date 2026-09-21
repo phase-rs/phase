@@ -112,6 +112,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugMove": {
+    "runEtbEffects": "Executar efeitos ETB",
+    "simulate": "Simular (efeitos ETB, gatilhos + SBA)"
+  },
   "debugLibrary": {
     "openActions": "Abrir ações de depuração para {{name}}"
   },

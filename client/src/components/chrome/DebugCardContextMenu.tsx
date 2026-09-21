@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 import type {
   CounterType,
@@ -600,6 +601,7 @@ function ZoneSubmenu({
   ) => void;
   chrome: SubmenuChrome;
 }) {
+  const { t } = useTranslation("game");
   // Off by default: a debug move stages the board raw. On, the engine runs the
   // real pipeline — ETB replacements and triggers, leave/dies triggers, SBAs.
   const [runEtb, setRunEtb] = useState(false);
@@ -617,7 +619,7 @@ function ZoneSubmenu({
         }
       >
         <span className="w-3 text-center text-[10px]">{runEtb ? "✓" : ""}</span>
-        <span>Run ETB effects</span>
+        <span>{t("debugMove.runEtbEffects")}</span>
       </button>
       {ZONES.filter((z) => z !== currentZone).map((zone) =>
         zone === "Library" ? (
