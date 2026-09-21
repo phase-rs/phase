@@ -1904,7 +1904,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
           renumbering: null,
           nowStarted: false,
         },
-      };
+      } as unknown as Awaited<ReturnType<typeof mocks.applySeatMutation>>;
     });
     await adapter.applySeatMutation({
       type: "SetKind",
@@ -1933,7 +1933,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
           renumbering: { removedIndex: 1, remapping: [[2, 1]] },
           nowStarted: false,
         },
-      };
+      } as unknown as Awaited<ReturnType<typeof mocks.applySeatMutation>>;
     });
     await adapter.applySeatMutation({ type: "Remove", data: { seatIndex: 1 } });
     await adapter.initializeGame();
