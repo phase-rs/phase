@@ -2854,9 +2854,15 @@ fn resume_multiplayer_host_state_inner(
     }
 
     let restored = decode_and_rehydrate_restored_game_state(json_str, |state| {
+        let player_count = u8::try_from(state.players.len()).map_err(|_| {
+            format!(
+                "player_count {} exceeds the supported range",
+                state.players.len()
+            )
+        })?;
         state
             .format_config
-            .validate_for_player_count(state.players.len() as u8)?;
+            .validate_for_player_count(player_count)?;
         let fresh_seed: u64 = rand::rng().random();
         state.rng_seed = fresh_seed;
         state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
