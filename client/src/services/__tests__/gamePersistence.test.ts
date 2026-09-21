@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, GameState, TrustedGameStateEnvelope } from "../../adapter/types";
+import type {
+  EngineAdapter,
+  FormatConfig,
+  GameState,
+  TrustedGameStateEnvelope,
+} from "../../adapter/types";
 import { persistedGameStateView } from "../../adapter/types";
 import { GAME_KEY_PREFIX } from "../../constants/storage";
 import { buildGameState, buildPriorityWaitingFor } from "../../test/factories/gameStateFactory";
@@ -66,7 +71,7 @@ describe("game persistence", () => {
       format: "Commander",
       command_zone: true,
       deck_size: 100 as never,
-    };
+    } as FormatConfig;
     vi.mocked(idbGet).mockResolvedValueOnce(state);
 
     await expect(loadGame("legacy-deck-size")).resolves.toMatchObject({
@@ -81,7 +86,7 @@ describe("game persistence", () => {
       format: "Standard",
       command_zone: false,
       deck_size: 60 as never,
-    };
+    } as FormatConfig;
     const envelope = {
       state,
       precast_shortcut_runtime: { opaque: true },

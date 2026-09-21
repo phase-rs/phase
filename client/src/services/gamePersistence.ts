@@ -163,8 +163,9 @@ export function migratePersistedGameState(state: PersistedGameState): PersistedG
   const formatConfig = gameState.format_config;
   if (!formatConfig || typeof formatConfig !== "object") return state;
 
-  const normalized = normalizeLegacyDeckSizeRule(formatConfig as unknown as Record<string, unknown>);
-  if (normalized === formatConfig) return state;
+  const rawFormatConfig = formatConfig as unknown as Record<string, unknown>;
+  const normalized = normalizeLegacyDeckSizeRule(rawFormatConfig);
+  if (normalized === rawFormatConfig) return state;
 
   const nextState = { ...gameState, format_config: normalized as unknown as FormatConfig };
   return envelope ? { ...state, state: nextState } : nextState;
