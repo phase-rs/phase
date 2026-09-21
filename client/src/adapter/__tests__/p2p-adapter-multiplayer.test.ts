@@ -20,6 +20,9 @@ import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../..
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
 
+/** `multiplayer:reconnectRejected.hostDisconnectedBeforeSetup`, rendered in English. */
+const HOST_DISCONNECTED_BEFORE_SETUP = "Host disconnected before game setup completed";
+
 // `vi.mock` is hoisted above imports, so the factory can't reference module
 // scope. Inline the wire-format stub. See `./protocolTestStub.ts` for the
 // rationale: `CompressionStream` doesn't drain under fake timers in happy-dom,
@@ -3973,7 +3976,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     const setupRejection = expect(adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
-      message: "Host disconnected before game setup completed",
+      message: HOST_DISCONNECTED_BEFORE_SETUP,
     });
     conn.simulateClose();
     await setupRejection;
@@ -4769,7 +4772,7 @@ describe("P2P undeliverable frames", () => {
     await guest.adapter.initialize();
     const rejection = expect(guest.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
-      message: "Host disconnected before game setup completed",
+      message: HOST_DISCONNECTED_BEFORE_SETUP,
     });
 
     guest.conn.simulateClose();
@@ -4777,7 +4780,7 @@ describe("P2P undeliverable frames", () => {
     await rejection;
     expect(guest.emitted).toHaveBeenCalledWith({
       type: "reconnectFailed",
-      reason: "Host disconnected before game setup completed",
+      reason: HOST_DISCONNECTED_BEFORE_SETUP,
     });
     // A fresh guest has no token, so a redial cannot identify it to the host.
     expect(guest.connect).not.toHaveBeenCalled();

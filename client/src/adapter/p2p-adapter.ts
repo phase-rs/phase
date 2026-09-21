@@ -4718,7 +4718,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       // A fresh guest has no token with which a new connection could identify
       // itself. Retrying the transport would reopen an unauthenticated channel
       // that sends nothing, leaving initializeGame() pending forever.
-      const reason = "Host disconnected before game setup completed";
+      const reason = i18n.t("multiplayer:reconnectRejected.hostDisconnectedBeforeSetup");
       this.terminate();
       this.rejectGameSetup(reason);
       this.emit({ type: "reconnectFailed", reason });

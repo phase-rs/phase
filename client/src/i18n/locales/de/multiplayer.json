@@ -104,7 +104,8 @@
     "versionRequired": "Dieser Host benötigt das Übertragungsprotokoll v{{version}}. Aktualisiere beide Fenster und versuche es erneut.",
     "versionMismatch": "Übertragungsprotokoll stimmt nicht überein: Dein Client hat v{{guestVersion}} gesendet, der Host verwendet jedoch v{{hostVersion}}. Aktualisiere beide Fenster.",
     "malformedAuthority": "Der Host hat eine ungültige Verbindungsberechtigung abgelehnt. Tritt mit einem neuen Raumcode erneut bei.",
-    "frameUndecodable": "Der Host hat eine Nachricht gesendet, die dieser Client nicht lesen konnte. Aktualisiere beide Fenster und versuche es erneut."
+    "frameUndecodable": "Der Host hat eine Nachricht gesendet, die dieser Client nicht lesen konnte. Aktualisiere beide Fenster und versuche es erneut.",
+    "hostDisconnectedBeforeSetup": "Die Verbindung zum Host wurde vor Abschluss der Einrichtung getrennt."
   },
   "serverOfflinePrompt": {
     "title": "Matchmaking nicht erreichbar",

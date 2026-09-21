@@ -104,7 +104,8 @@
     "versionRequired": "Este host requiere el protocolo de conexión v{{version}}. Actualiza ambas ventanas e inténtalo de nuevo.",
     "versionMismatch": "El protocolo de conexión no coincide: tu cliente envió v{{guestVersion}}, pero el host usa v{{hostVersion}}. Actualiza ambas ventanas.",
     "malformedAuthority": "El host rechazó una autorización de conexión no válida. Vuelve a unirte con un código de sala nuevo.",
-    "frameUndecodable": "El host envió un mensaje que este cliente no pudo leer. Actualiza ambas ventanas e inténtalo de nuevo."
+    "frameUndecodable": "El host envió un mensaje que este cliente no pudo leer. Actualiza ambas ventanas e inténtalo de nuevo.",
+    "hostDisconnectedBeforeSetup": "La conexión con el host se cerró antes de completar la configuración."
   },
   "serverOfflinePrompt": {
     "title": "Emparejamiento inaccesible",
