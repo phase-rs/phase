@@ -8885,6 +8885,94 @@ fn flicker_enters_trigger_keeps_chosen_target_anaphor() {
     );
 }
 
+/// CR 608.2k + CR 603.6: "When this creature dies, return it … attached to
+/// target opponent" — "it" is the leaving creature (event source), not the
+/// chosen player. A player-only `valid_target` must not block the
+/// ParentTarget → TriggeringSource lift. Object-target flicker (the test
+/// above) still blocks.
+#[test]
+fn dies_return_it_attached_to_target_opponent_lifts_it_to_event_source() {
+    let def = parse_trigger_line(
+        "When this creature dies, return it to the battlefield transformed under your control attached to target opponent.",
+        "Accursed Witch",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert!(
+        def.valid_target
+            .as_ref()
+            .is_some_and(TargetFilter::is_player_scope),
+        "attach host must remain a player target slot, got {:?}",
+        def.valid_target
+    );
+    let exec = def.execute.as_ref().expect("execute must be Some");
+    match exec.effect.as_ref() {
+        Effect::ChangeZone {
+            origin,
+            destination: Zone::Battlefield,
+            target,
+            enter_transformed: true,
+            ..
+        } => {
+            assert_eq!(
+                target,
+                &TargetFilter::SelfRef,
+                "\"it\" must be the dying creature, not ParentTarget (the chosen opponent)"
+            );
+            assert_eq!(
+                origin,
+                &Some(Zone::Graveyard),
+                "CR 603.6: return the card from the zone the dies trigger moved it to"
+            );
+        }
+        other => panic!("expected transformed battlefield return, got {other:?}"),
+    }
+    let sub = exec.sub_ability.as_ref().expect("return chains to attach");
+    assert!(
+        matches!(sub.effect.as_ref(), Effect::Attach { .. }),
+        "\"attached to target opponent\" must stay a separate Attach, got {:?}",
+        sub.effect
+    );
+}
+
+/// SHAPE: origin stamping must traverse every nested ability carrier, including
+/// modes, chained sub-abilities, and otherwise branches.
+#[test]
+fn self_return_origin_stamps_nested_modes_sub_abilities_and_else_branches() {
+    let def = parse_trigger_line(
+        "When this creature dies, return it to the battlefield transformed under your control attached to target opponent.",
+        "Accursed Witch",
+    );
+    let mut lifted = *def.execute.expect("parsed self-return");
+    let Effect::ChangeZone { origin, target, .. } = lifted.effect.as_mut() else {
+        panic!("expected a parsed return");
+    };
+    *origin = None;
+    *target = TargetFilter::TriggeringSource;
+    lifted.sub_ability = None;
+
+    let mut mode = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+    mode.sub_ability = Some(Box::new(lifted.clone()));
+    let mut root = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+    root.mode_abilities.push(mode);
+    root.sub_ability = Some(Box::new(lifted.clone()));
+    root.else_ability = Some(Box::new(lifted));
+    stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
+    for returned in [
+        root.sub_ability.as_deref().unwrap(),
+        root.mode_abilities[0].sub_ability.as_deref().unwrap(),
+        root.else_ability.as_deref().unwrap(),
+    ] {
+        assert!(matches!(
+            returned.effect.as_ref(),
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+}
+
 #[test]
 fn counter_added_trigger_captures_explicit_type() {
     // CR 122.1: Hapatra — "Whenever you put one or more -1/-1 counters on a

@@ -12,10 +12,10 @@ expression: result
         "kind": "Spell",
         "effect": {
           "type": "ChangeZone",
-          "origin": null,
+          "origin": "Graveyard",
           "destination": "Battlefield",
           "target": {
-            "type": "TriggeringSource"
+            "type": "SelfRef"
           },
           "owner_library": false,
           "enter_transformed": false,
