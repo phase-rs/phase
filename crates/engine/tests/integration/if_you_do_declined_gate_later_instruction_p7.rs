@@ -740,7 +740,7 @@ fn syn_exile_that_declined_resolves_nothing() {
 /// "It gains haste" names the Goblin, and it is not proven independent of the
 /// declined gate, so the Goblin sentence is skipped with it: declined, nothing
 /// happens (the base reading), never a Goblin without haste. GREEN AT BASE;
-/// red under M-11 (the coupling disabled: a Goblin without haste; measured).
+/// red under M-11b (the coupling disabled: a Goblin without haste; measured).
 #[test]
 fn syn_rider_declined_creates_no_goblin_without_its_rider() {
     let board = combat_board("SynRider", SYN_RIDER, false);
