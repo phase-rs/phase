@@ -2978,6 +2978,27 @@ mod restored_card_db_requirements_tests {
         assert!(!game_state_present());
         assert!(!is_multiplayer_mode());
     }
+
+    #[test]
+    fn multiplayer_host_resume_rejects_unrepresentable_persisted_seat_count_before_install() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let player_template = state.players[0].clone();
+        state.players.resize(259, player_template);
+        let json = serde_json::to_string(&state).unwrap();
+
+        let error = resume_multiplayer_host_state_inner(&json)
+            .expect_err("P2P host resume must reject a seat count that cannot fit in u8");
+        assert!(
+            error.contains("player_count"),
+            "resume error must identify the seat-count conversion boundary"
+        );
+        assert!(!game_state_present());
+        assert!(!is_multiplayer_mode());
+    }
 }
 
 #[cfg(test)]
