@@ -1127,7 +1127,8 @@ fn a_declined_gate_that_would_repeat_its_later_instructions_resolves_nothing_aft
         };
         (runner.life(P0) - life, waiting)
     }
-    let cases: [(&str, fn(&mut ResolvedAbility)); 5] = [
+    type Case = (&'static str, fn(&mut ResolvedAbility));
+    let cases: [Case; 5] = [
         ("no repeat", |_| {}),
         ("while", |gate| {
             gate.repeat_until = Some(RepeatContinuation::WhileCondition {

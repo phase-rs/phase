@@ -19728,7 +19728,8 @@ mod tests {
                 },
             })
         }
-        let cases: [(&str, fn(&mut ResolvedAbility)); 8] = [
+        type Case = (&'static str, fn(&mut ResolvedAbility));
+        let cases: [Case; 8] = [
             ("no repeat", |_| {}),
             ("counted", |gate| {
                 gate.repeat_for = Some(QuantityExpr::Fixed { value: 2 })
