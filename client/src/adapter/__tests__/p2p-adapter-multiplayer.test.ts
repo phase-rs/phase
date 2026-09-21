@@ -4298,7 +4298,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
 
     adapter.dispose();
 
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false, expect.any(Symbol));
   });
 
   it("does not let another host's teardown clear the claimant's game", async () => {
@@ -4368,7 +4368,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     gate.resolve(undefined);
 
     await expect(start).rejects.toThrow(/disposed during start/);
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false, expect.any(Symbol));
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
     expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
   });
 
