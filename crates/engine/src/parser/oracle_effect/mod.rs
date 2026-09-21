@@ -16005,11 +16005,9 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
         // ... sacrifice(s) the rest" finds three cards: Archfiend of
         // Depravity's "that player chooses" declines earlier, at the
         // head-verb step, on its unmodelled subject
-        // (`keeper_dispose_head_declines_an_unmodelled_subject`); Covetous
-        // Elegy and Stick Together both print an `each player`/`each
-        // opponent` subject, landing in the EachPlayer/EachOpponent arm below
-        // instead. The controller-scope lowering is also `DestroyAll` over
-        // the tracked-set complement; no controller-scope sacrifice primitive
+        // (`keeper_dispose_head_declines_an_unmodelled_subject`). The
+        // controller-scope lowering is also `DestroyAll` over the
+        // tracked-set complement; no controller-scope sacrifice primitive
         // with that complement exists.
         (
             KeeperChooserScope::Controller,
@@ -16109,14 +16107,14 @@ fn parse_keeper_dispose_rest_ir(
             // structurally (so this recognizer keeps routing the line, per
             // the gate's own comment) but no controller-scope lowering exists
             // for it: `ChooseObjectsIntoTrackedSet` + `DestroyAll` over the
-            // tracked-set complement has no step to place a counter in. CR
-            // 122.1's counter is what nominates the keeper on this subject,
-            // so silently building that lowering would drop the printed
-            // instruction. Claim the whole printed instruction as one honest
-            // gap instead of a per-sub-clause split — the disposal half is
-            // meaningless without the (unmodelled) counter nomination it
-            // depends on, so splitting it into "claimed" and "gapped" halves
-            // would misstate which part is unsupported.
+            // tracked-set complement has no step to place a counter in.
+            // CR 122.1's counter is what nominates the keeper on this
+            // subject, so silently building that lowering would drop the
+            // printed instruction. Claim the whole printed instruction as one
+            // honest gap instead of a per-sub-clause split — the disposal
+            // half is meaningless without the (unmodelled) counter
+            // nomination it depends on, so splitting it into "claimed" and
+            // "gapped" halves would misstate which part is unsupported.
             KeeperHead::Counter { .. } => {
                 let whole_source = text.get(..head.disposal_span.1)?;
                 builder
@@ -16207,8 +16205,8 @@ fn parse_keeper_dispose_rest_ir(
             // CR 122.1 + CR 608.2c: a `KeeperHead::Counter` head's printed
             // counter nominates the keeper AS PART of this same instruction,
             // so it rides on the effect's `keeper_counter` field rather than a
-            // following `PutCounterAll` clause — F1's fix. `Choose` heads carry
-            // no counter.
+            // following `PutCounterAll` clause. `Choose` heads carry no
+            // counter.
             let keeper_counter = match &head.head {
                 KeeperHead::Choose => None,
                 KeeperHead::Counter {

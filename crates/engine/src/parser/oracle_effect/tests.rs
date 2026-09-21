@@ -69981,9 +69981,9 @@ fn keeper_dispose_head_captures_printed_counter_count() {
 /// lowering (reintroducing the `PutCounterAll` clause, or dropping
 /// `keeper_counter` entirely) reddens the assertions below.
 ///
-/// This item is also **V-HONEST's reach-guard** (M-g): it asserts
-/// `keeper_counter: Some(("vow", Fixed(1)))` is actually populated, which is
-/// what keeps `promise_of_loyalty_binds_outer_tracked_set_inner_selfref`'s
+/// This item also asserts `keeper_counter: Some(("vow", Fixed(1)))` is
+/// actually populated, which is what keeps
+/// `promise_of_loyalty_binds_outer_tracked_set_inner_selfref`'s
 /// `parse_warnings.is_empty()` negative from passing vacuously — if the line
 /// stopped parsing, this positive assertion fails first.
 #[test]

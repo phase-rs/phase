@@ -1657,7 +1657,7 @@ mod tests {
     /// `KeeperConstraint::ExactCount`; every other keeper mode refuses rather
     /// than silently dropping the printed instruction.
     ///
-    /// M-e: the category-mode row and the total-power-mode row are BOTH
+    /// The category-mode row and the total-power-mode row are BOTH
     /// required, not redundant — `resolve`'s two early returns fire in the
     /// order `total_power_cap` THEN `KeeperConstraint::ExactCount`, so a guard
     /// placed between them would see the `ExactCount` early return happen

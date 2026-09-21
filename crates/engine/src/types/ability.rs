@@ -584,7 +584,7 @@ pub enum KeeperConstraint {
 /// select(.value.oracle_text | test("sacrifices? the rest|destroys? the
 /// rest"; "i")) | .key' client/public/card-data.json` returns it alone once
 /// Ajani, Nacatl Avenger's unrelated `+1/+1`-counter loyalty ability is
-/// excluded — and its printed count is `QuantityExpr::Fixed(1)`, so "resolve
+/// excluded — and its printed count is `QuantityExpr::Fixed { value: 1 }`, so "resolve
 /// at `resolve`" and "resolve at placement" are observationally identical
 /// today. A dynamic count would have to be re-derived at placement instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

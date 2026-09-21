@@ -490,9 +490,9 @@ fn promise_of_loyalty_keeper_attacks_after_vow_counter_removed() {
 
     // Cross-seat control: the caster's own keeper ("Caster Keeper") still carries
     // its own vow counter, untouched by p1_keeper's removal above. CR 506.2: an
-    // attacking creature must be controlled by the active player and its attack
-    // target must be the nonactive (defending) player, so a creature can never
-    // legally attack its own controller. Moving p0_keeper to P1's control (the
+    // attacking creature must be controlled by the active player, and the
+    // nonactive player is the defending player, so a creature can never legally
+    // attack its own controller. Moving p0_keeper to P1's control (the
     // active player for this window) is what makes declaring it against P0
     // legal at all — `game/combat.rs::attacker_can_attack_target` refuses any
     // `AttackTarget::Player` on the active team, and P0 is never on that team —
@@ -524,7 +524,8 @@ fn promise_of_loyalty_keeper_attacks_after_vow_counter_removed() {
         .expect_err("the caster's own keeper still has its own vow counter");
     assert!(
         format!("{refusal:?}").contains("CR 508.1c/d attack restriction"),
-        "the refusal must come from the vow prohibition: {refusal:?}"
+        "the refusal must come from the per-target restriction loop, not the \
+         creature-level checks in validate_attackers_with_cap: {refusal:?}"
     );
     runner
         .declare_attackers(&[(p1_keeper, AttackTarget::Player(P0))])
@@ -1486,7 +1487,7 @@ fn promise_of_loyalty_sentence_two_binds_to_the_keepers_on_every_pause_path() {
 /// path never constructs a completion frame at all, so neither mode is even
 /// consulted there.
 ///
-/// `add_object_counters_then`'s `Suppress` mode (B-1) is what keeps the
+/// `add_object_counters_then`'s `Suppress` mode is what keeps the
 /// PAUSED boards at that same baseline instead of adding a THIRD push for the
 /// counter queue's own completion. Positive control, run and reverted byte-
 /// exact: flipping `Suppress` to `Emit` in `counters.rs::add_object_counters_then`
