@@ -2000,6 +2000,15 @@ export class P2PHostAdapter implements EngineAdapter {
         this.rejectSuperseded(session);
         return;
       }
+      if (this.closedPregameSessions.has(session)) {
+        // The native attach can outlive the PeerJS channel. Release the
+        // server-side seat before returning, and never publish a local guest
+        // session for a connection that already closed.
+        if (this.ownsAuthority()) {
+          await this.releaseNativePregameSeat(pid, "disconnect during guest attachment");
+        }
+        return;
+      }
 
       const token = crypto.randomUUID();
       this.playerTokens.set(pid, token);

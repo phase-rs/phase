@@ -939,6 +939,33 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mocks.setAiDecisionDiagnosticsEnabled).toHaveBeenCalledWith(true);
   });
 
+  it("releases a native seat when its PeerJS guest closes during attachment", async () => {
+    const { adapter, emitConnection } = makeNativeHost();
+    const guestAttachment = deferred<typeof NATIVE_GUEST_ATTACHMENT>();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame
+      .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+      .mockImplementationOnce(() => guestAttachment.promise);
+
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    guest.simulateClose();
+    guestAttachment.resolve(NATIVE_GUEST_ATTACHMENT);
+    await flushPromises(20);
+
+    const host = adapter as unknown as { guestSessions: Map<number, unknown> };
+    expect(host.guestSessions.has(1)).toBe(false);
+    expect(nativeWebSocketMocks.sendSeatMutation).toHaveBeenCalledWith({
+      type: "SetKind",
+      data: { seatIndex: 1, kind: { type: "WaitingHuman" } },
+    });
+    expect(nativeWebSocketMocks.dispose).toHaveBeenCalledOnce();
+    adapter.dispose();
+  });
+
   it("exposes local diagnostics after native pregame seat release falls back to WASM", async () => {
     const { adapter, emitConnection } = makeNativeHost();
     nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
