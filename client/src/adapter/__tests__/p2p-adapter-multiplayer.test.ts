@@ -963,6 +963,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       data: { seatIndex: 1, kind: { type: "WaitingHuman" } },
     });
     expect(nativeWebSocketMocks.dispose).toHaveBeenCalledOnce();
+
+    nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+    await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Island"], sideboard: [] } },
+    });
+    await flushPromises(10);
+    expect(host.guestSessions.has(1)).toBe(true);
     adapter.dispose();
   });
 
