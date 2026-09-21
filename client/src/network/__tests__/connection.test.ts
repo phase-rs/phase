@@ -66,7 +66,7 @@ vi.mock("peerjs", () => {
   return { default: FakePeer };
 });
 
-import { dialPeer, fetchFreshTurnConfig, safePeerError, PEER_CONNECT_OPTIONS, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
+import { dialPeer, fetchFreshTurnConfig, safePeerError, PEER_CONNECT_OPTIONS, TURN_CREDENTIALS_URL, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
 
 import { getDiagnosticHistory } from "../../services/troubleshooting";
 
@@ -315,7 +315,7 @@ describe("strict fresh TURN credentials", () => {
     vi.stubGlobal("fetch", fetcher);
     const before = getDiagnosticHistory();
     expect((await fetchFreshTurnConfig(controller.signal)).iceServers).toHaveLength(2);
-    expect(fetcher).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: controller.signal, cache: "no-store" }));
+    expect(fetcher).toHaveBeenCalledWith(TURN_CREDENTIALS_URL, expect.objectContaining({ signal: controller.signal, cache: "no-store" }));
     expect(getDiagnosticHistory()).toEqual(before);
   });
   it.each([
