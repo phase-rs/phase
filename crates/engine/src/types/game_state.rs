@@ -6705,6 +6705,37 @@ pub enum PendingCounterPostAction {
     ContinueProliferateActions {
         pending: PendingProliferateActions,
     },
+    /// CR 608.2c + CR 701.21a + CR 616.1: the keeper marks a keeper-and-dispose
+    /// instruction owed have all landed; sacrifice everything else in scope.
+    ///
+    /// The sacrifice `selections` are deliberately NOT carried across the pause —
+    /// they are re-derived from `kept` by
+    /// `choose_and_sacrifice_rest::unchosen_sacrifice_selections_for_scope` when this
+    /// runs, so the complement is computed against the state as it then is
+    /// (CR 608.2c) and no cursor can go stale across a CR 616.1 choice.
+    ///
+    /// Runs at most once per instruction: `drain_pending_counter_additions` pops the
+    /// post-action off the queue BEFORE invoking it and re-parks only the remainder,
+    /// so a nested pause cannot re-derive and re-execute a sacrifice already begun.
+    ///
+    /// `add-engine-variant` gate, recorded because the verdict is binding:
+    /// * Stage 1 DOES_NOT_EXIST — no post-action resumes a player-scope sacrifice.
+    /// * Stage 2 EXTEND_OK — the `Continue*` members carry structurally disjoint
+    ///   payloads for distinct suspended operations, with no `(op, scope, target)`
+    ///   axis to parameterize over; see `ContinueProliferateActions`'s note.
+    /// * Stage 3 WITHIN_SECTION — payload lies wholly inside CR 701.21a + CR 616.1,
+    ///   and this is a resumption layer, not a leaf-reference layer.
+    ///
+    /// Serialized surface: reaches persisted state through
+    /// `PendingEffectResolved::post_actions` on the `RESOLUTION_STATE_WIRE_VERSION`
+    /// frame wire. A new externally-tagged variant is backward compatible.
+    ContinuePlayerScopeSacrifice {
+        kept: Vec<ObjectId>,
+        scoped_players: Vec<PlayerId>,
+        sacrifice_filter: TargetFilter,
+        source_id: ObjectId,
+        source_controller: PlayerId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -14789,6 +14820,11 @@ pub enum WaitingFor {
         /// `eligible.len()`.
         #[serde(alias = "count")]
         required_count: usize,
+        /// CR 608.2c + CR 122.1: the keeper mark the instruction owes, with its count
+        /// already resolved (CR 608.2h). The `ResolvedAbility` is gone by the time
+        /// `GameAction::ChooseKeptPermanents` resumes, so the mark rides here.
+        #[serde(default)]
+        keeper_counter: Option<(CounterType, u32)>,
         #[serde(default = "default_target_filter_permanent")]
         choose_filter: TargetFilter,
         #[serde(default = "default_target_filter_permanent")]

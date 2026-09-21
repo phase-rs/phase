@@ -2624,6 +2624,8 @@ export type WaitingFor =
       target_player: PlayerId;
       eligible: ObjectId[];
       required_count: number;
+      // CR 608.2c + CR 122.1: the printed keeper mark, already resolved (CR 608.2h).
+      keeper_counter?: [CounterType, number] | null;
       choose_filter?: TargetFilter;
       sacrifice_filter?: TargetFilter;
       chooser_scope?: "EachPlayerSelf" | "ControllerForAll";

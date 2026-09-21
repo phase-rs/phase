@@ -103,8 +103,8 @@
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, CardTypeSetSource, ContinuousModification, ControllerRef,
-    Duration, Effect, GuessSubject, ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    Duration, Effect, GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
     RepeatContinuation, ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition,
     TargetFilter, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
     ZoneChoiceCandidateSource, ZoneRef,
@@ -3324,15 +3324,28 @@ fn legacy_effect(x: &Effect) -> bool {
             target_player,
             ..
         } => legacy_target_filter(filter) || legacy_quantity_expr(count) || otf(target_player),
+        // `keeper_constraint`'s `ExactCount { count }` and
+        // `keeper_counter`'s `KeeperCounterMark::count` are both unread
+        // `QuantityExpr` positions closed together here — the pre-existing
+        // `keeper_constraint` omission is the same fail-open shape the new
+        // `keeper_counter` field would otherwise introduce.
         Effect::ChooseAndSacrificeRest {
             choose_filter,
             sacrifice_filter,
             total_power_cap,
+            keeper_constraint,
+            keeper_counter,
             ..
         } => {
             legacy_target_filter(choose_filter)
                 || legacy_target_filter(sacrifice_filter)
                 || oqe(total_power_cap)
+                || keeper_constraint.as_ref().is_some_and(
+                    |KeeperConstraint::ExactCount { count }| legacy_quantity_expr(count),
+                )
+                || keeper_counter
+                    .as_ref()
+                    .is_some_and(|mark| legacy_quantity_expr(&mark.count))
         }
         Effect::EachPlayerCopyChosen {
             choose_filter,

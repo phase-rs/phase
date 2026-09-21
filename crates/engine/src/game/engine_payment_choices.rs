@@ -1446,15 +1446,37 @@ pub(super) fn handle_unless_payment(
                 let source = pending_effect.source_id;
                 let ctx =
                     crate::game::filter::FilterContext::from_source_with_controller(source, player);
+                // The zone population is scanned ACROSS ALL PLAYERS — the
+                // parsed `filter` is the single authority for narrowing it
+                // (e.g. "your graveyard" stamps `tf.controller = Some(You)`;
+                // "an opponent's graveyard" stamps `FilterProp::Owned{Opponent}`;
+                // a bare/possessive-less zone phrase, like an unrestricted
+                // "a graveyard", carries no ownership restriction at all — see
+                // `parse_zone_suffix` in `oracle_target.rs`). Pre-restricting
+                // this scan to the payer's own zone (as a prior version did)
+                // silently narrowed an unrestricted source zone to the payer's
+                // own, even though the printed text named no such restriction.
                 let zone_objects: Vec<ObjectId> = match from_zone {
-                    Some(Zone::Graveyard) => state
-                        .players
+                    Some(zone) => state
+                        .objects
                         .iter()
-                        .find(|p| p.id == player)
-                        .map(|p| p.graveyard.iter().copied().collect())
-                        .unwrap_or_default(),
-                    _ => state.battlefield.iter().copied().collect(),
+                        .filter(|(_, obj)| obj.zone == *zone)
+                        .map(|(id, _)| *id)
+                        .collect(),
+                    None => state.battlefield.iter().copied().collect(),
                 };
+                // CR 118.12: eligibility is governed ENTIRELY by the parsed
+                // `filter` (which already encodes whatever ownership/control
+                // restriction the printed text actually specifies — "you
+                // control" via `tf.controller`, a possessive source zone via
+                // `FilterProp::Owned`, or nothing at all for an unrestricted
+                // noun like Drake Familiar's "an enchantment"). Do NOT impose
+                // an additional blanket `obj.controller == player` restriction
+                // here — that duplicated (and for zone-qualified costs,
+                // silently replaced) the filter's own scoping and made an
+                // unrestricted return-cost impossible to pay with an
+                // opponent-controlled object, even though the Oracle text
+                // named no such restriction.
                 let filter_ref = filter.as_ref();
                 let eligible: Vec<ObjectId> = zone_objects
                     .iter()
@@ -1463,8 +1485,7 @@ pub(super) fn handle_unless_payment(
                             .objects
                             .get(id)
                             .map(|obj| {
-                                obj.controller == player
-                                    && !obj.is_emblem
+                                !obj.is_emblem
                                     && filter_ref.is_none_or(|f| {
                                         crate::game::filter::matches_target_filter(
                                             state, **id, f, &ctx,

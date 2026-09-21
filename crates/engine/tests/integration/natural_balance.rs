@@ -678,3 +678,129 @@ fn natural_balance_two_scoped_seats_journal_one_may_source_under_two_independent
          this row's claim stops at the journal"
     );
 }
+
+/// The keeper population a `ChooseAndSacrificeRest` resolution fixes is
+/// published into the chain's tracked set, as the UNION across seats and on the
+/// RESUMED path (both seats answer a real
+/// `GameAction::ChooseKeptPermanents`), so a later clause in the same chain can
+/// name it — "Each of those creatures …", "put a counter on each of them".
+///
+/// A NEW two-seat fixture is required and cannot be borrowed from the rows
+/// above: every other test in this file seats exactly one player at six lands
+/// (P0, `(0..6).map(add_basic_land)`) and the remaining seats below Natural
+/// Balance's printed six-land threshold, i.e. deliberately on the SEARCH branch
+/// rather than the keeper branch. Regenerate that census with
+/// `grep -nE '\(0\.\.[0-9]+\)|for _ in 0\.\.[0-9]+|add_basic_land\(P[0-9]' crates/engine/tests/integration/natural_balance.rs`.
+///
+/// Natural Balance is the discriminating producer here precisely because it is
+/// NOT the recognizer this change adds: the publish lives in
+/// `choose_and_sacrifice_rest::sacrifice_unchosen`, the single funnel every
+/// producer of the effect reaches. Reverting that one line empties the
+/// published set for every producer at once.
+#[test]
+fn natural_balance_publishes_the_union_of_both_seats_keepers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let mut spell = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Natural Balance",
+        false,
+        NATURAL_BALANCE_ORACLE,
+    );
+    spell.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+        generic: 2,
+    });
+    let natural_balance = spell.id();
+
+    // BOTH seats sit at the printed six-land threshold, so both take the keeper
+    // branch and both must appear in the published union.
+    let p0_lands: Vec<ObjectId> = (0..6)
+        .map(|_| scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green))
+        .collect();
+    let p1_lands: Vec<ObjectId> = (0..6)
+        .map(|_| scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue))
+        .collect();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(natural_balance).resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::KeepExactPermanentsChoice {
+                player: P0,
+                required_count: 5,
+                ..
+            }
+        ),
+        "the first seat must be prompted for its five keepers: {:?}",
+        outcome.final_waiting_for()
+    );
+    drop(outcome);
+
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: p0_lands[..5].to_vec(),
+        })
+        .expect("the first seat keeps five lands");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::KeepExactPermanentsChoice {
+                player: P1,
+                required_count: 5,
+                ..
+            }
+        ),
+        "the SECOND seat must be prompted too — without it this row could not \
+         distinguish a union from a last-seat-wins publish: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: p1_lands[..5].to_vec(),
+        })
+        .expect("the second seat keeps five lands");
+
+    let set_id = runner
+        .state()
+        .chain_tracked_set_id
+        .expect("the keeper population must be published into the chain's tracked set");
+    let mut published = runner
+        .state()
+        .tracked_object_sets
+        .get(&set_id)
+        .cloned()
+        .expect("the published set must exist");
+    published.sort();
+    let mut expected: Vec<ObjectId> = p0_lands[..5]
+        .iter()
+        .chain(p1_lands[..5].iter())
+        .copied()
+        .collect();
+    expected.sort();
+    assert_eq!(
+        published, expected,
+        "the published set must be the union of BOTH seats' keepers, not one seat's"
+    );
+
+    // Reach-guard: the sacrifice really happened, so the published set is the
+    // post-resolution keeper population rather than an untouched board.
+    for sacrificed in [p0_lands[5], p1_lands[5]] {
+        assert_eq!(
+            runner.state().objects[&sacrificed].zone,
+            Zone::Graveyard,
+            "the sixth land of each seat is sacrificed"
+        );
+    }
+}

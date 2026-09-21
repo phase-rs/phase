@@ -13043,6 +13043,7 @@ fn choose_and_sacrifice_rest_replacement_preserves_terminal_sweep() {
             sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
             total_power_cap: None,
             keeper_constraint: None,
+            keeper_counter: None,
         },
         vec![],
         source,

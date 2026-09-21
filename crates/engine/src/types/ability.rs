@@ -570,6 +570,29 @@ pub enum KeeperConstraint {
     ExactCount { count: QuantityExpr },
 }
 
+/// CR 122.1 + CR 608.2c: the counter a keeper-and-dispose instruction places to
+/// NOMINATE its keeper ("Each player puts a vow counter on a creature they
+/// control and sacrifices the rest"). The mark is a step of the SAME printed
+/// instruction as the disposal, not a following one, so it rides on
+/// [`Effect::ChooseAndSacrificeRest`] rather than a chained `PutCounterAll`.
+///
+/// CR 608.2h: `count` is resolved once, when the effect is applied, and the
+/// resolved value is carried on `WaitingFor::KeepExactPermanentsChoice`.
+/// Promise of Loyalty is currently the only card in this class — `jq -r
+/// 'to_entries[] | select(.value.oracle_text != null) |
+/// select(.value.oracle_text | test("counter"; "i")) |
+/// select(.value.oracle_text | test("sacrifices? the rest|destroys? the
+/// rest"; "i")) | .key' client/public/card-data.json` returns it alone once
+/// Ajani, Nacatl Avenger's unrelated `+1/+1`-counter loyalty ability is
+/// excluded — and its printed count is `QuantityExpr::Fixed { value: 1 }`, so "resolve
+/// at `resolve`" and "resolve at placement" are observationally identical
+/// today. A dynamic count would have to be re-derived at placement instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeeperCounterMark {
+    pub counter_type: CounterType,
+    pub count: QuantityExpr,
+}
+
 /// Additional selection constraints for tracked-set card picks during resolution.
 ///
 /// Internally tagged (`{ "type": "DistinctCardTypes", "categories": [...] }`) to
@@ -18082,6 +18105,14 @@ pub enum Effect {
         /// total-power modes on the wire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keeper_constraint: Option<KeeperConstraint>,
+        /// CR 608.2c + CR 122.1: when `Some`, each keeper receives this mark BEFORE the
+        /// unchosen permanents are sacrificed — the printed order. CR 614.1: replacement
+        /// effects "apply continuously as events happen", so a would-be multiplier that
+        /// is itself about to be sacrificed must still be on the battlefield when the
+        /// mark is placed. Only valid together with `KeeperConstraint::ExactCount`;
+        /// `choose_and_sacrifice_rest::resolve` refuses any other mode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keeper_counter: Option<KeeperCounterMark>,
     },
     /// CR 101.4 + CR 707.2 + CR 122.1: Each player, in APNAP order, chooses an
     /// ordered `min..=max` selection of objects they control matching
@@ -21742,8 +21773,8 @@ impl Effect {
     /// (`ChangeZoneAll`/`PutAtLibraryPosition`/`Conjure`/`Counter`'s
     /// countered-spell destination), `UntilCondition::CumulativeThreshold`
     /// (`ExileFromTopUntil`), `GuessSubject::Proposition` (`OpponentGuess`),
-    /// `KeeperConstraint::ExactCount` (`ChooseAndSacrificeRest`), and each
-    /// `ConjureCard::count`.
+    /// `KeeperConstraint::ExactCount` and `KeeperCounterMark::count`
+    /// (`ChooseAndSacrificeRest`), and each `ConjureCard::count`.
     ///
     /// Deliberately NOT walked: quantities inside deferred definition
     /// payloads (`AbilityDefinition` — including `RollDie::results` branch
@@ -22098,6 +22129,7 @@ impl Effect {
             Effect::ChooseAndSacrificeRest {
                 total_power_cap,
                 keeper_constraint,
+                keeper_counter,
                 ..
             } => {
                 if let Some(q) = total_power_cap {
@@ -22109,6 +22141,10 @@ impl Effect {
                     match constraint {
                         KeeperConstraint::ExactCount { count } => f(count),
                     }
+                }
+                // CR 608.2c + CR 122.1: the printed keeper mark's count.
+                if let Some(mark) = keeper_counter {
+                    f(&mark.count);
                 }
             }
             Effect::GainEnergy { amount, .. } => {
@@ -33637,6 +33673,54 @@ mod tests {
         let mut visited = Vec::new();
         effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
         assert_eq!(visited, vec![count, rhs]);
+    }
+
+    /// V-QE: `ChooseAndSacrificeRest`'s TWO secondary quantity slots —
+    /// `keeper_constraint`'s `ExactCount { count }` and `keeper_counter`'s
+    /// `KeeperCounterMark::count` — are both visited, and in that order. No
+    /// pre-existing completeness test enumerated the CSR arm's slots (grepped
+    /// this module for a `for_each_quantity_expr` walk keyed to
+    /// `ChooseAndSacrificeRest`: none existed before this row), so this is a
+    /// direct row rather than an extension of one.
+    #[test]
+    fn keeper_counter_quantity_visitor_includes_the_mark() {
+        let keeper_count = QuantityExpr::Fixed { value: 1 };
+        let mark_count = QuantityExpr::Fixed { value: 2 };
+        let effect = Effect::ChooseAndSacrificeRest {
+            categories: Vec::new(),
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            choose_filter: TargetFilter::Typed(TypedFilter::creature()),
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
+            total_power_cap: None,
+            keeper_constraint: Some(KeeperConstraint::ExactCount {
+                count: keeper_count.clone(),
+            }),
+            keeper_counter: Some(KeeperCounterMark {
+                counter_type: crate::types::counter::CounterType::Generic("vow".to_string()),
+                count: mark_count.clone(),
+            }),
+        };
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![keeper_count, mark_count]);
+
+        // A `keeper_counter: None` construction yields only the `ExactCount` expr.
+        let Effect::ChooseAndSacrificeRest {
+            keeper_counter: mark_slot,
+            ..
+        } = &effect
+        else {
+            unreachable!()
+        };
+        assert!(mark_slot.is_some());
+        let mut none_effect = effect.clone();
+        let Effect::ChooseAndSacrificeRest { keeper_counter, .. } = &mut none_effect else {
+            unreachable!()
+        };
+        *keeper_counter = None;
+        let mut visited_none = Vec::new();
+        none_effect.for_each_quantity_expr(&mut |quantity| visited_none.push(quantity.clone()));
+        assert_eq!(visited_none, vec![QuantityExpr::Fixed { value: 1 }]);
     }
 
     /// CR 109.1: `with_own_cast_exclusion` injects the `Another` marker and

@@ -263,6 +263,55 @@ pub fn add_counter_with_replacement(
     }
 }
 
+/// CR 122.1 + CR 614.1 + CR 616.1: place `count` `counter_type` counters on each
+/// of `recipients`, then run `post_action`.
+///
+/// Returns `true` when the whole batch landed inline AND the post-action ran to
+/// completion. Returns `false` when either paused: a replacement consult parks
+/// the remaining additions and `post_action` on the counter-addition queue and
+/// `drain_pending_counter_additions` runs the tail once the batch settles; or
+/// the post-action itself parked its own continuation, in which case NOTHING is
+/// re-parked here — the post-action owns its resumption (the same contract
+/// `apply_object_counter_addition`'s `false` carries).
+///
+/// This is the generic "counter batch, then typed work" primitive; it exists
+/// so callers outside this module compose it instead of reaching for the
+/// private `object_counter_addition` / `apply_object_counter_addition` pair.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_object_counters_then(
+    state: &mut GameState,
+    actor: PlayerId,
+    recipients: &[ObjectId],
+    counter_type: &CounterType,
+    count: u32,
+    kind: EffectKind,
+    source_id: ObjectId,
+    post_action: PendingCounterPostAction,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    // CR 608.2c: the completion carries the SAME post-action so a pause mid-batch
+    // resumes it once every addition has landed. `Suppress`: the sacrifice this
+    // post-action runs already pushes its own terminal `EffectResolved` (see the
+    // dispatch arm below and `V-F1h-E`); emitting a second one here would be an
+    // observable duplicate on the paused path.
+    let completion = PendingEffectResolved::with_post_actions_without_effect(
+        kind,
+        source_id,
+        vec![post_action.clone()],
+    );
+    let additions: Vec<PendingCounterAddition> = recipients
+        .iter()
+        .map(|&object_id| object_counter_addition(actor, object_id, counter_type.clone(), count))
+        .collect();
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        if !apply_object_counter_addition(state, addition, events) {
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return false;
+        }
+    }
+    apply_pending_counter_post_action(state, post_action, events)
+}
+
 pub(crate) fn stash_pending_counter_additions(
     state: &mut GameState,
     remaining: Vec<PendingCounterAddition>,
@@ -583,6 +632,23 @@ fn apply_pending_counter_post_action(
         PendingCounterPostAction::ContinueProliferateActions { pending } => {
             super::proliferate::continue_proliferate_actions(state, pending, events)
         }
+        // CR 701.21a: the keeper marks have settled; the disposal half of the same
+        // printed instruction is now owed.
+        PendingCounterPostAction::ContinuePlayerScopeSacrifice {
+            kept,
+            scoped_players,
+            sacrifice_filter,
+            source_id,
+            source_controller,
+        } => super::choose_and_sacrifice_rest::continue_player_scope_sacrifice(
+            state,
+            &kept,
+            &scoped_players,
+            &sacrifice_filter,
+            source_id,
+            source_controller,
+            events,
+        ),
         PendingCounterPostAction::AddSubtype { object_id, subtype } => {
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 if !obj
