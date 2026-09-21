@@ -1508,11 +1508,11 @@ scryfall_oracle_id = "11111111-1111-1111-1111-111111111111"
                 .any(|p| p.pt_provenance.is_source_defined_or_dynamic()),
             "no `[token.pt_provenance.SourceDefinedOrDynamic]` table in the corpus"
         );
-        assert!(
-            !parse_overlay(include_str!("../../data/known-tokens.overlay.toml"))
-                .expect("the committed overlay passes the same check")
-                .is_empty()
-        );
+        // The overlay may hold no rows (its healthy steady state between preview
+        // seasons), so only its parse is asserted here; the probe-row tests above
+        // keep the unknown-key check itself under test.
+        parse_overlay(include_str!("../../data/known-tokens.overlay.toml"))
+            .expect("the committed overlay passes the same check");
     }
 
     #[test]
@@ -1590,7 +1590,11 @@ scryfall_oracle_id = "11111111-1111-1111-1111-111111111111"
         // refusal, a supersession or an advisory all mean the file is stale.
         let (_, reports) = merge_overlay(generated, overlay.clone())
             .expect("every committed overlay row must satisfy the boundary guard");
-        assert!(!reports.is_empty(), "the overlay holds no rows to check");
+        // An empty overlay is this hatch's healthy steady state, not a lost
+        // row: every row is deleted once MTGJSON ships the token it stood in
+        // for, so the file is empty between preview seasons. The loop then has
+        // nothing to check, and the live control below is what keeps
+        // `merge_overlay` under test in that state.
         for report in &reports {
             assert_eq!(
                 report.outcome,
@@ -1603,10 +1607,19 @@ scryfall_oracle_id = "11111111-1111-1111-1111-111111111111"
             );
         }
 
-        // Live control: the same call, with one row's set code mis-keyed the way
-        // a Scryfall token-set code would be, must find the collision the loop
-        // above claims is absent.
-        let mut mis_keyed = overlay[0].clone();
+        // Live control: the same call, with one row's set code mis-keyed the
+        // way a Scryfall token-set code would be, must find a collision the
+        // loop above reports on none of its rows. Built from a catalog preset
+        // rather than a committed overlay row, so the control still runs when
+        // the overlay is empty. Safe for any preset: catalog set codes are
+        // parent codes, never `T`-prefixed token-set codes, so the mis-key
+        // cannot satisfy `names_same_token` (set-code equality) and the row
+        // reaches the advisory branch instead of being superseded.
+        let probe_source = known_token_presets()
+            .iter()
+            .find(|preset| row_source_oracle_ids(preset).next().is_some())
+            .expect("the catalog carries a preset with a source-card oracle id");
+        let mut mis_keyed = probe_source.clone();
         mis_keyed.id = format!("{}-probe", mis_keyed.id);
         mis_keyed.set_code = format!("T{}", mis_keyed.set_code);
         let (_, reports) = merge_overlay(known_token_presets().to_vec(), vec![mis_keyed])
@@ -1626,13 +1639,13 @@ scryfall_oracle_id = "11111111-1111-1111-1111-111111111111"
         let overlay = parse_overlay(include_str!("../../data/known-tokens.overlay.toml"))
             .expect("known-tokens.overlay.toml parses as a catalog file");
 
-        // Live-instrument control: a membership loop over an empty list confirms
-        // nothing, so an emptied overlay must red here rather than pass vacuously.
-        assert!(
-            !overlay.is_empty(),
-            "known-tokens.overlay.toml holds no rows: either a row was lost, or the \
-             file has outlived its purpose and it plus this test should be retired"
-        );
+        // A membership loop over an empty list confirms nothing — but an empty
+        // overlay is this hatch's healthy steady state rather than a lost row
+        // (see the sibling test), so there is simply nothing to assert here
+        // then. The sibling's live control keeps the merge path under test.
+        if overlay.is_empty() {
+            return;
+        }
 
         let mut seen = std::collections::HashSet::new();
         for row in &overlay {
