@@ -16,6 +16,7 @@ import { del as idbDel, get as idbGet, set as idbSet } from "idb-keyval";
 import {
   loadGame,
   loadP2PHostSession,
+  migratePersistedGameState,
   saveAuthoritativeGame,
   saveGame,
   saveResumableGameStrict,
@@ -56,6 +57,40 @@ describe("game persistence", () => {
     const restored = await loadGame("trusted-local");
     expect(restored).toEqual(envelope);
     expect(persistedGameStateView(restored!)).toEqual(state);
+  });
+
+  it("migrates a legacy bare deck size before resume deserialization", async () => {
+    const state = fixtureState();
+    state.format_config = {
+      ...state.format_config,
+      format: "Commander",
+      command_zone: true,
+      deck_size: 100 as never,
+    };
+    vi.mocked(idbGet).mockResolvedValueOnce(state);
+
+    await expect(loadGame("legacy-deck-size")).resolves.toMatchObject({
+      format_config: { deck_size: { type: "Exactly", data: 100 } },
+    });
+  });
+
+  it("migrates the state inside a trusted envelope without dropping private fields", () => {
+    const state = fixtureState();
+    state.format_config = {
+      ...state.format_config,
+      format: "Standard",
+      command_zone: false,
+      deck_size: 60 as never,
+    };
+    const envelope = {
+      state,
+      precast_shortcut_runtime: { opaque: true },
+    } as unknown as TrustedGameStateEnvelope;
+
+    expect(migratePersistedGameState(envelope)).toMatchObject({
+      state: { format_config: { deck_size: { type: "Minimum", data: 60 } } },
+      precast_shortcut_runtime: { opaque: true },
+    });
   });
 
   it("does not clear resumable storage for a terminal state before GameOver delivery", async () => {

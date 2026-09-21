@@ -8,6 +8,7 @@ import type {
   PersistedGameState,
   PlayerId,
 } from "../adapter/types";
+import { formatMetadata } from "../data/formatRegistry";
 import type { SeatState } from "../multiplayer/seatTypes";
 import type { FullSessionKey } from "./multiplayerSession";
 import type { P2PSessionKey } from "./p2pSession";
@@ -130,6 +131,45 @@ export interface NativeP2PServerSession {
   playerTokens: Record<number, string>;
 }
 
+/**
+ * Convert the pre-Commander-Draft save spelling of FormatConfig.deck_size.
+ *
+ * Protocol v42 changed this field from a bare number to DeckSizeRule. Network
+ * peers are version-gated, but IndexedDB saves survive upgrades and have no
+ * protocol handshake to reject them. A legacy local save therefore reached
+ * Rust deserialization with e.g. `deck_size: 100` and was discarded by the
+ * resume fallback. The format registry supplies the discriminant that the
+ * old wire shape could not carry; the saved magnitude remains authoritative.
+ */
+function normalizeLegacyDeckSizeRule(
+  formatConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Number.isInteger(formatConfig.deck_size)) return formatConfig;
+
+  const magnitude = formatConfig.deck_size as number;
+  const metadata = formatMetadata(formatConfig.format as FormatConfig["format"]);
+  const variant = metadata?.default_config.deck_size.type
+    ?? (formatConfig.command_zone === true ? "Exactly" : "Minimum");
+  return {
+    ...formatConfig,
+    deck_size: { type: variant, data: magnitude },
+  };
+}
+
+/** Normalize only the persisted state boundary; never mutate the IDB object. */
+export function migratePersistedGameState(state: PersistedGameState): PersistedGameState {
+  const envelope = "state" in state;
+  const gameState = envelope ? state.state : state;
+  const formatConfig = gameState.format_config;
+  if (!formatConfig || typeof formatConfig !== "object") return state;
+
+  const normalized = normalizeLegacyDeckSizeRule(formatConfig as unknown as Record<string, unknown>);
+  if (normalized === formatConfig) return state;
+
+  const nextState = { ...gameState, format_config: normalized as unknown as FormatConfig };
+  return envelope ? { ...state, state: nextState } : nextState;
+}
+
 const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";
 
 /**
@@ -211,7 +251,7 @@ export async function saveAuthoritativeGame(
 export async function loadGame(gameId: string): Promise<PersistedGameState | null> {
   try {
     const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
-    return state ?? null;
+    return state ? migratePersistedGameState(state) : null;
   } catch {
     return null;
   }
