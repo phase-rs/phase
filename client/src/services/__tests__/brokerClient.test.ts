@@ -7,6 +7,7 @@ import {
   resolveGuestOver,
   subscribeLobbyOver,
 } from "../brokerClient";
+import type { RegisterHostRequest } from "../brokerClient";
 import type { LobbyGame } from "../../adapter/types";
 import { PROTOCOL_VERSION, type ServerInfo } from "../../adapter/ws-adapter";
 
@@ -334,6 +335,58 @@ describe("subscribeLobbyOver", () => {
     expect(ws.send).toHaveBeenCalledWith(
       expect.stringContaining('"type":"UnsubscribeLobby"'),
     );
+  });
+});
+
+describe("broker host registration privacy", () => {
+  it("keeps deck and AI metadata out of LobbyOnly registration", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws));
+    const request: RegisterHostRequest = {
+      hostPeerId: "peer-host",
+      displayName: "Host",
+      public: true,
+      password: null,
+      timerSeconds: null,
+      playerCount: 2,
+      matchConfig: { match_type: "Bo1" },
+      formatConfig: null,
+      roomName: null,
+      draftMetadata: null,
+    };
+
+    const registration = client.registerHost(request);
+    const frame = JSON.parse(ws.send.mock.calls[0][0] as string) as {
+      type: string;
+      data: {
+        host_peer_id: string;
+        deck: Record<string, unknown>;
+        ai_seats: unknown[];
+      };
+    };
+
+    expect(frame.type).toBe("CreateGameWithSettings");
+    expect(frame.data.host_peer_id).toBe("peer-host");
+    expect(frame.data.deck).toEqual({
+      main_deck: [],
+      sideboard: [],
+      commander: [],
+      planar_deck: [],
+      scheme_deck: [],
+    });
+    expect(frame.data.ai_seats).toEqual([]);
+    expect(JSON.stringify(frame)).not.toContain("private-card");
+
+    ws.deliver(
+      JSON.stringify({
+        type: "GameCreated",
+        data: { game_code: "ABC123", player_token: "token" },
+      }),
+    );
+    await expect(registration).resolves.toEqual({
+      gameCode: "ABC123",
+      playerToken: "token",
+    });
   });
 });
 
