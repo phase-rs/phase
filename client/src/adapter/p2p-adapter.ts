@@ -4714,6 +4714,16 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.authenticatedSession = null;
     this.matchConcedeSent = false;
     this.session = null;
+    if (!this.playerToken && !this.gameSetupSettled) {
+      // A fresh guest has no token with which a new connection could identify
+      // itself. Retrying the transport would reopen an unauthenticated channel
+      // that sends nothing, leaving initializeGame() pending forever.
+      const reason = "Host disconnected before game setup completed";
+      this.terminate();
+      this.rejectGameSetup(reason);
+      this.emit({ type: "reconnectFailed", reason });
+      return;
+    }
     // Suppress auto-reconnect in terminal states (kicked, explicitly rejected,
     // or adapter disposed). Without this, a kicked guest would spin the
     // backoff schedule (~30s total) hammering the host with a blacklisted

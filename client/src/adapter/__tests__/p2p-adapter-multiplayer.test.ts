@@ -4758,6 +4758,25 @@ describe("P2P undeliverable frames", () => {
     );
   });
 
+  it("rejects a tokenless guest's setup when the initial host channel closes", async () => {
+    const guest = makeGuest();
+    await guest.adapter.initialize();
+    const rejection = expect(guest.adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: "Host disconnected before game setup completed",
+    });
+
+    guest.conn.simulateClose();
+
+    await rejection;
+    expect(guest.emitted).toHaveBeenCalledWith({
+      type: "reconnectFailed",
+      reason: "Host disconnected before game setup completed",
+    });
+    // A fresh guest has no token, so a redial cannot identify it to the host.
+    expect(guest.connect).not.toHaveBeenCalled();
+  });
+
   it("spends one retry per reconnect episode, and a decoded handshake restores the budget", async () => {
     const { adapter, conn, dials, emitted } = makeGuest("seat-token");
     await adapter.initialize();
