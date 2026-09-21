@@ -401,6 +401,38 @@ Either way, the durable receipt — not the in-memory `active_matches` map — i
 crash-surviving source of truth for the generation fence (§4.3), and session
 recovery must not retire a hosted game before its receipt is reconciled.
 
+### 4.5. Deck submission, format validation, and a readiness/lock lifecycle (raised in review)
+
+A pairing cannot become a server-authoritative table from tokens + `match_type`
+alone. `SessionManager::create_game_n_players` requires a `PlayerDeckPayload` and a
+`FormatConfig` it validates (`session.rs:1688-1718`), and each join supplies another
+deck payload (`:1888-1895`) — but `TournamentPlayer` carries only
+identity/token/display/drop, **no deck** (`tournament.rs:890-902`). The draft host
+already models the missing piece: it **refuses** to spawn a pairing without submitted
+decks and supplies resolved decks + a format to session creation
+(`draft_session.rs:680-746`). Hosted tournaments need the same, so **R10** requires:
+
+- **Authenticated deck submission** — each seated player submits a deck bound to
+  their tournament `player_token`, before their pairing can be hosted. The
+  tournament's `GameFormat` (already metadata, [[tournament-roadmap-track-b]]) drives
+  a `FormatConfig`; submission is **validated** against it at submit time, not only at
+  session create.
+- **A per-pairing readiness gate** — a pairing is hostable only when all seats have a
+  valid submitted deck; a **submission timeout** feeds the no-show path (§6, forfeit/
+  `drop_player`) rather than hanging.
+- **Snapshot + lock/release ownership** — the decks used to spawn are **snapshotted**
+  into the durable receipt (§4.4) so a rehost/recovery (R3/R7) reproduces the *same*
+  table, and the pairing's deck set is **locked** for the duration of the hosted game
+  (no mid-match resubmission), released on terminalization.
+- **Durable authority** — this lifecycle (submission, validation, readiness, lock,
+  snapshot) is owned by the same durable tournament state that R7 rehydrates; decks
+  live with the receipt, not only in the live session.
+
+This is additive to the core (a deck field/table keyed by `(pairing, player)`; still
+no `GameState`) plus reuse of the existing `PlayerDeckPayload`/`FormatConfig`
+validation. It is a genuine new surface the vertical slice must include — a hosted
+match is not reproducible or server-authoritative without it.
+
 ---
 
 ## 5. Protocol / versioning impact (B)
@@ -458,9 +490,14 @@ The only cited trusted-forfeit primitive, `apply_trusted_match_forfeit`
 (`match_flow.rs:276-285`), **rejects any session that is not Bo3 and not exactly
 two seats** ("Match forfeits require a best-of-three match" / "require exactly two
 players"). So it covers **2-seat Bo3 only** — not Bo1 head-to-head (single-elim,
-lobby v8) and not pods (Bo1, 3–4 seats). Normal game-over already works for every
-class (a game that reaches `WaitingFor::GameOver` reports fine); the gap is
-strictly the **trusted mid-game disconnect/abandon** terminalization for Bo1/pod.
+lobby v8) and not pods (Bo1, 3–4 seats). Normal game-over reports fine for every
+class **with one exception**: a game can reach `WaitingFor::GameOver { winner: None }`
+(a real in-game draw, CR 104.4a, `sba.rs:137-163`) which a non-Bo3 match completes
+without a winner (`match_flow.rs:210-225`) — reportable as a `Draw` everywhere
+*except single-elimination*, which rejects it (§6.3). So two gaps, not one: the
+**trusted mid-game disconnect** for Bo1/pod (this section, R6), and the
+**single-elim draw** (§6.3, R9). Pods themselves report a normal winner or a `Draw`
+fine — their only gap is disconnect (R6).
 
 This is a genuine fork the design must resolve (§9.6), not hand-wave:
 
@@ -523,55 +560,55 @@ can report or delete a reconnected session.
 This is R8 (§7). It composes with R6 (per-class trusted-terminal the hook selects),
 R7 (the receipt it writes through), and R9 (§6.3, the simultaneous-expiry outcome).
 
-### 6.3. Simultaneous full expiry needs a bracket-safe representable outcome (raised in review)
+### 6.3. Draws are representable everywhere except single-elimination (corrected in review)
 
-When **every** live seat's grace timer lapses together (both players abandoned),
-there is no obviously-correct winner — and, crucially, no *representable* one in
-every bracket. `PodOutcome` is only `Decisive { winner, game_wins }` or `Draw`
-(`tournament.rs:771-782`). A `Draw` is **rejected in single-elimination** (nobody
-advances, `tournament.rs:2486-2499`), and dropping every seated player deliberately
-**leaves the pairing pending** (`tournament.rs:2515-2517`). So the earlier
-"double-loss / no-result-drop per policy" phrasing could **silently strand** a
-single-elim or pod pairing. R9 pins this down per bracket:
+A drawn terminal happens two ways: a **real in-game draw** — the engine reaches
+`WaitingFor::GameOver { winner: None }` (CR 104.4a simultaneous loss;
+`sba.rs:137-163`) and a non-Bo3 match completes without converting it to a winner
+(`match_flow.rs:210-225`) — and a **simultaneous full expiry** (every live seat's
+grace lapses at once). Both yield "no winner," so both need a representable outcome.
 
-- **Swiss (and any format where a draw scores/advances):** simultaneous full expiry
-  ⇒ `PodOutcome::Draw` — representable, legal, with its receipt (§4.4) and
-  `TournamentUpdate` outbound (R1). Both no-shows score 0-0, exactly as a played
-  draw would.
-- **Single-elimination and pods (where `Draw`/drop-all is not bracket-safe):**
-  hosted mode does **not** invent an auto-winner (a deterministic rule like "higher
-  seed advances" is rejected — it credits an abandoning player). But — **corrected
-  from the prior draft** — there is **no organizer-authored resolution path today**
-  to fall back on: `TournamentAction` is only `StartRound`/`EndTournament`/`Drop`
-  (`tournament.rs:705-712`), the sole outcome-writer `report_result` requires a
-  **seated player** (`broker.rs:1465-1487`), and R1's retained manual mode is
-  `SeatedPlayer`/non-hosted only. So an all-expired single-elim/pod pairing has **no
-  legal way to resolve or advance** — a hard scope fork, not a "surface it to the
-  organizer" hand-wave:
-  - **(a) Build an organizer-resolution subsystem** — atomically-persisted
-    organizer-resolution state that clears/changes the hosted authority, plus an
-    **organizer-authorized** resolution action, with its view, `TournamentUpdate`
-    outbound, receipt (§4.4), and recovery/reconnect/race tests. A real new surface
-    (new authority + action + state), not a reuse.
-  - **(b) Firm v1 exclusion** — hosted v1 supports only the configuration whose
-    *every* terminal is representable **and** covered by an existing trusted
-    primitive. That is **Swiss + head-to-head + Bo3**, not merely "Swiss H2H":
-    an organizer may select `MatchType::Bo1` for any H2H event
-    (`tournament.rs:902-909` — "An organizer may override head-to-head to
-    `MatchType::Bo1`"; admitted at `:2118-2134`), and a **Bo1** H2H disconnect hits
-    the same wall — `apply_trusted_match_forfeit` rejects every non-Bo3 session
-    (`match_flow.rs:278-285`). So the admission gate must require `bracket == Swiss
-    && arity == HEAD_TO_HEAD && match_type == Bo3`, excluding single-elim, pods, **and
-    Bo1 H2H**. Only then does (b) actually close R6 (Bo3-only ⇒ the existing forfeit
-    primitive applies) and R9 (simultaneous expiry ⇒ a legal Swiss `Draw`).
+**Correction (raised in review): pods are Swiss and take a `Draw` fine — do not
+group them with single-elimination.** `validate_match_result` accepts
+`PodOutcome::Draw` for every arity (`tournament.rs:1547-1549`), and a `Draw` is
+rejected **only** for `BracketShape::SingleElimination` (`tournament.rs:2492-2499`
+— the comment explicitly keeps Swiss and pod draws). Single-elimination is itself
+gated to head-to-head (`tournament.rs:742-748` — pod single-elim is "explicitly
+excluded"). So:
 
-  This is the §9.7 decision; recommendation **(b)** for v1 (smallest honest scope),
-  (a) as a later expansion. Until decided, the doc does **not** claim a resolution
-  path that does not exist.
+- **Swiss — head-to-head *and* pods:** a no-winner terminal (in-game draw or
+  simultaneous expiry) maps `winner: None` ⇒ **`PodOutcome::Draw`**, representable
+  and legal, through the receipt (§4.4) and `TournamentUpdate` outbound (R1). A
+  drawn Swiss pod scores as MSTR's all-seated-players-draw. **Nothing special is
+  needed here** — pods are fully hostable for the draw case.
+- **Single-elimination only (head-to-head):** a `Draw` cannot advance the bracket
+  (`:2494-2499`), and there is **no organizer-authored resolution path today** —
+  `TournamentAction` is only `StartRound`/`EndTournament`/`Drop`
+  (`tournament.rs:705-712`), the sole outcome-writer `report_result` is
+  seated-player-only (`broker.rs:1465-1487`). So a drawn single-elim pairing (from a
+  real in-game draw **or** a double-expiry) has no legal way to resolve. This is a
+  **single-elimination-only** fork (R9):
+  - **(a) Build a single-elim draw-adjudication path** — either an organizer-authored
+    resolution action (persisted state + authorized action + view/outbound/receipt +
+    recovery/reconnect/race tests) or an automatic **replay game** (re-host a
+    tiebreaker until a winner emerges). Real new surface either way.
+  - **(b) Firm exclusion of the un-adjudicable case** — hosted single-elim requires a
+    winner; a drawn single-elim game/expiry is scoped out of v1 (documented as
+    unsupported) or single-elim hosting is deferred entirely. Note the **Bo1 vs Bo3**
+    axis is orthogonal to this: single-elim admits `MatchType::Bo1`
+    (`tournament.rs:902-909`, admitted `:2118-2134`), whose disconnect also lacks a
+    trusted primitive (`apply_trusted_match_forfeit` is Bo3/2-seat, `match_flow.rs:278-285`)
+    — that gap is R6, separate from this draw gap.
 
-For the representable case (Swiss `Draw`) the transition is serialized through the
-same atomic claim (R8) and receipt/outbound (R7/R1) and covered by tests — never an
-implicit `None` or a stranded pairing. The un-representable case is gated by §9.7.
+  Recommendation for the recorded **full-coverage** scope: build (a) as a **replay
+  game** for single-elim draws (cleanest, no new report authority; it reuses hosting
+  to produce a winner), with organizer override as the fallback. §9.7 records the
+  choice. Until then, the doc does **not** claim a resolution path that does not
+  exist.
+
+Every Swiss terminal (H2H and pod) is serialized through the atomic claim (R8) and
+receipt/outbound (R7/R1) and covered by tests — never an implicit `None`. Only
+single-elimination's draw case remains open, gated by §9.7.
 
 ---
 
@@ -617,16 +654,22 @@ checklist the implementation PR must satisfy:
   claim immediately before report+removal, and route through the receipt-backed
   handoff **before** session removal — with a race test. Replaces today's
   `terminal_artifact(…, None, …)` + remove (§6.2).
-- **R9 — Bracket-safe simultaneous-expiry outcome** — when all live seats expire
-  together, use a *representable* transition: `PodOutcome::Draw` where a draw
-  scores/advances (Swiss). Single-elim/pods have **no legal resolution path today**
-  (no organizer report authority; `report_result` is seated-player-only), so v1 must
-  **(a)** build an organizer-authored resolution subsystem (persisted state +
-  authorized action + view/outbound/receipt/recovery/reconnect tests) or **(b)** firm
-  the exclusion (hosted v1 = **Swiss + H2H + Bo3** only — Bo1 H2H is organizer-
-  selectable and equally unsupported, so the gate must check `match_type == Bo3`, not
-  just bracket+arity — closing R6+R9 together). Never an implicit `None` or a stranded
-  pairing (§6.3; decision §9.7).
+- **R9 — Single-elimination draw adjudication** — a no-winner terminal (in-game draw
+  `GameOver{winner:None}` *or* simultaneous expiry) maps to `PodOutcome::Draw`, which
+  is legal everywhere **except single-elimination** (`tournament.rs:2492-2499`). Swiss
+  H2H **and pods** just report the `Draw` — no special handling. Only single-elim
+  (H2H-only) can't advance a draw and has no organizer report path today; v1 must
+  **(a)** adjudicate it (replay game — recommended — or an organizer-authored action)
+  or **(b)** scope the drawn single-elim case out. Corrected: pods are Swiss and are
+  **not** part of this gap (§6.3; decision §9.7).
+- **R10 — Deck submission, format validation, readiness/lock lifecycle** — a pairing
+  cannot spawn a server-authoritative table from tokens + `match_type` alone
+  (`create_game_n_players` needs `PlayerDeckPayload` + `FormatConfig`,
+  `session.rs:1688-1718`; `TournamentPlayer` has no deck). Require authenticated
+  per-`player_token` deck submission validated against the tournament format, a
+  readiness gate with submission timeout, and deck snapshot/lock into the durable
+  receipt (R7) so rehost/recovery reproduce the same table — mirroring the draft host
+  (`draft_session.rs:680-746`) (§4.5).
 
 Genuinely open **sub-decisions** (do not block recording the design, resolved in
 the implementation PR):
@@ -644,7 +687,7 @@ the implementation PR):
 
 ---
 
-## 8. Failure matrix (how each ending is reported, under R1–R9)
+## 8. Failure matrix (how each ending is reported, under R1–R10)
 
 | Ending | Detector | Reports via | Fenced by |
 |---|---|---|---|
@@ -653,7 +696,8 @@ the implementation PR):
 | Disconnect — 2-seat Bo3 | `apply_trusted_match_forfeit` → `Completed` | same idempotent path (R2) | generation (R3) |
 | Disconnect — Bo1 / pod | generic trusted-terminal (§6.1, **new**) or scoped out (§9.6) | same idempotent path (R2) | generation (R3) |
 | Reconnect-grace expiry (single) | grace-expiry hook, atomic claim vs. reconnect (§6.2, R8) | same idempotent path (R2) | epoch claim (R8) + generation (R3) |
-| Simultaneous full expiry | Swiss ⇒ `Draw`; SE/pod ⇒ **no legal path today** → build (a) or exclude (b), §9.7 | receipt + outbound (R1/R7) | epoch claim (R8) |
+| In-game draw (`winner: None`) | `sba.rs:137-163` / `match_flow.rs:210-225` | Swiss H2H+pod ⇒ `Draw`; single-elim ⇒ adjudicate (§6.3, R9) | generation (R3) |
+| Simultaneous full expiry | Swiss H2H+pod ⇒ `Draw`; single-elim ⇒ adjudicate/exclude (§6.3, R9) | receipt + outbound (R1/R7) | epoch claim (R8) |
 | Restart recovery | `finish_restored_full_startup` (`main.rs:249`) after tournament rehydration (R7) | durable receipt → same path (R2) | generation, durably (R3+R7) |
 | No-show / never-connects | start-timeout (new, §9.2) | forfeit / `drop_player` | n/a (no game) |
 | Bye / pre-resolved | `generate_pairings` | never hosted | n/a |
@@ -682,9 +726,10 @@ the implementation PR):
    `apply_trusted_match_forfeit` does not apply. Add a **generic trusted-terminal**
    primitive in `match_flow` (recommended — keeps single-elim/pod hosting), or
    **restrict hosted v1 to 2-seat Bo3** and defer the rest?
-7. **Simultaneous-expiry scope (§6.3, R9).** A double no-show in single-elim/pods
-   has no legal resolution path today (no organizer report authority). Should hosted
-   v1 **(a)** build an organizer-authored resolution subsystem, or **(b)** firm the
-   exclusion — **hosted v1 = Swiss + H2H + Bo3** (recommended; must gate on
-   `match_type == Bo3`, since Bo1 H2H is organizer-selectable and equally unsupported,
-   §6.3)? Note (b), scoped to Bo3, also closes §9.6 (R6).
+7. **Single-elimination draw adjudication (§6.3, R9).** Corrected: pods are Swiss
+   and report a `Draw` fine — only **single-elimination** can't advance a draw (from
+   a real in-game draw or a double-expiry). For full-coverage single-elim hosting,
+   should a drawn single-elim pairing be resolved by **(a) an automatic replay game**
+   (recommended — reuses hosting, no new report authority), **(a′) an organizer-
+   authored action**, or **(b) scoped out** of v1? (Independent of §9.6, which is the
+   Bo1/pod *disconnect* primitive.)
