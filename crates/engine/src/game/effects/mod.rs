@@ -8,6 +8,7 @@ use crate::game::conditions::{
 };
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
+use crate::parser::oracle_effect::publishes_chain_created_referent;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally, CardPlayMode,
     CardTypeSetSource, CastFromZoneDriver, ChosenAttribute, CommanderOwnership,
@@ -3803,7 +3804,8 @@ pub(super) fn resolve_optional_effect_decision(
 /// happen. The one decline authority: `resolve_optional_effect_decision`
 /// resolves the returned branch and the search-ordering mirror
 /// (`search_library::optional_decline_search_ordering_outcomes`) walks the same
-/// branch, so the structural analysis reads exactly what resolution runs.
+/// branch (modelling the reduced gate's condition both ways, a superset of
+/// what resolution runs).
 ///
 /// Invariant: a borrowed branch is a printed decline branch (an `else`, an "if
 /// you don't" clause, or an unconditional next instruction), unchanged. An
@@ -4013,7 +4015,9 @@ fn declined_gate_surviving_instructions(gate: &ResolvedAbility) -> Vec<&Resolved
     // moves the object or declares a target of its own.
     let mut parent_target_is_declared = gate_declares_target_it_leaves_in_place(gate);
     // Each kept node with its instruction number and printed position; the
-    // kept nodes that create objects; and those skipped with a later node.
+    // kept nodes whose object a later `LastCreated` names (the parser's
+    // publisher authority, `publishes_chain_created_referent`); and those
+    // skipped with a later node.
     let mut kept = Vec::new();
     let mut producers = Vec::new();
     let mut skipped_producers = Vec::new();
@@ -4046,7 +4050,7 @@ fn declined_gate_surviving_instructions(gate: &ResolvedAbility) -> Vec<&Resolved
             dropped || !instruction_outlives_declined_gate(node, &audit, parent_target_is_declared);
         if !dropped {
             kept.push((instruction, position, node));
-            if audit.creates_objects {
+            if publishes_chain_created_referent(&node.effect) {
                 producers.push((instruction, position));
             }
         } else {
@@ -4315,10 +4319,6 @@ struct LaterInstructionAudit<'a> {
     /// which the caller reads as "may depend on the gated action".
     referents: Option<Vec<&'a TargetFilter>>,
     parent_target: ParentTargetHandling<'a>,
-    /// The instruction creates objects that a later "it" or "that token"
-    /// (`LastCreated`) names. Read only for a kept node, whose shape is
-    /// audited.
-    creates_objects: bool,
 }
 
 /// CR 608.2c: the one classification of every `Effect` variant the declined-gate
@@ -4332,7 +4332,7 @@ struct LaterInstructionAudit<'a> {
 /// behind it. Every quantity must be a fixed number, since a dynamic one can
 /// count what the gated action did ("that many", "this way").
 fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
-    let (referents, parent_target, creates_objects) = match effect {
+    let (referents, parent_target) = match effect {
         Effect::GenericEffect {
             static_abilities,
             duration,
@@ -4354,12 +4354,11 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             ParentTargetHandling::InstallsStatics {
                 target: target.as_ref(),
             },
-            false,
         ),
         Effect::DestroyAll {
             target,
             cant_regenerate: _,
-        } => (Some(vec![target]), ParentTargetHandling::NotAudited, false),
+        } => (Some(vec![target]), ParentTargetHandling::NotAudited),
         Effect::Token {
             name: _,
             power,
@@ -4389,7 +4388,6 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
                 None => ParentTargetHandling::NamesNoObject,
                 Some(_) => ParentTargetHandling::NotAudited,
             },
-            true,
         ),
         Effect::AdditionalPhase {
             target,
@@ -4405,7 +4403,6 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
                     .collect(),
             ),
             ParentTargetHandling::NotAudited,
-            false,
         ),
         Effect::GainLife { amount: _, player } => (
             Some(vec![player]),
@@ -4414,7 +4411,6 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             } else {
                 ParentTargetHandling::NotAudited
             },
-            false,
         ),
         Effect::CreateEmblem { statics, triggers } => (
             // CR 608.2c: an emblem's triggered ability can refer to anything when
@@ -4428,7 +4424,6 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
                 },
             ),
             ParentTargetHandling::NotAudited,
-            false,
         ),
         // Effects that act on their target without moving it. Their own later
         // referent sets are not audited.
@@ -4453,7 +4448,6 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
                 target,
                 one_declared_target: true,
             },
-            false,
         ),
         Effect::SetTapState {
             target,
@@ -4468,7 +4462,6 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
                     EffectScope::All => false,
                 },
             },
-            false,
         ),
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
@@ -4691,7 +4684,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => (None, ParentTargetHandling::NotAudited, false),
+        | Effect::Unimplemented { .. } => (None, ParentTargetHandling::NotAudited),
     };
     let mut quantities_fixed = true;
     effect.for_each_quantity_expr(&mut |quantity| {
@@ -4700,7 +4693,6 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
     LaterInstructionAudit {
         referents: referents.filter(|_| quantities_fixed),
         parent_target,
-        creates_objects,
     }
 }
 
@@ -4746,7 +4738,7 @@ fn pt_value_is_fixed(value: &PtValue) -> bool {
     }
 }
 
-/// CR 608.2c + CR 611.2a: whether a static ability that a later instruction
+/// CR 608.2c: whether a static ability that a later instruction
 /// grants or creates carries no condition, zone scope or source binding of its
 /// own, so it refers to nothing beyond its mode, its modifications and its
 /// `affected` filter, which each caller audits. The one classification of
@@ -4786,7 +4778,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && room_door.is_none()
 }
 
-/// CR 608.2c + CR 611.2a: the one object class a static ability granted by a
+/// CR 608.2c: the one object class a static ability granted by a
 /// later instruction applies to, when that ability grants only referent-free
 /// modes and binds nothing else ([`static_binds_nothing`]); `None` otherwise.
 fn static_grant_referent(static_ability: &StaticDefinition) -> Option<&TargetFilter> {
@@ -4841,7 +4833,9 @@ fn emblem_static_names_no_referent(static_ability: &StaticDefinition) -> bool {
 /// moved that object ("return this card … It gains haste"), and after a zone
 /// change it is a new object (CR 400.7). Every anaphor of a resolution result
 /// (a tracked set, the last created token, the cost-paid object, a chosen card)
-/// is refused because only the gated action produces it.
+/// is refused. A `LastCreated` may name a token a kept instruction created;
+/// refusing it drops that producer as well (see
+/// [`declined_gate_surviving_instructions`]; B-2).
 fn referent_exists_without_gated_action(
     filter: &TargetFilter,
     parent_target_is_declared: bool,
@@ -19623,6 +19617,55 @@ mod tests {
             .map(|node| node.effect.clone())
             .collect();
         assert_eq!(kept, vec![iv.effect.clone()]);
+    }
+
+    /// Phase 7, E0-1 (the building block): after a declined gate, a kept
+    /// instruction that creates an object is skipped when a later node that may
+    /// be its rider is skipped ("Create a … token. Put a counter on that
+    /// token."), since CR 608.2c lets later text modify earlier text; an
+    /// independent instruction after the rider still survives.
+    #[test]
+    fn a_declined_gate_skips_a_kept_producer_with_its_skipped_rider() {
+        fn node(json: &str) -> ResolvedAbility {
+            let effect: Effect = serde_json::from_str(json).expect("effect must parse");
+            let mut node = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+            node.sub_link = SubAbilityLink::SequentialSibling;
+            node
+        }
+        let mut gate = node(
+            r#"{"type":"GainLife","amount":{"type":"Fixed","value":1},"player":{"type":"Controller"}}"#,
+        );
+        gate.condition = Some(
+            serde_json::from_str(r#"{"type":"EffectOutcome","signal":"OptionalEffectPerformed"}"#)
+                .expect("condition must parse"),
+        );
+        let token = node(
+            r#"{"type":"Token","name":"Goblin","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":1},"types":["Creature","Goblin"],"colors":["Red"],"keywords":[],"tapped":false,"count":{"type":"Fixed","value":1},"owner":{"type":"Controller"},"enters_attacking":false,"supertypes":[],"static_abilities":[],"enter_with_counters":[]}"#,
+        );
+        let rider = node(
+            r#"{"type":"PutCounter","counter_type":"time","count":{"type":"Fixed","value":1},"target":{"type":"LastCreated"}}"#,
+        );
+        let gain_life = node(
+            r#"{"type":"GainLife","amount":{"type":"Fixed","value":2},"player":{"type":"Controller"}}"#,
+        );
+        let surviving = |nodes: Vec<&ResolvedAbility>| -> Vec<Effect> {
+            let mut gate = gate.clone();
+            gate.sub_ability = relink_in_printed_order(nodes);
+            declined_gate_surviving_instructions(&gate)
+                .into_iter()
+                .map(|node| node.effect.clone())
+                .collect()
+        };
+
+        // Reach guard: the token sentence alone survives the decline.
+        assert_eq!(surviving(vec![&token]), vec![token.effect.clone()]);
+        // Its rider is skipped, so the token is skipped with it.
+        assert_eq!(surviving(vec![&token, &rider]), Vec::<Effect>::new());
+        // An independent instruction after the rider still survives.
+        assert_eq!(
+            surviving(vec![&token, &rider, &gain_life]),
+            vec![gain_life.effect.clone()]
+        );
     }
 
     /// Issue #8762: the counter rider branch's tail allowlist is a POLICY pin —

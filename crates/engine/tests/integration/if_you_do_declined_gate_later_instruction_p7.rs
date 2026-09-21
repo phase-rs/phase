@@ -54,7 +54,9 @@ const IROH_TEA_MASTER: &str = "When Iroh enters, create a Food token.\nAt the be
 /// only a player.
 const SYN_J3: &str = "At the beginning of combat on your turn, you may pay {2}. If you do, double target creature's power until end of turn. That creature must be blocked this combat if able. You gain 2 life.";
 /// (i) the token is the gate's own step, (iv) "You gain 1 life" names only a
-/// player, (iii) "that token" names what only the gated action creates.
+/// player. (iii) "that token" names what only the gated action creates, but the
+/// synthetic parse binds it to `ParentTarget` (measured), so on the declined
+/// path (iii) is refused as an unaudited `PutCounter` shape.
 const SYN_GAP1: &str = "At the beginning of combat on your turn, you may pay {2}. If you do, create a 1/1 white Ally creature token. You gain 1 life. Put a +1/+1 counter on that token.";
 /// The Krenko shape: "It" is the gated token.
 const SYN_TOKEN_IT: &str = "At the beginning of combat on your turn, you may pay {2}. If you do, create a 1/1 red Goblin creature token. It gains haste until end of turn.";
@@ -258,6 +260,8 @@ fn neyith_declined_keeps_must_be_blocked_on_the_declared_creature() {
 }
 
 /// J-2a′: paid, the declared creature's power doubles and it must be blocked.
+/// GREEN AT BASE: reach guard of J-2a; the paid path never reaches the
+/// declined walk, so no in-scope mutation reddens it (preservation only).
 #[test]
 fn neyith_paid_doubles_power_and_keeps_must_be_blocked() {
     let board = neyith(true);
@@ -346,15 +350,18 @@ fn localized_destruction(accept: bool) -> (GameRunner, ObjectId, ObjectId) {
     (runner, c1, o1)
 }
 
-/// J-2c: declined, "Destroy all creatures." still happens.
+/// J-2c: declined, "You get {E}" stands and "Destroy all creatures." still
+/// happens.
 #[test]
 fn localized_destruction_declined_destroys_every_creature() {
     let (runner, c1, o1) = localized_destruction(false);
+    assert_eq!(runner.state().players[0].energy, 1, "the energy is kept");
     assert_eq!(runner.state().objects[&c1].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
 
 /// J-2e: paid, the creature whose power equals the energy paid survives.
+/// GREEN AT BASE: reach guard of J-2c; preservation only.
 #[test]
 fn localized_destruction_paid_spares_the_matching_creature() {
     let (runner, c1, o1) = localized_destruction(true);
@@ -397,9 +404,11 @@ fn witchs_mark_declined_still_creates_the_role_on_the_declared_creature() {
     assert_eq!(power(&runner, c1), Some(3));
     assert!(!resolved(&events).contains(&EffectKind::Draw), "no draw");
     assert_eq!(runner.state().players[0].library.len(), 3);
+    assert_eq!(runner.state().players[0].hand.len(), 1, "no card discarded");
 }
 
 /// J-2e: paid, the discard, the two draws and the Role all happen.
+/// GREEN AT BASE: reach guard of J-2d; preservation only.
 #[test]
 fn witchs_mark_paid_draws_and_creates_the_role() {
     let (runner, c1, events) = witchs_mark(true);
@@ -543,6 +552,7 @@ fn wyll_declined_still_adds_the_additional_phases() {
 }
 
 /// J-2f paid: the sacrifice, the untap and the additional phases all happen.
+/// GREEN AT BASE: reach guard of J-2f; preservation only.
 #[test]
 fn wyll_paid_untaps_and_adds_the_additional_phases() {
     let (runner, wyll, fodder) = wyll(true);
@@ -605,7 +615,8 @@ fn choice_of_fortunes_declined_still_creates_the_emblem() {
     assert_no_maximum_hand_size_emblem(&runner);
 }
 
-/// J-2g′: accepted, every instruction happens.
+/// J-2g′: accepted, every instruction happens. GREEN AT BASE: reach guard of
+/// J-2g; preservation only.
 #[test]
 fn choice_of_fortunes_accepted_seeks_twice_and_creates_the_emblem() {
     let (runner, events) = choice_of_fortunes(true);
@@ -636,7 +647,8 @@ fn syn_j3_declined_keeps_the_declared_target_rider_and_the_life_gain() {
     assert_eq!(board.runner.life(P0), 22);
 }
 
-/// J-3 (b): paid, every instruction happens.
+/// J-3 (b): paid, every instruction happens. GREEN AT BASE: reach guard of
+/// J-3 (a); preservation only.
 #[test]
 fn syn_j3_paid_resolves_every_instruction() {
     let board = combat_board("SynJ3", SYN_J3, true);
@@ -650,8 +662,9 @@ fn syn_j3_paid_resolves_every_instruction() {
 }
 
 /// J-3 (c), the charter's J-3 in one chain: declined, the gated token is not
-/// created, the counter "on that token" has nothing to go on, and "You gain 1
-/// life" still happens.
+/// created, the counter sentence is skipped (an unaudited `PutCounter`; see
+/// [`SYN_GAP1`]), and "You gain 1 life" still happens. Red at base; red under
+/// M-3.
 #[test]
 fn syn_gap1_declined_gains_life_without_the_token_or_its_counter() {
     let board = combat_board("SynGap1", SYN_GAP1, false);
@@ -660,10 +673,14 @@ fn syn_gap1_declined_gains_life_without_the_token_or_its_counter() {
     assert!(tokens_named(&board.runner, "Ally").is_empty(), "no token");
 }
 
-/// J-3 (b): paid, every instruction resolves: the token, the life gain and the
-/// counter.
+/// J-3 (b): paid, the token, life gain and counter instructions each resolve.
+/// GREEN AT BASE: reach guard of J-3 (c); preservation only. KNOWN-BAD: the
+/// parser binds "that token" to `ParentTarget`, so the counter lands on no
+/// object (measured: the Ally, c1 and c2 carry no counters, at base and on the
+/// candidate); plan J-3 passed-half (iii) is unmet for that reason. This row
+/// pins only the resolved kinds, the Ally and the life total.
 #[test]
-fn syn_gap1_paid_resolves_every_instruction() {
+fn syn_gap1_paid_resolves_each_instruction_kind() {
     let board = combat_board("SynGap1", SYN_GAP1, true);
     assert_eq!(
         resolved(&board.events),
@@ -678,7 +695,9 @@ fn syn_gap1_paid_resolves_every_instruction() {
 }
 
 /// J-3 (e): the Krenko shape. "It" names the token only the gated action
-/// creates, so nothing happens.
+/// creates, so nothing happens. GREEN AT BASE, NON-DISCRIMINATING: the later
+/// node is a `ContinuationStep` (the gate's own step), skipped before any
+/// referent is read; unchanged under M-4 (measured).
 #[test]
 fn syn_token_it_declined_creates_nothing() {
     let board = combat_board("SynTokIt", SYN_TOKEN_IT, false);
@@ -688,7 +707,7 @@ fn syn_token_it_declined_creates_nothing() {
 
 /// J-3 (g): a gate that would return its declared target makes "That
 /// creature" a new object only the gated action produces (CR 400.7), so the
-/// later instruction is governed.
+/// later instruction is governed. GREEN AT BASE; red under M-5 (measured).
 #[test]
 fn syn_reanimate_that_declined_resolves_nothing() {
     let mut scenario = GameScenario::new();
@@ -704,7 +723,7 @@ fn syn_reanimate_that_declined_resolves_nothing() {
 }
 
 /// J-3 (h): a gate that would exile its declared target governs "That
-/// creature".
+/// creature". GREEN AT BASE; red under M-5 (measured).
 #[test]
 fn syn_exile_that_declined_resolves_nothing() {
     let board = combat_board("SynExThat", SYN_EXILE_THAT, false);
@@ -720,7 +739,8 @@ fn syn_exile_that_declined_resolves_nothing() {
 /// skipped together (CR 608.2c: later text may modify earlier text). The rider
 /// "It gains haste" names the Goblin, and it is not proven independent of the
 /// declined gate, so the Goblin sentence is skipped with it: declined, nothing
-/// happens (the base reading), never a Goblin without haste.
+/// happens (the base reading), never a Goblin without haste. GREEN AT BASE;
+/// red under M-11 (the coupling disabled: a Goblin without haste; measured).
 #[test]
 fn syn_rider_declined_creates_no_goblin_without_its_rider() {
     let board = combat_board("SynRider", SYN_RIDER, false);
@@ -732,7 +752,8 @@ fn syn_rider_declined_creates_no_goblin_without_its_rider() {
     assert_eq!(board.runner.state().players[0].library.len(), 2, "no draw");
 }
 
-/// Paid, the draw, the Goblin and its haste all happen.
+/// Paid, the draw, the Goblin and its haste all happen. GREEN AT BASE:
+/// reach guard of the declined row; preservation only.
 #[test]
 fn syn_rider_paid_creates_a_goblin_with_haste() {
     let mut board = combat_board("SynRider", SYN_RIDER, true);
@@ -743,7 +764,10 @@ fn syn_rider_paid_creates_a_goblin_with_haste() {
 }
 
 /// J-6 (a): Krenko, Baron of Tin Street. "It gains haste" names the gated
-/// token; declined, no token is created.
+/// token; declined, no token is created. GREEN AT BASE, NON-DISCRIMINATING:
+/// "It" is a `ContinuationStep`, a step of the gate itself, so no single
+/// in-scope mutation reaches a referent check (M-4 measured unchanged on the
+/// same shape, J-3 (e)).
 #[test]
 fn krenko_declined_creates_no_goblin() {
     let mut scenario = GameScenario::new();
@@ -838,6 +862,7 @@ fn hollow_specter(accept: bool) -> (GameRunner, Vec<GameEvent>) {
 }
 
 /// J-6 (b2): Hollow Specter declined: nothing is revealed or discarded.
+/// GREEN AT BASE; red under M-4 (measured).
 #[test]
 fn hollow_specter_declined_reveals_and_discards_nothing() {
     let (runner, events) = hollow_specter(false);
@@ -846,10 +871,13 @@ fn hollow_specter_declined_reveals_and_discards_nothing() {
     assert_eq!(runner.state().players[1].hand.len(), 2);
 }
 
-/// J-6 (b2) reach guard at X = 1: paid, the gated reveal and discard
-/// instructions resolve.
+/// J-6 (b2) reach guard at X = 1: paid, the gated reveal and discard effects
+/// resolve. GREEN AT BASE; preservation only. KNOWN-BAD (residue): at X = 1
+/// the whole hand is revealed and nothing is discarded, at base and on the
+/// candidate (measured: 2 cards revealed, P1's hand 2, graveyard 0). This row
+/// pins only the resolved kinds.
 #[test]
-fn hollow_specter_paid_x1_resolves_the_reveal_and_the_discard() {
+fn hollow_specter_paid_x1_resolves_the_reveal_and_discard_kinds() {
     let (_, events) = hollow_specter(true);
     assert_eq!(
         resolved(&events),
@@ -858,7 +886,7 @@ fn hollow_specter_paid_x1_resolves_the_reveal_and_the_discard() {
 }
 
 /// J-6 (b3): Ardent Dustspeaker declined: nothing is exiled and no play
-/// permission is granted.
+/// permission is granted. GREEN AT BASE; red under M-4 (measured).
 #[test]
 fn ardent_dustspeaker_declined_exiles_nothing() {
     let mut scenario = GameScenario::new();
@@ -878,7 +906,7 @@ fn ardent_dustspeaker_declined_exiles_nothing() {
 }
 
 /// J-6 (b4): Kheru Lich Lord declined: nothing returns and no delayed exile is
-/// created.
+/// created. GREEN AT BASE; red under M-4 (measured).
 #[test]
 fn kheru_lich_lord_declined_returns_nothing() {
     let mut scenario = GameScenario::new();
@@ -975,6 +1003,8 @@ fn loyal_unicorn(with_commander: bool) -> (bool, bool, bool, Vec<EffectKind>) {
 /// J-6 (c): Loyal Unicorn's intervening "if" (CR 603.4) is not an "if you do"
 /// gate. With a commander, combat damage to every creature its controller
 /// controls is prevented and the other creatures gain vigilance.
+/// GREEN AT BASE, NON-DISCRIMINATING: there is no `OptionalEffectPerformed`
+/// gate, so the declined walk is unreachable.
 #[test]
 fn loyal_unicorn_with_commander_prevents_combat_damage_and_grants_vigilance() {
     let (c1_survived, c3_survived, vigilance, kinds) = loyal_unicorn(true);
@@ -986,7 +1016,8 @@ fn loyal_unicorn_with_commander_prevents_combat_damage_and_grants_vigilance() {
     assert!(vigilance);
 }
 
-/// J-6 (c): without a commander, nothing happens.
+/// J-6 (c): without a commander, nothing happens. GREEN AT BASE,
+/// NON-DISCRIMINATING, as above.
 #[test]
 fn loyal_unicorn_without_commander_does_nothing() {
     let (c1_survived, c3_survived, vigilance, kinds) = loyal_unicorn(false);
@@ -996,7 +1027,9 @@ fn loyal_unicorn_without_commander_does_nothing() {
 }
 
 /// J-6 (d): Iroh, Tea Master's reflexive "when you do" (CR 603.12): declined,
-/// no control changes and no Ally token is created.
+/// no control changes and no Ally token is created. GREEN AT BASE,
+/// NON-DISCRIMINATING: the condition is `WhenYouDo`, which the gate-shape
+/// check refuses.
 #[test]
 fn iroh_declined_creates_no_ally() {
     let mut scenario = GameScenario::new();

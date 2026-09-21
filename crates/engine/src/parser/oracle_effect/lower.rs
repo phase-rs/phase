@@ -3451,7 +3451,11 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
 /// It perpetually gains ..." would otherwise mis-bind "it" to `ParentTarget`
 /// (the ability's actual chosen target — "target opponent" — not the
 /// conjured card).
-pub(super) fn publishes_chain_created_referent(effect: &Effect) -> bool {
+///
+/// The declined "if you do" walk (`game::effects`,
+/// `declined_gate_surviving_instructions`) reads the same answer to keep a
+/// created object and its later rider together.
+pub(crate) fn publishes_chain_created_referent(effect: &Effect) -> bool {
     is_token_creating_effect(effect)
         || matches!(
             effect,
