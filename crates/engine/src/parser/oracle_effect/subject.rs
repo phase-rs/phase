@@ -2294,12 +2294,17 @@ fn try_parse_can_attack_with_defender(
     // indexes the original-case text.
     let subject = text[..subject_lower.len()].trim();
     let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    // Duration is derived from the WHOLE clause, NOT from the segment: the subject
-    // can carry "this turn" with an empty segment (measured: three corpus cards), and
-    // narrowing this to the segment would move those three lines' durations.
-    // UNCHANGED from base — value EXTRACTION from already-accepted text, not parsing
-    // dispatch. Guarded by
-    // `defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_production`.
+    // Duration is derived from the WHOLE clause, NOT from the interposed segment:
+    // a SUBJECT-carried "this turn" over an EMPTY segment still yields
+    // UntilEndOfTurn here, and narrowing the derivation to the segment would drop
+    // it. UNCHANGED from base — value EXTRACTION from already-accepted text, not
+    // parsing dispatch. Guarded by
+    // `defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_production`,
+    // whose subject-carried fixture is the one that reds under that narrowing —
+    // its duration-form fixture cannot, because there the adverbial IS the
+    // segment. No corpus line reaches THIS production with "this turn" outside
+    // the segment; the ones that print it there are "As long as ... this turn,"
+    // statics, which land on the printed-static production instead.
     let duration = if lower.contains("this turn") {
         Some(Duration::UntilEndOfTurn)
     } else {

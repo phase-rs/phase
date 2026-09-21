@@ -193,8 +193,12 @@ fn all_consuming_defender_tail(rest: &str) -> Option<()> {
 ///
 /// `split_defender_exception_predicate_all_consuming` below carries the identical
 /// line for production (c), and the compound LOOP's own choice to route through
-/// THIS function is a third application of the same policy. **The three have three
-/// SEPARATE tests because a mutation at one call site leaves the other two green:**
+/// THIS function is a third application of the same policy. **Each of the three
+/// call sites has a test that reds under ITS OWN mutation — but the three
+/// mutations are NOT isolated from one another, so a red does not by itself name
+/// the site that broke:** dropping the LOOP's line reds only the loop's test,
+/// dropping THIS function's line reds this function's test AND the loop's, and
+/// dropping production (c)'s line reds all three. The three tests are:
 /// `defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_policy`
 /// covers this function's line,
 /// `walking_bulwark_comma_compound_carries_the_anchored_condition` covers

@@ -71975,10 +71975,20 @@ fn p3e_anchored() -> StaticCondition {
 /// activated, 6 triggered; ZERO printed statics), so this arm is where the
 /// classifier's `all_consuming(tag("this turn"))` decision is corpus-visible.
 ///
-/// The duration is derived from the WHOLE clause, not from the segment
-/// (`lower.contains("this turn")`, UNCHANGED from base): three corpus cards carry
-/// `"this turn"` in the SUBJECT with an EMPTY segment, and narrowing the derivation
-/// to the segment would move them.
+/// The duration is derived from the WHOLE clause, not from the interposed
+/// segment, and that derivation is UNCHANGED from base. The fixture above cannot
+/// see that scoping decision — in it the adverbial IS the segment, so a
+/// segment-derived duration lands on the same answer — so the test also carries a
+/// SUBJECT-CARRIED fixture, where the two derivations disagree, and a
+/// no-adverbial negative control.
+///
+/// Measured over the 55 corpus lines that print the CR 702.3b tail: every one of
+/// them that prints `"this turn"` OUTSIDE the segment does so in an
+/// `"As long as ... this turn,"` prefix and parses to the PRINTED-STATIC
+/// production (a `StaticDefinition` carrying the condition and no duration at
+/// all), never to (c). The subject-carried fixture is therefore composed from two
+/// printed templates — Crushing Pain's `"target creature that was dealt damage
+/// this turn"` and the CR 702.3b tail — rather than lifted from one card.
 #[test]
 fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_production() {
     let parsed = parse_oracle_text(
@@ -72029,6 +72039,63 @@ fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_pr
         );
     };
     assert_eq!(static_abilities[0].condition, Some(p3e_anchored()));
+
+    // THE DISCRIMINATING FIXTURE for the WHOLE-CLAUSE derivation: `"this turn"`
+    // sits in the SUBJECT and the interposed segment is EMPTY, so the classifier
+    // answers `Unrestricted` and a SEGMENT-derived duration would be `None`.
+    // Neither fixture above can red on that narrowing, because in both of them
+    // the adverbial IS the segment.
+    let subject_carried = parse_oracle_text(
+        "Target creature that was dealt damage this turn can attack as though it didn't have defender.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    }) = subject_carried.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "subject-carried: expected a GenericEffect, got {:?}",
+            subject_carried.abilities
+        );
+    };
+    assert_eq!(
+        static_abilities[0].condition, None,
+        "the interposed segment is empty, so no player class is carried"
+    );
+    assert_eq!(
+        duration,
+        &Some(Duration::UntilEndOfTurn),
+        "a SUBJECT-carried adverbial still sets the duration: the derivation reads the whole clause"
+    );
+
+    // PAIRED NEGATIVE CONTROL, same production and the SAME empty segment: drop
+    // the subject's adverbial and the duration goes away. Without it the
+    // assertion above would also be satisfied by a production that answers
+    // `UntilEndOfTurn` unconditionally.
+    let no_adverbial = parse_oracle_text(
+        "Target creature can attack as though it didn't have defender.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect { duration, .. }) =
+        no_adverbial.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "no-adverbial control: expected a GenericEffect, got {:?}",
+            no_adverbial.abilities
+        );
+    };
+    assert_eq!(
+        duration, &None,
+        "with no adverbial anywhere in the clause the production carries no duration"
+    );
 }
 
 /// ROW 7 ARM (iii): the class is supported on production
