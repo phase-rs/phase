@@ -5287,22 +5287,6 @@ fn filter_has_keyword_kind_constraint(filter: &TargetFilter, kind: KeywordKind) 
     }
 }
 
-/// Test-only accessor for [`has_graveyard_cast_permission_without_keyword_constraint`].
-///
-/// That consumer is one of the four graveyard-permission call sites that resolve
-/// "your graveyard" against the card's OWNER (CR 109.4 + CR 108.4a). It is
-/// reachable in production only from the bestow lane, so integration coverage of
-/// the owner substitution needs to query its verdict directly.
-#[doc(hidden)]
-pub fn has_graveyard_cast_permission_without_keyword_constraint_for_test(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    kind: KeywordKind,
-) -> bool {
-    has_graveyard_cast_permission_without_keyword_constraint(state, player, object_id, kind)
-}
-
 fn has_graveyard_cast_permission_without_keyword_constraint(
     state: &GameState,
     player: PlayerId,
