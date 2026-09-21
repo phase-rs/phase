@@ -72248,11 +72248,14 @@ fn walking_bulwark_comma_compound_carries_the_anchored_condition() {
 /// `defender_exception_predicate_all_consuming` over the bare adapter.
 ///
 /// THE FIXTURE IS SYNTHESIZED AND ITS CORPUS EXPOSURE IS MEASURED ZERO: the tail
-/// census over all 56 corpus defender-exception lines finds 44 tails of `"."`, three
-/// `" as long as <cond>."` riders, one `"and it can't be blocked."`, one
-/// `", and assigns combat damage …"`, two `"."` inside quoted granted text and two
-/// `". Activate only …"` — NONE is a trailing-text tail inside a comma compound. No
-/// printed card can buy this line, so a synthesized fixture is the only instrument.
+/// census over all 56 corpus defender-exception lines finds 44 tails of `"."`,
+/// three `". Activate only …"`, three `" as long as <cond>."` riders, two `"."`
+/// inside quoted granted text, one `" and it can't be blocked."`, one
+/// `", and assigns combat damage …"`, one `". Exile it at the beginning of the
+/// next end step."` and one `". (Equipment, … are modifications.)"` reminder —
+/// 44+3+3+2+1+1+1+1 = 56, and NONE is a trailing-text tail inside a comma
+/// compound. No printed card can buy this line, so a synthesized fixture is the
+/// only instrument.
 ///
 /// Deleting `all_consuming_defender_tail(rest)?` from
 /// `defender_exception_predicate_all_consuming` flips the SUBJECT from ONE fused
