@@ -2345,7 +2345,7 @@ mod tests {
         GameState::new_two_player(42)
     }
 
-    // ===== Phase 2 ROW B — C2.4's BEHAVIOURAL half =====
+    // ===== ROW B — the polarity-typed deferral rule, BEHAVIOURAL half =====
 
     /// CR 508.1c + CR 702.3b: the ONE deferral rule is POLARITY-TYPED and
     /// FAIL-CLOSED.
@@ -2353,8 +2353,8 @@ mod tests {
     /// Seven unit lines on the rule itself — no board, no `||`, nothing that can
     /// mask a mutation — plus one board-level reading that proves the
     /// classification path is LIVE rather than inert: on ONE board, a `CantBlock`
-    /// static carrying the anchored condition answers exactly as it does at
-    /// `PHASE_BASE_SHA` (`false` — unclassified, so no deferral, and the
+    /// static carrying the anchored condition answers exactly as it did before
+    /// this change (`false` — unclassified, so no deferral, and the
     /// unanchored condition refuses), while a `CanAttackWithDefender` static with
     /// the SAME condition on the SAME board FLIPS to `true` (classified
     /// `Permission`, so it defers).
@@ -2367,9 +2367,10 @@ mod tests {
         let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
             scope: AttackedYouScope::AttackedPlayer,
         };
-        // The shipped Demon Wall shape — PRESENT but UNANCHORED. Same condition
-        // row 4's walls C and D carry, so the unit and board halves of the
-        // `needs_defending_player_anchor` guard test the same shape.
+        // The shipped Demon Wall shape — PRESENT but UNANCHORED. The same
+        // condition the present-but-unanchored walls in `combat.rs`'s row 4 carry,
+        // so the unit and board halves of the `needs_defending_player_anchor` guard
+        // test the same shape.
         let unanchored = StaticCondition::HasCounters {
             counters: CounterMatch::Any,
             minimum: 1,
@@ -2395,8 +2396,9 @@ mod tests {
             Some(true),
             "CanAttackWithDefender is a Permission: the deferred verdict is `applies`"
         );
-        // 3 — FAIL-CLOSED: an UNCLASSIFIED mode never defers. This is M-5's only
-        // killer; no board can see it, because a board carries classified modes.
+        // 3 — FAIL-CLOSED: an UNCLASSIFIED mode never defers. This unit line is the
+        // ONLY instrument for that rule; no board can see it, because every board
+        // carries classified modes.
         assert_eq!(
             unanchored_defending_player_deferral(&StaticMode::CantBlock, Some(&anchored), None),
             None,

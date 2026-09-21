@@ -36635,9 +36635,11 @@ fn during_your_turn_keyword_grant_unchanged() {
 }
 
 // =========================================================================
-// PHASE 3 — the interposed defender-class grammar (CR 702.3b :3915 +
-// CR 609.4 :2854). Rows 1 (twin), 4 (static arms), 5, 6 (line level), 7 (i)/(ii)
-// and 8 (arms 1-5b, 8-11) of the phase's verification matrix.
+// THE INTERPOSED DEFENDER-CLASS GRAMMAR (CR 702.3b :3915 + CR 609.4 :2854),
+// STATIC SIDE. The `ROW n` / `ARM n` banners below label the sections of this
+// group and match the lowercase `"arm n"` strings the assertions carry; the
+// effect-side counterparts live in `oracle_effect/tests.rs` under the same
+// numbering.
 //
 // FRAME (binding): every exact-value assertion below is in the VERBATIM frame —
 // a DIRECT `parse_static_line` / `parse_static_line_multi` /
@@ -36649,25 +36651,25 @@ fn during_your_turn_keyword_grant_unchanged() {
 // =========================================================================
 
 /// The interposed player class Weathered Sentinels prints, shared by every
-/// Phase 3 static-side row so the three-production rows cannot drift from the card.
+/// static-side row below so the three-production rows cannot drift from the card.
 const P3_SEG: &str = "players who attacked you during their last turn";
 
-/// Weathered Sentinels, printed line 2 — VERBATIM (Step-0 verified against the
-/// base card-data artifact's `oracle_text`). Note the ASCII `'`: the parser
+/// Weathered Sentinels, printed line 2 — VERBATIM (verified against the base
+/// card-data artifact's `oracle_text`). Note the ASCII `'`: the parser
 /// lowercases and every defender-exception tag uses ASCII `didn't`, so a curly
 /// apostrophe silently declines.
 const P3_WEATHERED_SENTINELS_L2: &str = "This creature can attack players who \
     attacked you during their last turn as though it didn't have defender.";
 
-/// ROW 1's PRODUCTION-ATTRIBUTION TWIN (charter row 1 · C3.1).
+/// ROW 1's PRODUCTION-ATTRIBUTION TWIN.
 ///
 /// CR 702.3b (docs/MagicCompRules.txt:3915): the card's printed line is consumed
 /// by production (b) ITSELF — `parse_can_attack_despite_defender`, called
 /// DIRECTLY — and not by some shadowing branch that happens to produce the same
-/// value through `parse_static_line`'s dispatch. C3.1 is therefore MEASURED
-/// rather than inferred from dispatch ordering.
+/// value through `parse_static_line`'s dispatch. The attribution is therefore
+/// MEASURED rather than inferred from dispatch ordering.
 ///
-/// Measured at PHASE_BASE_SHA (8cd2aa58c): every one of the three productions
+/// Measured before this change: every one of the three productions
 /// DECLINED this line, and it was consumed by the continuous-keyword-grant
 /// fallback on the effect side, which read the literal substring
 /// `"didn't have defender"` and emitted `AddKeyword(Defender)` — the exact
@@ -36699,17 +36701,17 @@ fn weathered_sentinels_line_is_consumed_by_the_non_attached_static_production() 
     assert_eq!(control.condition, None);
 }
 
-/// ROW 4, STATIC ARMS (charter row 4 · C3.4).
+/// ROW 4, STATIC ARMS.
 ///
 /// CR 702.3b: `"can attack this turn as though it didn't have defender"` is a
 /// DURATION adverbial, not a player class. Both static productions decline it as
-/// a class, identically to PHASE_BASE_SHA — production (b) returns `None`,
+/// a class, identically to base — production (b) returns `None`,
 /// production (a) keeps its base `Continuous`/`AddKeyword(Defender)` shape.
 ///
 /// TWO DIFFERENT REVERTS, TWO DIFFERENT CONSEQUENCES:
 ///  * reverting the CLASSIFIER's `all_consuming(tag("this turn"))` arm routes
 ///    `"this turn"` to the INERT marker and moves all 20 duration-form corpus
-///    cards — every one of which lives on production (c), NOT here (M-21);
+///    cards — every one of which lives on production (c), NOT here;
 ///  * reverting the `DurationAdverbial` DECLINE GUARD in a static production
 ///    makes it emit an UNCONDITIONED (permanently ACTIVE, CR 611.3a :2926)
 ///    permission with the printed duration DROPPED. Corpus movement is ZERO — no
@@ -36746,8 +36748,8 @@ fn defender_exception_duration_form_is_declined_by_both_static_productions() {
     );
     assert_eq!(conjunctive[0].mode, StaticMode::Continuous);
 
-    // PAIRED POSITIVE CONTROL ON EACH PRODUCTION, SAME FIXTURE (the charter's
-    // reach-guard): the INTERPOSED form IS accepted on the very same production,
+    // PAIRED POSITIVE CONTROL ON EACH PRODUCTION, SAME FIXTURE (the reach-guard):
+    // the INTERPOSED form IS accepted on the very same production,
     // which proves the declining fixtures above were offered to the widened scan
     // rather than missing it.
     let anchored = Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
@@ -36798,17 +36800,17 @@ fn defender_exception_duration_form_is_declined_by_both_static_productions() {
     );
 }
 
-/// ROW 5 (charter row 5 · C3.5): an unrecognized interposed class is
+/// ROW 5: an unrecognized interposed class is
 /// PERMANENTLY INERT at runtime AND leaves the card RED in coverage.
 ///
 /// Two fixtures differing ONLY in the interposed segment. `unenforceable_gate_marker`
 /// yields `Not(Unrecognized{..})`: `layers::evaluate_condition_inner` reads a BARE
 /// `Unrecognized` as TRUE (layers.rs:2120), so the `Not` wrapper is what makes the
 /// gate evaluate FALSE forever — a bare `Unrecognized` here would grant the
-/// PERMISSION against EVERY defender (fail-OPEN, the outcome C3.5 forbids), while
-/// `contains_unrecognized` still reports the gap either way.
+/// PERMISSION against EVERY defender — the fail-OPEN outcome this row forbids —
+/// while `contains_unrecognized` still reports the gap either way.
 ///
-/// BASE-SHAPE RECORD (M-9): at PHASE_BASE_SHA the same line parsed to a
+/// BASE-SHAPE RECORD: before this change the same line parsed to a
 /// `Continuous`/`AddKeyword(Defender)` grant whose `card_face_gaps` was `[]` —
 /// dishonestly GREEN. This row therefore measures a real supported -> unsupported
 /// FLIP, and its value must not be mistaken for "it was always red".
@@ -36861,8 +36863,8 @@ fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() 
         "a Not(Unrecognized) gate must evaluate FALSE (a bare Unrecognized is TRUE, layers.rs:2120)"
     );
 
-    // (iv) RED IN COVERAGE — the half C3.5 says the fallback's NAME does not
-    // guarantee.
+    // (iv) RED IN COVERAGE — the half the fallback's NAME does not guarantee:
+    // being permanently inert at runtime does not by itself make the card red.
     let bad_face = crate::types::card::CardFace {
         static_abilities: vec![bad.clone()],
         ..Default::default()
@@ -36888,7 +36890,7 @@ fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() 
     );
 }
 
-/// ROW 6, LINE LEVEL (charter row 6 · C3.6): DELEGATION IS REAL.
+/// ROW 6, LINE LEVEL: DELEGATION IS REAL.
 ///
 /// CR 702.3b: a segment naming a condition `parse_inner_condition` DOES own, but
 /// which has no defending-player-anchored reading, reaches the INERT-MARKER
@@ -36932,14 +36934,14 @@ fn authority_owned_but_unanchorable_class_reaches_the_inert_marker() {
     );
 }
 
-/// ROW 7 ARM (i) (charter row 7 · C3.7): the class is supported on production
+/// ROW 7 ARM (i): the class is supported on production
 /// (a), the ATTACHED-SUBJECT production `parse_enchanted_equipped_predicate`
 /// (CR 509.1b + CR 604.1 + CR 611.3a :2926).
 ///
 /// Attributed by DIRECT CALL, not by dispatch ordering. THREE separate test
 /// functions, one per production, so a widening that lands on only one arm cannot
-/// pass a merged "static side" assertion — this row is the direct guard against
-/// the revision-2 regression the charter's PROVENANCE records.
+/// pass a merged "static side" assertion — this row is the direct guard against a
+/// widening that reaches only the non-attached production.
 #[test]
 fn interposed_class_is_supported_on_the_attached_subject_production() {
     let enchanted = TargetFilter::Typed(TypedFilter {
@@ -36999,7 +37001,7 @@ fn interposed_class_is_supported_on_the_attached_subject_production() {
     ));
 }
 
-/// ROW 7 ARM (ii) (charter row 7 · C3.7): the class is supported on production
+/// ROW 7 ARM (ii): the class is supported on production
 /// (b), the NON-ATTACHED static production `parse_can_attack_despite_defender`
 /// (CR 702.3b :3915 + CR 611.3a :2926).
 ///
@@ -37043,7 +37045,7 @@ fn interposed_class_is_supported_on_the_non_attached_static_production() {
     ));
 
     // FOURTH SHAPE — the plural/filter subject and the `they` pronoun arm. Measured
-    // at PHASE_BASE_SHA to produce the `Continuous`/`AddKeyword(Defender)` INVERSE.
+    // before this change to produce the `Continuous`/`AddKeyword(Defender)` INVERSE.
     // Production attribution: production (b) consumes it, by DIRECT CALL.
     let plural =
         format!("Creatures you control can attack {P3_SEG} as though they didn't have defender.");
@@ -37080,7 +37082,7 @@ fn interposed_class_is_supported_on_the_non_attached_static_production() {
     );
 }
 
-/// ROW 8, ARMS 1 / 2 / 3 / 4 / 5 / 9 / 10 (charter row 8): every adjacent
+/// ROW 8, ARMS 1 / 2 / 3 / 4 / 5 / 9 / 10: every adjacent
 /// defender grammar keeps ITS OWN expected parse. Every arm asserts the POSITIVE
 /// expected shape — "no anchored condition appeared" is satisfied by a fixture the
 /// production never saw and is used nowhere here.
@@ -37133,7 +37135,7 @@ fn adjacent_defender_grammars_keep_their_own_parse() {
     assert!(matches!(arm3b.mode, StaticMode::CantBeBlockedBy { .. }));
 
     // ARM 4 — the PLAIN conjunctive split, and the CONTROL for arm 5. It is also
-    // the guard on Step 6's recomputed splice offset (DISCRIMINATION 6.5): a short
+    // the guard on the conjunctive splitter's recomputed splice offset: a short
     // splice leaves `"and can attack"` fragments in Line A, `parse_static_line_multi`
     // returns `[]`, and the whole splitter returns `None`.
     let arm4 = parse_static_line_multi(
@@ -37151,7 +37153,7 @@ fn adjacent_defender_grammars_keep_their_own_parse() {
     assert_eq!(arm4[1].mode, StaticMode::CanAttackWithDefender);
     assert_eq!(arm4[1].condition, None);
 
-    // ARM 5 (C3.9) — the INTERPOSED conjunctive split. NEVER an unconditioned
+    // ARM 5 — the INTERPOSED conjunctive split. NEVER an unconditioned
     // `CanAttackWithDefender` on an interposed line: that is the #8785 defect shape
     // reappearing on a sibling grammar.
     let arm5 = parse_static_line_multi(&format!(
@@ -37211,7 +37213,7 @@ fn adjacent_defender_grammars_keep_their_own_parse() {
     );
 }
 
-/// ROW 8, ARM 8 (charter row 8): the word-boundary guard after the verb phrase,
+/// ROW 8, ARM 8: the word-boundary guard after the verb phrase,
 /// as a MINIMAL PAIR with ARM 1 — the same sentence three characters apart, on the
 /// SAME production through the SAME entry point, with opposite verdicts.
 ///
@@ -37234,7 +37236,7 @@ fn word_boundary_guard_refuses_the_attackers_minimal_pair() {
     assert_eq!(pair.condition, None);
 }
 
-/// ROW 8, ARM 2b (charter row 8): the REAL printed LEADING-condition shape —
+/// ROW 8, ARM 2b: the REAL printed LEADING-condition shape —
 /// Novice Knight, VERBATIM. 20 corpus cards print this leading form.
 ///
 /// FRAME (binding): this is the VERBATIM frame — a direct `parse_static_line` call
@@ -37275,8 +37277,8 @@ fn novice_knight_leading_condition_form_is_unmoved() {
     );
 }
 
-/// ROW 8, ARM 5b (charter row 8 · C3.9 + `combine_conditions`'s `(Some, Some)`
-/// arm AT THE CONJUNCTIVE-SPLITTER CALL SITE): Spire Serpent's REAL printed line,
+/// ROW 8, ARM 5b (`combine_conditions`'s `(Some, Some)` arm AT THE
+/// CONJUNCTIVE-SPLITTER CALL SITE): Spire Serpent's REAL printed line,
 /// whose Line A carries its OWN condition.
 ///
 /// FRAME (binding): the fixture carries the corpus `oracle_text` wording
@@ -37355,16 +37357,17 @@ fn spire_serpent_conjunctive_split_composes_both_conditions() {
     );
 }
 
-/// ROW 8, ARM 11 (charter row 8): production (a) STILL FIRES for a trailing-rider
+/// ROW 8, ARM 11: production (a) STILL FIRES for a trailing-rider
 /// line — its RETAINED PREFIX policy.
 ///
 /// ASSERT ONLY THAT IT FIRES. The resulting `condition` is `None` because
 /// production (a) sits ABOVE the trailing-condition split and a prefix match does
-/// not peel a rider — that is **F1, a LATENT DEFECT this phase deliberately
-/// preserves and deliberately does NOT pin**: pinning `condition == None` would
-/// make a future fix of F1 read as a regression.
+/// not peel a rider — that is **a LATENT DEFECT this change deliberately preserves
+/// and deliberately does NOT pin**: pinning `condition == None` would make a future
+/// fix of the missing rider peel read as a regression.
 ///
-/// Corpus exposure of F1 is ZERO: the only attached-subject defender-exception card
+/// Corpus exposure of that defect is ZERO: the only attached-subject
+/// defender-exception card
 /// is Animate Wall, whose tail is `"."`. Replacing (a)'s PREFIX policy with an
 /// all-consuming one makes this arm DECLINE, the line fall through, and the
 /// `AddKeyword(Defender)` inverse win — so this assertion reds.

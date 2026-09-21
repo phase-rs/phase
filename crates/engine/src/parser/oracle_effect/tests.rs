@@ -41567,8 +41567,8 @@ fn leading_conditional_accepts_the_then_if_connector() {
     );
 }
 
-/// V13 — a non-rider EVENT body gaps rather than lowering. At `PHASE_BASE_SHA` the
-/// guard was dropped and `Effect::PreventDamage` was emitted unconditionally.
+/// V13 — a non-rider EVENT body gaps rather than lowering. Without the guard,
+/// `Effect::PreventDamage` is emitted unconditionally.
 ///
 /// No terminating period: `push_clause_chunk` strips one before the seam sees the text,
 /// so a fixture ending in `.` cannot produce a byte-equal description. Do not weaken
@@ -71914,9 +71914,10 @@ fn frost_breath_plural_anaphor_keeps_parent_target() {
 }
 
 // =========================================================================
-// PHASE 3 — the interposed defender-class grammar, EFFECT SIDE (CR 702.3b
-// :3915 + CR 609.4 :2854 + CR 611.2c :2913). Rows 4 (effect arm), 7 (iii) and
-// 8 (arms 3, 6, 7, 9's effect counterpart, 12, 13).
+// THE INTERPOSED DEFENDER-CLASS GRAMMAR, EFFECT SIDE (CR 702.3b :3915 +
+// CR 609.4 :2854 + CR 611.2c :2913). The `ROW n` / `ARM n` banners below label
+// the sections of this group and share their numbering with the static-side
+// counterparts in `oracle_static/tests.rs`.
 //
 // Every arm attributes its production by OUTPUT SHAPE — a multi-element
 // `static_abilities` vec on ONE `GenericEffect` is
@@ -71965,12 +71966,12 @@ fn p3e_anchored() -> StaticCondition {
     }
 }
 
-/// ROW 4, EFFECT ARM (charter row 4 · C3.4): the duration form's NATURAL HOME.
+/// ROW 4, EFFECT ARM: the duration form's NATURAL HOME.
 ///
 /// CR 702.3b: `"can attack this turn as though it didn't have defender"` keeps its
 /// `UntilEndOfTurn` duration on production (c)
 /// (`try_parse_can_attack_with_defender`) and carries NO condition — identical to
-/// PHASE_BASE_SHA. All 20 duration-form corpus lines live on THIS production (14
+/// base. All 20 duration-form corpus lines live on THIS production (14
 /// activated, 6 triggered; ZERO printed statics), so this arm is where the
 /// classifier's `all_consuming(tag("this turn"))` decision is corpus-visible.
 ///
@@ -72008,7 +72009,7 @@ fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_pr
     );
 
     // PAIRED POSITIVE CONTROL ON THE SAME PRODUCTION, SAME FIXTURE SHAPE (the
-    // charter's reach-guard): the INTERPOSED form IS accepted here, so the
+    // reach-guard): the INTERPOSED form IS accepted here, so the
     // `condition: None` above is a measured routing decision rather than a
     // production that never saw the line.
     let reach = parse_oracle_text(
@@ -72030,7 +72031,7 @@ fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_pr
     assert_eq!(static_abilities[0].condition, Some(p3e_anchored()));
 }
 
-/// ROW 7 ARM (iii) (charter row 7 · C3.7): the class is supported on production
+/// ROW 7 ARM (iii): the class is supported on production
 /// (c), `try_parse_can_attack_with_defender` — a RESOLUTION-side continuous
 /// effect, authorized by CR 611.2c (:2913) rather than CR 611.3a.
 ///
@@ -72091,7 +72092,7 @@ fn interposed_class_is_supported_on_the_effect_production() {
     ));
 }
 
-/// ROW 8, ARM 6 (charter row 8 · C3.9): the CONTINUOUS COMPOUND
+/// ROW 8, ARM 6: the CONTINUOUS COMPOUND
 /// (`build_defender_attack_continuous_compound`, CR 702.3b + CR 510.1c :2403 +
 /// CR 611.2c :2913) carries the anchored condition.
 ///
@@ -72099,18 +72100,20 @@ fn interposed_class_is_supported_on_the_effect_production() {
 /// card that reaches this production.
 ///
 /// THE CONTROL DOES TWO JOBS. Beyond proving the compound fires, its ARITY and
-/// ORDER are DISCRIMINATION 1.10's discriminator: relax the module's single
-/// all-consuming policy (`all_consuming_defender_tail`'s `rest.is_empty()`) to a
-/// prefix and production (c) claims the whole clause BEFORE the compound is
-/// reached, collapsing this three-element vec to ONE `CanAttackWithDefender` whose
-/// `description` is the whole predicate, with the `gains haste` and
-/// damage-assignment conjuncts LOST. The same collapse is what 1.24 / 8b.2 — (c)'s
-/// own call-site choice — produces.
+/// ORDER are what discriminate the module's emptiness check: relax
+/// `all_consuming_defender_tail`'s `rest.is_empty()` to a prefix and production (c)
+/// claims the whole clause BEFORE the compound is reached, collapsing this
+/// three-element vec to ONE `CanAttackWithDefender` whose `description` is the
+/// whole predicate, with the `gains haste` and damage-assignment conjuncts LOST.
+/// Dropping the same policy at production (c)'s OWN call site
+/// (`split_defender_exception_predicate_all_consuming`) produces the identical
+/// collapse, so this test guards both.
 ///
 /// Inside the compound's loop the alternative to the defender branch is
 /// `parse_continuous_modifications`, which for this exact grammar returns
-/// `[AddKeyword(Defender)]` — the INVERSE of the printed clause. Reverting 8c's
-/// `permission_condition()` attachment ALONE, with 8a widened, makes the SUBJECT's
+/// `[AddKeyword(Defender)]` — the INVERSE of the printed clause. Reverting the
+/// LOOP's `permission_condition()` attachment ALONE, with the gate's predicate
+/// widened, makes the SUBJECT's
 /// middle element `condition: null` — byte-identical to the CONTROL's, which is
 /// PRECISELY the #8785 defect shape on a sibling grammar. The two halves differ on
 /// exactly that one value.
@@ -72159,8 +72162,8 @@ fn walking_bulwark_comma_compound_carries_the_anchored_condition() {
     );
     assert_eq!(subject[0].modifications, control[0].modifications);
     assert_eq!(subject[2].modifications, control[2].modifications);
-    // and NO AddKeyword(Defender) anywhere in the vec — the base defect, measured at
-    // PHASE_BASE_SHA as ONE fused `Continuous{[AssignDamageFromToughness,
+    // and NO AddKeyword(Defender) anywhere in the vec — the base defect, measured
+    // before this change as ONE fused `Continuous{[AssignDamageFromToughness,
     // AddKeyword(Defender)]}` with the `gains haste` conjunct LOST.
     assert!(
         !subject.iter().any(|d| d
@@ -72172,9 +72175,9 @@ fn walking_bulwark_comma_compound_carries_the_anchored_condition() {
     );
 }
 
-/// ROW 8, ARM 12 (charter row 8): THE SHARED ALL-CONSUMING POLICY AT 8a's CALL
-/// SITE (DISCRIMINATION 8a.2) — `is_can_attack_despite_defender_predicate`'s choice
-/// of `defender_exception_predicate_all_consuming` over the bare adapter.
+/// ROW 8, ARM 12: THE SHARED ALL-CONSUMING POLICY AT THE PREDICATE'S CALL SITE —
+/// `is_can_attack_despite_defender_predicate`'s choice of
+/// `defender_exception_predicate_all_consuming` over the bare adapter.
 ///
 /// THE FIXTURE IS SYNTHESIZED AND ITS CORPUS EXPOSURE IS MEASURED ZERO: the tail
 /// census over all 56 corpus defender-exception lines finds 44 tails of `"."`, three
@@ -72191,9 +72194,10 @@ fn walking_bulwark_comma_compound_carries_the_anchored_condition() {
 ///
 /// It is a SEPARATE `#[test]` from arm 6 and from arm 13 because the three
 /// discriminate three DIFFERENT call sites of one policy: arm 6's control fails
-/// when (c) stops applying it (1.10 / 1.24 / 8b.2), THIS arm fails when 8a stops
-/// applying it (8a.2), and arm 13 fails when 8c stops applying it (8c.2). Merging
-/// any two re-creates the one-sibling-walked asymmetry inside one function.
+/// when production (c) stops applying it, THIS arm fails when
+/// `is_can_attack_despite_defender_predicate` stops applying it, and arm 13 fails
+/// when the compound's per-segment LOOP stops applying it. Merging any two leaves
+/// one call site with no test of its own.
 #[test]
 fn defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_policy() {
     // CONTROL — the reach-guard: the compound fires on the verbatim printed line.
@@ -72239,26 +72243,27 @@ fn defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_po
     ));
 }
 
-/// ROW 8, ARM 13 (charter row 8): THE SHARED ALL-CONSUMING POLICY AT 8c's CALL
-/// SITE (DISCRIMINATION 8c.2) — the compound's per-segment LOOP's choice of
+/// ROW 8, ARM 13: THE SHARED ALL-CONSUMING POLICY AT THE COMPOUND LOOP'S CALL
+/// SITE — the per-segment LOOP's choice of
 /// `defender_exception_predicate_all_consuming` over the bare adapter.
 ///
 /// THE FIXTURE IS SYNTHESIZED AND ITS CORPUS EXPOSURE IS MEASURED ZERO (the same
 /// tail census arm 12 cites).
 ///
 /// ARM 12 SPECIFICALLY DOES NOT CATCH THIS, and the reason is measured rather than
-/// argued: under 8c.2's mutation arm 12's per-segment LOOP verdict does flip, but
-/// the GATE — which runs 8a, untouched by 8c.2 — stays SHUT, so the loop is never
+/// argued: under this mutation arm 12's per-segment LOOP verdict does flip, but the
+/// GATE — which runs `is_can_attack_despite_defender_predicate`, untouched by a
+/// change to the loop — stays SHUT, so the loop is never
 /// entered. THIS fixture carries TWO defender segments, the first clean and the
 /// second with trailing text, so the gate OPENS on segment 2, the loop is ENTERED,
 /// a `CanAttackWithDefender` is PUSHED, and only then does the loop bail on the
 /// trailing-text segment — reach demonstrated in the UNMUTATED direction.
 ///
-/// With 8c reverted to the bare PREFIX adapter the SUBJECT flips from ONE element
-/// to FOUR, the THIRD an UNCONDITIONED
+/// With the LOOP reverted to the bare PREFIX adapter the SUBJECT flips from ONE
+/// element to FOUR, the THIRD an UNCONDITIONED
 /// `CanAttackWithDefender{description: "can attack as though it didn't have defender quickly"}`
-/// — the #8785 defect shape on C3.9's own production — while the CONTROL stays
-/// byte-identical.
+/// — the #8785 defect shape on the continuous compound's own production — while the
+/// CONTROL stays byte-identical.
 #[test]
 fn two_defender_segments_in_one_compound_keep_the_all_consuming_policy_at_the_loop() {
     // CONTROL — Walking Bulwark's verbatim printed line, the reach-guard.
@@ -72277,7 +72282,7 @@ fn two_defender_segments_in_one_compound_keep_the_all_consuming_policy_at_the_lo
     // bails on it and the whole compound declines, so the generic continuous parser
     // claims the predicate and emits the `AddKeyword(Defender)` INVERSE as one fused
     // element. That is the candidate's (and base's) behaviour, and it is what the
-    // 8c.2 mutation destroys.
+    // loop-call-site mutation destroys.
     let subject = p3e_generic_statics(&P3E_WALKING_BULWARK.replace(
         "can attack as though it didn't have defender,",
         "can attack as though it didn't have defender, can attack as though it didn't have defender quickly,",
@@ -72296,7 +72301,7 @@ fn two_defender_segments_in_one_compound_keep_the_all_consuming_policy_at_the_lo
     );
 }
 
-/// ROW 8, ARMS 3 / 7 / 9's EFFECT COUNTERPART (charter row 8): the effect-side
+/// ROW 8, ARMS 3 / 7 / 9's EFFECT COUNTERPART: the effect-side
 /// adjacent grammars keep THEIR OWN parse.
 #[test]
 fn adjacent_defender_grammars_keep_their_own_parse_on_the_effect_side() {
@@ -72305,7 +72310,7 @@ fn adjacent_defender_grammars_keep_their_own_parse_on_the_effect_side() {
     // OUTPUT SHAPE: a `Pump` with a `sub_ability`, which the comma compound (a
     // multi-element `static_abilities` vec) cannot produce.
     //
-    // THE CONTROL HALF IS DISCRIMINATION 1.9's DISCRIMINATOR: deleting
+    // THE CONTROL HALF IS WHAT DISCRIMINATES THE TERMINATOR ARM: deleting
     // `all_consuming_defender_tail`'s `opt(tag("."))` turns this parse from
     // `Pump + sub_ability{CanAttackWithDefender}` into ONE bare
     // `GenericEffect{CanAttackWithDefender}` with the `Pump` LOST, because
@@ -72390,7 +72395,7 @@ fn adjacent_defender_grammars_keep_their_own_parse_on_the_effect_side() {
     //    peeled into a `sub_ability` and the defender conjunct that re-enters (c)
     //    carries no tail at all.
     //
-    // Both verdicts were measured at PHASE_BASE_SHA (8cd2aa58c) in an isolated
+    // Both verdicts were measured before this change in an isolated
     // worktree and reproduce byte-identically at this candidate — the widening moves
     // neither.
     let creature_frame = parse_oracle_text(

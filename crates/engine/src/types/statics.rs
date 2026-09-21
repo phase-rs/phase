@@ -4382,7 +4382,7 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    // ===== Phase 2 ROW C — C2.4's STRUCTURAL half =====
+    // ===== ROW C — the polarity-typed deferral rule, STRUCTURAL half =====
 
     /// Flatten `Pat::Or` recursively and unwrap `Pat::Paren`, yielding the
     /// TOP-LEVEL alternatives of one arm pattern.
@@ -4436,7 +4436,7 @@ mod tests {
         matches[0]
     }
 
-    /// CR 508.1c + CR 702.3b, C2.4 STRUCTURAL half: every arm alternative of
+    /// CR 508.1c + CR 702.3b, STRUCTURAL half: every arm alternative of
     /// `StaticMode::defending_player_anchor_polarity` NAMES a `StaticMode`
     /// variant explicitly, so a future `StaticMode` variant is a COMPILE ERROR
     /// that must be classified deliberately rather than silently falling into

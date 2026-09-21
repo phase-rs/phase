@@ -846,7 +846,10 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // The consuming policy is a PREFIX match, PRESERVED from base: this arm sits
     // ABOVE the trailing-condition split below, so a trailing rider is (still) not
     // peeled here. Measured: no corpus card reaching this arm carries one — the only
-    // one is Animate Wall, whose tail is ".". See the phase plan's F1.
+    // one is Animate Wall, whose tail is ".". Replacing this PREFIX policy with an
+    // all-consuming one makes the arm decline, the line fall through, and the
+    // `AddKeyword(Defender)` inverse win; guarded by
+    // `attached_subject_production_still_fires_with_a_trailing_rider`.
     if let Some((segment, _rest)) =
         defender_exception::parse_defender_exception_predicate(pred_lower.as_str())
     {

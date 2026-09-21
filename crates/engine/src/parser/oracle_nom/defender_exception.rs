@@ -11,8 +11,7 @@
 //! another. A SEVENTH site, `sequence::combat_requirement_conjunct_prepend`, is
 //! UNEDITED and reaches this module through the shared predicate. FIVE of the
 //! six EMIT a `CanAttackWithDefender` and therefore call `permission_condition`;
-//! the predicate emits nothing. (Counts derived by command, not listed —
-//! revision 5, DERIVED SWEEP.)
+//! the predicate emits nothing.
 //!
 //! SINGLE CONDITION AUTHORITY: recognition is delegated to
 //! `oracle_nom::condition::parse_inner_condition`. This module applies a purely
@@ -54,13 +53,26 @@ pub(crate) enum DefenderExceptionSegment {
     /// then checks restrictions against it; CR 611.3a (:2926) keeps the
     /// STATIC-side effect unlocked, and CR 611.2c (:2913) does the same job for
     /// the RESOLUTION-side production (c) and the continuous compound, which
-    /// 611.3a by its own text does not cover. (Revision 5, review finding m-E.)
+    /// 611.3a by its own text does not cover.
     /// The class is answerable per proposed pairing.
     AnchoredClass(StaticCondition),
     /// `parse_inner_condition` recognized the normalized clause, but it has NO
     /// anchored reading, so it cannot be answered per pairing. Fail-closed.
+    ///
+    /// **DELIBERATELY SEPARATE FROM `UnrecognizedClass`, even though
+    /// `permission_condition` — the only consumer — maps both to the same
+    /// `unenforceable_gate_marker`.** The split is the instrument that proves this
+    /// classifier DELEGATES recognition rather than carrying a local class table:
+    /// a local table has never heard of "players who discarded a card this turn"
+    /// and would answer `UnrecognizedClass`, whereas delegating to the condition
+    /// authority — which OWNS that phrase but gives it no defending-player-anchored
+    /// reading — answers `UnanchorableClass`. Merging the two variants would erase
+    /// the only observable difference between the two implementations and leave
+    /// `classifier_accept_set_is_the_condition_authoritys_not_a_local_table` unable
+    /// to discriminate them. This is a proof obligation, not an unfinished branch.
     UnanchorableClass { text: String },
     /// `parse_inner_condition` declined the normalized clause. Fail-closed.
+    /// Kept distinct from `UnanchorableClass` for the reason given on that variant.
     UnrecognizedClass { text: String },
 }
 
@@ -70,8 +82,7 @@ impl DefenderExceptionSegment {
     /// so the FIVE EMITTING PRODUCTIONS cannot disagree about it — (a), (b),
     /// (c), the conjunctive static splitter and the continuous compound.
     /// (`is_can_attack_despite_defender_predicate` is the sixth call site of
-    /// the recognizer but emits nothing, so it does not call this. Derived by
-    /// command — revision 5, DERIVED SWEEP.)
+    /// the recognizer but emits nothing, so it does not call this.)
     ///
     /// `unenforceable_gate_marker` yields `Not(Unrecognized{..})`, which
     /// `layers::evaluate_condition_inner` negates to FALSE forever — so an
@@ -99,8 +110,8 @@ impl DefenderExceptionSegment {
 /// continues with "and it can't be blocked"), while
 /// `defender_exception_predicate_all_consuming` requires an empty one.
 ///
-/// **IT DOES NOT TRIM ITS INPUT, and that is a decision, not an omission
-/// (revision 4, SYMMETRY SWEEP S-2).** Trimming here would make production (a)
+/// **IT DOES NOT TRIM ITS INPUT, and that is a decision, not an omission.**
+/// Trimming here would make production (a)
 /// accept a line base refuses, on a path with no test and no card: base's
 /// CR 702.3b arm is `alt((tag(..), tag(..))).parse(pred_lower.as_str())` with no
 /// trim at all, so a leading space makes base DECLINE. Each caller keeps base's
@@ -111,24 +122,24 @@ pub(crate) fn parse_defender_exception_predicate(
     lower: &str,
 ) -> Option<(DefenderExceptionSegment, &str)> {
     // A PURE type/shape adapter over `defender_exception_ir`, which is the single
-    // place the grammar is written. ONE spelling, SIX edited call sites (DERIVED
-    // SWEEP). It carries no behaviour of its own — which is why it needs no
-    // DISCRIMINATION row, and why the sweep that looked for one removed the line
-    // that would have needed one.
+    // place the grammar is written. ONE spelling, SIX edited call sites. It carries
+    // no behaviour of its own: no edit to this body can change a parse without also
+    // changing `defender_exception_ir`, so it has no test of its own — the tests
+    // that guard the grammar guard it.
     defender_exception_ir(lower)
         .ok()
         .map(|(rest, segment)| (segment, rest))
 }
 
-/// THE ALL-CONSUMING POLICY, WRITTEN ONCE — and the only place in this phase
-/// where it is written at all.
+/// THE ALL-CONSUMING POLICY, WRITTEN ONCE — and the only place it is written at
+/// all.
 ///
 /// A defender-exception predicate is "all-consuming" when nothing follows the
-/// tail except at most a single terminator. **Every all-consuming call site in
-/// the phase routes through this function**, because at `PHASE_BASE_SHA` the
-/// policy already lives in exactly one place — `is_can_attack_despite_defender_predicate`
-/// — and production (c) is one of its consumers rather than carrying a copy
-/// (measured, M-23). A second spelling would re-create, in the very module whose
+/// tail except at most a single terminator. **Every all-consuming call site
+/// routes through this function**, because before this change the policy already
+/// lived in exactly one place — `is_can_attack_despite_defender_predicate` —
+/// and production (c) was one of its consumers rather than carrying a copy.
+/// A second spelling would re-create, in the very module whose
 /// purpose is to remove copies of this grammar, the duplication the module
 /// exists to delete.
 ///
@@ -137,49 +148,67 @@ pub(crate) fn parse_defender_exception_predicate(
 /// remainders it accepts after the tail are `""` and `"."`, plus trailing
 /// whitespace that the input trim had already removed. A `rest.trim()` here
 /// would additionally accept `" ."` — i.e. `"… didn't have defender ."` — a line
-/// base DECLINES. Corpus exposure of that difference is zero (M-13's tail census
-/// enumerates every tail), but this helper's whole job is to PRESERVE a policy,
+/// base DECLINES. Corpus exposure of that difference is zero — a census of the
+/// tails of all 56 corpus defender-exception lines turns up no `" ."` tail — but
+/// this helper's whole job is to PRESERVE a policy,
 /// so it is spelled to reproduce base rather than to approximate it. `trim_end`
 /// reproduces the input trim's only surviving effect; the remainder is NOT
 /// re-trimmed on the left.
 ///
-/// DISCRIMINATION 1.9 walks the `opt(tag("."))`; 1.10 the emptiness check;
-/// **8a.2, 1.24 / 8b.2 and 8c.2 walk this function's THREE call sites' choices
-/// to apply it.** All FIVE are bought at CARD altitude — see their rows.
+/// GUARDED BY: `adjacent_defender_grammars_keep_their_own_parse_on_the_effect_side`
+/// fails if the `opt(tag("."))` goes, and
+/// `walking_bulwark_comma_compound_carries_the_anchored_condition` fails if the
+/// emptiness check is relaxed to a prefix. The THREE call sites' separate choices
+/// to apply this policy at all are guarded by three further tests — named at
+/// `defender_exception_predicate_all_consuming`.
 fn all_consuming_defender_tail(rest: &str) -> Option<()> {
-    // 1.9
+    // The one permitted terminator. Drop it and the sequence splitter's conjunct,
+    // which still carries its own ".", fails the emptiness check below: the parse
+    // collapses from `Pump` + `sub_ability{CanAttackWithDefender}` to a bare
+    // `GenericEffect{CanAttackWithDefender}` with the `Pump` LOST.
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("."))
         .parse(rest.trim_end())
         .ok()?;
-    // 1.10
+    // Emptiness, NOT a prefix. Relax this and production (c) claims the whole
+    // clause before the continuous compound is ever reached, so the compound's
+    // element arity and order change.
     rest.is_empty().then_some(())
 }
 
 /// Parse from the START of `lower` under the all-consuming policy.
-/// **TWO DIRECT CALLERS:** 8a (`is_can_attack_despite_defender_predicate`, and
-/// through it the compound's GATE and the sequence splitter) and **8c, the
-/// compound's per-segment LOOP, which calls this directly because it needs the
-/// `class`**. Both pass a TRIMMED input — 8a passes `lower.trim()` (base's own
-/// trim); 8c passes `segment.to_lowercase()` where base already trimmed
-/// `segment`. See `all_consuming_defender_tail`.
+/// **TWO DIRECT CALLERS:** `is_can_attack_despite_defender_predicate` — and
+/// through it the continuous compound's GATE and the sequence splitter — and the
+/// continuous compound's per-segment LOOP, which calls this directly because it
+/// needs the classified segment. Both pass a TRIMMED input: the predicate passes
+/// `lower.trim()` (base's own trim), the loop a lowercased segment that base had
+/// already trimmed. See `all_consuming_defender_tail`.
 ///
-/// **THE `all_consuming_defender_tail(rest)?` LINE BELOW IS DISCRIMINATION 8a.2.**
-/// Delete it — equivalently, make 8a call `parse_defender_exception_predicate`
-/// directly — and the continuous compound's per-segment gate OPENS for a
-/// defender segment that carries trailing text, pushing an unconditioned
-/// `CanAttackWithDefender` where base and the candidate both refuse. Measured
-/// (M-24, MODE 5). Its SIBLING,
-/// `split_defender_exception_predicate_all_consuming` below, carries the
-/// identical line for production (c) and is walked as 1.24 / 8b.2; the compound
-/// LOOP's own choice to route through THIS function is 8c.2. **None of the
-/// three call sites may be edited without the other two's rows (8a.2,
-/// 1.24 / 8b.2, 8c.2) being re-checked: that asymmetry — one sibling walked,
-/// the others not — is what review findings MG-1 and MG-A each caught.**
+/// **DO NOT DROP THE `all_consuming_defender_tail(rest)?` LINE BELOW** —
+/// equivalently, do not make `is_can_attack_despite_defender_predicate` call
+/// `parse_defender_exception_predicate` directly. The continuous compound's
+/// per-segment gate then OPENS for a defender segment carrying trailing text and
+/// pushes an unconditioned `CanAttackWithDefender` where base and this parser both
+/// refuse. Guarded by
+/// `defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_policy`.
+///
+/// `split_defender_exception_predicate_all_consuming` below carries the identical
+/// line for production (c), and the compound LOOP's own choice to route through
+/// THIS function is a third application of the same policy. **The three have three
+/// SEPARATE tests because a mutation at one call site leaves the other two green:**
+/// `defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_policy`
+/// covers this function's line,
+/// `walking_bulwark_comma_compound_carries_the_anchored_condition` covers
+/// production (c)'s, and
+/// `two_defender_segments_in_one_compound_keep_the_all_consuming_policy_at_the_loop`
+/// covers the loop's. Edit any one call site and re-check all three.
 pub(crate) fn defender_exception_predicate_all_consuming(
     lower: &str,
 ) -> Option<DefenderExceptionSegment> {
     let (segment, rest) = parse_defender_exception_predicate(lower)?;
-    all_consuming_defender_tail(rest)?; // 8a.2 — sibling of 1.24 / 8b.2 and of 8c.2
+    // Dropping this opens the continuous compound's per-segment gate for a segment
+    // with trailing text; guarded by
+    // `defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_policy`.
+    all_consuming_defender_tail(rest)?;
     Some(segment)
 }
 
@@ -194,7 +223,10 @@ pub(crate) fn split_defender_exception_predicate_all_consuming(
     lower: &str,
 ) -> Option<(&str, DefenderExceptionSegment)> {
     let (subject_prefix, segment, rest) = split_defender_exception_predicate(lower)?;
-    all_consuming_defender_tail(rest)?; // 1.24 / 8b.2 — sibling of 8a.2 and of 8c.2
+    // Dropping this lets production (c) claim a clause the continuous compound
+    // must have, changing that compound's element arity and order; guarded by
+    // `walking_bulwark_comma_compound_carries_the_anchored_condition`.
+    all_consuming_defender_tail(rest)?;
     Some((subject_prefix, segment))
 }
 
@@ -204,12 +236,13 @@ pub(crate) fn split_defender_exception_predicate_all_consuming(
 /// `F: FnMut(&'a str) -> IResult<&'a str, O, OracleError<'a>>`, and
 /// `parse_defender_exception_predicate` returns `Option<(..)>`, which does not
 /// satisfy that bound. `split_defender_exception_predicate` and the conjunctive
-/// static splitter (Step 6) both scan with THIS function; the `Option`-returning
+/// static splitter (`oracle_static::evasion::try_split_and_can_attack_despite_defender`)
+/// both scan with THIS function; the `Option`-returning
 /// `parse_defender_exception_predicate` above is a thin adapter over it for the
 /// call sites that parse from the start of their input. **ONE spelling of the
-/// grammar, SIX EDITED CALL SITES** (derived by command — revision 5, DERIVED
-/// SWEEP; a seventh, 8d, is unedited and arrives through the shared predicate)
-/// — which is the whole reason the module exists.
+/// grammar, SIX EDITED CALL SITES** (a seventh,
+/// `sequence::combat_requirement_conjunct_prepend`, is unedited and arrives
+/// through the shared predicate) — which is the whole reason the module exists.
 ///
 /// `pub(crate)` rather than module-private because the conjunctive static
 /// splitter (`oracle_static::evasion::try_split_and_can_attack_despite_defender`)
@@ -219,8 +252,11 @@ pub(crate) fn defender_exception_ir(
 ) -> nom::IResult<&str, DefenderExceptionSegment, OracleError<'_>> {
     type VE<'a> = OracleError<'a>;
     let (after_verb, _) = tag::<_, _, VE>("can attack").parse(input)?;
-    // Word boundary: without this, "can attackers ..." matches the verb phrase
-    // and the interposed segment becomes "ers". (Row 8 arm 8.)
+    // Word boundary: without this, "can attackers ..." matches the verb phrase,
+    // the interposed segment becomes "ers", and an INERT `CanAttackWithDefender`
+    // is emitted for a non-line. Guarded by `verb_phrase_requires_a_word_boundary`
+    // here and by `word_boundary_guard_refuses_the_attackers_minimal_pair` at line
+    // level.
     peek(tag::<_, _, VE>(" ")).parse(after_verb)?;
     let (segment, _tail, rest) = nom_primitives::scan_preceded(after_verb, |i: &str| {
         (
@@ -336,8 +372,7 @@ mod tests {
     const ANCHORED_CLAUSE: &str = "attacked you during their last turn";
 
     /// CR 508.6 (:2327): every `alt` member of the relative-clause -> clausal
-    /// normalization, TABLE-DRIVEN so deleting any member reds a NAMED entry
-    /// (DISCRIMINATION 1.13, 1.14 and 1.15).
+    /// normalization, TABLE-DRIVEN so deleting any member reds a NAMED entry.
     #[test]
     fn every_relative_clause_surface_normalizes_and_anchors() {
         let surfaces = [
@@ -368,9 +403,9 @@ mod tests {
         }
     }
 
-    /// C3.6 + Row 6 (i): the accept set is the CONDITION AUTHORITY's, not a local
-    /// table — the variant difference IS the instrument. All three classification
-    /// terminals in one fixture.
+    /// The accept set is the CONDITION AUTHORITY's, not a local table — the
+    /// `UnanchorableClass` / `UnrecognizedClass` difference IS the instrument (see
+    /// those variants' docs). All three classification terminals in one fixture.
     ///
     /// `"players who discarded a card this turn"` normalizes to
     /// `"a player discarded a card this turn"`, which `parse_inner_condition`
@@ -398,9 +433,8 @@ mod tests {
         ));
     }
 
-    /// Row 6's hostile fixture: the authority's EMPTY-REMAINDER contract
-    /// (DISCRIMINATION 1.18). A segment the authority owns only as a PREFIX must
-    /// NOT be accepted.
+    /// The hostile fixture for the authority's EMPTY-REMAINDER contract: a segment
+    /// the authority owns only as a PREFIX must NOT be accepted.
     #[test]
     fn classifier_enforces_the_authoritys_empty_remainder_contract() {
         assert!(
@@ -421,9 +455,9 @@ mod tests {
         ));
     }
 
-    /// DISCRIMINATION 1.11 + 1.1: the empty segment is the plain, unrestricted
-    /// CR 702.3b permission; DISCRIMINATION 1.2 / 1.12: `"this turn"` is a
-    /// DURATION adverbial, not a player class.
+    /// The empty segment is the plain, unrestricted CR 702.3b permission, and
+    /// `"this turn"` is a DURATION adverbial rather than a player class — two
+    /// distinct terminals, neither of which may collapse into the other.
     #[test]
     fn empty_and_duration_segments_are_their_own_terminals() {
         assert_eq!(
@@ -435,7 +469,7 @@ mod tests {
             DefenderExceptionSegment::DurationAdverbial
         );
         // `all_consuming`, not a prefix: "this turn players who ..." is NOT a
-        // duration adverbial (Row 4's hostile fixture).
+        // duration adverbial. The hostile fixture for that `all_consuming`.
         assert!(matches!(
             classify_interposed_segment(
                 "this turn players who attacked you during their last turn"
@@ -444,9 +478,10 @@ mod tests {
         ));
     }
 
-    /// DISCRIMINATION 1.7: the word-boundary guard after the verb phrase.
+    /// The word-boundary guard after the verb phrase.
     /// `"can attackers ..."` must NOT parse; the same sentence WITHOUT `ers` must.
-    /// A MINIMAL PAIR, three characters apart (Row 8 arm 8 / arm 1 at line level).
+    /// A MINIMAL PAIR, three characters apart. The same pair is asserted at LINE
+    /// level by `word_boundary_guard_refuses_the_attackers_minimal_pair`.
     #[test]
     fn verb_phrase_requires_a_word_boundary() {
         assert!(parse_defender_exception_predicate(
@@ -461,7 +496,7 @@ mod tests {
     }
 
     /// `permission_condition`'s FOUR outcomes — the single place the
-    /// inert-marker decision is made (DISCRIMINATION 1.20 / 1.21 / 1.22).
+    /// inert-marker decision is made.
     #[test]
     fn permission_condition_maps_every_terminal() {
         assert_eq!(

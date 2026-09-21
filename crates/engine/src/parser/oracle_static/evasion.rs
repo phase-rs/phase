@@ -869,17 +869,23 @@ pub(crate) fn is_forced_block_static_candidate(lower: &str) -> bool {
 }
 
 /// CR 702.3b + CR 611.3a + CR 613: Decompose `"<predicate_1> and can attack
-/// as though <pronoun> didn't have defender[ as long as <cond>]"` into two
-/// independent `StaticDefinition`s sharing the same `affected` + `condition`.
+/// [<segment>] as though <pronoun> didn't have defender[ as long as <cond>]"`
+/// into two independent `StaticDefinition`s sharing the same `affected`.
+///
+/// `<segment>` — the optional INTERPOSED SEGMENT — names the class of defenders
+/// the permission covers. It is recognized by the ONE shared
+/// `defender_exception::defender_exception_ir`, never by a local grammar here.
 ///
 /// Strategy: locate the conjunction phrase at a word boundary via
 /// `scan_preceded`, splice it out of the text, and re-parse the remainder
 /// via `parse_static_line_multi`. Recursion is safe — the spliced text no
-/// longer contains the conjunction marker. The first conjunct's `affected`
-/// and `condition` are cloned onto a companion `CanAttackWithDefender`
-/// definition. All emitted definitions share the original full-line
-/// description, matching the convention used by other compound handlers
-/// (e.g., `CantBeEquipped` + `CantBeEnchanted`).
+/// longer contains the conjunction marker. The first conjunct's `affected` is
+/// cloned onto a companion `CanAttackWithDefender` definition. Its `condition`
+/// is NOT: the interposed segment's condition and Line A's own condition are
+/// INDEPENDENT gates that must both hold, so they are CONJOINED via
+/// `combine_conditions` rather than one replacing the other. All emitted
+/// definitions share the original full-line description, matching the convention
+/// used by other compound handlers (e.g., `CantBeEquipped` + `CantBeEnchanted`).
 pub(crate) fn try_split_and_can_attack_despite_defender(
     text: &str,
 ) -> Option<Vec<StaticDefinition>> {
@@ -913,7 +919,10 @@ pub(crate) fn try_split_and_can_attack_despite_defender(
     // It CANNOT be `matched.len()` any more: the combinator's output is a
     // `DefenderExceptionSegment`, whose payload is a `StaticCondition` or an owned
     // `String` — neither is a slice of `lower`, and an offset computed from either
-    // would splice at the wrong byte. (DISCRIMINATION 6.5.)
+    // would splice at the wrong byte: a short splice leaves `"and can attack"`
+    // fragments in Line A, `parse_static_line_multi` returns `[]`, and the whole
+    // splitter returns `None`. Guarded by
+    // `adjacent_defender_grammars_keep_their_own_parse`.
     let matched_len = lower.len() - before.len() - rest.len();
     // Drop the trailing space that precedes the "and" marker so Line A doesn't
     // end up with " ." before its terminating period.
@@ -943,9 +952,11 @@ pub(crate) fn try_split_and_can_attack_despite_defender(
     // CR 508.1c (:2270): the interposed class and Line A's OWN condition are
     // INDEPENDENT gates and both must hold, so they conjoin rather than one
     // replacing the other. SAME helper and SAME `(Some, Some)` arm as production
-    // (b) — DISCRIMINATION 6.3, bought by Row 8 arm 5b (Spire Serpent, whose Line A
-    // carries its own `QuantityComparison`). With no interposed segment this
-    // degenerates to `(None, Some)` and reproduces base exactly (Row 8 arm 4).
+    // (b). Guarded by `spire_serpent_conjunctive_split_composes_both_conditions`
+    // (Spire Serpent, whose Line A carries its own `QuantityComparison`), which
+    // fails if either gate is dropped or one overwrites the other. With no
+    // interposed segment this degenerates to `(None, Some)` and reproduces base
+    // exactly — guarded by `adjacent_defender_grammars_keep_their_own_parse`.
     if let Some(condition) =
         combine_conditions(segment.permission_condition(), template.condition.clone())
     {
@@ -3028,12 +3039,15 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
 /// didn't have defender [as long as <condition>]" into a StaticMode::
 /// CanAttackWithDefender on `affected` with an optional condition.
 ///
-/// Uses `scan_split_at_phrase(tag("can attack as though"))` to locate the
-/// phrase at a word boundary (unlike the old ` can attack` form which
-/// required a leading space and silently failed when the subject was `~`).
-/// Fails gracefully (returns `None`) when the phrase is missing, the tail
-/// doesn't match either pronoun form, or the subject cannot be resolved
-/// to a known filter — letting subsequent dispatch branches try.
+/// Delegates the whole predicate to
+/// `defender_exception::split_defender_exception_predicate`, the ONE shared
+/// recognizer, which scans for it at a word boundary and returns the subject
+/// prefix together with the classified interposed segment. (The older form
+/// scanned for a literal leading-space ` can attack`, which silently failed when
+/// the subject was `~`.) Fails gracefully (returns `None`) when the predicate is
+/// missing, when the segment is a duration adverbial rather than a player class,
+/// or when the subject cannot be resolved to a known filter — letting subsequent
+/// dispatch branches try.
 pub(crate) fn parse_can_attack_despite_defender(
     tp: &TextPair<'_>,
     description: &str,
@@ -3054,7 +3068,9 @@ pub(crate) fn parse_can_attack_despite_defender(
     // The consuming policy is UNCHANGED: the scanner returns a remainder and this
     // production IGNORES it, exactly as its base prefix tail-check did. Expedition
     // Lookout's `"...didn't have defender and it can't be blocked."` depends on
-    // that (Row 8 arm 9).
+    // that: under a uniform all-consuming policy this production declines, the line
+    // falls through, and that real card LOSES its permission. Guarded by
+    // `adjacent_defender_grammars_keep_their_own_parse`.
     let (subject_prefix, segment, _rest) =
         defender_exception::split_defender_exception_predicate(body_tp.lower)?;
     // A duration adverbial is not a player class and has no static-line reading —

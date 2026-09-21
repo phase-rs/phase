@@ -798,9 +798,9 @@ mod tests {
         )
     }
 
-    // ===== Phase 2 ROW 7, CR 113.6g arm =====
+    // ===== ROW 7, CR 113.6g arm =====
 
-    /// CR 113.6g (docs/MagicCompRules.txt:785), C2.1: the new ATTACK slice
+    /// CR 113.6g (docs/MagicCompRules.txt:785): the new ATTACK slice
     /// inherits the self-referential `CantBeCountered`/`CantBeCopied` stack
     /// exception rather than restating it — both entry points are one
     /// `static_def_applies`, so the exception cannot be dropped on one side.

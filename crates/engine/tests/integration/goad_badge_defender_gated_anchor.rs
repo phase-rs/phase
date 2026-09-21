@@ -932,12 +932,12 @@ fn must_attack_gate_short_circuits_on_the_first_legal_pairing() {
 }
 
 // ===========================================================================
-// ROW 5 (Phase 2 row 9) — C2.7 CONTAINMENT: the PROHIBITION polarity's published
-// state is UNCHANGED by the permission authority.
+// ROW 5 — CONTAINMENT: the PROHIBITION polarity's published state is UNCHANGED
+// by the permission authority.
 // ===========================================================================
 
-/// C2.7: badge emission for the deferred-anchor PROHIBITION polarity is a
-/// pre-existing engine follow-up, whose defining comment sits inside
+/// Badge emission for the deferred-anchor PROHIBITION polarity is a pre-existing
+/// engine follow-up, whose defining comment sits inside
 /// `combat::attacker_constraints_for_active_player`'s declare-attackers badge
 /// walk. That gap belongs to the OPPOSITE polarity from the defender-anchored
 /// PERMISSION class, and the permission work must neither create, widen nor
@@ -950,9 +950,9 @@ fn must_attack_gate_short_circuits_on_the_first_legal_pairing() {
 /// `combat::build_declare_attackers_waiting_for`, so the row is a single
 /// published snapshot rather than three independent probes.
 ///
-/// BASE VALUES ARE RECORDED, NOT INHERITED. Read at
-/// `PHASE_BASE_SHA = 032c71408dbe9eb2a08707dc2e214066147f7c26` on this exact
-/// board:
+/// BASE VALUES ARE RECORDED, NOT INHERITED. Read at commit
+/// `032c71408dbe9eb2a08707dc2e214066147f7c26` — the last commit before the
+/// permission authority landed — on this exact board:
 ///
 /// | observable | `gated` (deferred-anchor `CantAttack`) |
 /// |---|---|
@@ -1065,7 +1065,7 @@ fn deferred_anchor_prohibition_published_state_is_unchanged_by_the_permission_au
         constraints.get(&badged)
     );
 
-    // --- The three base observables, UNCHANGED (C2.7). ---
+    // --- The three base observables, UNCHANGED. ---
     assert!(
         valid.contains(&gated),
         "C2.7 ({LABEL}): base observable 1 of 3 — the deferred-anchor PROHIBITION \

@@ -2186,8 +2186,9 @@ fn evaluate_condition_inner(
         // CR 508.6 + CR 109.5: the `!= controller` guard mirrors the existential
         // arm's `p.id != controller`, so the two scopes agree on CR 508.6's
         // subject exclusion and the anchored reading stays a strict REFINEMENT
-        // of the existential one (anchored-true => existential-true). Phase 2's
-        // creature-level deferral depends on that ordering.
+        // of the existential one (anchored-true => existential-true). The
+        // creature-level deferral in `static_abilities::unanchored_defending_player_deferral`
+        // depends on that ordering.
         StaticCondition::AnyPlayerAttackedYouLastTurn {
             scope: AttackedYouScope::AttackedPlayer,
         } => {

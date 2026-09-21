@@ -2278,10 +2278,14 @@ fn try_parse_can_attack_with_defender(
     let lower = text.to_lowercase();
     // The all-consuming policy is (c)'s base behaviour and it is NOT respelled
     // here: `split_defender_exception_predicate_all_consuming` applies the module's
-    // single `all_consuming_defender_tail`, the same policy 8a applies. At
-    // PHASE_BASE_SHA (c) likewise carries no policy of its own — it shares 8a's
-    // predicate (M-23) — so this preserves base's topology rather than adding a
-    // second spelling. This also REPLACES base's `TextPair` lookup of
+    // single `all_consuming_defender_tail`, the same policy
+    // `is_can_attack_despite_defender_predicate` applies. Before this change (c)
+    // likewise carried no policy of its own — it shared that predicate — so this
+    // preserves base's topology rather than adding a second spelling. Dropping the
+    // all-consuming entry point here in favour of the bare adapter lets (c) claim a
+    // clause the continuous compound must have; guarded by
+    // `walking_bulwark_comma_compound_carries_the_anchored_condition`.
+    // This also REPLACES base's `TextPair` lookup of
     // `" can attack"`, a non-combinator dispatch, with a word-boundary
     // combinator scan.
     let (subject_lower, segment) =
@@ -2292,8 +2296,10 @@ fn try_parse_can_attack_with_defender(
     let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
     // Duration is derived from the WHOLE clause, NOT from the segment: the subject
     // can carry "this turn" with an empty segment (measured: three corpus cards), and
-    // narrowing this to the segment would move those lines (M-12). UNCHANGED from
-    // base — value EXTRACTION from already-accepted text, not parsing dispatch.
+    // narrowing this to the segment would move those three lines' durations.
+    // UNCHANGED from base — value EXTRACTION from already-accepted text, not parsing
+    // dispatch. Guarded by
+    // `defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_production`.
     let duration = if lower.contains("this turn") {
         Some(Duration::UntilEndOfTurn)
     } else {
@@ -2306,7 +2312,9 @@ fn try_parse_can_attack_with_defender(
             mode: StaticMode::CanAttackWithDefender,
         }])
         .description(text.to_string());
-    // C3.9: NEVER an unconditioned CanAttackWithDefender for an interposed line.
+    // NEVER an unconditioned CanAttackWithDefender for an interposed line — that is
+    // the issue #8785 defect shape. Guarded by
+    // `interposed_class_is_supported_on_the_effect_production`.
     if let Some(condition) = segment.permission_condition() {
         def = def.condition(condition);
     }
@@ -2417,11 +2425,12 @@ pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
 /// that emits a `CanAttackWithDefender` agree about the grammar.
 ///
 /// Widening this predicate widens its TWO remaining consumers at this candidate:
-/// `build_defender_attack_continuous_compound`'s GATE (the loop below it calls
-/// `defender_exception_predicate_all_consuming` directly, see 8c.2) and
-/// `sequence::combat_requirement_conjunct_prepend` (unedited). At
-/// `PHASE_BASE_SHA` there were three; `try_parse_can_attack_with_defender` moved
-/// to `split_defender_exception_predicate_all_consuming` in this same commit.
+/// `build_defender_attack_continuous_compound`'s GATE (the loop below that gate
+/// calls `defender_exception_predicate_all_consuming` directly, as its own separate
+/// application of the same policy) and
+/// `sequence::combat_requirement_conjunct_prepend` (unedited). Before this change
+/// there were three; `try_parse_can_attack_with_defender` moved to
+/// `split_defender_exception_predicate_all_consuming` in this same commit.
 /// Every grammar site that EMITS a `CanAttackWithDefender` must carry the
 /// interposed class's condition onto it — an unconditioned one on an interposed
 /// line is the issue #8785 defect shape reappearing on a sibling grammar.
@@ -2433,9 +2442,12 @@ pub(super) fn is_can_attack_despite_defender_predicate(lower: &str) -> bool {
     // `all_consuming(..).parse(lower.trim())`. The classifier module does NOT
     // trim on the caller's behalf.
     //
-    // 8a.2: the choice of `defender_exception_predicate_all_consuming` over the
-    // bare `parse_defender_exception_predicate` IS this line's retained
-    // all-consuming policy. Row 8 arm 12 fails if it is dropped (M-24, MODE 5).
+    // The choice of `defender_exception_predicate_all_consuming` over the bare
+    // `parse_defender_exception_predicate` IS this line's retained all-consuming
+    // policy. Drop it and the continuous compound's gate OPENS for a defender
+    // segment carrying trailing text, pushing an unconditioned
+    // `CanAttackWithDefender`. Guarded by
+    // `defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_policy`.
     defender_exception::defender_exception_predicate_all_consuming(lower.trim()).is_some()
 }
 
@@ -6450,16 +6462,19 @@ fn build_defender_attack_continuous_compound(
             continue;
         }
         let lower = segment.to_lowercase();
-        // 8c.2 — THE CALL-SITE CHOICE. This calls the ALL-CONSUMING entry point, not
-        // the bare `parse_defender_exception_predicate`. SIBLING of 8a.2 and of
-        // 1.24 / 8b.2: three call sites apply one policy, and all three carry a row.
-        // Reverting THIS one to the bare adapter is DISCRIMINATION 8c.2, bought by
-        // Row 8 arm 13 (M-27). The GATE above runs 8a; this LOOP is a DIFFERENT call
-        // site of a DIFFERENT function.
+        // THE CALL-SITE CHOICE. This calls the ALL-CONSUMING entry point, not the
+        // bare `parse_defender_exception_predicate`. Revert it to the bare adapter
+        // and this loop pushes an unconditioned `CanAttackWithDefender` for a
+        // segment carrying trailing text — the issue #8785 defect shape on this
+        // production. Guarded by
+        // `two_defender_segments_in_one_compound_keep_the_all_consuming_policy_at_the_loop`,
+        // which is a SEPARATE test from the gate's because the GATE above runs
+        // `is_can_attack_despite_defender_predicate`, a DIFFERENT call site of a
+        // DIFFERENT function: mutating this loop leaves the gate's test green.
         //
         // The branch is not an optimization: the fallback below is
         // `parse_continuous_modifications`, which for this exact grammar returns
-        // `[AddKeyword(Defender)]` — the INVERSE of the printed clause (M-17).
+        // `[AddKeyword(Defender)]` — the INVERSE of the printed clause.
         if let Some(class) = defender_exception::defender_exception_predicate_all_consuming(&lower)
         {
             let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
@@ -6468,9 +6483,10 @@ fn build_defender_attack_continuous_compound(
                     mode: StaticMode::CanAttackWithDefender,
                 }])
                 .description(segment.to_string());
-            // C3.9: NEVER an unconditioned CanAttackWithDefender for an interposed
-            // line. The CONDITION comes from the classification of the SAME string
-            // the `description` carries.
+            // NEVER an unconditioned CanAttackWithDefender for an interposed line —
+            // that is the issue #8785 defect shape. The CONDITION comes from the
+            // classification of the SAME string the `description` carries. Guarded by
+            // `walking_bulwark_comma_compound_carries_the_anchored_condition`.
             if let Some(condition) = class.permission_condition() {
                 def = def.condition(condition);
             }

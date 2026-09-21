@@ -1948,7 +1948,7 @@ fn creature_can_attack_despite_defender(
     // `cargo check -p phase-ai`. NOTE, because the obvious guess is wrong:
     // `--all-targets` does NOT catch it — the self dev-dependency in
     // crates/engine/Cargo.toml unifies `test-support` onto the lib, so clippy
-    // passes (measured; Phase 2 plan M-X).
+    // passes (measured).
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_defender_permission_lookup();
     super::functioning_abilities::active_static_definitions_for_attack(state, obj, target)
@@ -9172,7 +9172,12 @@ mod tests {
     }
 
     // =======================================================================
-    // PHASE 2 — defender-anchored attack permission (#8785).
+    // DEFENDER-ANCHORED ATTACK PERMISSION (#8785) — THE RUNTIME AUTHORITY.
+    //
+    // The `ROW n` banners below label the sections of this group; the matching
+    // lowercase `"row n"` strings are the `dp_assert_survived` labels those
+    // sections pass. A second group, `ROW n (REAL CARD)`, appears further down and
+    // drives the same seam from `parse_oracle_text` instead of a hand-built static.
     //
     // Shared fixture helpers for the rows below. THE BINDING FIXTURE RULE: a
     // hand-pushed `StaticDefinition` survives the layers pipeline only if it is
@@ -9234,7 +9239,7 @@ mod tests {
     }
 
     /// CR 508.6 + CR 508.1b: "players who attacked you during their last turn",
-    /// anchored to the attack target as a PLAYER (Phase 1's scope).
+    /// anchored to the attack target as a PLAYER, not existentially to any player.
     fn dp_anchored() -> StaticCondition {
         StaticCondition::AnyPlayerAttackedYouLastTurn {
             scope: crate::types::ability::AttackedYouScope::AttackedPlayer,
@@ -9252,7 +9257,7 @@ mod tests {
     }
 
     /// The INTRINSIC self-referential permission this class's carrier shape is
-    /// pinned to (charter row 1): `affected: TargetFilter::SelfRef` on the
+    /// pinned to (row 1 below): `affected: TargetFilter::SelfRef` on the
     /// Defender creature itself.
     fn dp_intrinsic_permission(condition: Option<StaticCondition>) -> StaticDefinition {
         let def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
@@ -9263,7 +9268,7 @@ mod tests {
         }
     }
 
-    // ===== ROW 1 — charter row 1 =====
+    // ===== ROW 1 — the intrinsic anchored permission is offered and scoped =====
 
     /// CR 702.3b (docs/MagicCompRules.txt:3915) + CR 508.1b (:2268) + CR 508.6
     /// (:2327): a Defender creature carrying an INTRINSIC self-referential
@@ -9324,14 +9329,14 @@ mod tests {
             vec![AttackTarget::Player(PlayerId(1))],
             "CR 508.1b + CR 508.6: only the player who attacked P0 last turn qualifies"
         );
-        // (c) the `validate_attackers` call site's reach-guard (C2.1).
+        // (c) the `validate_attackers` call site's reach-guard.
         assert!(
             validate_attackers(&state, &[wall]).is_ok(),
             "CR 508.1a: the offered creature must pass the declaration validator"
         );
     }
 
-    // ===== ROW 2 — charter row 2 =====
+    // ===== ROW 2 — the two condition views agree, pair by pair =====
 
     /// CR 508.1b + CR 508.1c: the two views of `legal_attack_targets_iter` AGREE
     /// about the anchored creature, and the pairability counter proves EVERY
@@ -9404,7 +9409,7 @@ mod tests {
         );
     }
 
-    // ===== ROW 3 — charter row 3 (C2.6) =====
+    // ===== ROW 3 — the per-pairing authority has exactly one target-binding caller =====
 
     /// Does `attrs` carry a literal `#[cfg(test)]`?
     fn dp_is_cfg_test(attrs: &[syn::Attribute]) -> bool {
@@ -9545,13 +9550,13 @@ mod tests {
         }
     }
 
-    /// C2.6 + the STANDING INVARIANT: every caller of
+    /// THE STANDING INVARIANT: every caller of
     /// `creature_can_attack_despite_defender` is enumerated; **exactly four pass
     /// the literal `None`, exactly one passes any other expression, and that one
     /// lies inside `fn attacker_can_attack_target`.**
     ///
     /// The row counts the COMPLEMENT of `None`, not occurrences of `Some(` — the
-    /// drift shape the charter names is a FIFTH site written
+    /// drift shape it must catch is a FIFTH site written
     /// `creature_can_attack_despite_defender(state, obj, gates, maybe_target)`
     /// with a bound `Option<AttackTarget>`, which contains no literal `Some(` at
     /// all. Any argument expression that is not the literal `None` is a
@@ -9662,7 +9667,8 @@ mod tests {
         );
     }
 
-    // ===== ROW 4 — charter row 4 (C2.5) + the present-but-unanchored sibling =====
+    // ===== ROW 4 — the new arm narrows no pairing legal at base, + the
+    // present-but-unanchored sibling =====
 
     /// CR 702.3b (:3915) + CR 508.1c (:2270): the new per-pairing arm narrows NO
     /// pairing that is legal at base, and a permission whose condition is PRESENT
@@ -9766,7 +9772,7 @@ mod tests {
         );
     }
 
-    // ===== ROW 5 — charter row 5 =====
+    // ===== ROW 5 — a Defender creature with no permission costs nothing =====
 
     /// CR 702.3b: a Defender creature with NO permission is refused at creature
     /// level and contributes ZERO pairability evaluations, while a Defender
@@ -9785,7 +9791,7 @@ mod tests {
     ///
     /// `has_potential_attackers` is used here as a VERDICT instrument only: it
     /// short-circuits on the first eligible creature, so its scan count is
-    /// meaningless and is never read as a counter anywhere in this matrix.
+    /// meaningless and is never read as a counter by any row in this module.
     #[test]
     fn unpermitted_defender_contributes_no_pairability_evaluations() {
         let mut state = setup_multiplayer_combat(3);
@@ -9857,21 +9863,21 @@ mod tests {
         );
     }
 
-    // ===== ROW 6 — charter row 6, axes (a) and (b) =====
+    // ===== ROW 6 — union and coexistence, axes (a) and (b) =====
 
     /// CR 508.5a (:2325) + CR 702.3b (:3915) + CR 508.1c (:2270): two
     /// INCOMPARABLE anchored permissions on ONE creature UNION correctly, and an
     /// anchored PERMISSION and an anchored PROHIBITION coexist on one board with
-    /// OPPOSITE verdicts from the one deferral rule (C2.3).
+    /// OPPOSITE verdicts from the one deferral rule.
     ///
-    /// **The charter's wording for (a) is unsatisfiable with an anchored + an
-    /// UNCONDITIONAL permission** — the union is then EQUAL to the unconditional
-    /// singleton, never a strict superset. The row is therefore built on TWO
-    /// INCOMPARABLE ANCHORED permissions, which makes the charter's own wording
-    /// literally satisfiable and is the stronger test: neither singleton contains
-    /// the other, so the union is a strict superset of BOTH and a masking
-    /// implementation fails in either direction. The equal-to-the-larger-singleton
-    /// case the charter's prose reached for is retained below as a LABELLED
+    /// **"the union is a STRICT SUPERSET of either singleton" is unsatisfiable
+    /// with an anchored + an UNCONDITIONAL permission** — the union is then EQUAL
+    /// to the unconditional singleton, never a strict superset. The row is
+    /// therefore built on TWO INCOMPARABLE ANCHORED permissions, which makes that
+    /// claim literally satisfiable and is the stronger test: neither singleton
+    /// contains the other, so the union is a strict superset of BOTH and a masking
+    /// implementation fails in either direction. The weaker
+    /// equal-to-the-larger-singleton case is retained below as a LABELLED
     /// EQUALITY.
     ///
     /// The discriminating conjunct is `DefendingPlayerControls { filter }`, whose
@@ -9941,7 +9947,7 @@ mod tests {
                 .affected(TargetFilter::SelfRef)
                 .condition(dp_anchored()),
         );
-        // C2.1 reach-guard for `creature_must_attack_with_attackable_targets`.
+        // Reach-guard for `creature_must_attack_with_attackable_targets`.
         dp_push_static(
             &mut state,
             x_only,
@@ -10023,7 +10029,7 @@ mod tests {
              creature on the same board"
         );
 
-        // C2.1 reach-guard: the `creature_must_attack_with_attackable_targets`
+        // Reach-guard: the `creature_must_attack_with_attackable_targets`
         // call site really is reached on this board.
         assert!(
             creature_must_attack_with_attackable_targets(&state, x_only, &attackable),
@@ -10031,7 +10037,7 @@ mod tests {
         );
     }
 
-    // ===== ROW 6(c) — charter row 6, THIRD axis =====
+    // ===== ROW 6(c) — one carrier, two definitions: ANY-semantics =====
 
     /// CR 604.1: ONE remote carrier holding TWO `CanAttackWithDefender`
     /// definitions grants through EITHER of them — the ANY-semantics property
@@ -10107,7 +10113,7 @@ mod tests {
         );
     }
 
-    // ===== ROW 7 — charter row 7 (C2.1): the CR gate stack is not dropped =====
+    // ===== ROW 7 — the CR gate stack is not dropped =====
 
     /// CR 702.26b (docs/MagicCompRules.txt:4180): a phased-out permanent is
     /// treated as though it does not exist, so the permission it carries does not
@@ -10189,8 +10195,8 @@ mod tests {
     /// POSITION a measured property rather than a declared one.** Both REMOTE
     /// readings exercise `object_functioning_statics` through
     /// `carrier_static_applies` and neither touches the intrinsic slice's own
-    /// zone gate — the gate C2.1 names as one a helper "can drop without any test
-    /// noticing". `static_def_applies` places the polarity deferral AFTER the
+    /// zone gate — the gate a helper can silently drop without any other test
+    /// noticing. `static_def_applies` places the polarity deferral AFTER the
     /// CR 113.6g branch and `static_functions_in_zone`; hoisting it to the top of
     /// that function returns `Permission => Some(true)` before the zone gate is
     /// ever consulted and OFFERS the `Command`-scoped creature.
@@ -10284,7 +10290,7 @@ mod tests {
         }
     }
 
-    // ===== ROW 8 — charter row 8 (C2.2): the perf seam, on BOTH axes =====
+    // ===== ROW 8 — the perf seam, on BOTH axes =====
 
     /// Build row 8(b)/(c)/(d)'s shared shape: a 3-player board, `P1` attacked
     /// `P0` last turn, `K` vanilla creatures controlled by P0, and ONE REMOTE
@@ -10294,7 +10300,7 @@ mod tests {
     /// The carrier MUST be REMOTE: with an intrinsic self-referential permission
     /// the `||`'s first arm answers before any whole-battlefield scan and the
     /// scan counter cannot move at all, so an intrinsic board cannot measure this
-    /// axis (charter row 8).
+    /// axis at all.
     fn dp_remote_carrier_board(k: usize, defenders: usize) -> (GameState, Vec<ObjectId>) {
         use crate::parser::oracle_target::parse_target;
         let mut state = setup_multiplayer_combat(3);
@@ -10328,7 +10334,7 @@ mod tests {
         (state, walls)
     }
 
-    /// C2.2, PER-PAIRING AXIS: two boards differing ONLY in the size of the
+    /// PERF SEAM, PER-PAIRING AXIS: two boards differing ONLY in the size of the
     /// defender universe yield EQUAL and NON-ZERO `static_full_scans`.
     ///
     /// A per-pairing `check_static_ability` costs exactly one whole-battlefield
@@ -10397,7 +10403,7 @@ mod tests {
         );
     }
 
-    /// C2.2, PER-CANDIDATE AXIS: a board carrying a permission static but NO
+    /// PERF SEAM, PER-CANDIDATE AXIS: a board carrying a permission static but NO
     /// Defender creature takes ZERO `static_full_scans` across a published
     /// payload, at two different candidate counts — the Assault-Formation shape.
     ///
@@ -10454,7 +10460,7 @@ mod tests {
         );
     }
 
-    /// C2.2, PER-CANDIDATE AXIS with a Defender creature present: EQUAL, NON-ZERO
+    /// PERF SEAM, PER-CANDIDATE AXIS with a Defender creature present: EQUAL, NON-ZERO
     /// `static_full_scans` at two different candidate counts.
     ///
     /// No literal expected constant is asserted — the claim is INVARIANCE, and
@@ -10493,7 +10499,7 @@ mod tests {
         );
     }
 
-    /// C2.2, ARM ORDER: a CREATURE-LEVEL query over a board whose only permission
+    /// PERF SEAM, ARM ORDER: a CREATURE-LEVEL query over a board whose only permission
     /// is INTRINSIC takes ZERO `static_full_scans`.
     ///
     /// The entry point is `get_valid_attacker_ids`, which is
@@ -10702,19 +10708,19 @@ mod tests {
         );
     }
 
-    // ===== ROW A — the charter's SCOPE-RULE measurement, made permanent =====
+    // ===== ROW A — the two condition-evaluation entry points agree =====
 
     /// The TWO condition-evaluation entry points a defender permission reaches
     /// AGREE about the same static — for a SINGLE-LEAF anchored condition AND for
     /// a COMPOUND one carrying a recipient-relative leaf.
     ///
-    /// This is the row that brings Phase 2's own guard for the INTRINSIC half,
-    /// which rows 1-9 alone do not discriminate because the `||` masks it. The
+    /// This is the row that guards the INTRINSIC half, which rows 1-9 alone do not
+    /// discriminate because the `||` masks it. The
     /// arms are measured INDIVIDUALLY, which is the only instrument that can see
     /// the `recipient` widening at all — and arm AGREEMENT, not the `||`'s value,
     /// is the property under contract.
     ///
-    /// Base counterpart (measured at `PHASE_BASE_SHA` 032c71408): the same three
+    /// Base counterpart (measured at commit 032c71408): the same three
     /// single-leaf readings were `false/false`, `false/true`, `false/false` — the
     /// arms ALREADY DISAGREED at `Some(P1)`. The row therefore also documents the
     /// base defect.
@@ -10910,7 +10916,7 @@ mod tests {
         );
     }
 
-    // ===== ROW E — `!Defender` is the FIRST conjunct (C2.2) =====
+    // ===== ROW E — `!Defender` is the FIRST conjunct =====
 
     /// The count of defender-permission lookups that get PAST the `!Defender`
     /// guard does not grow with the number of VANILLA creatures on the board.
@@ -10963,24 +10969,32 @@ mod tests {
         );
     }
 
-    // ===== ROW 1 — charter row 1 (PHASE 3) · C3.1 (AFTER half) + C3.2 =====
+    // =======================================================================
+    // THE SAME SEAM, DRIVEN FROM THE REAL CARD's PARSE.
+    //
+    // The rows above hand-build the carrier shape; these three parse Weathered
+    // Sentinels' printed Oracle text and drive the identical seam with whatever
+    // the parser actually produces. Nothing in `game/` differs between the two
+    // groups — that is the point.
+    // =======================================================================
+
+    // ===== ROW 1 (REAL CARD) — the parser -> combat seam =====
 
     /// CR 702.3b (docs/MagicCompRules.txt:3915) + CR 508.6 (:2327) + CR 609.4
     /// (:2854): the target card's printed SECOND LINE parses to a
     /// `CanAttackWithDefender` carrying the ANCHORED
     /// `AnyPlayerAttackedYouLastTurn { scope: AttackedPlayer }`.
     ///
-    /// **THIS TEST IS THE REWRITTEN PHASE 2 CANARY**, in place, and its flip is
-    /// PLANNED rather than discovered. It shipped at Phase 2 as
+    /// **THIS TEST IS A REWRITTEN CANARY**, in place, and its flip was PLANNED
+    /// rather than discovered. It previously stood as
     /// `weathered_sentinels_second_line_still_parses_to_its_base_shape`, pinning
-    /// `parse_static_line == None` AND `parse_static_line_multi == []` for exactly
-    /// the line Phase 3 teaches the parser to accept. **The canary DID its job**: it
-    /// held the Phase 2 tree honest — Phase 2 emitted nothing from the parser and
-    /// charter row 10 required the card-data artifact to be byte-identical to base —
-    /// and its failure at PHASE_BASE_SHA 8cd2aa58c IS the measurement that Phase 3
-    /// moved the parse. Its two negative assertions become the positive shape
-    /// assertions below; its CONTROL block is KEPT VERBATIM as this row's paired
-    /// positive control.
+    /// that BOTH static-side entry points REFUSED this exact line — the earlier,
+    /// runtime-only change deliberately emitted nothing new from the parser and
+    /// required the card-data artifact to stay byte-identical to base, and this
+    /// canary is what held that honest. Its failure under the parser change IS the
+    /// measurement that the parse moved. Its two negative assertions became the
+    /// positive shape assertions below; its CONTROL block is KEPT VERBATIM as this
+    /// row's paired positive control.
     ///
     /// **It stays in `combat.rs`, deliberately.** A parser row could live in
     /// `oracle_static/tests.rs` (and the production-attribution twin does), but this
@@ -10992,7 +11006,8 @@ mod tests {
     /// map, or production (b)'s widened scan each fires a named assertion here.
     #[test]
     fn weathered_sentinels_line_parses_to_anchored_can_attack_with_defender() {
-        // Verbatim Oracle text (Scryfall, re-verified at Phase 1's Step 0).
+        // Verbatim Oracle text (Scryfall, re-verified against the card-data
+        // artifact's `oracle_text` field).
         const LINE: &str = "This creature can attack players who attacked you during \
                             their last turn as though it didn't have defender.";
         // PAIRED POSITIVE CONTROL, same production, same subject class: the plain
@@ -11015,8 +11030,7 @@ mod tests {
         );
         assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
         // BOTH static-side entry points, because the canary this row replaces pinned
-        // BOTH at Phase 2's base (`parse_static_line == None` AND
-        // `parse_static_line_multi == []`). Asserting only the first would leave the
+        // BOTH as refusing the line. Asserting only the first would leave the
         // canary's other half un-replaced.
         let multi = parse_static_line_multi(LINE);
         assert_eq!(
@@ -11034,9 +11048,9 @@ mod tests {
             "CR 508.1b (:2268) + CR 508.6 (:2327): the class is answerable PER PROPOSED \
              PAIRING, so it carries the ANCHORED scope, not the existential default"
         );
-        // POSITIVE SHAPE, not merely the absence of the Defender grant: at
-        // PHASE_BASE_SHA this line produced `Continuous{[AddKeyword(Defender)]}` — the
-        // exact INVERSE of the printed clause (issue #8785).
+        // POSITIVE SHAPE, not merely the absence of the Defender grant: before this
+        // change the line produced `Continuous{[AddKeyword(Defender)]}` — the exact
+        // INVERSE of the printed clause (issue #8785).
         assert!(
             def.modifications.is_empty(),
             "the CR 702.3b permission must carry no AddKeyword modification; got {:?}",
@@ -11056,20 +11070,20 @@ mod tests {
         );
     }
 
-    /// Weathered Sentinels' VERBATIM three-line Oracle text (Step-0 verified
-    /// against the base card-data artifact's `oracle_text` field). Line 1 is the
-    /// keyword line, line 2 is the CR 702.3b permission this phase teaches the
-    /// parser, line 3 is an attack trigger neither phase touches.
-    const P3_WEATHERED_SENTINELS_ORACLE: &str = "Defender, reach, vigilance, trample\nThis creature can attack players who attacked you during their last turn as though it didn't have defender.\nWhenever this creature attacks, it gets +3/+3 and gains indestructible until end of turn.";
+    /// Weathered Sentinels' VERBATIM three-line Oracle text (verified against the
+    /// base card-data artifact's `oracle_text` field). Line 1 is the keyword line,
+    /// line 2 is the CR 702.3b permission this change teaches the parser, line 3 is
+    /// an attack trigger nothing here touches.
+    const WEATHERED_SENTINELS_ORACLE: &str = "Defender, reach, vigilance, trample\nThis creature can attack players who attacked you during their last turn as though it didn't have defender.\nWhenever this creature attacks, it gets +3/+3 and gains indestructible until end of turn.";
 
     /// The `mtgjson_keyword_names` the EXPORT frame supplies for this card, in
     /// printed order. **THE ARGUMENT IS LOAD-BEARING AND IT IS MEASURED.** With
     /// `&[]`, line 1 is NOT absorbed into `extracted_keywords` — it survives as
     /// `Unimplemented{name:"unknown"}` and `abilities.len()` is 2, so an emptiness
     /// assertion on `abilities` would FAIL for a reason that has nothing to do with
-    /// this phase. Supplying the names puts these rows in the EXPORT frame, which is
-    /// the frame the corpus-regeneration row measures.
-    fn p3_weathered_sentinels_keyword_names() -> Vec<String> {
+    /// the permission under test. Supplying the names puts these rows in the EXPORT
+    /// frame, which is the frame the corpus-regeneration row measures.
+    fn weathered_sentinels_keyword_names() -> Vec<String> {
         vec![
             "Defender".to_string(),
             "Reach".to_string(),
@@ -11081,11 +11095,11 @@ mod tests {
     /// Parse the real card and return its printed statics, asserting the routing
     /// facts both runtime rows stand on. **No row borrows another row's fixture**;
     /// this is a shared RECIPE, re-run per row.
-    fn p3_weathered_sentinels_statics() -> Vec<StaticDefinition> {
+    fn weathered_sentinels_statics() -> Vec<StaticDefinition> {
         let parsed = crate::parser::parse_oracle_text(
-            P3_WEATHERED_SENTINELS_ORACLE,
+            WEATHERED_SENTINELS_ORACLE,
             "Weathered Sentinels",
-            &p3_weathered_sentinels_keyword_names(),
+            &weathered_sentinels_keyword_names(),
             &["Artifact".to_string(), "Creature".to_string()],
             &["Wall".to_string()],
         );
@@ -11116,7 +11130,7 @@ mod tests {
             parsed.extracted_keywords
         );
         // With line 1 absorbed, `abilities` is empty IFF line 2 moved to `statics`.
-        // At PHASE_BASE_SHA this vec was
+        // Before this change the vec was
         // `[GenericEffect{Continuous, SelfRef, [AddKeyword(Defender)]}]` — the INVERSE
         // of the printed clause — so this is a POSITIVE direction assertion, not a
         // tautology.
@@ -11126,7 +11140,7 @@ mod tests {
              got {:?}",
             parsed.abilities
         );
-        // Line 3 is untouched by this phase.
+        // Line 3 is untouched by this change.
         assert_eq!(
             parsed.triggers.len(),
             1,
@@ -11135,7 +11149,7 @@ mod tests {
         parsed.statics
     }
 
-    // ===== ROW 2 — charter row 2 (PHASE 3): integration FROM THE REAL CARD =====
+    // ===== ROW 2 (REAL CARD) — integration FROM THE REAL CARD =====
 
     /// CR 508.1a (docs/MagicCompRules.txt:2266) + CR 508.1c (:2270) + CR 508.6
     /// (:2327): with the card's OWN PARSED statics on the board, the Defender
@@ -11143,10 +11157,11 @@ mod tests {
     /// equals EXACTLY the qualifying player set — a PROPER SUBSET of the attackable
     /// universe.
     ///
-    /// **This row is why Phase 3 follows Phase 2.** Nothing in `game/` is edited by
-    /// this phase; the row is the proof that the PARSE OUTPUT is the shape Phase 2's
-    /// authority already consumes. Phase 2 row 1 hand-built this carrier shape; this
-    /// row drives the same seam from `parse_oracle_text`.
+    /// **This row is why the parser change and the runtime change belong in one
+    /// branch.** Nothing in `game/` is edited by the parser change; the row is the
+    /// proof that the PARSE OUTPUT is the shape the runtime authority already
+    /// consumes. Row 1 above hand-builds this carrier shape; this row drives the
+    /// same seam from `parse_oracle_text`.
     ///
     /// The published surface is `WaitingFor::DeclareAttackers`'s
     /// `valid_attack_targets_by_attacker`, built from the PRIVATE
@@ -11170,7 +11185,7 @@ mod tests {
         // permission, paired with `wall`'s presence as its control.
         let inert_wall = dp_create_defender(&mut state, PlayerId(0), "Plain Wall");
 
-        for def in p3_weathered_sentinels_statics() {
+        for def in weathered_sentinels_statics() {
             dp_push_static(&mut state, wall, def);
         }
         crate::game::layers::evaluate_layers(&mut state);
@@ -11219,7 +11234,7 @@ mod tests {
         );
     }
 
-    // ===== ROW 3 — charter row 3 (PHASE 3) · C3.8 =====
+    // ===== ROW 3 (REAL CARD) — the published display surface agrees, whole =====
 
     /// CR 508.1a (:2266) + CR 508.1c (:2270): the PUBLISHED display surface AGREES,
     /// WHOLE. ONE read of `build_declare_attackers_waiting_for` shows all three
@@ -11228,8 +11243,8 @@ mod tests {
     /// qualifying set.
     ///
     /// They come from ONE published snapshot rather than three independent probes,
-    /// which is the property the charter asks this row to buy: the frontend computes
-    /// nothing, so "display agreeing" is exactly "the engine published a consistent
+    /// which is the property this row exists to buy: the frontend computes nothing,
+    /// so "display agreeing" is exactly "the engine published a consistent
     /// snapshot".
     ///
     /// BOTH paired positive controls are MANDATORY, or the badge half is vacuous:
@@ -11238,8 +11253,8 @@ mod tests {
     /// board at all.
     ///
     /// CONTAINMENT: this row is the PERMISSION polarity and adds nothing to the badge
-    /// walk. Phase 2 row 9 owns the PROHIBITION-polarity display gap and holds it
-    /// unchanged.
+    /// walk. The PROHIBITION-polarity display gap is owned elsewhere and is held
+    /// unchanged here.
     #[test]
     fn real_card_published_combat_constraints_agree_whole() {
         let mut state = setup_multiplayer_combat(3);
@@ -11268,7 +11283,7 @@ mod tests {
         // `entered_battlefield_turn` bookkeeping field.
         state.objects.get_mut(&sick).unwrap().summoning_sick = true;
 
-        for def in p3_weathered_sentinels_statics() {
+        for def in weathered_sentinels_statics() {
             dp_push_static(&mut state, wall, def);
         }
         crate::game::layers::evaluate_layers(&mut state);
