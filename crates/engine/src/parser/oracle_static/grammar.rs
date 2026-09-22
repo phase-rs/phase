@@ -905,7 +905,24 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     if let Some((segment, _rest)) =
         defender_exception::parse_defender_exception_predicate(body_lower)
     {
-        if !matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+        // CR 702.3b: DECLINE the duration form outright rather than falling
+        // through. "Enchanted creature can attack THIS TURN as though it didn't
+        // have defender" is a TEMPORARY exception to Defender; the generic
+        // continuous parser below reads the tail as a grant and emits
+        // `AddKeyword(Defender)` — the exact INVERSE of the printed permission,
+        // and the #8785 defect shape on a sibling grammar.
+        //
+        // An empty `Vec` means "not parsed here": callers fall back to
+        // `parse_static_line` (production (b)), which declines this form too, so
+        // the line ends up UNPARSED and visible as a coverage gap instead of
+        // silently reversed. That is the honest answer for a shape no corpus card
+        // prints as a static line, and it makes the two static productions agree
+        // rather than disagree. Guarded by
+        // `defender_exception_duration_form_is_declined_by_both_static_productions`.
+        if matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+            return Vec::new();
+        }
+        {
             let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
                 .affected(affected.clone())
                 .description(description.to_string());
