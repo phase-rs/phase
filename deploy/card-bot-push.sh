@@ -35,6 +35,13 @@ if [ "${healthy:-0}" != "1" ]; then
   exit 1
 fi'
 
+cd "$(dirname "$0")/.."
+
+# The seam pins (formats, endpoints, server directory) guard what the image
+# ships; a failure aborts before anything is built (set -e).
+echo "Testing card-bot..."
+bun test scripts/card-bot
+
 echo "Building ${IMAGE}..."
 # --platform linux/amd64: the VPS is x86_64 even when building from Apple Silicon.
 # --provenance=false keeps the image in the classic format the host's older

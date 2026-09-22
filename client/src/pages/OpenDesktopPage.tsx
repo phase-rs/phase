@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { Link, useSearchParams } from "react-router";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { GITHUB_URL, social } from "../components/chrome/socialLinks";
 import { menuButtonClass } from "../components/menu/buttonStyles";
@@ -23,23 +23,30 @@ const DESKTOP_DOWNLOAD_URL = `${GITHUB_URL}/releases/latest`;
  * this page (and its fallbacks) visible, others show their own error page, and
  * the user must go Back to reach the fallbacks. The hand-off therefore assigns
  * rather than replaces, so this page's history entry survives for that Back.
- * A document reached by that Back (a history traversal that was not restored
- * from the bfcache) skips the automatic hand-off, so it cannot loop back to the
- * error page; the "Open desktop app" link remains the manual retry.
+ *
+ * Before handing off, the page marks its own history entry
+ * (`desktopHandOff` in the router's location state). Entry state survives both
+ * a Back that reloads the document and an in-app Back (after "Continue in
+ * browser"), so an entry that already handed off never does so automatically
+ * again and cannot loop back to the error page; the "Open desktop app" link
+ * remains the manual retry.
  */
 export function OpenDesktopPage() {
   const { t } = useTranslation("multiplayer");
   const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const handedOff = location.state?.desktopHandOff === true;
   const to = searchParams.get("to");
   const desktopLink = to?.startsWith(DESKTOP_LINK_PREFIX) ? to : null;
   const webPath = desktopLink === null ? null : new URL(desktopLink).searchParams.get("path");
   const browserPath = webPath?.startsWith(MULTIPLAYER_PREFIX) ? webPath : null;
 
   useEffect(() => {
-    // "navigation" entries are always PerformanceNavigationTiming; absent means a normal load.
-    const [navigation] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
-    if (desktopLink !== null && navigation?.type !== "back_forward") location.assign(desktopLink);
-  }, [desktopLink]);
+    if (desktopLink === null || handedOff) return;
+    navigate(location, { replace: true, state: { ...location.state, desktopHandOff: true } });
+    window.location.assign(desktopLink);
+  }, [desktopLink, handedOff, location, navigate]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col items-center justify-center px-4">

@@ -156,6 +156,13 @@ describe("/lfg command (T-cmd)", () => {
     ],
     ["broker below lobby protocol 10", () => cache(9), [opt("format", "Commander")], "doesn't support Discord games yet"],
     [
+      // A lobby-10 server on a pre-10 build: the build's site would ignore the links.
+      "server mode on a broker below lobby protocol 10, with an eligible lobby-10 server",
+      () => cache(9, [row()]),
+      [opt("format", "Commander"), opt("mode", "server")],
+      "doesn't support Discord games yet",
+    ],
+    [
       "no eligible server",
       () => cache(10, [row({ mode: "LobbyOnly" })]),
       [opt("format", "Commander"), opt("mode", "server")],
@@ -224,12 +231,6 @@ describe("/lfg command (T-cmd)", () => {
     const res = await body(lfgCommand(command([opt("format", "Commander"), opt("mode", "server")]), d));
     expect(res.data.flags).toBeUndefined();
     expect(created()[0]).toMatchObject({ lfg: { mode: "server", server: { url: high.url } } });
-  });
-
-  test("server mode is not gated on the P2P broker's lobby protocol", async () => {
-    const d = deps(await cache(9, [row()]));
-    const res = await body(lfgCommand(command([opt("format", "Commander"), opt("mode", "server")]), d));
-    expect(res.data.flags).toBeUndefined();
   });
 });
 
@@ -331,6 +332,15 @@ describe("/lfg server autocomplete", () => {
     expect((await body(lfgAutocomplete(interaction("BRA"), d))).data.choices?.map((c) => c.value)).toEqual([
       "wss://b.example/ws",
     ]);
+  });
+
+  test("a broker below lobby protocol 10 offers nothing, even with an eligible lobby-10 server", async () => {
+    const d = deps(await cache(9, [row()]));
+    const interaction = { ...command([opt("server", "", true)]), type: InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE };
+    expect((await body(lfgAutocomplete(interaction, d))).data.choices).toEqual([]);
+    // Reach guard: the same row is offered once the broker is at lobby 10.
+    const ok = deps(await cache(10, [row()]));
+    expect((await body(lfgAutocomplete(interaction, ok))).data.choices?.map((c) => c.value)).toEqual([row().url]);
   });
 
   test("a cold cache offers nothing", async () => {

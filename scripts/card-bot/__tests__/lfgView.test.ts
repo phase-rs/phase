@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { BUILD_ENDPOINTS } from "../config";
 import { ButtonStyle, ComponentType, MessageFlags } from "../discord";
 import { findFormat, FORMATS } from "../formats";
 import type { Lfg } from "../lfg";
@@ -44,6 +45,14 @@ function lfg(overrides: Partial<Lfg> = {}): Lfg {
 const SERVER = { url: "wss://phase-0.example.com/ws", name: "Phase 0" };
 const serverLfg = (overrides: Partial<Lfg> = {}) =>
   lfg({ mode: "server", server: SERVER, ...overrides });
+
+// The client's reader of these links. Its config module reads Vite defines at
+// load, so they are stubbed before the (dynamic, hence unhoisted) import.
+Object.assign(globalThis, {
+  __OFFICIAL_MULTIPLAYER_SERVER_URL__: "wss://lobby.phase-rs.dev/ws",
+  __DEFAULT_MULTIPLAYER_SERVER_URL__: "wss://lobby.phase-rs.dev/ws",
+});
+const { parseBotLink } = await import("../../../client/src/pages/multiplayerPageState");
 
 describe("host link (Phase B grammar)", () => {
   test("P2P: exactly code, format, players, room — in order, no view; players = seated count", () => {
@@ -108,6 +117,40 @@ const linkButtonOf = (label: string, url: string) => ({
   style: ButtonStyle.LINK,
   label,
   url,
+});
+
+describe("the client's parseBotLink reads the bot's links", () => {
+  const search = (link: string) => new URL(link).search;
+
+  for (const [mode, make] of [
+    ["p2p", lfg],
+    ["server", serverLfg],
+  ] as const) {
+    for (const build of ["release", "preview"] as const) {
+      test(`${mode} on ${build}: the host link round-trips its seed`, () => {
+        const l = make({ build });
+        expect(parseBotLink(search(hostLink(l)))).toEqual({
+          kind: "host",
+          seed: {
+            code: CODE,
+            format: l.format.format,
+            playerCount: l.seated.length,
+            roomName: roomName(l.format),
+            serverUrl: l.server?.url ?? null,
+          },
+        });
+      });
+
+      test(`${mode} on ${build}: the guest link joins the code at the game's server`, () => {
+        const l = make({ build });
+        expect(parseBotLink(search(guestLink(l)))).toEqual({
+          kind: "join",
+          code: CODE,
+          serverUrl: l.server?.url ?? BUILD_ENDPOINTS[build].lobbyWs,
+        });
+      });
+    }
+  }
 });
 
 describe("Get-my-link reply", () => {

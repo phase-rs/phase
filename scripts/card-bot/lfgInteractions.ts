@@ -95,13 +95,14 @@ export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
   if (availability === null) {
     return ephemeral("Checking lobby status — try again in a few seconds.");
   }
+  // The build's broker is the bot's only signal for its site's client version: a
+  // pre-10 build's site ignores bot links, whichever mode would host the game.
+  if (!brokerSupportsBotGames(availability.broker)) {
+    return ephemeral(`The ${build} lobby doesn't support Discord games yet.`);
+  }
 
   let server: { url: string; name: string } | null = null;
-  if (mode === "p2p") {
-    if (!brokerSupportsBotGames(availability.broker)) {
-      return ephemeral(`The ${build} lobby doesn't support Discord games yet.`);
-    }
-  } else {
+  if (mode === "server") {
     const eligible = eligibleServers(availability.broker, availability.servers);
     if (eligible.length === 0) return ephemeral("No dedicated server is currently available.");
     // The option is user-typeable, so only a URL from the verified directory is used.
@@ -193,7 +194,8 @@ export function lfgAutocomplete(i: CommandInteraction, deps: LfgDeps): Response 
   let choices: Array<{ name: string; value: string }> = [];
   if (focused?.name === "server") {
     const availability = deps.servers.get(lfgBuild(stringOption(options, "build")));
-    if (availability !== null) {
+    // A pre-10 build refuses every /lfg, so it offers no servers either.
+    if (availability !== null && brokerSupportsBotGames(availability.broker)) {
       const q = (typeof focused.value === "string" ? focused.value : "").trim().toLowerCase();
       choices = eligibleServers(availability.broker, availability.servers)
         .filter((r) => r.name.toLowerCase().includes(q) || r.url.toLowerCase().includes(q))

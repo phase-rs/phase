@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OpenDesktopPage } from "../OpenDesktopPage";
@@ -13,11 +13,35 @@ function desktopLink(path: string): string {
   return `phase://open?${new URLSearchParams({ site: "release", path })}`;
 }
 
-function renderPage(to: string | null) {
+/** The page's router state, as last rendered. */
+let entryState: unknown;
+function EntryState() {
+  entryState = useLocation().state;
+  return null;
+}
+
+/** Stands in for the multiplayer arrival; its button is the browser's Back. */
+function Arrival() {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate(-1)}>Back</button>;
+}
+
+function renderPage(to: string | null, state?: unknown) {
   const search = to === null ? "" : `?${new URLSearchParams({ to })}`;
   render(
-    <MemoryRouter initialEntries={[`/open-desktop${search}`]}>
-      <OpenDesktopPage />
+    <MemoryRouter initialEntries={[{ pathname: "/open-desktop", search, state }]}>
+      <Routes>
+        <Route
+          path="/open-desktop"
+          element={
+            <>
+              <OpenDesktopPage />
+              <EntryState />
+            </>
+          }
+        />
+        <Route path="/multiplayer" element={<Arrival />} />
+      </Routes>
     </MemoryRouter>,
   );
 }
@@ -33,6 +57,7 @@ function expectDownloadLink() {
 describe("OpenDesktopPage", () => {
   beforeEach(() => {
     assign.mockReset();
+    entryState = undefined;
     Object.defineProperty(window, "location", {
       configurable: true,
       writable: true,
@@ -56,23 +81,42 @@ describe("OpenDesktopPage", () => {
 
     expect(assign).toHaveBeenCalledTimes(1);
     expect(assign).toHaveBeenCalledWith(to);
+    expect(entryState).toEqual({ desktopHandOff: true });
     expect(openApp()).toHaveAttribute("href", to);
     expect(continueInBrowser()).toHaveAttribute("href", ARRIVAL);
     expect(invalid()).toBeNull();
     expectDownloadLink();
   });
 
-  it("skips the hand-off when reached by Back, leaving the Open-app link as the retry", () => {
-    vi.spyOn(performance, "getEntriesByType").mockReturnValue([
-      { type: "back_forward" } as PerformanceNavigationTiming,
-    ]);
+  it("marks the entry without dropping its existing state", () => {
+    renderPage(desktopLink(ARRIVAL), { from: "discord" });
+
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(entryState).toEqual({ from: "discord", desktopHandOff: true });
+  });
+
+  it("skips the hand-off on an entry that already handed off (a Back that reloads the page)", () => {
     const to = desktopLink(ARRIVAL);
-    renderPage(to);
+    renderPage(to, { desktopHandOff: true });
 
     expect(assign).not.toHaveBeenCalled();
     expect(openApp()).toHaveAttribute("href", to);
     expect(continueInBrowser()).toHaveAttribute("href", ARRIVAL);
     expectDownloadLink();
+  });
+
+  it("does not hand off again on an in-app Back from Continue in browser", () => {
+    const to = desktopLink(ARRIVAL);
+    renderPage(to);
+    expect(assign).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(continueInBrowser()!);
+    // Reach guard: the page left for the multiplayer arrival.
+    expect(openApp()).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    expect(openApp()).toHaveAttribute("href", to);
+    expect(assign).toHaveBeenCalledTimes(1);
   });
 
   it("offers no browser fallback for a path outside the multiplayer arrival", () => {
