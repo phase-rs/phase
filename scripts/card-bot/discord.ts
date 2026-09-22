@@ -55,14 +55,75 @@ export interface InteractionOption {
   focused?: boolean;
 }
 
-export interface Interaction {
-  type: number;
+export interface DiscordUser {
+  id: string;
+  username: string;
+  global_name?: string | null;
+}
+
+interface InteractionBase {
   application_id: string;
   token: string;
-  data?: {
-    name: string;
-    options?: InteractionOption[];
-  };
+  guild_id?: string;
+  /** Sent when the interaction is invoked in a guild. */
+  member?: { user: DiscordUser };
+  /** Sent when the interaction is invoked in a DM. */
+  user?: DiscordUser;
+}
+
+export interface CommandData {
+  name: string;
+  options?: InteractionOption[];
+}
+
+export interface ComponentData {
+  custom_id: string;
+  component_type: number;
+}
+
+/** An inbound interaction, discriminated on `type`. */
+export type Interaction =
+  | (InteractionBase & { type: typeof InteractionType.PING })
+  | (InteractionBase & {
+      type:
+        | typeof InteractionType.APPLICATION_COMMAND
+        | typeof InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE;
+      data: CommandData;
+    })
+  | (InteractionBase & { type: typeof InteractionType.MESSAGE_COMPONENT; data: ComponentData });
+
+export type CommandInteraction = Extract<Interaction, { data: CommandData }>;
+export type ComponentInteraction = Extract<Interaction, { data: ComponentData }>;
+
+/** The invoking user's id: `member.user` in a guild, `user` in a DM. */
+export function invokerId(interaction: Interaction): string | undefined {
+  return interaction.member?.user.id ?? interaction.user?.id;
+}
+
+/** A JSON HTTP response (the interaction reply to Discord). */
+export function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/** A string option's value, if present. */
+export function stringOption(
+  options: readonly InteractionOption[] | undefined,
+  name: string,
+): string | undefined {
+  const opt = options?.find((o) => o.name === name);
+  return typeof opt?.value === "string" ? opt.value : undefined;
+}
+
+/** An integer option's value, if present. */
+export function integerOption(
+  options: readonly InteractionOption[] | undefined,
+  name: string,
+): number | undefined {
+  const opt = options?.find((o) => o.name === name);
+  return typeof opt?.value === "number" ? opt.value : undefined;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -114,12 +175,16 @@ export async function verifyRequest(
   }
 }
 
-/** Bulk-overwrites the guild's command set (instant propagation). */
-export async function registerGuildCommand(
+/**
+ * Bulk-overwrites the guild's command set (instant propagation). The PUT
+ * REPLACES every guild command, so all commands must be registered in one call —
+ * registering one alone deletes the others.
+ */
+export async function registerGuildCommands(
   appId: string,
   guildId: string,
   token: string,
-  command: unknown,
+  commands: readonly unknown[],
 ): Promise<void> {
   const res = await fetch(`${API}/applications/${appId}/guilds/${guildId}/commands`, {
     method: "PUT",
@@ -127,23 +192,31 @@ export async function registerGuildCommand(
       Authorization: `Bot ${token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify([command]),
+    body: JSON.stringify(commands),
   });
   if (!res.ok) {
-    throw new Error(`registerGuildCommand → ${res.status}: ${await res.text()}`);
+    throw new Error(`registerGuildCommands → ${res.status}: ${await res.text()}`);
   }
 }
 
-/** Edits the original (deferred) interaction response with the final content. */
-export async function editOriginalResponse(
-  appId: string,
-  interactionToken: string,
+/** Pause between retries of a status listed in `retryOn`. */
+const RETRY_DELAY_MS = 1000;
+
+/**
+ * One interaction-webhook request, up to 3 attempts: a 429 waits Discord's
+ * `retry_after`; a status in `retryOn` waits RETRY_DELAY_MS; any other non-2xx
+ * throws.
+ */
+async function webhookRequest(
+  method: "PATCH" | "POST",
+  url: string,
   body: unknown,
+  label: string,
+  retryOn: readonly number[],
 ): Promise<void> {
-  const url = `${API}/webhooks/${appId}/${interactionToken}/messages/@original`;
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(url, {
-      method: "PATCH",
+      method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10000),
@@ -153,10 +226,53 @@ export async function editOriginalResponse(
       await Bun.sleep(Math.ceil(retry_after * 1000) + 100);
       continue;
     }
+    if (retryOn.includes(res.status)) {
+      await Bun.sleep(RETRY_DELAY_MS);
+      continue;
+    }
     if (!res.ok) {
-      throw new Error(`editOriginalResponse → ${res.status}: ${await res.text()}`);
+      throw new Error(`${label} → ${res.status}: ${await res.text()}`);
     }
     return;
   }
-  throw new Error("editOriginalResponse → exhausted retries");
+  throw new Error(`${label} → exhausted retries`);
+}
+
+/** Edits the original (deferred) interaction response with the final content. */
+export async function editOriginalResponse(
+  appId: string,
+  interactionToken: string,
+  body: unknown,
+): Promise<void> {
+  await webhookRequest(
+    "PATCH",
+    `${API}/webhooks/${appId}/${interactionToken}/messages/@original`,
+    body,
+    "editOriginalResponse",
+    [],
+  );
+}
+
+/**
+ * Wait before a follow-up's first attempt. The follow-up is sent in the same tick
+ * the initial interaction response is returned, and Discord does not document
+ * whether a follow-up may precede its processing of that response; waiting ~1 s
+ * (and retrying a 404) avoids depending on the ordering.
+ */
+const FOLLOWUP_DELAY_MS = 1000;
+
+/** Posts a follow-up message on an interaction (e.g. the /lfg ready ping). */
+export async function createFollowupMessage(
+  appId: string,
+  interactionToken: string,
+  body: unknown,
+): Promise<void> {
+  await Bun.sleep(FOLLOWUP_DELAY_MS);
+  await webhookRequest(
+    "POST",
+    `${API}/webhooks/${appId}/${interactionToken}`,
+    body,
+    "createFollowupMessage",
+    [404],
+  );
 }

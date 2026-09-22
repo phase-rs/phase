@@ -201,24 +201,35 @@ describe("sweep", () => {
     // A file database, so a second connection can read the raw seat table.
     const dir = mkdtempSync(join(tmpdir(), "lfg-sweep-"));
     const path = join(dir, "lfg.sqlite");
-    const store = new LfgStore(path);
-    const old = created(store, { seats: 3 });
-    store.join(old.id, GUILD, "b", T0);
-    const young = created(store, { creatorId: "creator-2", seats: 3 }, T0 + HOUR_MS);
-    const now = T0 + DAY_MS + 1; // old is 24 h + 1 ms stale, young 23 h + 1 ms
+    let store: LfgStore | undefined;
+    let raw: Database | undefined;
+    // Cleanup runs even when an assertion fails: close both connections, then
+    // remove the temp database.
+    try {
+      store = new LfgStore(path);
+      const old = created(store, { seats: 3 });
+      store.join(old.id, GUILD, "b", T0);
+      const young = created(store, { creatorId: "creator-2", seats: 3 }, T0 + HOUR_MS);
+      const now = T0 + DAY_MS + 1; // old is 24 h + 1 ms stale, young 23 h + 1 ms
 
-    // The write that triggers the sweep is an unrelated create.
-    created(store, { creatorId: "creator-3" }, now);
-    expect(store.linkFor(old.id, GUILD, "b", now)).toEqual({ kind: "ended", lfg: null });
-    // Seats cascaded: the raw table has none for the swept id (reach guard: the
-    // young row's seat is still there).
-    const raw = new Database(path, { readonly: true, strict: true });
-    const count = (table: "lfg" | "lfg_seat", column: "id" | "lfg_id", id: string) =>
-      (raw.query(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} = $id`).get({ id }) as { n: number }).n;
-    expect([count("lfg", "id", old.id), count("lfg_seat", "lfg_id", old.id)]).toEqual([0, 0]);
-    expect([count("lfg", "id", young.id), count("lfg_seat", "lfg_id", young.id)]).toEqual([1, 1]);
-    raw.close();
-    rmSync(dir, { recursive: true, force: true });
+      // The write that triggers the sweep is an unrelated create.
+      created(store, { creatorId: "creator-3" }, now);
+      expect(store.linkFor(old.id, GUILD, "b", now)).toEqual({ kind: "ended", lfg: null });
+      // Seats cascaded: the raw table has none for the swept id (reach guard: the
+      // young row's seat is still there).
+      const reader = new Database(path, { readonly: true, strict: true });
+      raw = reader;
+      const count = (table: "lfg" | "lfg_seat", column: "id" | "lfg_id", id: string) =>
+        (reader.query(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} = $id`).get({ id }) as { n: number }).n;
+      expect([count("lfg", "id", old.id), count("lfg_seat", "lfg_id", old.id)]).toEqual([0, 0]);
+      expect([count("lfg", "id", young.id), count("lfg_seat", "lfg_id", young.id)]).toEqual([1, 1]);
+    } finally {
+      raw?.close();
+      // LfgStore exposes no close(); its connection is reached through the
+      // private field (bracket access) so the test does not leak it.
+      store?.["db"].close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
