@@ -18,6 +18,11 @@ export const DIRECTORY_VERSION = 1;
 /** Discord's cap on a string choice value — a server URL is offered as one. */
 const MAX_CHOICE_VALUE_LENGTH = 100;
 
+/** Printable ASCII without whitespace. Each such character percent-encodes to at
+ *  most three, so the length cap also bounds the web links built from the URL;
+ *  a non-ASCII character encodes to up to twelve. */
+const PLAIN_URL = /^[\x21-\x7e]+$/;
+
 /** Per-request timeout for the lobby's `/health` and `/servers`. */
 const REQUEST_TIMEOUT_MS = 5000;
 
@@ -67,7 +72,8 @@ export function eligibleServers(
         row.mode === "Full" &&
         row.lobby_protocol_version >= REQUESTED_CODE_LOBBY_PROTOCOL &&
         row.protocol_version === broker.protocol_version &&
-        row.url.length <= MAX_CHOICE_VALUE_LENGTH,
+        row.url.length <= MAX_CHOICE_VALUE_LENGTH &&
+        PLAIN_URL.test(row.url),
     )
     .sort(
       (a, b) =>

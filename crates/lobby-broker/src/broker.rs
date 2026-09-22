@@ -95,11 +95,14 @@ pub struct ConnState {
     /// stamp). Disconnect / re-registration teardown and every host-only check
     /// key off this — and act only while it is still the registration listed
     /// under its code ([`LobbyManager::is_current`]): the listing is reaped
-    /// only once this socket has sent no frame for longer than the timeout
-    /// (its frames refresh the listing, see
-    /// [`LobbyManager::refresh_liveness`]), for example a half-open or
-    /// throttled socket that stays open, and the code can then be claimed by
-    /// another host, whose listing this stamp must never touch.
+    /// once the timeout passes since its liveness clock last advanced. This
+    /// socket's frames advance that clock at most once per
+    /// [`LIVENESS_REFRESH_SECS`](crate::lobby::LIVENESS_REFRESH_SECS) (see
+    /// [`LobbyManager::refresh_liveness`]), so the listing can be reaped up to
+    /// that interval sooner than the timeout after its last frame. A half-open
+    /// or throttled socket that stays open is reaped this way too, and the
+    /// code can then be claimed by another host, whose listing this stamp must
+    /// never touch.
     pub host_game: Option<LobbyRegistration>,
     /// `(game_code, token)` reservations this connection holds, released on
     /// disconnect or explicit release/consume.

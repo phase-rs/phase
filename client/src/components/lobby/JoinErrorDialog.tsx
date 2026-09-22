@@ -15,6 +15,9 @@ interface JoinErrorDialogProps {
   onDismiss?: () => void;
   /** Label of the dismiss button. Defaults to "Dismiss". */
   dismissLabel?: string;
+  /** Whether a backdrop click also fires `onDismiss`. Defaults to true; false
+   * when dismissing is a decision the user must make with the button. */
+  dismissOnBackdrop?: boolean;
 }
 
 /**
@@ -31,11 +34,12 @@ export function JoinErrorDialog({
   primaryAction,
   onDismiss,
   dismissLabel,
+  dismissOnBackdrop = true,
 }: JoinErrorDialogProps) {
   const { t } = useTranslation("multiplayer");
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/70" onClick={onDismiss} />
+      <div className="absolute inset-0 bg-black/70" onClick={dismissOnBackdrop ? onDismiss : undefined} />
       <motion.div
         initial={{ opacity: 0, scale: 0.96 }}
         animate={{ opacity: 1, scale: 1 }}

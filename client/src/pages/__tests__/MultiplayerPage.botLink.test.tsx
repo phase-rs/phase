@@ -592,6 +592,20 @@ describe("MultiplayerPage Discord bot links", () => {
         expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
       });
 
+      it("ignores a backdrop click: Continue anyway takes the button", async () => {
+        const user = userEvent.setup();
+        renderRouted(JOIN_LINK);
+
+        const title = await screen.findByText(multiplayerEn.page.updateFailedTitle);
+        const backdrop = title.closest("div.fixed")!.firstElementChild!;
+        await user.click(backdrop);
+        await act(async () => {});
+
+        expect(screen.getByText(multiplayerEn.page.updateFailedTitle)).toBeInTheDocument();
+        expect(lookupJoinTarget).not.toHaveBeenCalled();
+        expect(stashedKind()).toBe("join");
+      });
+
       it("refreshes through the live-game guard and keeps the stash", async () => {
         const user = userEvent.setup();
         renderRouted(JOIN_LINK);
@@ -839,15 +853,53 @@ describe("MultiplayerPage Discord bot links", () => {
         expect(screen.getByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
         expect(screen.queryByTestId("host-setup")).not.toBeInTheDocument();
       });
+
+      it("does not open its manual dialog after the newer one proceeded", async () => {
+        const update = deferred<string>();
+        buildMocks.checkDeployedBuild.mockResolvedValueOnce("stale").mockResolvedValue("current");
+        buildMocks.updateToLatestBuild.mockReturnValueOnce(update.promise);
+        const router = renderRouted(HOST_LINK);
+        await screen.findByText(multiplayerEn.page.updatingTitle);
+
+        await go(router, JOIN_LINK);
+        await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+        await act(async () => update.resolve("manual"));
+
+        expect(screen.queryByText(multiplayerEn.page.updateFailedTitle)).not.toBeInTheDocument();
+        expect(harness.hostMounts).toHaveLength(0);
+      });
+
+      it("makes its manual dialog inert while the newer arrival's check is pending", async () => {
+        const user = userEvent.setup();
+        const second = deferred<string>();
+        buildMocks.checkDeployedBuild.mockResolvedValueOnce("stale").mockReturnValueOnce(second.promise);
+        const router = renderRouted(HOST_LINK);
+        await screen.findByText(multiplayerEn.page.updateFailedTitle);
+
+        await go(router, JOIN_LINK);
+        expect(stashedKind()).toBe("join");
+        await user.click(screen.getByRole("button", { name: multiplayerEn.page.continueAnyway }));
+        await act(async () => {});
+
+        expect(harness.hostMounts).toHaveLength(0);
+        expect(stashedKind()).toBe("join");
+
+        await act(async () => second.resolve("current"));
+        await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+        expect(harness.hostMounts).toHaveLength(0);
+        expect(screen.queryByText(multiplayerEn.page.updateFailedTitle)).not.toBeInTheDocument();
+        expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+      });
     });
 
     describe("\"Client out of date\" Refresh", () => {
-      async function openOutOfDateDialog(): Promise<void> {
+      async function openOutOfDateDialog(): Promise<TestRouter> {
         resolveGuest.mockResolvedValue({ ok: false, reason: "build_mismatch", message: "m" });
-        renderRouted(JOIN_LINK);
+        const router = renderRouted(JOIN_LINK);
         await screen.findByTestId("my-decks");
         act(() => (harness.myDecks!.onSelectDeck as (name: string) => void)("Deck"));
         await screen.findByText(multiplayerEn.page.joinErrorOutOfDateTitle);
+        return router;
       }
 
       function refreshButton(): HTMLElement {
@@ -885,6 +937,23 @@ describe("MultiplayerPage Discord bot links", () => {
         await act(async () => {});
         expect(screen.getByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
         expect(buildMocks.reloadIfNoLiveGame).not.toHaveBeenCalled();
+      });
+
+      it("leaves a bot-link gate's updating dialog up when its own update fails", async () => {
+        const user = userEvent.setup();
+        const router = await openOutOfDateDialog();
+        const refreshUpdate = deferred<string>();
+        buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+        buildMocks.updateToLatestBuild.mockReturnValueOnce(refreshUpdate.promise).mockReturnValue(new Promise(() => {}));
+        await user.click(refreshButton());
+        await screen.findByText(multiplayerEn.page.updatingTitle);
+
+        await go(router, HOST_LINK);
+        await waitFor(() => expect(buildMocks.updateToLatestBuild).toHaveBeenCalledTimes(2));
+        await act(async () => refreshUpdate.resolve("manual"));
+
+        expect(buildMocks.reloadIfNoLiveGame).toHaveBeenCalledOnce();
+        expect(screen.getByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
       });
 
       it.each(["current", "unknown"])("reloads at once on a %s build", async (build) => {

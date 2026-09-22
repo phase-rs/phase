@@ -20,8 +20,9 @@ const DESKTOP_DOWNLOAD_URL = `${GITHUB_URL}/releases/latest`;
  *
  * With no desktop app installed, what happens is browser-specific and not
  * controllable from here: some browsers ignore the unknown scheme and leave
- * this page (and its fallbacks) visible, others replace it with their own error
- * page, and the user must go Back to reach the fallbacks.
+ * this page (and its fallbacks) visible, others show their own error page, and
+ * the user must go Back to reach the fallbacks. The hand-off therefore assigns
+ * rather than replaces, so this page's history entry survives for that Back.
  */
 export function OpenDesktopPage() {
   const { t } = useTranslation("multiplayer");
@@ -32,7 +33,7 @@ export function OpenDesktopPage() {
   const browserPath = webPath?.startsWith(MULTIPLAYER_PREFIX) ? webPath : null;
 
   useEffect(() => {
-    if (desktopLink !== null) location.replace(desktopLink);
+    if (desktopLink !== null) location.assign(desktopLink);
   }, [desktopLink]);
 
   return (

@@ -33,7 +33,10 @@
 //!
 //! The dev shell is unsupported: macOS registers the scheme only for an
 //! installed bundle, and the destination is always a production channel
-//! origin, never the dev server or a `SHELL_REMOTE_ORIGIN` override.
+//! origin, never the dev server or a `SHELL_REMOTE_ORIGIN` override. A debug
+//! build never registers the Linux handler either: it would register
+//! `target/debug/phase-tauri`, and an installed build's `is_registered`
+//! pre-check would then skip its own registration for good.
 
 use std::{borrow::Cow, fmt::Display, sync::Mutex};
 
@@ -175,8 +178,10 @@ fn registration_needed<E: Display>(
 /// stale `Exec` until the user deletes
 /// `~/.local/share/applications/<exe>-handler.desktop`.
 ///
-/// Off Linux the plugin returns `UnsupportedPlatform`; only Linux calls this.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Only a Linux release build calls this: on macOS the plugin returns
+/// `UnsupportedPlatform`, and on Windows the installer registers the scheme.
+/// A debug build never calls it (see the module docs on the dev shell).
+#[cfg_attr(any(not(target_os = "linux"), debug_assertions), allow(dead_code))]
 pub fn register_scheme_if_missing(app: AppHandle) {
     if registration_needed(UpdateAuthority::detect(), || {
         app.deep_link().is_registered(DEEP_LINK_SCHEME)
@@ -364,24 +369,18 @@ mod tests {
 
     #[test]
     fn linux_registers_only_when_the_handler_is_missing_and_never_under_flatpak() {
-        assert!(registration_needed(UpdateAuthority::Shell, || Ok::<
-            _,
-            String,
-        >(
-            false
-        )));
-        assert!(!registration_needed(UpdateAuthority::Shell, || Ok::<
-            _,
-            String,
-        >(
-            true
-        )));
-        assert!(!registration_needed(UpdateAuthority::Shell, || Err::<
-            bool,
-            _,
-        >(
-            "no xdg-mime"
-        )));
+        assert!(registration_needed(
+            UpdateAuthority::Shell,
+            || -> Result<bool, String> { Ok(false) }
+        ));
+        assert!(!registration_needed(
+            UpdateAuthority::Shell,
+            || -> Result<bool, String> { Ok(true) }
+        ));
+        assert!(!registration_needed(
+            UpdateAuthority::Shell,
+            || -> Result<bool, String> { Err("no xdg-mime".into()) }
+        ));
         assert!(!registration_needed(
             UpdateAuthority::Flatpak,
             || -> Result<bool, String> { panic!("Flatpak must not query xdg-mime") }

@@ -378,8 +378,9 @@ pub fn run() {
                 if let Ok(Some(links)) = app.deep_link().get_current() {
                     deep_link::deliver(app.handle(), links);
                 }
-                // Off the setup thread: it runs up to three subprocesses.
-                #[cfg(target_os = "linux")]
+                // Off the setup thread: it runs up to three subprocesses. Not
+                // in a debug build (see `deep_link`'s module docs).
+                #[cfg(all(target_os = "linux", not(debug_assertions)))]
                 {
                     let handle = app.handle().clone();
                     std::thread::spawn(move || deep_link::register_scheme_if_missing(handle));
@@ -537,11 +538,11 @@ mod tests {
     }
 
     /// `update_authority` is wired into the updater through the version
-    /// comparator. Drop that call and the module still
-    /// compiles, its own unit tests still pass, and self-update is silently
-    /// restored inside the Flatpak sandbox, where `/app` is read-only. No test
-    /// of the module can observe that, so pin the wiring here — the same reason
-    /// the generated Android Gradle invariants are pinned below.
+    /// comparator's `UpdateAuthority::detect()` call. Drop that call and the
+    /// module still compiles, its own unit tests still pass, and self-update is
+    /// silently restored inside the Flatpak sandbox, where `/app` is read-only.
+    /// No test of the module can observe that, so pin the wiring here — the
+    /// same reason the generated Android Gradle invariants are pinned below.
     #[test]
     fn updater_plugin_defers_to_the_update_authority() {
         // Only the production half of this file, because the needles below are

@@ -66,7 +66,7 @@ const BUILD_UPDATE_DEADLINE_MS = 15_000;
 
 type BuildUpdateDialog =
   | { status: "updating" }
-  | { status: "manual"; link: ActionableBotLink };
+  | { status: "manual"; link: ActionableBotLink; arrival: number };
 
 function parseViewParam(value: string | null): MultiplayerView {
   if (value === "host-setup" || value === "deck-select" || value === "draft-lobby") return value;
@@ -416,9 +416,11 @@ function MultiplayerPageContent({
   const refreshToLatestBuild = useCallback(async () => {
     setJoinErrorDialog(null);
     if ((await checkDeployedBuild()) === "stale") {
-      setBuildUpdate({ status: "updating" });
+      const updating: BuildUpdateDialog = { status: "updating" };
+      setBuildUpdate(updating);
       if ((await updateToLatestBuild({ deadlineMs: BUILD_UPDATE_DEADLINE_MS })) === "reloading") return;
-      setBuildUpdate(null);
+      // Only this refresh's own dialog: a bot-link gate may have replaced it.
+      setBuildUpdate((current) => (current === updating ? null : current));
     }
     reloadOrToast();
   }, [reloadOrToast]);
@@ -919,7 +921,13 @@ function MultiplayerPageContent({
     setBuildUpdate({ status: "updating" });
     const outcome = await updateToLatestBuild({ deadlineMs: BUILD_UPDATE_DEADLINE_MS });
     if (superseded()) return;
-    if (outcome === "manual") setBuildUpdate({ status: "manual", link });
+    if (outcome === "manual") setBuildUpdate({ status: "manual", link, arrival });
+  };
+
+  // A manual dialog's actions do nothing once a newer arrival overtook it; that
+  // arrival's gate replaces the dialog when its check returns.
+  const unlessSuperseded = (arrival: number, action: () => void) => () => {
+    if (arrival === latestArrival.current) action();
   };
 
   // Discord bot links (`?code=…` host, `?join=…` guest). One arrival = one
@@ -1257,9 +1265,13 @@ function MultiplayerPageContent({
         <JoinErrorDialog
           title={t("page.updateFailedTitle")}
           message={t("page.updateFailedMessage")}
-          primaryAction={{ label: t("page.joinErrorRefresh"), onClick: reloadOrToast }}
+          primaryAction={{
+            label: t("page.joinErrorRefresh"),
+            onClick: unlessSuperseded(buildUpdate.arrival, reloadOrToast),
+          }}
           dismissLabel={t("page.continueAnyway")}
-          onDismiss={() => continueOnThisBuild(buildUpdate.link)}
+          onDismiss={unlessSuperseded(buildUpdate.arrival, () => continueOnThisBuild(buildUpdate.link))}
+          dismissOnBackdrop={false}
         />
       )}
     </div>

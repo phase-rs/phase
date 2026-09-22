@@ -35,7 +35,7 @@ describe("availability gate", () => {
     expect(brokerSupportsBotGames({ protocol_version: 76, lobby_protocol_version: 10 })).toBe(true);
   });
 
-  test("eligibleServers keeps Full / lobby ≥ 10 / same protocol / url ≤ 100 only", () => {
+  test("eligibleServers keeps Full / lobby ≥ 10 / same protocol / printable-ASCII url ≤ 100 only", () => {
     const good = row({ url: "wss://good.example/ws" });
     const cases: [string, DirectoryServer][] = [
       ["LobbyOnly", row({ url: "wss://lobbyonly.example/ws", mode: "LobbyOnly" })],
@@ -43,6 +43,10 @@ describe("availability gate", () => {
       ["protocol -1", row({ url: "wss://older.example/ws", protocol_version: 75 })],
       ["protocol +1", row({ url: "wss://newer.example/ws", protocol_version: 77 })],
       ["url > 100", row({ url: `wss://${"x".repeat(95)}.example/ws` })],
+      // 100 chars, so only the charset excludes it: percent-encoded, it overflows
+      // Discord's 512-char link-button URL.
+      ["non-ASCII url", row({ url: `wss://${"é".repeat(100 - "wss://.example/ws".length)}.example/ws` })],
+      ["url with whitespace", row({ url: "wss://a b.example/ws" })],
     ];
     for (const [, bad] of cases) {
       expect(urls(eligibleServers(BROKER, [bad, good]))).toEqual([good.url]);

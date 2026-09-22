@@ -7,7 +7,7 @@ import { OpenDesktopPage } from "../OpenDesktopPage";
 const ARRIVAL = "/multiplayer?join=AB12CD%40wss%3A%2F%2Flobby.phase-rs.dev%2Fws";
 const DOWNLOAD = "https://github.com/phase-rs/phase/releases/latest";
 const originalLocation = window.location;
-const replace = vi.fn();
+const assign = vi.fn();
 
 function desktopLink(path: string): string {
   return `phase://open?${new URLSearchParams({ site: "release", path })}`;
@@ -32,11 +32,11 @@ function expectDownloadLink() {
 
 describe("OpenDesktopPage", () => {
   beforeEach(() => {
-    replace.mockReset();
+    assign.mockReset();
     Object.defineProperty(window, "location", {
       configurable: true,
       writable: true,
-      value: { ...originalLocation, replace },
+      value: { ...originalLocation, assign },
     });
   });
 
@@ -53,8 +53,8 @@ describe("OpenDesktopPage", () => {
     const to = desktopLink(ARRIVAL);
     renderPage(to);
 
-    expect(replace).toHaveBeenCalledTimes(1);
-    expect(replace).toHaveBeenCalledWith(to);
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(assign).toHaveBeenCalledWith(to);
     expect(openApp()).toHaveAttribute("href", to);
     expect(continueInBrowser()).toHaveAttribute("href", ARRIVAL);
     expect(invalid()).toBeNull();
@@ -65,7 +65,7 @@ describe("OpenDesktopPage", () => {
     const to = desktopLink("/game/1");
     renderPage(to);
 
-    expect(replace).toHaveBeenCalledWith(to);
+    expect(assign).toHaveBeenCalledWith(to);
     expect(openApp()).toHaveAttribute("href", to);
     expect(continueInBrowser()).toBeNull();
     expectDownloadLink();
@@ -76,10 +76,10 @@ describe("OpenDesktopPage", () => {
     ["another phase:// host", `phase://evil?${new URLSearchParams({ site: "release", path: ARRIVAL })}`],
     ["a javascript: URL", "javascript:alert(1)"],
     ["a missing to", null],
-  ])("refuses %s: no replace, no desktop or browser link, invalid text", (_label, to) => {
+  ])("refuses %s: no assign, no desktop or browser link, invalid text", (_label, to) => {
     renderPage(to);
 
-    expect(replace).not.toHaveBeenCalled();
+    expect(assign).not.toHaveBeenCalled();
     expect(openApp()).toBeNull();
     expect(continueInBrowser()).toBeNull();
     expect(invalid()).toBeInTheDocument();
