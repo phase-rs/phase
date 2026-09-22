@@ -2294,21 +2294,32 @@ fn try_parse_can_attack_with_defender(
     // indexes the original-case text.
     let subject = text[..subject_lower.len()].trim();
     let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    // Duration is derived from the WHOLE clause, NOT from the interposed segment:
-    // a SUBJECT-carried "this turn" over an EMPTY segment still yields
-    // UntilEndOfTurn here, and narrowing the derivation to the segment would drop
-    // it. UNCHANGED from base — value EXTRACTION from already-accepted text, not
-    // parsing dispatch. Guarded by
-    // `defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_production`,
-    // whose subject-carried fixture is the one that reds under that narrowing —
-    // its duration-form fixture cannot, because there the adverbial IS the
-    // segment. No corpus line reaches THIS production with "this turn" outside
-    // the segment; the ones that print it there are "As long as ... this turn,"
-    // statics, which land on the printed-static production instead.
-    let duration = if lower.contains("this turn") {
-        Some(Duration::UntilEndOfTurn)
-    } else {
-        None
+    // CR 611.2a (:2911): the permission's duration comes from the RECOGNIZED
+    // defender-exception segment, never from the whole clause. Base derived it
+    // from a bare whole-clause substring test for the words "this turn", which
+    // cannot tell a duration adverbial
+    // on the PERMISSION ("can attack this turn as though …") from a "this turn"
+    // that qualifies the SUBJECT ("target creature that was dealt damage this
+    // turn …"). The latter is a damage-history filter on which creature is
+    // selected; it says nothing about when the permission ends, and reading it
+    // as `UntilEndOfTurn` published a permission that silently expired.
+    //
+    // The shared recognizer has already classified the segment, so the answer is
+    // a total function of that classification. Exhaustive per CLAUDE.md: a new
+    // terminal must force a decision here rather than inherit `None`.
+    //
+    // Guarded in both directions by
+    // `defender_exception_duration_comes_from_the_segment_not_the_subject`:
+    // the subject-carried fixture reds if this widens back to the whole clause,
+    // and the permission-duration control reds if it narrows to always-`None`.
+    let duration = match &segment {
+        defender_exception::DefenderExceptionSegment::DurationAdverbial => {
+            Some(Duration::UntilEndOfTurn)
+        }
+        defender_exception::DefenderExceptionSegment::Unrestricted
+        | defender_exception::DefenderExceptionSegment::AnchoredClass(_)
+        | defender_exception::DefenderExceptionSegment::UnanchorableClass { .. }
+        | defender_exception::DefenderExceptionSegment::UnrecognizedClass { .. } => None,
     };
     let affected = static_affected_for_application(&application);
     let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)

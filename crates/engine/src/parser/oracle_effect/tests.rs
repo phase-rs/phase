@@ -71966,31 +71966,41 @@ fn p3e_anchored() -> StaticCondition {
     }
 }
 
-/// ROW 4, EFFECT ARM: the duration form's NATURAL HOME.
+/// ROW 4, EFFECT ARM: where the permission's duration comes from.
 ///
-/// CR 702.3b: `"can attack this turn as though it didn't have defender"` keeps its
-/// `UntilEndOfTurn` duration on production (c)
-/// (`try_parse_can_attack_with_defender`) and carries NO condition — identical to
-/// base. All 20 duration-form corpus lines live on THIS production (14
-/// activated, 6 triggered; ZERO printed statics), so this arm is where the
-/// classifier's `all_consuming(tag("this turn"))` decision is corpus-visible.
+/// CR 611.2a (:2911): the duration of the granted permission is the one the
+/// PERMISSION prints, and production (c) reads it off the RECOGNIZED
+/// defender-exception segment. Base instead asked `lower.contains("this turn")`
+/// over the whole clause, which cannot distinguish two different jobs the same
+/// two words do:
 ///
-/// The duration is derived from the WHOLE clause, not from the interposed
-/// segment, and that derivation is UNCHANGED from base. The fixture above cannot
-/// see that scoping decision — in it the adverbial IS the segment, so a
-/// segment-derived duration lands on the same answer — so the test also carries a
-/// SUBJECT-CARRIED fixture, where the two derivations disagree, and a
-/// no-adverbial negative control.
+///  * `"can attack THIS TURN as though it didn't have defender"` — the adverbial
+///    IS the segment. The permission expires at end of turn.
+///  * `"target creature that was dealt damage THIS TURN can attack as though it
+///    didn't have defender"` — the adverbial qualifies the SUBJECT's damage
+///    history, selecting WHICH creature is targeted. It says nothing about when
+///    the permission ends, and reading it as a duration published a permission
+///    that silently expired at cleanup.
 ///
-/// Measured over the 56 corpus lines that print the CR 702.3b tail: every one of
-/// them that prints `"this turn"` OUTSIDE the segment does so in an
-/// `"As long as ... this turn,"` prefix and parses to the PRINTED-STATIC
-/// production (a `StaticDefinition` carrying the condition and no duration at
-/// all), never to (c). The subject-carried fixture is therefore composed from two
-/// printed templates — Crushing Pain's `"target creature that was dealt damage
-/// this turn"` and the CR 702.3b tail — rather than lifted from one card.
+/// All 20 duration-form corpus lines live on THIS production (14 activated, 6
+/// triggered; ZERO printed statics), so the classifier's
+/// `all_consuming(tag("this turn"))` decision is corpus-visible here.
+///
+/// TWO-SIDED by construction — neither fixture alone buys the scoping:
+///  * the DURATION-FORM fixture reds if the derivation narrows to always-`None`;
+///  * the SUBJECT-CARRIED fixture reds if it widens back to the whole clause.
+///
+/// The reach-guard between them proves the production actually saw the line.
+///
+/// The subject-carried fixture is composed from two printed templates — Crushing
+/// Pain's `"target creature that was dealt damage this turn"` and the CR 702.3b
+/// tail — rather than lifted from one card: measured over the 56 corpus lines
+/// printing that tail, every one carrying `"this turn"` OUTSIDE the segment does
+/// so in an `"As long as ... this turn,"` prefix and parses to the printed-static
+/// production, never to (c).
 #[test]
-fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_production() {
+fn defender_exception_duration_comes_from_the_segment_not_the_subject() {
+    // (1) GENUINE PERMISSION DURATION: the adverbial IS the segment.
     let parsed = parse_oracle_text(
         "Target creature can attack this turn as though it didn't have defender.",
         "Probe",
@@ -72009,7 +72019,8 @@ fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_pr
     assert_eq!(
         duration,
         &Some(Duration::UntilEndOfTurn),
-        "the printed duration must survive"
+        "a DurationAdverbial segment is the one shape that sets the duration; \
+         narrowing the derivation to always-None reds here"
     );
     assert_eq!(static_abilities.len(), 1);
     assert_eq!(static_abilities[0].mode, StaticMode::CanAttackWithDefender);
@@ -72018,9 +72029,8 @@ fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_pr
         "a duration adverbial is NOT a player class and must carry no condition"
     );
 
-    // PAIRED POSITIVE CONTROL ON THE SAME PRODUCTION, SAME FIXTURE SHAPE (the
-    // reach-guard): the INTERPOSED form IS accepted here, so the
-    // `condition: None` above is a measured routing decision rather than a
+    // (2) REACH-GUARD, same production: the INTERPOSED form IS accepted here, so
+    // the `condition: None` above is a measured routing decision rather than a
     // production that never saw the line.
     let reach = parse_oracle_text(
         &format!("Target creature can attack {P3E_SEG} as though it didn't have defender."),
@@ -72040,12 +72050,10 @@ fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_pr
     };
     assert_eq!(static_abilities[0].condition, Some(p3e_anchored()));
 
-    // THE DISCRIMINATING FIXTURE for the WHOLE-CLAUSE derivation: `"this turn"`
-    // sits in the SUBJECT and the interposed segment is EMPTY, so the classifier
-    // answers `Unrestricted` and a SEGMENT-derived duration would be `None`.
-    // Neither fixture above can red on that narrowing: in the duration-form
-    // fixture the adverbial IS the segment, and the reach-guard carries no
-    // adverbial at all and asserts no duration.
+    // (3) UNRESTRICTED DAMAGE-HISTORY SUBJECT: `"this turn"` sits in the SUBJECT
+    // and the interposed segment is EMPTY, so the classifier answers
+    // `Unrestricted` and the permission carries NO duration. This is the fixture
+    // the whole-clause derivation got wrong; it reds if that derivation returns.
     let subject_carried = parse_oracle_text(
         "Target creature that was dealt damage this turn can attack as though it didn't have defender.",
         "Probe",
@@ -72069,15 +72077,12 @@ fn defender_exception_duration_form_keeps_its_until_end_of_turn_on_the_effect_pr
         "the interposed segment is empty, so no player class is carried"
     );
     assert_eq!(
-        duration,
-        &Some(Duration::UntilEndOfTurn),
-        "a SUBJECT-carried adverbial still sets the duration: the derivation reads the whole clause"
+        duration, &None,
+        "CR 611.2a: `this turn` qualifies the SUBJECT's damage history, not the \
+         permission — a whole-clause derivation reds here"
     );
 
-    // PAIRED NEGATIVE CONTROL, same production and the SAME empty segment: drop
-    // the subject's adverbial and the duration goes away. Without it the
-    // assertion above would also be satisfied by a production that answers
-    // `UntilEndOfTurn` unconditionally.
+    // (4) NO-ADVERBIAL CONTROL: nothing anywhere in the clause.
     let no_adverbial = parse_oracle_text(
         "Target creature can attack as though it didn't have defender.",
         "Probe",
