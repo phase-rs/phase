@@ -40,6 +40,7 @@ pub fn handle_priority_pass(
 pub(crate) struct PriorityPassOutcome {
     pub(crate) waiting_for: WaitingFor,
     pub(crate) consumed_stack_entries: u32,
+    pub(crate) cleanup_deferred: bool,
 }
 
 pub(crate) fn handle_priority_pass_with_limit(
@@ -77,6 +78,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                 return PriorityPassOutcome {
                     waiting_for: state.waiting_for.clone(),
                     consumed_stack_entries: 0,
+                    cleanup_deferred: true,
                 };
             }
             // CR 510.4: The combat damage step's turn-based action runs in two
@@ -101,6 +103,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                 PriorityPassOutcome {
                     waiting_for: turns::auto_advance(state, events),
                     consumed_stack_entries: 0,
+                    cleanup_deferred: false,
                 }
             } else if state.phase == crate::types::phase::Phase::Cleanup {
                 // CR 514.3a: Triggered abilities that triggered during the
@@ -116,6 +119,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                 PriorityPassOutcome {
                     waiting_for: turns::auto_advance(state, events),
                     consumed_stack_entries: 0,
+                    cleanup_deferred: false,
                 }
             } else {
                 // CR 117.4: Empty stack — advance to next phase.
@@ -127,6 +131,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                 PriorityPassOutcome {
                     waiting_for: turns::auto_advance(state, events),
                     consumed_stack_entries: 0,
+                    cleanup_deferred: false,
                 }
             }
         } else {
@@ -183,6 +188,7 @@ pub(crate) fn handle_priority_pass_with_limit(
             PriorityPassOutcome {
                 waiting_for,
                 consumed_stack_entries: consumed,
+                cleanup_deferred: false,
             }
         }
     } else {
@@ -200,6 +206,7 @@ pub(crate) fn handle_priority_pass_with_limit(
         PriorityPassOutcome {
             waiting_for: WaitingFor::Priority { player: next },
             consumed_stack_entries: 0,
+            cleanup_deferred: false,
         }
     }
 }

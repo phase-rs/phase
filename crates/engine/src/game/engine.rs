@@ -8783,6 +8783,7 @@ fn pass_priority_once_with_pipeline(
         events,
         stack_resolution_limit,
     );
+    let cleanup_deferred = priority_outcome.cleanup_deferred;
     sync_waiting_for(state, &priority_outcome.waiting_for);
 
     // CR 608.2 + CR 117.4: Drain any pending continuation queued during the
@@ -8821,7 +8822,8 @@ fn pass_priority_once_with_pipeline(
     // continuation and post-action pipelines have completed, retry the same
     // turn-interpreter unit exactly once.  Do not re-run cleanup while the
     // carrier is still live or while the pipeline opened new stack work.
-    if boundary_snapshot.phase == Phase::Cleanup
+    if cleanup_deferred
+        && boundary_snapshot.phase == Phase::Cleanup
         && turns::phase_transition_requires_settlement(&boundary_snapshot)
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.stack.is_empty()
