@@ -307,6 +307,7 @@ describe("joinRoom", () => {
 describe("strict fresh TURN credentials", () => {
   afterEach(() => vi.unstubAllGlobals());
   it("validates servers and forwards abort without caching or exporting secrets", async () => {
+    const configuredEndpoint = "https://turn.example.test/credentials";
     const controller = new AbortController();
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ iceServers: [
       { urls: "stun:example.org:3478" },
@@ -314,8 +315,9 @@ describe("strict fresh TURN credentials", () => {
     ] })));
     vi.stubGlobal("fetch", fetcher);
     const before = getDiagnosticHistory();
+    expect(TURN_CREDENTIALS_URL).toBe(configuredEndpoint);
     expect((await fetchFreshTurnConfig(controller.signal)).iceServers).toHaveLength(2);
-    expect(fetcher).toHaveBeenCalledWith(TURN_CREDENTIALS_URL, expect.objectContaining({ signal: controller.signal, cache: "no-store" }));
+    expect(fetcher).toHaveBeenCalledWith(configuredEndpoint, expect.objectContaining({ signal: controller.signal, cache: "no-store" }));
     expect(getDiagnosticHistory()).toEqual(before);
   });
   it.each([

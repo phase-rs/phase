@@ -1041,4 +1041,9 @@ jobs:
         run: cd client && pnpm run type-check
 
       - name: Run tests with coverage
+        env:
+          # Exercise the self-hosted build-time TURN endpoint through the
+          # Vitest define. The resolver tests separately cover unset/empty
+          # values retaining the official endpoint.
+          TURN_CREDENTIALS_URL: https://turn.example.test/credentials
         run: cd client && pnpm test -- --run --coverage
