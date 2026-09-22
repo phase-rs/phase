@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router";
 
@@ -23,8 +23,8 @@ import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/s
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import { expandParsedDeck } from "../services/deckParser";
-import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
-import { classifyCompatResult } from "./multiplayerPageState";
+import type { BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
+import { classifyCompatResult, hostLinkSearch, parseBotLink } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
 import { installServerMetricsLifecycle } from "../services/serverMetrics";
 import {
@@ -145,6 +145,8 @@ function MultiplayerPageContent({
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  // Host settings from a Discord host link, applied to HostSetup at mount.
+  const [hostSeed, setHostSeed] = useState<HostSeed | null>(null);
   // Shown when `LobbyView` detects the server is unreachable. The user picks
   // between staying in server mode (LobbyView remounts via `lobbyRetryKey` and
   // retries) or flipping to P2P for direct-code play. Tracked on this page,
@@ -325,14 +327,28 @@ function MultiplayerPageContent({
   };
 
   const handleEditDeck = useCallback((name: string) => {
-    const returnParams = new URLSearchParams(location.search);
-    if (view === "lobby") {
-      returnParams.delete("view");
+    // A Discord host flow must come back through the bot-link arrival: `view`
+    // and `hostSeed` are component state, and the deck-builder route unmounts
+    // this page.
+    const seededReturn =
+      hostSeed !== null
+      && (view === "host-setup"
+        || (pendingAction?.type === "host" && pendingAction.settings.requestedCode === hostSeed.code)
+        // Change / Pick deck on the seeded host-setup screen open deck-select with no action.
+        || (view === "deck-select" && pendingAction === null && deckSelectReturn === "host-setup"));
+    let returnTo: string;
+    if (seededReturn) {
+      returnTo = `${location.pathname}?${hostLinkSearch(hostSeed)}`;
     } else {
-      returnParams.set("view", view);
+      const returnParams = new URLSearchParams(location.search);
+      if (view === "lobby") {
+        returnParams.delete("view");
+      } else {
+        returnParams.set("view", view);
+      }
+      const returnSearch = returnParams.toString();
+      returnTo = `${location.pathname}${returnSearch ? `?${returnSearch}` : ""}`;
     }
-    const returnSearch = returnParams.toString();
-    const returnTo = `${location.pathname}${returnSearch ? `?${returnSearch}` : ""}`;
     const fmt = pendingAction?.type === "host"
       ? pendingAction.settings.formatConfig.format
       : pendingAction?.type === "join"
@@ -342,7 +358,16 @@ function MultiplayerPageContent({
     navigate(
       `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
     );
-  }, [location.pathname, location.search, navigate, pendingAction, storeFormatConfig, view]);
+  }, [
+    deckSelectReturn,
+    hostSeed,
+    location.pathname,
+    location.search,
+    navigate,
+    pendingAction,
+    storeFormatConfig,
+    view,
+  ]);
 
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
@@ -511,11 +536,16 @@ function MultiplayerPageContent({
         // A dedicated game server and the lobby broker can both be connected.
         // Preserve a custom broker anchor, but never use a Full server for
         // P2P registration. Unknown custom endpoints are probed before deciding.
+        // A Discord host (`requestedCode`) registers on the build's official
+        // broker regardless of the browsing anchor: that is the broker its
+        // guest links name.
         const anchor = store.hostingServer;
         let target = action.connectionMode === "p2p"
-          ? anchor !== null && store.sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
-            ? anchor
-            : OFFICIAL_MULTIPLAYER_SERVER_URL
+          ? action.settings.requestedCode !== undefined
+            ? OFFICIAL_MULTIPLAYER_SERVER_URL
+            : anchor !== null && store.sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
+              ? anchor
+              : OFFICIAL_MULTIPLAYER_SERVER_URL
           : action.serverUrl;
         let socket = target === null
           ? null
@@ -527,6 +557,12 @@ function MultiplayerPageContent({
 
         if (action.connectionMode === "p2p") {
           if (socket?.serverInfo.mode !== "LobbyOnly") {
+            // "Continue without lobby" would host an unregistered room that no
+            // Discord link can find, so a Discord host gets no such offer.
+            if (action.settings.requestedCode !== undefined) {
+              showToast(t("page.botLinkBrokerUnreachable"));
+              return false;
+            }
             setBrokerOfflinePrompt({ action, serverAddress: target });
             return false;
           }
@@ -678,6 +714,7 @@ function MultiplayerPageContent({
       password?: string,
       format?: GameFormat,
       context?: LobbyGame,
+      onNotFound?: () => void,
     ) => {
       // Draft entries bypass the normal join-with-deck flow entirely — draft
       // pods handle their own deck building after the draft completes.
@@ -733,6 +770,9 @@ function MultiplayerPageContent({
           showToast(retry.message);
           return;
         }
+      } else if (result.reason === "not_found" && onNotFound) {
+        onNotFound();
+        return;
       } else {
         showToast(result.message);
         return;
@@ -751,6 +791,60 @@ function MultiplayerPageContent({
     },
     [lookupJoinTargetFromStore, handleJoinDraftFromLobby, showToast, t],
   );
+
+  // Guest join from a Discord link. A room the host has not opened yet (or has
+  // closed) is a wait, not an error, so "not found" offers Retry. The origin
+  // is the link's, latched here and in the resulting pending join.
+  const joinFromBotLink = (code: string, origin: LobbySource) => {
+    setJoinErrorDialog(null);
+    void handleJoinGame(code, origin, undefined, undefined, undefined, () =>
+      setJoinErrorDialog({
+        title: t("page.waitingForHostTitle"),
+        message: t("page.waitingForHostMessage"),
+        primaryAction: {
+          label: t("connectionToast.retry"),
+          onClick: () => joinFromBotLink(code, origin),
+        },
+      }),
+    );
+  };
+
+  const applyBotLink = (link: BotLink) => {
+    switch (link.kind) {
+      case "invalid":
+        showToast(t("page.invalidGameLink"));
+        return;
+      case "host":
+        setPendingAction(null);
+        setHostSeed(link.seed);
+        setView("host-setup");
+        return;
+      case "join": {
+        const origin = adHocLobbySource(link.serverUrl);
+        if (origin === null) {
+          showToast(t("page.invalidGameLink"));
+          return;
+        }
+        joinFromBotLink(link.code, origin);
+        return;
+      }
+    }
+  };
+
+  // Discord bot links (`?code=…` host, `?join=…` guest). One arrival = one
+  // history entry: StrictMode (DevStrict wraps /multiplayer) re-runs this
+  // effect with the same location in dev, and refs survive that re-run. The
+  // strip is a new entry with an empty search, so its run is a no-op; the same
+  // link opened again is a new entry and is handled again.
+  const handledArrival = useRef<string | null>(null);
+  useEffect(() => {
+    if (handledArrival.current === location.key) return;
+    handledArrival.current = location.key;
+    const link = parseBotLink(location.search);
+    if (link === null) return;
+    navigate(location.pathname, { replace: true });
+    applyBotLink(link);
+  }, [location.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleBack = () => {
     if (view === "deck-select") {
@@ -909,7 +1003,11 @@ function MultiplayerPageContent({
             // Deliberately does NOT set a mode: the transport is chosen on
             // Host Game itself, so arriving there keeps whatever the player
             // last chose rather than silently overriding it.
-            onHostGame={() => setView("host-setup")}
+            onHostGame={() => {
+              // The lobby's own Host Game never inherits a Discord seed.
+              setHostSeed(null);
+              setView("host-setup");
+            }}
             onHostDraft={handleHostDraft}
             onJoinGame={handleJoinGame}
             onSpectate={handleSpectate}
@@ -919,6 +1017,10 @@ function MultiplayerPageContent({
 
         {view === "host-setup" && (
           <HostSetup
+            // Remounts the form when a new Discord link arrives while it is
+            // mounted, so the seed is applied once, at mount.
+            key={hostSeed?.code ?? "manual"}
+            seed={hostSeed ?? undefined}
             onHost={handleHostSetupComplete}
             onBack={() => setView("lobby")}
             connectionMode={connectionMode}

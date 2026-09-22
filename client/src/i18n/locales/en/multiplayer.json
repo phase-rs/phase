@@ -276,7 +276,9 @@
     "loadingCustomFormat": "Loading format…",
     "noSavedCustomFormats": "No saved custom formats yet.",
     "customFormatResolveFailed": "Could not load that saved format.",
-    "customFormatHostingUnavailable": "Hosting with a custom format isn't supported yet — deck legality can't be checked for it. Save and preview it for now."
+    "customFormatHostingUnavailable": "Hosting with a custom format isn't supported yet — deck legality can't be checked for it. Save and preview it for now.",
+    "botGameNotice": "Hosting Discord game {{code}}. Connection and privacy come from the Discord post.",
+    "botSeedIgnored": "Some settings from the Discord post couldn't be used here — check the format and player count."
   },
   "page": {
     "deckRejected": "Deck was rejected by the host.",
@@ -309,7 +311,11 @@
     "pickDeck": "Pick Deck",
     "anonymous": "Anonymous",
     "joining": "Joining",
-    "joinNeedsServer": "Pick a server before joining a game."
+    "joinNeedsServer": "Pick a server before joining a game.",
+    "invalidGameLink": "This game link is invalid or incomplete.",
+    "waitingForHostTitle": "Waiting for host…",
+    "waitingForHostMessage": "The host hasn't opened this game yet, or it has closed. Retry once the host has opened their link.",
+    "botLinkBrokerUnreachable": "Couldn't reach the lobby server to open this Discord game. Check your connection, then open your host link again."
   },
   "draftLobbyPanel": {
     "draftPod": "Draft Pod",
@@ -325,5 +331,9 @@
     "checkingLegality": "Checking deck legality…",
     "legal": "✓ Legal in {{format}}",
     "notLegal": "Not legal in {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "This server doesn't support Discord games yet.",
+    "codeInUse": "This game's code is still held by an earlier room. Wait a few minutes, then open your host link from Discord again. If it keeps happening, start a new /lfg."
   }
 }

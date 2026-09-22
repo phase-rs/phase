@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { DeckCompatibilityResult } from "../../services/deckCompatibility";
-import { classifyCompatResult } from "../multiplayerPageState";
+import {
+  classifyCompatResult,
+  hostLinkSearch,
+  parseBotLink,
+  type HostSeed,
+} from "../multiplayerPageState";
 
 function makeResult(
   overrides: Partial<DeckCompatibilityResult> = {},
@@ -57,5 +62,105 @@ describe("classifyCompatResult", () => {
   it("returns idle when selected_format_compatible is omitted", () => {
     const out = classifyCompatResult("Pauper", makeResult());
     expect(out).toEqual({ status: "idle" });
+  });
+});
+
+describe("parseBotLink", () => {
+  it.each(["", "?view=host-setup", "?format=Commander&players=4"])(
+    "ignores a search with no bot-link params: %j",
+    (search) => {
+      expect(parseBotLink(search)).toBeNull();
+    },
+  );
+
+  it("reads a full host link", () => {
+    expect(
+      parseBotLink("?code=AB12CD&format=Commander&players=4&room=%20Friday%20night%20"),
+    ).toEqual({
+      kind: "host",
+      seed: {
+        code: "AB12CD",
+        format: "Commander",
+        playerCount: 4,
+        roomName: "Friday night",
+        serverUrl: null,
+      },
+    });
+  });
+
+  it("reads a host link with only a code", () => {
+    expect(parseBotLink("?code=AB12CD&room=%20%20")).toEqual({
+      kind: "host",
+      seed: { code: "AB12CD", format: null, playerCount: null, roomName: null, serverUrl: null },
+    });
+  });
+
+  it("canonicalizes an encoded dedicated-server URL", () => {
+    const link = parseBotLink(
+      `?code=AB12CD&server=${encodeURIComponent("wss://Games.Example:443/ws")}`,
+    );
+    expect(link).toEqual({
+      kind: "host",
+      seed: expect.objectContaining({ serverUrl: "wss://games.example/ws" }),
+    });
+  });
+
+  it("keeps the path of a guest link's server URL", () => {
+    const link = parseBotLink("?join=AB12CD@wss://lobby.phase-rs.dev/ws");
+    expect(link).toEqual({
+      kind: "join",
+      code: "AB12CD",
+      serverUrl: "wss://lobby.phase-rs.dev/ws",
+    });
+  });
+
+  it.each([
+    ["lowercase code", "?code=ab12cd"],
+    ["5-character code", "?code=AB12C"],
+    ["non-numeric players", "?code=AB12CD&players=four"],
+    ["non-websocket server", "?code=AB12CD&server=http://x"],
+    ["guest link without a server", "?join=AB12CD"],
+    ["guest link with an empty server", "?join=AB12CD@"],
+    ["guest link with a non-websocket server", "?join=AB12CD@https://x"],
+    ["guest link with a bad code", "?join=ab12cd@wss://lobby.phase-rs.dev/ws"],
+    ["both code and join", "?code=AB12CD&join=AB12CD@wss://lobby.phase-rs.dev/ws"],
+  ])("rejects a %s", (_label, search) => {
+    expect(parseBotLink(search)).toEqual({ kind: "invalid" });
+  });
+});
+
+describe("hostLinkSearch", () => {
+  const seeds: [string, HostSeed][] = [
+    [
+      "every field",
+      {
+        code: "AB12CD",
+        format: "Commander",
+        playerCount: 4,
+        roomName: "Friday & #1 night",
+        serverUrl: "wss://games.example/ws?region=eu",
+      },
+    ],
+    [
+      "no optional field",
+      { code: "AB12CD", format: null, playerCount: null, roomName: null, serverUrl: null },
+    ],
+    [
+      "only a server",
+      {
+        code: "ZZ99ZZ",
+        format: null,
+        playerCount: null,
+        roomName: null,
+        serverUrl: "wss://games.example/ws",
+      },
+    ],
+  ];
+
+  it.each(seeds)("round-trips a seed with %s through parseBotLink", (_label, seed) => {
+    const search = hostLinkSearch(seed);
+    expect(parseBotLink(`?${search}`)).toEqual({ kind: "host", seed });
+    expect(search).not.toContain("view=");
+    expect(search.startsWith("?")).toBe(false);
   });
 });

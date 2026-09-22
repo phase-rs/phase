@@ -276,7 +276,9 @@
     "loadingCustomFormat": "Caricamento del formato…",
     "noSavedCustomFormats": "Nessun formato personalizzato salvato.",
     "customFormatResolveFailed": "Impossibile caricare il formato salvato.",
-    "customFormatHostingUnavailable": "Ospitare con un formato personalizzato non è ancora supportato — la legalità del mazzo non può essere verificata per esso. Per ora, salvalo e limitati all'anteprima."
+    "customFormatHostingUnavailable": "Ospitare con un formato personalizzato non è ancora supportato — la legalità del mazzo non può essere verificata per esso. Per ora, salvalo e limitati all'anteprima.",
+    "botGameNotice": "Stai ospitando la partita Discord {{code}}. Connessione e privacy sono stabilite dal post su Discord.",
+    "botSeedIgnored": "Alcune impostazioni del post su Discord non possono essere usate qui — controlla il formato e il numero di giocatori."
   },
   "page": {
     "deckRejected": "Il mazzo è stato rifiutato dall'host.",
@@ -309,7 +311,11 @@
     "pickDeck": "Scegli mazzo",
     "anonymous": "Anonimo",
     "joining": "Connessione in corso",
-    "joinNeedsServer": "Scegli un server prima di unirti a una partita."
+    "joinNeedsServer": "Scegli un server prima di unirti a una partita.",
+    "invalidGameLink": "Questo link alla partita non è valido o è incompleto.",
+    "waitingForHostTitle": "In attesa dell'host…",
+    "waitingForHostMessage": "L'host non ha ancora aperto questa partita, oppure è stata chiusa. Riprova quando l'host avrà aperto il suo link.",
+    "botLinkBrokerUnreachable": "Impossibile raggiungere il server della lobby per aprire questa partita Discord. Controlla la connessione, poi riapri il tuo link da host."
   },
   "draftLobbyPanel": {
     "draftPod": "Pod di draft",
@@ -325,5 +331,9 @@
     "checkingLegality": "Verifica della legalità del mazzo…",
     "legal": "✓ Legale in {{format}}",
     "notLegal": "Non legale in {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Questo server non supporta ancora le partite Discord.",
+    "codeInUse": "Il codice di questa partita è ancora occupato da una stanza precedente. Attendi qualche minuto, poi riapri il tuo link da host da Discord. Se continua a succedere, avvia un nuovo /lfg."
   }
 }

@@ -276,7 +276,9 @@
     "loadingCustomFormat": "Format wird geladen…",
     "noSavedCustomFormats": "Noch keine eigenen Formate gespeichert.",
     "customFormatResolveFailed": "Dieses gespeicherte Format konnte nicht geladen werden.",
-    "customFormatHostingUnavailable": "Das Hosten mit einem eigenen Format wird noch nicht unterstützt — die Deck-Legalität kann dafür nicht geprüft werden. Speichere und sieh es dir vorerst nur an."
+    "customFormatHostingUnavailable": "Das Hosten mit einem eigenen Format wird noch nicht unterstützt — die Deck-Legalität kann dafür nicht geprüft werden. Speichere und sieh es dir vorerst nur an.",
+    "botGameNotice": "Du hostest das Discord-Spiel {{code}}. Verbindung und Privatsphäre legt der Discord-Beitrag fest.",
+    "botSeedIgnored": "Einige Einstellungen aus dem Discord-Beitrag können hier nicht verwendet werden — prüfe Format und Spielerzahl."
   },
   "page": {
     "deckRejected": "Das Deck wurde vom Host abgelehnt.",
@@ -309,7 +311,11 @@
     "pickDeck": "Deck wählen",
     "anonymous": "Anonym",
     "joining": "Tritt bei",
-    "joinNeedsServer": "Wähle einen Server, bevor du einem Spiel beitrittst."
+    "joinNeedsServer": "Wähle einen Server, bevor du einem Spiel beitrittst.",
+    "invalidGameLink": "Dieser Spiellink ist ungültig oder unvollständig.",
+    "waitingForHostTitle": "Warte auf den Host…",
+    "waitingForHostMessage": "Der Host hat dieses Spiel noch nicht geöffnet, oder es wurde geschlossen. Versuche es erneut, sobald der Host seinen Link geöffnet hat.",
+    "botLinkBrokerUnreachable": "Der Lobby-Server für dieses Discord-Spiel ist nicht erreichbar. Prüfe deine Verbindung und öffne dann deinen Host-Link erneut."
   },
   "draftLobbyPanel": {
     "draftPod": "Draft-Pod",
@@ -325,5 +331,9 @@
     "checkingLegality": "Deck-Legalität wird geprüft…",
     "legal": "✓ Legal in {{format}}",
     "notLegal": "Nicht legal in {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Dieser Server unterstützt noch keine Discord-Spiele.",
+    "codeInUse": "Der Code dieses Spiels ist noch von einem früheren Raum belegt. Warte ein paar Minuten und öffne dann deinen Host-Link aus Discord erneut. Wenn es weiter passiert, starte ein neues /lfg."
   }
 }

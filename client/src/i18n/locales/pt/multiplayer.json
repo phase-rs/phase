@@ -276,7 +276,9 @@
     "loadingCustomFormat": "Carregando formato…",
     "noSavedCustomFormats": "Nenhum formato personalizado salvo ainda.",
     "customFormatResolveFailed": "Não foi possível carregar esse formato salvo.",
-    "customFormatHostingUnavailable": "Hospedar com um formato personalizado ainda não é suportado — a legalidade do baralho não pode ser verificada para ele. Por enquanto, salve e apenas visualize."
+    "customFormatHostingUnavailable": "Hospedar com um formato personalizado ainda não é suportado — a legalidade do baralho não pode ser verificada para ele. Por enquanto, salve e apenas visualize.",
+    "botGameNotice": "Hospedando a partida do Discord {{code}}. A conexão e a privacidade vêm da publicação no Discord.",
+    "botSeedIgnored": "Algumas configurações da publicação no Discord não puderam ser usadas aqui — verifique o formato e o número de jogadores."
   },
   "page": {
     "deckRejected": "O deck foi rejeitado pelo anfitrião.",
@@ -309,7 +311,11 @@
     "pickDeck": "Escolher Deck",
     "anonymous": "Anônimo",
     "joining": "Entrando",
-    "joinNeedsServer": "Escolha um servidor antes de entrar em um jogo."
+    "joinNeedsServer": "Escolha um servidor antes de entrar em um jogo.",
+    "invalidGameLink": "Este link de partida é inválido ou está incompleto.",
+    "waitingForHostTitle": "Aguardando o anfitrião…",
+    "waitingForHostMessage": "O anfitrião ainda não abriu esta partida, ou ela foi encerrada. Tente novamente quando o anfitrião tiver aberto o link dele.",
+    "botLinkBrokerUnreachable": "Não foi possível acessar o servidor do lobby para abrir esta partida do Discord. Verifique sua conexão e abra seu link de anfitrião novamente."
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de Draft",
@@ -325,5 +331,9 @@
     "checkingLegality": "Verificando a validade do deck…",
     "legal": "✓ Válido em {{format}}",
     "notLegal": "Não válido em {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Este servidor ainda não oferece suporte a partidas do Discord.",
+    "codeInUse": "O código desta partida ainda está ocupado por uma sala anterior. Aguarde alguns minutos e abra seu link de anfitrião pelo Discord novamente. Se continuar acontecendo, inicie um novo /lfg."
   }
 }

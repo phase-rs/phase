@@ -276,7 +276,9 @@
     "loadingCustomFormat": "Wczytywanie formatu…",
     "noSavedCustomFormats": "Brak zapisanych formatów niestandardowych.",
     "customFormatResolveFailed": "Nie udało się wczytać zapisanego formatu.",
-    "customFormatHostingUnavailable": "Hostowanie z formatem niestandardowym nie jest jeszcze obsługiwane — legalność talii nie może zostać dla niego sprawdzona. Na razie zapisz i tylko podglądaj."
+    "customFormatHostingUnavailable": "Hostowanie z formatem niestandardowym nie jest jeszcze obsługiwane — legalność talii nie może zostać dla niego sprawdzona. Na razie zapisz i tylko podglądaj.",
+    "botGameNotice": "Hostujesz grę z Discorda {{code}}. Połączenie i prywatność określa post na Discordzie.",
+    "botSeedIgnored": "Niektórych ustawień z posta na Discordzie nie można tu użyć — sprawdź format i liczbę graczy."
   },
   "page": {
     "deckRejected": "Talia została odrzucona przez gospodarza.",
@@ -309,7 +311,11 @@
     "pickDeck": "Wybierz talię",
     "anonymous": "Anonimowy",
     "joining": "Dołączanie",
-    "joinNeedsServer": "Wybierz serwer, zanim dołączysz do gry."
+    "joinNeedsServer": "Wybierz serwer, zanim dołączysz do gry.",
+    "invalidGameLink": "Ten link do gry jest nieprawidłowy lub niekompletny.",
+    "waitingForHostTitle": "Czekanie na hosta…",
+    "waitingForHostMessage": "Host jeszcze nie otworzył tej gry albo została ona zamknięta. Spróbuj ponownie, gdy host otworzy swój link.",
+    "botLinkBrokerUnreachable": "Nie udało się połączyć z serwerem poczekalni, aby otworzyć tę grę z Discorda. Sprawdź połączenie, a potem ponownie otwórz swój link hosta."
   },
   "draftLobbyPanel": {
     "draftPod": "Grupa draftu",
@@ -325,5 +331,9 @@
     "checkingLegality": "Sprawdzanie zgodności talii z zasadami…",
     "legal": "✓ Dozwolona w formacie {{format}}",
     "notLegal": "Niedozwolona w formacie {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Ten serwer nie obsługuje jeszcze gier z Discorda.",
+    "codeInUse": "Kod tej gry jest wciąż zajęty przez wcześniejszy pokój. Odczekaj kilka minut, a potem ponownie otwórz swój link hosta z Discorda. Jeśli problem się powtarza, rozpocznij nowe /lfg."
   }
 }

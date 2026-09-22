@@ -276,7 +276,9 @@
     "noSavedCustomFormats": "保存済みカスタムフォーマットはまだありません。",
     "customFormatResolveFailed": "保存済みフォーマットを読み込めませんでした。",
     "customFormatHostingUnavailable": "カスタムフォーマットでのホストにはまだ対応していません — デッキ適性を確認できません。今は保存してプレビューしてください。",
-    "hostGame": "ルームを作成"
+    "hostGame": "ルームを作成",
+    "botGameNotice": "Discordゲーム {{code}} をホストしています。接続とプライバシーの設定はDiscordの投稿に従います。",
+    "botSeedIgnored": "Discordの投稿の一部の設定はここでは使用できません — フォーマットとプレイヤー数を確認してください。"
   },
   "page": {
     "deckRejected": "ホストにデッキを拒否されました。",
@@ -309,7 +311,11 @@
     "pickDeck": "デッキを選択",
     "anonymous": "匿名",
     "joining": "参加中",
-    "joinNeedsServer": "ゲームに参加する前にサーバーを選択してください。"
+    "joinNeedsServer": "ゲームに参加する前にサーバーを選択してください。",
+    "invalidGameLink": "このゲームリンクは無効か、不完全です。",
+    "waitingForHostTitle": "ホストを待っています…",
+    "waitingForHostMessage": "ホストがまだこのゲームを開いていないか、ゲームが終了しています。ホストがリンクを開いたら再試行してください。",
+    "botLinkBrokerUnreachable": "このDiscordゲームを開くためのロビーサーバーに接続できませんでした。接続を確認してから、ホスト用リンクをもう一度開いてください。"
   },
   "draftLobbyPanel": {
     "draftPod": "ドラフトポッド",
@@ -325,5 +331,9 @@
     "checkingLegality": "デッキの適性を確認中…",
     "legal": "✓ {{format}}で使用可能",
     "notLegal": "{{format}}では使用不可"
+  },
+  "botLink": {
+    "codeUnsupported": "このサーバーはまだDiscordゲームに対応していません。",
+    "codeInUse": "このゲームのコードは、以前のルームがまだ使用しています。数分待ってから、Discordのホスト用リンクをもう一度開いてください。それでも解決しない場合は、新しく /lfg を始めてください。"
   }
 }

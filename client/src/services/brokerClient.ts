@@ -60,6 +60,23 @@ export interface RegisterHostRequest {
   /** Draft-specific metadata. When set, the lobby entry is badged as a
    *  draft pod with set code and draft kind. */
   draftMetadata: DraftLobbyMetadata | null;
+  /** Pre-minted `[A-Z0-9]{6}` game code from a Discord link. Absent → the
+   *  broker mints one. */
+  requestedCode?: string;
+}
+
+/**
+ * A broker `Error` frame, rejected from a request promise. `code` is the wire
+ * `ServerErrorCode` (e.g. `code_in_use`), or `null` when the broker sent none.
+ */
+export class BrokerRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null,
+  ) {
+    super(message);
+    this.name = "BrokerRequestError";
+  }
 }
 
 export interface RegisteredGame {
@@ -177,9 +194,9 @@ export function makeBrokerClient(socket: PhaseSocket): BrokerClient {
           cleanup();
           resolve({ gameCode: data.game_code, playerToken: data.player_token });
         } else if (msg.type === "Error") {
-          const data = msg.data as { message: string };
+          const data = msg.data as { message: string; code?: string };
           cleanup();
-          reject(new Error(data.message));
+          reject(new BrokerRequestError(data.message, data.code ?? null));
         }
       };
 
@@ -223,6 +240,7 @@ export function makeBrokerClient(socket: PhaseSocket): BrokerClient {
             draft_metadata: req.draftMetadata,
             start_when_full: req.startWhenFull ?? true,
             ranked: req.ranked ?? false,
+            requested_code: req.requestedCode ?? null,
           },
         }),
       );
@@ -398,9 +416,13 @@ export function resolveGuestOver(
           message: "This room requires a password",
         });
       } else if (msg.type === "Error") {
-        const data = msg.data as { message: string };
+        const data = msg.data as { message: string; code?: string };
         cleanup();
-        resolve({ ok: false, reason: classifyError(data.message), message: data.message });
+        resolve({
+          ok: false,
+          reason: classifyError(data.message, data.code),
+          message: data.message,
+        });
       }
     };
 
@@ -516,9 +538,13 @@ export function lookupJoinTargetOver(
           message: "This room requires a password",
         });
       } else if (msg.type === "Error") {
-        const data = msg.data as { message: string };
+        const data = msg.data as { message: string; code?: string };
         cleanup();
-        resolve({ ok: false, reason: classifyError(data.message), message: data.message });
+        resolve({
+          ok: false,
+          reason: classifyError(data.message, data.code),
+          message: data.message,
+        });
       }
     };
 
@@ -580,7 +606,10 @@ export function lookupJoinTargetOver(
 
 type FailureReason = Extract<ResolveResult | LookupJoinTargetResult, { ok: false }>["reason"];
 
-function classifyError(message: string): FailureReason {
+function classifyError(message: string, code?: string): FailureReason {
+  // Typed wire code first (lobby protocol 10+); the substring checks below
+  // remain the fallback for older brokers that send only a message.
+  if (code === "game_not_found") return "not_found";
   const lower = message.toLowerCase();
   if (lower.includes("build mismatch")) return "build_mismatch";
   if (lower.includes("not found")) return "not_found";

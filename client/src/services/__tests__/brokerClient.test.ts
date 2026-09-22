@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PhaseSocket } from "../openPhaseSocket";
 import {
+  BrokerRequestError,
   lookupJoinTargetOver,
   makeBrokerClient,
   resolveGuestOver,
@@ -432,5 +433,104 @@ describe("broker client keepalive", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("requested game codes (lobby protocol 10)", () => {
+  const baseRequest: RegisterHostRequest = {
+    hostPeerId: "peer-host",
+    displayName: "Host",
+    public: false,
+    password: null,
+    timerSeconds: null,
+    playerCount: 4,
+    matchConfig: { match_type: "Bo1" },
+    formatConfig: null,
+    roomName: null,
+    draftMetadata: null,
+  };
+
+  function sentFrame(ws: MockWebSocket): { type: string; data: { requested_code?: unknown } } {
+    return JSON.parse(ws.send.mock.calls[0][0] as string) as {
+      type: string;
+      data: { requested_code?: unknown };
+    };
+  }
+
+  it("sends the requested code in the registration frame", () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws));
+    void client.registerHost({ ...baseRequest, requestedCode: "AB12CD" });
+
+    expect(sentFrame(ws).data.requested_code).toBe("AB12CD");
+  });
+
+  it("sends a null requested code when none is requested", () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws));
+    void client.registerHost(baseRequest);
+
+    expect(sentFrame(ws).data.requested_code).toBeNull();
+  });
+
+  it("rejects a held code with a typed BrokerRequestError", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws));
+    const registration = client.registerHost({ ...baseRequest, requestedCode: "AB12CD" });
+    ws.deliver(
+      JSON.stringify({
+        type: "Error",
+        data: { message: "Game code AB12CD is already in use", code: "code_in_use" },
+      }),
+    );
+
+    const err = await registration.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BrokerRequestError);
+    expect((err as BrokerRequestError).code).toBe("code_in_use");
+    expect((err as BrokerRequestError).message).toBe("Game code AB12CD is already in use");
+  });
+
+  it("still resolves GameCreated for a requested code", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws));
+    const registration = client.registerHost({ ...baseRequest, requestedCode: "AB12CD" });
+    ws.deliver(
+      JSON.stringify({
+        type: "GameCreated",
+        data: { game_code: "AB12CD", player_token: "token" },
+      }),
+    );
+
+    await expect(registration).resolves.toEqual({ gameCode: "AB12CD", playerToken: "token" });
+  });
+
+  it("classifies a typed game_not_found as not_found whatever the message", async () => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "AB12CD");
+    ws.deliver(
+      JSON.stringify({
+        type: "Error",
+        data: { message: "No such room", code: "game_not_found" },
+      }),
+    );
+
+    await expect(promise).resolves.toEqual(
+      expect.objectContaining({ ok: false, reason: "not_found" }),
+    );
+  });
+
+  it("still classifies a legacy un-coded not-found message", async () => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "AB12CD");
+    ws.deliver(
+      JSON.stringify({
+        type: "Error",
+        data: { message: "Game not found in lobby: AB12CD" },
+      }),
+    );
+
+    await expect(promise).resolves.toEqual(
+      expect.objectContaining({ ok: false, reason: "not_found" }),
+    );
   });
 });

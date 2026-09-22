@@ -565,9 +565,12 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  *     trigger — a caller-pre-minted `[A-Z0-9]{6}` code the host claims instead
  *     of a broker-minted one. ServerErrorCode, carried server -> client on
  *     Error.code, gains `game_not_found` and `code_in_use`. Additive, so
- *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2. This client does not yet
- *     send the field or read the new codes; the client change that first
- *     relies on them decides whether it needs a capability floor.
+ *     MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2. This client sends
+ *     `requested_code` for Discord-link hosts and reads `code_in_use` /
+ *     `game_not_found`. No capability floor: a pre-10 broker or server silently
+ *     drops the field and mints its own code, which the host detects as
+ *     `GameCreated.game_code !== requested` and handles; `game_not_found` falls
+ *     back to the legacy message classification.
  * 9 — Recoverable credential rotation via idempotent-nonce replay.
  *     RenewTournamentCredential gains an optional `rotation_nonce` field
  *     (#[serde(default)]) — the "a lobby field is added" trigger;

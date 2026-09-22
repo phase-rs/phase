@@ -276,7 +276,9 @@
     "loadingCustomFormat": "Chargement du format…",
     "noSavedCustomFormats": "Aucun format personnalisé enregistré.",
     "customFormatResolveFailed": "Impossible de charger ce format enregistré.",
-    "customFormatHostingUnavailable": "Héberger avec un format personnalisé n'est pas encore pris en charge — la légalité du deck ne peut pas être vérifiée pour ce format. Enregistrez-le et prévisualisez-le pour l'instant."
+    "customFormatHostingUnavailable": "Héberger avec un format personnalisé n'est pas encore pris en charge — la légalité du deck ne peut pas être vérifiée pour ce format. Enregistrez-le et prévisualisez-le pour l'instant.",
+    "botGameNotice": "Vous hébergez la partie Discord {{code}}. La connexion et la confidentialité sont fixées par la publication Discord.",
+    "botSeedIgnored": "Certains paramètres de la publication Discord ne peuvent pas être utilisés ici — vérifiez le format et le nombre de joueurs."
   },
   "page": {
     "deckRejected": "Le deck a été refusé par l'hôte.",
@@ -309,7 +311,11 @@
     "pickDeck": "Choisir un deck",
     "anonymous": "Anonyme",
     "joining": "Connexion",
-    "joinNeedsServer": "Choisissez un serveur avant de rejoindre une partie."
+    "joinNeedsServer": "Choisissez un serveur avant de rejoindre une partie.",
+    "invalidGameLink": "Ce lien de partie est invalide ou incomplet.",
+    "waitingForHostTitle": "En attente de l’hôte…",
+    "waitingForHostMessage": "L’hôte n’a pas encore ouvert cette partie, ou elle a été fermée. Réessayez une fois que l’hôte a ouvert son lien.",
+    "botLinkBrokerUnreachable": "Impossible de joindre le serveur de salon pour ouvrir cette partie Discord. Vérifiez votre connexion, puis rouvrez votre lien d’hôte."
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de draft",
@@ -325,5 +331,9 @@
     "checkingLegality": "Vérification de la légalité du deck…",
     "legal": "✓ Légal en {{format}}",
     "notLegal": "Non légal en {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Ce serveur ne prend pas encore en charge les parties Discord.",
+    "codeInUse": "Le code de cette partie est encore occupé par un salon précédent. Attendez quelques minutes, puis rouvrez votre lien d’hôte depuis Discord. Si cela continue, lancez un nouveau /lfg."
   }
 }
