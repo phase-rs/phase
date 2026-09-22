@@ -8978,9 +8978,11 @@ mod tests {
         );
     }
 
-    /// CR 508.1k + CR 514.2 + CR 603.10a: the ANCHORED revenge scope reads the
-    /// latched `AttackerInfo` for its source on top of the cleanup-time attack
-    /// snapshot; the DEFAULT scope reads only the snapshot. There is no
+    /// CR 508.1k + CR 603.10a: the ANCHORED revenge scope reads the latched
+    /// `AttackerInfo` for its source on top of the cleanup-time attack
+    /// snapshot; the DEFAULT scope reads only the snapshot. The snapshot's
+    /// cleanup-step boundary is engine implementation, not a CR-mandated
+    /// timing — see `StaticCondition::AnyPlayerAttackedYouLastTurn`. There is no
     /// `StateKind` combat variant, so the latched-combat read profiles as
     /// `frozen_source_read()` — the same channel `SourceIsAttacking` and its
     /// siblings use in this match.
@@ -9002,7 +9004,7 @@ mod tests {
         );
         assert!(
             a.reads_player.turn_structure,
-            "and still reads the cleanup-time attack-history snapshot (CR 514.2)"
+            "and still reads the cleanup-time attack-history snapshot"
         );
 
         let d = rw_static_condition(&StaticCondition::AnyPlayerAttackedYouLastTurn {

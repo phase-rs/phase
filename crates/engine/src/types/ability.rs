@@ -11685,13 +11685,19 @@ pub enum StaticCondition {
     SpellCastWithVariantThisTurn {
         variant: crate::types::game_state::CastingVariant,
     },
-    /// CR 508.6 + CR 514.2 + CR 109.5: the "attacked you during their last
+    /// CR 508.6 + CR 109.5: the "attacked you during their last
     /// turn" revenge gate. TRUE when a player declared one or more creatures
     /// attacking the ability's controller ("you", CR 109.5) during that
     /// player's most recent COMPLETED turn. Backed by the
-    /// `attacked_defenders_last_turn` snapshot taken at each turn's cleanup
-    /// step (CR 514.2) and read through the single history authority
-    /// `GameState::player_attacked_player_last_turn`.
+    /// `attacked_defenders_last_turn` snapshot, read through the single history
+    /// authority `GameState::player_attacked_player_last_turn`.
+    ///
+    /// The snapshot rolls over at the cleanup step, and that timing is ENGINE
+    /// IMPLEMENTATION rather than a CR mandate. CR 514.2 — previously cited
+    /// here — governs only damage removal and the end of "until end of turn"
+    /// and "this turn" effects; no rule defines an attack-history snapshot.
+    /// CR 508.6 supplies the semantics ("has attacked [a player]"); the
+    /// cleanup boundary is merely where this engine advances "last turn".
     ///
     /// `scope` selects WHICH player is asked about, and is the only difference
     /// between the two readings:
