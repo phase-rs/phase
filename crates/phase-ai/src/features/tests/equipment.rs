@@ -70,6 +70,7 @@ fn attach_equipment() -> Effect {
     Effect::Attach {
         attachment: equipment_filter(),
         target: TargetFilter::Any,
+        selection: engine::types::ability::AttachSelection::Targeted,
     }
 }
 
@@ -102,6 +103,7 @@ fn equipment_with_its_own_equip_ability_is_not_payoff() {
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::Any,
+            selection: engine::types::ability::AttachSelection::Targeted,
         },
     ));
     assert!(is_equipment(&e));

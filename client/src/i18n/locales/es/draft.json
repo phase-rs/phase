@@ -183,6 +183,7 @@
     "packProgress": "Sobre {{current}} de {{total}}",
     "openPack": "Abrir sobre",
     "openPackArt": "Abrir ilustración del sobre",
+    "openAllPacks": "Abrir todos los sobres",
     "pulls": "Tus cartas",
     "nextPack": "Siguiente sobre",
     "viewPool": "Ver tu pool",

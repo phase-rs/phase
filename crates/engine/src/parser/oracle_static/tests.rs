@@ -28071,14 +28071,23 @@ fn cant_attack_unless_opponent_dealt_damage_stores_not() {
     else {
         panic!("expected DamageDealtThisTurn ref, got {lhs:?}");
     };
-    // Subject "an opponent" → opponent-controller target filter.
-    assert!(
-        matches!(
-            target.as_ref(),
-            TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)
-        ),
-        "expected opponent-controller target, got {target:?}"
+    // Subject "an opponent" → the player-only recipient shape
+    // `And[Player, Typed{controller: Opponent}]` (CR 120.1 + CR 120.3 +
+    // CR 120.9): the `Player` child refuses object recipients, so damage dealt
+    // to an opponent's permanent can never satisfy the inner condition.
+    let TargetFilter::And { filters } = target.as_ref() else {
+        panic!("expected the player-only And recipient filter, got {target:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected [Player, Typed], got {filters:?}"
     );
+    assert_eq!(filters[0], TargetFilter::Player);
+    let TargetFilter::Typed(tf) = &filters[1] else {
+        panic!("expected the typed controller leg, got {:?}", filters[1]);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
 }
 
 /// HAZARD regression — CR 118.12a. A self-referential pay-tax that falls

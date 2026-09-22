@@ -10100,6 +10100,11 @@ pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityIr> {
             parsed_clause(Effect::Attach {
                 attachment: crate::types::ability::TargetFilter::SelfRef,
                 target,
+                // CR 702.6a: the keyword's "target" names the HOST; the
+                // attachment ("this permanent") is determined.
+                selection: crate::types::ability::AttachSelection::AtResolution {
+                    count: crate::types::ability::AttachCardinality::One,
+                },
             }),
             None,
             None,

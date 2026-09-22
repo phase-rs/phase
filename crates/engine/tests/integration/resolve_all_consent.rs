@@ -155,6 +155,7 @@ fn browser_partial_priority_equip_state() -> (GameState, ObjectId, ObjectId) {
                     target: TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::You),
                     ),
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
                 vec![TargetRef::Object(creature)],
                 equipment,

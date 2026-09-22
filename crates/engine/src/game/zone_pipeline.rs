@@ -9,9 +9,9 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AdditionalCostInstancePayment, CastTimingPermission, CostPaidObjectSnapshot, Duration, Effect,
-    EffectKind, KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter,
-    TargetRef,
+    AdditionalCostInstancePayment, AttachCardinality, AttachSelection, CastTimingPermission,
+    CostPaidObjectSnapshot, Duration, Effect, EffectKind, KickerVariant, LibraryPosition,
+    ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -4558,6 +4558,11 @@ fn execute_zone_move_with_applied_terminal(
                         Effect::Attach {
                             attachment: TargetFilter::SelfRef,
                             target: TargetFilter::Any,
+                            // Aura-attachment delivery: the entering Aura is the
+                            // attachment; only its host is chosen here.
+                            selection: AttachSelection::AtResolution {
+                                count: AttachCardinality::One,
+                            },
                         },
                         Vec::new(),
                         source_id,

@@ -47,13 +47,6 @@ function withValidatedFormatConfig<T extends { format_config?: FormatConfig | nu
 export interface RegisterHostRequest {
   /** PeerJS peer ID guests dial to reach the host's engine. */
   hostPeerId: string;
-  deck: {
-    main_deck: string[];
-    sideboard: string[];
-    commander: string[];
-    planar_deck?: string[];
-    scheme_deck?: string[];
-  };
   displayName: string;
   public: boolean;
   password: string | null;
@@ -61,7 +54,6 @@ export interface RegisterHostRequest {
   playerCount: number;
   matchConfig: MatchConfig;
   formatConfig: FormatConfig | null;
-  aiSeats: unknown[];
   startWhenFull?: boolean;
   ranked?: boolean;
   roomName: string | null;
@@ -208,7 +200,16 @@ export function makeBrokerClient(socket: PhaseSocket): BrokerClient {
         JSON.stringify({
           type: "CreateGameWithSettings",
           data: {
-            deck: req.deck,
+            // LobbyOnly brokers never consume deck data. Keep the existing
+            // wire shape for protocol compatibility without exposing the
+            // host's private deck or AI seat metadata.
+            deck: {
+              main_deck: [],
+              sideboard: [],
+              commander: [],
+              planar_deck: [],
+              scheme_deck: [],
+            },
             display_name: req.displayName,
             public: req.public,
             password: req.password,
@@ -216,7 +217,7 @@ export function makeBrokerClient(socket: PhaseSocket): BrokerClient {
             player_count: req.playerCount,
             match_config: req.matchConfig,
             format_config: req.formatConfig,
-            ai_seats: req.aiSeats,
+            ai_seats: [],
             room_name: req.roomName,
             host_peer_id: req.hostPeerId,
             draft_metadata: req.draftMetadata,

@@ -23,13 +23,14 @@ use crate::parser::oracle_quantity::{
     parse_quantity_ref,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider,
-    DigRestOrder, DigSource, Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody,
-    FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
-    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
+    CastingPermission, ChoiceType, Chooser, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigSource, Duration, Effect,
+    EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp, ForEachCategoryAction,
+    LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope, PermissionGrantee,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -4513,6 +4514,10 @@ pub(super) fn apply_clause_continuation(
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
                         target: host,
+                        // The moved card is the host; the attachment is the source.
+                        selection: AttachSelection::AtResolution {
+                            count: AttachCardinality::One,
+                        },
                     },
                 )));
             }

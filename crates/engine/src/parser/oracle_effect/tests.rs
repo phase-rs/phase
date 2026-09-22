@@ -12,10 +12,10 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AbilityUseTally, AttachmentKind, CardSelectionMode, CastCostModifier, CastManaObjectScope,
-    CastManaSpentMetric, CommanderOwnership, DigRestOrder, ExcessRecipient, ForEachCategoryAction,
-    MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource, SeatDirection,
-    TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
+    AbilityUseTally, AttachSelection, AttachmentKind, CardSelectionMode, CastCostModifier,
+    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, DigRestOrder, ExcessRecipient,
+    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
+    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -117,6 +117,11 @@ fn assert_grip_of_phyresis_chain(text: &str) {
         &Effect::Attach {
             attachment: TargetFilter::ParentTarget,
             target: TargetFilter::LastCreated,
+            // CR 115.10a: "attach that Equipment" is a determined anaphor, not a
+            // printed target — the role is chosen while the effect resolves.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
         "attachment and recipient provenance must be exact: {text}"
     );
@@ -3195,6 +3200,126 @@ fn anaphor_self_rewrite_does_not_fire_without_named_clause() {
             "single-clause 'exile it' must stay TriggeringSource (issue #319 class)"
         ),
         other => panic!("expected ChangeZone exile, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 701.3a (FIN Sidequest class — Sidequest: Play Blitzball):
+/// in "transform ~, then attach it to <host>", the previous clause named the
+/// SOURCE via `~` (a `SelfRef` Transform), so the following bare-pronoun
+/// ATTACHMENT operand must rebind to the source. The DEFAULT `ParseContext` is
+/// the discriminating context: `typed_trigger_subject` is false there, so only
+/// the new `attach_anaphor_after_self_ref_transform` admission can fire. The
+/// fully-named host (`target`) keeps its own binding.
+#[test]
+fn attach_anaphor_rebinds_to_self_after_named_transform_clause() {
+    let mut ctx = ParseContext::default();
+    let def = parse_effect_chain_with_context(
+        "transform ~, then attach it to a creature you control.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    // Clause 1: the named source.
+    match &*def.effect {
+        Effect::Transform {
+            target: TargetFilter::SelfRef,
+            ..
+        } => {}
+        other => panic!("expected clause 1 = Transform SelfRef, got {other:?}"),
+    }
+    // Clause 2 (sub_ability): the attachment rebinds; the host is untouched.
+    let sub = def.sub_ability.as_ref().expect("attach sub_ability");
+    match &*sub.effect {
+        Effect::Attach {
+            attachment, target, ..
+        } => {
+            assert_eq!(
+                *attachment,
+                TargetFilter::SelfRef,
+                "the bare-pronoun attachment names the transformed source"
+            );
+            match target {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "host must stay 'a creature you control', got {:?}",
+                        tf.type_filters
+                    );
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed host filter, got {other:?}"),
+            }
+        }
+        other => panic!("expected clause 2 = Attach, got {other:?}"),
+    }
+}
+
+/// Same clause shape under a typed trigger subject: the attachment operand route
+/// (`imperative::parse_attachment_anaphor`) parses through a DEFAULT
+/// `ParseContext`, so it yields `ParentTarget` before the chunk-loop gate
+/// regardless of the real subject — the pre-existing `typed_trigger_subject`
+/// disjunct and the new admission both land on `SelfRef`.
+#[test]
+fn attach_anaphor_rebinds_to_self_under_typed_trigger_subject() {
+    let mut ctx = cat_subject_ctx();
+    let def = parse_effect_chain_with_context(
+        "transform ~, then attach it to a creature you control.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    match &*def.effect {
+        Effect::Transform {
+            target: TargetFilter::SelfRef,
+            ..
+        } => {}
+        other => panic!("expected clause 1 = Transform SelfRef, got {other:?}"),
+    }
+    let sub = def.sub_ability.as_ref().expect("attach sub_ability");
+    match &*sub.effect {
+        Effect::Attach {
+            attachment, target, ..
+        } => {
+            assert_eq!(
+                *attachment,
+                TargetFilter::SelfRef,
+                "typed-subject context must still bind the attachment to the source"
+            );
+            assert!(
+                matches!(target, TargetFilter::Typed(_)),
+                "host must stay a typed creature filter, got {target:?}"
+            );
+        }
+        other => panic!("expected clause 2 = Attach, got {other:?}"),
+    }
+}
+
+/// Negative sibling (the Soul Seizer encoding): when the previous clause
+/// transformed a CHOSEN target (`Transform{ParentTarget}` — "transform it"),
+/// the following bare "it" is genuinely ambiguous, so the gate must NOT fire and
+/// the attachment operand keeps its default `ParentTarget` — never `SelfRef`.
+#[test]
+fn attach_anaphor_keeps_parent_target_when_prior_clause_is_not_self_ref_transform() {
+    let mut ctx = ParseContext::default();
+    let def = parse_effect_chain_with_context(
+        "transform it, then attach it to a creature you control.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    match &*def.effect {
+        Effect::Transform {
+            target: TargetFilter::ParentTarget,
+            ..
+        } => {}
+        other => panic!("expected clause 1 = Transform ParentTarget, got {other:?}"),
+    }
+    let sub = def.sub_ability.as_ref().expect("attach sub_ability");
+    match &*sub.effect {
+        Effect::Attach {
+            attachment: TargetFilter::ParentTarget,
+            ..
+        } => {}
+        other => {
+            panic!("attachment must stay ParentTarget for a non-SelfRef antecedent, got {other:?}")
+        }
     }
 }
 
@@ -39634,9 +39759,11 @@ fn self_exile_change_zone_keeps_selfref_through_anaphor_scan() {
 
 /// CR 115.10a (#548 over-rewrite regression): a target carrying the `Another`
 /// property excludes the referenced object by definition, so the #548 anaphor
-/// scan must never collapse it to ParentTarget. (Fumble: "Return target
-/// creature… then attach them to another creature." — the attach destination
-/// is a fresh, distinct creature, not the bounced one.)
+/// scan must never collapse it to ParentTarget. Reachable singular input (the
+/// plural form of this sentence is now refused outright — see
+/// `plural_anaphor_attachment_clause_is_unsupported`): "attach IT to another
+/// creature" — the attach destination is a fresh, distinct creature, not the
+/// bounced one.
 #[test]
 fn attach_to_another_creature_keeps_another_through_anaphor_scan() {
     fn find_attach_target(def: &AbilityDefinition) -> Option<&TargetFilter> {
@@ -39646,7 +39773,7 @@ fn attach_to_another_creature_keeps_another_through_anaphor_scan() {
         def.sub_ability.as_ref().and_then(|s| find_attach_target(s))
     }
     let def = parse_effect_chain(
-            "Return target creature to its owner's hand. Gain control of all Auras and Equipment that were attached to it, then attach them to another creature.",
+            "Return target creature to its owner's hand. Gain control of all Auras and Equipment that were attached to it, then attach it to another creature.",
             AbilityKind::Spell,
         );
     let target = find_attach_target(&def).expect("attach clause");
@@ -39659,6 +39786,26 @@ fn attach_to_another_creature_keeps_another_through_anaphor_scan() {
             ),
             other => panic!("expected Typed{{Another}} attach destination, got {other:?}"),
         }
+
+    // Liveness control for the assertion above: the SAME scan arm must collapse a
+    // non-explicit host to ParentTarget, or the preservation asserted above could
+    // pass vacuously (e.g. if the scan arm were removed entirely).
+    let mut collapsed = Effect::Attach {
+        attachment: TargetFilter::ParentTarget,
+        target: TargetFilter::SelfRef,
+        selection: AttachSelection::Targeted,
+    };
+    super::replace_target_with_parent(&mut collapsed);
+    match collapsed {
+        Effect::Attach {
+            target: TargetFilter::ParentTarget,
+            ..
+        } => {}
+        other => panic!(
+            "liveness control: the #548 scan arm must rewrite a non-explicit host \
+             to ParentTarget, got {other:?}"
+        ),
+    }
 }
 
 /// CR 608.2k: Predicate guard — the anaphor-rebinding gate must NOT fire when the
@@ -51592,7 +51739,9 @@ fn attach_just_moved_iron_man_put_from_hand_attach_equipment_to_source() {
         .as_ref()
         .expect("expected Attach sub_ability for the Equipment follow-up");
     match &*attach.effect {
-        Effect::Attach { attachment, target } => {
+        Effect::Attach {
+            attachment, target, ..
+        } => {
             assert!(
                 matches!(attachment, TargetFilter::SelfRef),
                 "attachment must be the moved card (SelfRef), got {attachment:?}"
@@ -51659,7 +51808,9 @@ fn invincible_iron_man_trigger_parses_equipment_attach_via_parse_oracle_text() {
         .as_ref()
         .expect("expected Attach sub_ability");
     match &*attach.effect {
-        Effect::Attach { attachment, target } => {
+        Effect::Attach {
+            attachment, target, ..
+        } => {
             assert!(matches!(attachment, TargetFilter::SelfRef));
             assert!(matches!(target, TargetFilter::ParentTarget));
         }
@@ -51727,7 +51878,9 @@ fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
         .as_ref()
         .expect("expected Attach sub_ability after Dig");
     match &*attach.effect {
-        Effect::Attach { attachment, target } => {
+        Effect::Attach {
+            attachment, target, ..
+        } => {
             assert!(
                 matches!(attachment, TargetFilter::ParentTarget),
                 "attachment should bind to a chosen moved Equipment, got {attachment:?}"
@@ -51772,6 +51925,396 @@ fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
         attach.target_choice_timing,
         TargetChoiceTiming::Resolution,
         "Gilgamesh says 'a Samurai', not 'target Samurai', so the host is chosen while resolving"
+    );
+}
+
+/// First `Effect::Attach` node in a parsed chain (root first, then
+/// sub-abilities), panicking when the clause did not lower to one.
+fn attach_node(def: &AbilityDefinition) -> &AbilityDefinition {
+    if matches!(&*def.effect, Effect::Attach { .. }) {
+        return def;
+    }
+    def.sub_ability
+        .as_deref()
+        .map(attach_node)
+        .unwrap_or_else(|| panic!("expected an Attach node in the parsed chain: {def:?}"))
+}
+
+/// CR 115.1d + CR 608.2d: Sidequest: Play Blitzball's "transform this
+/// enchantment, then attach it to a creature you control". The printed host is
+/// DESCRIBED — no literal "target" — so the host is chosen while the effect
+/// resolves. Deciding conjuncts: context-ref attachment (the U3 anaphor binds
+/// "it" to the source) + host needs a declared slot + host denotes battlefield
+/// objects + the clause prints the "attach " verb; the shared `"target "` scan
+/// then finds none.
+#[test]
+fn attach_host_timing_play_blitzball_is_resolution() {
+    let def = parse_effect_chain(
+        "transform ~, then attach it to a creature you control.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "a described battlefield-object host is chosen while the effect resolves"
+    );
+}
+
+/// CR 115.1a + CR 608.2d: Aura Graft's "Attach it to another permanent it can
+/// enchant" — described host, battlefield objects, printed verb ⇒ Resolution
+/// (an Instant clause, so the spell-form targeting rule 115.1a applies; the
+/// triggered class keeps CR 115.1d).
+#[test]
+fn attach_host_timing_aura_graft_is_resolution() {
+    let def = parse_effect_chain(
+        "Gain control of target Aura that's attached to a permanent. Attach it to another permanent it can enchant.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "Aura Graft's host is described, not targeted"
+    );
+}
+
+/// CR 115.1d + CR 608.2d: Stonehewer Giant's searched-up Equipment is attached
+/// to "a creature you control" — described host ⇒ Resolution (the moved-card
+/// attachment role still resolves through the shared cascade at execution).
+#[test]
+fn attach_host_timing_stonehewer_giant_is_resolution() {
+    let def = parse_effect_chain(
+        "Search your library for an Equipment card, put it onto the battlefield, attach it to a creature you control, then shuffle.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "the searched-up Equipment's host is described, not targeted"
+    );
+}
+
+/// CR 608.2c (rules of English — number agreement) + CR 400.7 (maintainer
+/// finding on #9166, honest-coverage option): Fumble's "then attach them to
+/// another creature" names a SET ("them" = the Auras/Equipment the previous
+/// instruction gained control of). The AST has no set-valued attachment
+/// operand and `GainControlAll` publishes no typed provenance, so the clause is
+/// REFUSED outright — `Effect::unimplemented("plural_attachment_anaphor")`
+/// instead of a `ParentTarget` attach bound to the bounced creature, which
+/// CR 400.7 makes a new object.
+///
+/// Reach-guards: the two modelled clauses in front of it still parse, so the
+/// refusal is the attach clause only, not a whole-line collapse.
+#[test]
+fn plural_anaphor_attachment_clause_is_unsupported() {
+    let def = parse_effect_chain(
+        "Return target creature to its owner's hand. Gain control of all Auras and Equipment that were attached to it, then attach them to another creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Bounce { .. }),
+        "reach-guard: the bounce clause still parses, got {:?}",
+        def.effect
+    );
+    let gain = def
+        .sub_ability
+        .as_deref()
+        .expect("the gain-control clause must follow the bounce");
+    assert!(
+        matches!(&*gain.effect, Effect::GainControlAll { .. }),
+        "reach-guard: the gain-control clause still parses, got {:?}",
+        gain.effect
+    );
+    let attach_clause = gain
+        .sub_ability
+        .as_deref()
+        .expect("the attach clause must follow the gain-control clause");
+    match &*attach_clause.effect {
+        Effect::Unimplemented { name, description } => {
+            assert_eq!(
+                name, "plural_attachment_anaphor",
+                "the gap key must be the stable pattern class"
+            );
+            assert!(
+                description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("attach them")),
+                "the gap description must carry the refused clause, got {description:?}"
+            );
+        }
+        other => panic!(
+            "a plural-anaphor attachment operand has no typed antecedent and must be \
+             honestly unsupported, got {other:?}"
+        ),
+    }
+}
+
+/// Same refusal for the `those <noun>` half of the recognizer (CR 608.2c):
+/// Helm of Kaldra's "Attach those Equipment to it." names the set {Helm, Sword,
+/// Shield of Kaldra}, which this engine cannot represent. The positive control
+/// in the same test proves the guard keys on the PLURAL phrase, not on the
+/// "attach " verb: the singular "attach it to another creature" still parses to
+/// an `Attach` node.
+#[test]
+fn plural_demonstrative_attachment_clause_is_unsupported() {
+    let def = parse_effect_chain("Attach those Equipment to it.", AbilityKind::Spell);
+    match &*def.effect {
+        Effect::Unimplemented { name, .. } => assert_eq!(name, "plural_attachment_anaphor"),
+        other => panic!("`those <noun>` must be refused, got {other:?}"),
+    }
+
+    let singular = parse_effect_chain(
+        "Gain control of all Auras and Equipment that were attached to it, then attach it to another creature.",
+        AbilityKind::Spell,
+    );
+    fn chain_has_attach(def: &AbilityDefinition) -> bool {
+        matches!(&*def.effect, Effect::Attach { .. })
+            || def.sub_ability.as_deref().is_some_and(chain_has_attach)
+    }
+    assert!(
+        chain_has_attach(&singular),
+        "positive control: a SINGULAR attachment anaphor still lowers to Attach, got {singular:?}"
+    );
+}
+
+/// CR 608.2c + CR 608.2k: the refusal is UNCONDITIONAL.
+/// `plural_object_pronoun_ref` carries the linked-exile pool for QUANTITY
+/// references, but nothing consumes it into an attachment OPERAND —
+/// `parse_attachment_anaphor` ignores it and would still bind the singular
+/// `ParentTarget`, the exact wrong-operand shape the guard prevents. Both a bare
+/// context and a context carrying that typed antecedent are refused; called
+/// through the `pub(super)` entry so the hand-built context is the real one.
+#[test]
+fn plural_attachment_anaphor_is_refused_even_with_a_typed_antecedent() {
+    let text = "attach them to another creature";
+    let lower = text.to_ascii_lowercase();
+    for (label, mut ctx) in [
+        ("bare context", ParseContext::default()),
+        (
+            "typed plural antecedent present",
+            ParseContext {
+                plural_object_pronoun_ref: Some(TargetFilter::ExiledBySource),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let ast = crate::parser::oracle_effect::imperative::parse_utility_imperative_ast(
+            text, &lower, &mut ctx,
+        )
+        .expect("the clause must still parse (as the refusal variant)");
+        assert!(
+            matches!(ast, UtilityImperativeAst::AttachPluralAnaphor { .. }),
+            "{label}: a plural attachment anaphor has no set-valued operand encoding and \
+             must be refused, got {ast:?}"
+        );
+    }
+}
+
+/// CR 115.1d + CR 608.2d: Embercleave's Equipment-ETB "attach it to **target**
+/// creature you control" prints the literal word, so the shared `"target "`
+/// guard keeps the clause Stack even though the other conjuncts match.
+#[test]
+fn attach_host_timing_embercleave_stays_stack() {
+    let def = parse_effect_chain(
+        "attach it to target creature you control.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "a literal \"target\" host keeps stack-time targeting"
+    );
+}
+
+/// CR 702.6a: a keyword-generated Equip clause lowers from the reminder-stripped
+/// fragment `"Equip {3}"`, which prints no "attach " verb — the verb guard is
+/// what keeps the whole keyword class (and the four committed oracle_ir
+/// snapshots) at Stack.
+#[test]
+fn attach_host_timing_equip_keyword_stays_stack() {
+    let equip = crate::parser::oracle::try_parse_equip_lowered("Equip {3}")
+        .expect("Equip {3} must lower to an activated ability");
+    assert_eq!(
+        equip.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "the Equip keyword targets (CR 702.6a); its reminder-stripped fragment prints no verb"
+    );
+}
+
+/// CR 115.10a + CR 608.2d: the ATTACHMENT operand's printed role and
+/// cardinality. `"attach any number of Equipment you control to target creature
+/// you control"` (Beatrix, Loyal General; Ardenn, Intrepid Archaeologist)
+/// prints "target" for the HOST only, so the attachment is a RESOLUTION choice
+/// carrying its printed cardinality (CR 107.1c), and the awaited target-count
+/// field stays empty (`clause.multi_target` is the ANNOUNCED count).
+#[test]
+fn attach_selection_described_any_number_is_resolution_with_cardinality() {
+    for text in [
+        "attach any number of Equipment you control to target creature you control.",
+        "attach any number of Auras and Equipment you control to target permanent or player.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let node = attach_node(&def);
+        match &*node.effect {
+            Effect::Attach { selection, .. } => assert_eq!(
+                selection,
+                &AttachSelection::AtResolution {
+                    count: AttachCardinality::AnyNumber
+                },
+                "{text}"
+            ),
+            other => panic!("{text}: expected Attach, got {other:?}"),
+        }
+        assert_eq!(
+            node.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}: the printed-target HOST keeps its announcement slot"
+        );
+        assert_eq!(
+            node.multi_target, None,
+            "{text}: the described count must NOT travel in the announced-count field"
+        );
+    }
+}
+
+/// CR 115.10a: the conservative internal-`target ` rule. Glamer Spinners'
+/// "all Auras enchanting target permanent" carries a `target` INSIDE the
+/// attachment phrase whose relation is itself unmodelled, so the operand keeps
+/// the legacy announced role (a disclosed deferral) rather than re-timing on a
+/// partial parse.
+#[test]
+fn attach_selection_internal_target_phrase_stays_targeted() {
+    let def = parse_effect_chain(
+        "attach all Auras enchanting target permanent to another permanent with the same controller.",
+        AbilityKind::Spell,
+    );
+    match &*attach_node(&def).effect {
+        Effect::Attach { selection, .. } => assert_eq!(
+            selection,
+            &AttachSelection::Targeted,
+            "a phrase whose own relation contains an unmodelled target keeps the \
+             legacy announced role"
+        ),
+        other => panic!("expected Attach, got {other:?}"),
+    }
+}
+
+/// CR 115.10a: a PRINTED-target attachment (`"attach target Equipment you
+/// control to target creature you control"` — Brass Squire, Auriok Windwalker,
+/// Thorin, Weapons Vendor) stays announced for BOTH roles.
+#[test]
+fn attach_selection_printed_target_stays_targeted() {
+    let def = parse_effect_chain(
+        "attach target Equipment you control to target creature you control.",
+        AbilityKind::Spell,
+    );
+    let node = attach_node(&def);
+    match &*node.effect {
+        Effect::Attach { selection, .. } => assert_eq!(selection, &AttachSelection::Targeted),
+        other => panic!("expected Attach, got {other:?}"),
+    }
+    assert!(
+        node.multi_target.is_none(),
+        "a single printed-target attachment carries no count spec"
+    );
+}
+
+/// CR 107.1c: `"attach all <filter>"` is a DETERMINED set (no player choice);
+/// the printed cardinality is recorded so the enumeration follow-up has a typed
+/// seam. Balan, Wandering Knight.
+#[test]
+fn attach_selection_all_is_recorded() {
+    let def = parse_effect_chain(
+        "Attach all Equipment you control to Balan.",
+        AbilityKind::Spell,
+    );
+    match &*attach_node(&def).effect {
+        Effect::Attach { selection, .. } => assert_eq!(
+            selection,
+            &AttachSelection::AtResolution {
+                count: AttachCardinality::All
+            }
+        ),
+        other => panic!("expected Attach, got {other:?}"),
+    }
+}
+
+/// CR 115.10a + CR 608.2d: determined operands (context references) and
+/// "up to N" described operands carry their truthful role/cardinality.
+#[test]
+fn attach_selection_determined_and_up_to_rows() {
+    // Nahiri, the Lithomancer: "attach an Equipment you control to it" — the
+    // host is a context ref and the attachment is described.
+    let nahiri = parse_effect_chain("attach an Equipment you control to it.", AbilityKind::Spell);
+    match &*attach_node(&nahiri).effect {
+        Effect::Attach { selection, .. } => assert_eq!(
+            selection,
+            &AttachSelection::AtResolution {
+                count: AttachCardinality::One
+            }
+        ),
+        other => panic!("expected Attach, got {other:?}"),
+    }
+
+    // Embercleave: "attach it to target creature you control" — the attachment
+    // is the source ("it"), never a printed target.
+    let embercleave = parse_effect_chain(
+        "attach it to target creature you control.",
+        AbilityKind::Spell,
+    );
+    match &*attach_node(&embercleave).effect {
+        Effect::Attach { selection, .. } => assert_eq!(
+            selection,
+            &AttachSelection::AtResolution {
+                count: AttachCardinality::One
+            }
+        ),
+        other => panic!("expected Attach, got {other:?}"),
+    }
+
+    // Synthetic "up to N" described attachment.
+    let up_to = parse_effect_chain(
+        "attach up to two Equipment you control to target creature you control.",
+        AbilityKind::Spell,
+    );
+    match &*attach_node(&up_to).effect {
+        Effect::Attach { selection, .. } => assert_eq!(
+            selection,
+            &AttachSelection::AtResolution {
+                count: AttachCardinality::UpTo(QuantityExpr::Fixed { value: 2 })
+            }
+        ),
+        other => panic!("expected Attach, got {other:?}"),
+    }
+}
+
+/// CR 115.4 + CR 608.2d: Maddening Hex's "attach this Aura to another one of
+/// your opponents chosen at random" names a PLAYER population ("any other" is
+/// player-or-object), which the battlefield-object capability refuses ⇒ Stack.
+#[test]
+fn attach_host_timing_maddening_hex_stays_stack() {
+    let def = parse_effect_chain(
+        "Then attach this Aura to another one of your opponents chosen at random.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "a player-valued described host cannot be served by a battlefield-object prompt"
+    );
+}
+
+/// CR 115.1d + CR 608.2d: Spellweaver Volute's "attach this Aura to another
+/// instant card in a graveyard" names an OFF-BATTLEFIELD population ⇒ Stack.
+#[test]
+fn attach_host_timing_spellweaver_volute_stays_stack() {
+    let def = parse_effect_chain(
+        "exile the enchanted card and attach this Aura to another instant card in a graveyard.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        attach_node(&def).target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "a graveyard-valued described host cannot be served by a battlefield-object prompt"
     );
 }
 
@@ -51871,7 +52414,10 @@ fn return_equipment_then_attach_it_to_last_created_token_forwards_returned_equip
         .sub_ability
         .as_ref()
         .expect("expected attach sub-ability");
-    let Effect::Attach { attachment, target } = &*attach.effect else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = &*attach.effect
+    else {
         panic!("expected Attach, got {:?}", attach.effect);
     };
     assert_eq!(
@@ -52060,8 +52606,11 @@ fn attach_just_moved_collapsed_recipient_anaphor_rebinds_to_forwarded_source() {
         &Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::ParentTarget,
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
-        "the returned Sword is the attachment; 'that creature' is the host"
+        "the returned Sword is the attachment ('this permanent' prints no target); \n         'that creature' is the host"
     );
 }
 
@@ -52130,7 +52679,10 @@ fn attach_just_moved_negative_distinct_anaphors_are_not_rebound() {
         .iter()
         .find_map(|def| find_attach_under(def, is_battlefield_move))
         .expect("Attach under the library→battlefield put");
-    let Effect::Attach { attachment, target } = &*attach.effect else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = &*attach.effect
+    else {
         unreachable!("find_attach_under only returns Attach nodes");
     };
     assert_eq!(
@@ -52177,6 +52729,9 @@ fn attach_just_moved_negative_self_ref_attachment_is_not_rebound() {
         &Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::ParentTarget,
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
         "an explicit self attachment must survive the rebind unchanged"
     );
@@ -52192,6 +52747,7 @@ fn rebind_rejects_self_ref_attachment_operand() {
     let mut effect = Effect::Attach {
         attachment: TargetFilter::SelfRef,
         target: TargetFilter::SelfRef,
+        selection: AttachSelection::Targeted,
     };
     assert!(
         !super::lower::rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
@@ -52203,6 +52759,7 @@ fn rebind_rejects_self_ref_attachment_operand() {
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::SelfRef,
+            selection: AttachSelection::Targeted,
         }
     );
 }
@@ -52248,6 +52805,9 @@ fn attach_just_moved_negative_equal_operands_under_gain_control_are_not_rebound(
         &Effect::Attach {
             attachment: TargetFilter::ParentTarget,
             target: TargetFilter::ParentTarget,
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
         "no public-zone move ⇒ no CR 400.7j referent ⇒ no rebind"
     );
@@ -52281,7 +52841,10 @@ fn attach_just_moved_negative_aura_graft_attachment_stays_parent_target() {
             find_attach_under(def, |effect| matches!(effect, Effect::GainControl { .. }))
         })
         .expect("Attach under the GainControl");
-    let Effect::Attach { attachment, target } = &*attach.effect else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = &*attach.effect
+    else {
         unreachable!("find_attach_under only returns Attach nodes");
     };
     assert_eq!(*attachment, TargetFilter::ParentTarget);
@@ -58964,7 +59527,10 @@ fn us_agent_attaches_created_equipment_token_to_self() {
         .sub_ability
         .as_ref()
         .expect("Attach must follow the token creation");
-    let Effect::Attach { attachment, target } = attach.effect.as_ref() else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = attach.effect.as_ref()
+    else {
         panic!("expected Attach sub-ability, got {:?}", attach.effect);
     };
     assert_eq!(
@@ -58986,11 +59552,15 @@ fn attachable_token_creator_still_rewrites_target_side_anaphor() {
     let mut effect = Effect::Attach {
         attachment: TargetFilter::SelfRef,
         target: TargetFilter::ParentTarget,
+        selection: AttachSelection::Targeted,
     };
 
     rewrite_parent_target_to_last_created(&mut effect, true);
 
-    let Effect::Attach { attachment, target } = effect else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = effect
+    else {
         panic!("expected Attach effect");
     };
     assert_eq!(attachment, TargetFilter::SelfRef);

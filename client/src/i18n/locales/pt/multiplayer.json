@@ -104,7 +104,8 @@
     "versionRequired": "Este anfitrião requer o protocolo de ligação v{{version}}. Atualize ambas as janelas e tente novamente.",
     "versionMismatch": "O protocolo de ligação não corresponde: o seu cliente enviou v{{guestVersion}}, mas o anfitrião usa v{{hostVersion}}. Atualize ambas as janelas.",
     "malformedAuthority": "O anfitrião recusou uma autorização de ligação inválida. Entre novamente com um novo código de sala.",
-    "frameUndecodable": "O anfitrião enviou uma mensagem que este cliente não conseguiu ler. Atualize ambas as janelas e tente novamente."
+    "frameUndecodable": "O anfitrião enviou uma mensagem que este cliente não conseguiu ler. Atualize ambas as janelas e tente novamente.",
+    "hostDisconnectedBeforeSetup": "A ligação ao anfitrião foi interrompida antes de a configuração estar concluída."
   },
   "serverOfflinePrompt": {
     "title": "Matchmaking inacessível",

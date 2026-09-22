@@ -104,7 +104,8 @@
     "versionRequired": "このホストにはワイヤープロトコルv{{version}}が必要です。両方のウィンドウを更新して、もう一度試してください。",
     "versionMismatch": "ワイヤープロトコルが一致しません。クライアントはv{{guestVersion}}を送信しましたが、ホストはv{{hostVersion}}です。両方のウィンドウを更新してください。",
     "malformedAuthority": "ホストが無効な接続権限を拒否しました。新しいルームコードで再参加してください。",
-    "frameUndecodable": "ホストがこのクライアントで読めないメッセージを送信しました。両方のウィンドウを更新して、もう一度試してください。"
+    "frameUndecodable": "ホストがこのクライアントで読めないメッセージを送信しました。両方のウィンドウを更新して、もう一度試してください。",
+    "hostDisconnectedBeforeSetup": "セットアップが完了する前にホストとの接続が切断されました。"
   },
   "serverOfflinePrompt": {
     "title": "マッチメイキングに接続できません",

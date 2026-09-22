@@ -6169,6 +6169,7 @@ fn legacy_equip_effect_cost_one_of_is_legal_without_mana_when_discard_available(
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::Typed(TypedFilter::creature()),
+            selection: crate::types::ability::AttachSelection::Targeted,
         },
     );
     {

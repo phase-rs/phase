@@ -10291,7 +10291,10 @@ fn bound_by_moonsilver_sacrifice_another_attach_activated() {
         tf.properties
     );
 
-    let Effect::Attach { attachment, target } = ability.effect.as_ref() else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = ability.effect.as_ref()
+    else {
         panic!("expected Attach effect, got {:?}", ability.effect);
     };
     assert_eq!(*attachment, TargetFilter::SelfRef);

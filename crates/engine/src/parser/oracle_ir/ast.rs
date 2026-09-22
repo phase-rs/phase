@@ -3,9 +3,9 @@ use serde::Serialize;
 use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
-    CastingPermission, ChosenCounterCountCondition, ContinuousModification, ControlWindow,
-    ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, AttachSelection,
+    BounceSelection, CastingPermission, ChosenCounterCountCondition, ContinuousModification,
+    ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope,
     FaceDownProfile, ForceBlockAttackerRef, GuardReading, LibraryPosition, ManaProduction,
     ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool,
@@ -1415,6 +1415,11 @@ pub(crate) enum MultiZoneExileQuantifier {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// Intentional: variants carry parser IR directly (the `Attach` arm's printed
+// role/cardinality plus its announced-count spec), mirroring
+// `oracle_ir::effect_chain` and `oracle_ir::doc`; boxing a field here would add
+// an allocation per parsed clause without changing what is carried.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum UtilityImperativeAst {
     Prevent {
         text: String,
@@ -1460,6 +1465,26 @@ pub(crate) enum UtilityImperativeAst {
         /// target ..." cardinality belongs to the ability's target selection,
         /// not the `Effect::Attach` payload.
         multi_target: Option<MultiTargetSpec>,
+        /// CR 115.1a/c/d/e + CR 608.2d: the printed role of the ATTACHMENT
+        /// operand — `Targeted` when the phrase prints "target …", otherwise
+        /// `AtResolution { count }` with the printed cardinality. Mirrored onto
+        /// `Effect::Attach.selection`; the HOST operand's timing stays the
+        /// ability-level `TargetChoiceTiming`.
+        selection: AttachSelection,
+    },
+    /// CR 608.2c (rules of English — number agreement) + CR 400.7: an Attach
+    /// instruction whose ATTACHMENT operand is a plural anaphor ("attach
+    /// them/those …"). The antecedent set has no typed provenance in the AST
+    /// (`TargetFilter` is singular; `GainControlAll` and the conjure family
+    /// publish no set), so the clause cannot be implemented correctly and
+    /// lowers to `Effect::unimplemented("plural_attachment_anaphor", fragment)`
+    /// — honest coverage instead of a wrong-operand attach.
+    ///
+    /// Follow-up: when the producers publish the affected set as typed
+    /// provenance, this variant becomes a set-valued attachment operand.
+    AttachPluralAnaphor {
+        /// The printed clause, for the `Unimplemented` description.
+        fragment: String,
     },
     UnattachAll {
         attachment: TargetFilter,
@@ -1528,6 +1553,12 @@ pub(crate) enum ChooseImperativeAst {
         chooser: crate::types::ability::Chooser,
         /// CR 608.2d (override): `Random` for "choose one of them at random".
         selection: crate::types::ability::CardSelectionMode,
+        /// CR 608.2d: WHICH set the anaphor names. The bare "of them"/"of those"
+        /// anaphors keep the historic tracked-set fallback (`Legacy`); the
+        /// source-bound "of the exiled cards" form inside an ability whose own
+        /// cost exiled the cards names that cost-payment record instead
+        /// (`CostPaidObjects`, CR 400.7j).
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource,
     },
     /// "choose a [filter] card in/from [player's] [zone]" — direct selection
     /// from visible/resolution-scoped zone contents. Lowered to `Effect::ChooseFromZone`.

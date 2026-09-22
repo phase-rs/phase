@@ -27302,6 +27302,7 @@ pub mod tests {
                             .controller(ControllerRef::You),
                     ),
                     target: TargetFilter::SelfRef,
+                    selection: crate::types::ability::AttachSelection::Targeted,
                 },
             );
             execute.optional = true;

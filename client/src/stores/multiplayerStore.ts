@@ -3303,7 +3303,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             }
             const registered = await broker.registerHost({
               hostPeerId: host.peer.id,
-              deck: asDeckPayload(deck),
               displayName: get().displayName || "Host",
               public: settings.public,
               password: settings.password || null,
@@ -3314,7 +3313,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 loop_detection: settings.loopDetection,
               },
               formatConfig: settings.formatConfig,
-              aiSeats,
               roomName: opts.roomName ?? null,
               draftMetadata: null,
               startWhenFull: settings.startWhenFull,

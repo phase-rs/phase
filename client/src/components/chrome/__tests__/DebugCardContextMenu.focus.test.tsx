@@ -193,20 +193,22 @@ describe("DebugCardContextMenu focus ownership", () => {
 
     fireEvent.keyDown(zoneTrigger, { key: "ArrowRight" });
     const zoneMenu = await screen.findByRole("menu", { name: /^Zone/ });
+    const runEtb = within(zoneMenu).getByRole("menuitemcheckbox", {
+      name: "Run ETB effects",
+    });
     const firstZone = within(zoneMenu).getByRole("menuitem", {
       name: "Battlefield",
     });
-    const secondZone = within(zoneMenu).getByRole("menuitem", { name: "Hand" });
     const lastZone = within(zoneMenu).getByRole("menuitem", { name: "Command" });
-    await waitFor(() => expect(firstZone).toHaveFocus());
+    await waitFor(() => expect(runEtb).toHaveFocus());
 
-    fireEvent.keyDown(firstZone, { key: "ArrowDown" });
-    expect(secondZone).toHaveFocus();
-    fireEvent.keyDown(secondZone, { key: "End" });
+    fireEvent.keyDown(runEtb, { key: "ArrowDown" });
+    expect(firstZone).toHaveFocus();
+    fireEvent.keyDown(firstZone, { key: "End" });
     expect(lastZone).toHaveFocus();
     fireEvent.keyDown(lastZone, { key: "ArrowDown" });
-    expect(firstZone).toHaveFocus();
-    fireEvent.keyDown(firstZone, { key: "ArrowUp" });
+    expect(runEtb).toHaveFocus();
+    fireEvent.keyDown(runEtb, { key: "ArrowUp" });
     expect(lastZone).toHaveFocus();
 
     fireEvent.keyDown(lastZone, { key: "ArrowLeft" });
@@ -215,6 +217,46 @@ describe("DebugCardContextMenu focus ownership", () => {
     );
     expect(zoneTrigger).toHaveFocus();
   });
+
+  it.each([
+    { toggled: false, simulate: false },
+    { toggled: true, simulate: true },
+  ])(
+    "moves zones with simulate=$simulate when Run ETB effects is toggled=$toggled",
+    async ({ toggled, simulate }) => {
+      dispatchDebug.mockResolvedValue([]);
+      render(<ScopedMenuHarness onParentClose={vi.fn()} />);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Open debug actions for Flame Jab",
+        }),
+      );
+      fireEvent.click(screen.getByRole("menuitem", { name: /^Zone/ }));
+      const zoneMenu = await screen.findByRole("menu", { name: /^Zone/ });
+      const runEtb = within(zoneMenu).getByRole("menuitemcheckbox", {
+        name: "Run ETB effects",
+      });
+      expect(runEtb).toHaveAttribute("aria-checked", "false");
+      if (toggled) {
+        fireEvent.click(runEtb);
+        expect(runEtb).toHaveAttribute("aria-checked", "true");
+      }
+
+      fireEvent.click(
+        within(zoneMenu).getByRole("menuitem", { name: "Battlefield" }),
+      );
+
+      await waitFor(() =>
+        expect(dispatchDebug).toHaveBeenCalledWith({
+          type: "Debug",
+          data: {
+            type: "MoveToZone",
+            data: { object_id: 7, to_zone: "Battlefield", simulate },
+          },
+        }),
+      );
+    },
+  );
 
   it("traverses standard, counter, edited P/T, and keyword commands within their owning menu", async () => {
     const creature = gameObjectFactory

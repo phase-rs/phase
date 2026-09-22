@@ -19,7 +19,8 @@ pub(crate) use lower::{
     capitalize, lower_effect_chain_ir, parse_controls_permanent_object,
     parse_counter_suffix_body_combinator, parse_countless_counter_element,
     parse_with_counters_suffix, parse_with_counters_suffix_spanned,
-    player_lookback_relative_clause_owns_suffix, strip_trailing_duration, strip_trailing_where_x,
+    player_lookback_relative_clause_owns_suffix, publishes_chain_created_referent,
+    strip_trailing_duration, strip_trailing_where_x,
 };
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
@@ -46,16 +47,16 @@ use lower::{
     extract_remove_counter_multi_target, extract_switch_pt_multi_target,
     instruction_spine_is_continuation, is_token_creating_effect,
     parse_contextual_bare_card_aggregate, parse_damage_player_scope,
-    parse_for_each_opponent_target_fanout_clause, publishes_chain_created_referent,
-    rebind_clause_recipients_with, rebind_decline_body_recipient,
-    rebind_subject_only_body_recipient, scan_until_next_same_source_exile_invalidation,
-    split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
-    strip_each_scope_who_cant_subject, strip_each_scope_who_didnt_verb_filter_this_way_subject,
-    strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
-    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
-    strip_leading_duration, strip_leading_quantifier, strip_leading_return_destination_ext,
-    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
-    strip_redundant_flip_win_quantifier, strip_repeat_count_suffix, strip_return_destination_ext,
+    parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
+    rebind_decline_body_recipient, rebind_subject_only_body_recipient,
+    scan_until_next_same_source_exile_invalidation, split_difference_repeat_suffix,
+    strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
+    strip_each_scope_who_didnt_verb_filter_this_way_subject, strip_each_scope_who_does_subject,
+    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
+    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_quantifier,
+    strip_leading_return_destination_ext, strip_leading_sequence_connector,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
+    strip_repeat_count_suffix, strip_return_destination_ext,
     strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
     trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
     try_parse_distribute_counters, try_parse_distribute_damage,
@@ -108,11 +109,11 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
-    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint, Chooser,
-    CombatDamageScope, Comparator, ConjureCard, ConjureSource, ContinuousModification,
-    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
-    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    AttachCardinality, AttachSelection, BounceSelection, CardPlayMode, CardTypeSetSource,
+    CastFromZoneDriver, CastMechanism, CastPermissionConstraint, CastingPermission, ChoiceType,
+    ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
+    ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
@@ -173,7 +174,8 @@ use self::subject::{
 };
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::{
-    ChosenColorQualifierScope, ParseContext, TokenPtFollowup, TriggerConditionScope,
+    ChosenColorQualifierScope, ParseContext, PriorZoneChoicePartition, TokenPtFollowup,
+    TriggerConditionScope,
 };
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr,
@@ -15470,6 +15472,10 @@ fn build_aura_attach_clause(
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::ParentTarget,
+            // The reanimated permanent is the host; the attachment is the source.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     )
     .sub_ability(delayed);
@@ -22800,11 +22806,14 @@ fn replace_target_with_parent(effect: &mut Effect) {
 /// `replace_target_with_parent`, but assigns `TargetFilter::SelfRef`.
 ///
 /// Only the effect arms reachable for the "name ~ then refer back" class are
-/// populated: zone changes (the issue card), single-object tap/untap, and
-/// `Transform` for the DFC family. Arms with
-/// `ParentTargetController`/`LastCreated` guards (`Sacrifice`, `Attach`) are
-/// intentionally omitted — those guards are meaningless for a `SelfRef` rebind,
-/// and no card in this class reaches them.
+/// populated: zone changes (the issue card), single-object tap/untap,
+/// `Transform` for the DFC family, and `Attach`'s ATTACHMENT operand for the
+/// FIN "transform ~, then attach it to <host>" class. `Attach` is the one arm
+/// whose rebind is limited to `ParentTarget` (see the arm comment); the
+/// `TriggeringSource` encoding names the trigger event's object and must not
+/// be re-pointed. Arms with `ParentTargetController`/`LastCreated` guards
+/// (`Sacrifice`) remain intentionally omitted — those guards are meaningless
+/// for a `SelfRef` rebind, and no card in this class reaches them.
 fn replace_target_with_self(effect: &mut Effect) {
     match effect {
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
@@ -22826,6 +22835,24 @@ fn replace_target_with_self(effect: &mut Effect) {
         // same source-binding fixup applies.
         Effect::FlipPermanent { target, .. } => {
             *target = TargetFilter::SelfRef;
+        }
+        // CR 608.2c + CR 701.3a (FIN Sidequest class — Sidequest: Play Blitzball):
+        // in "transform ~, then attach it to <host>", the bare-pronoun ATTACHMENT
+        // operand names the source the previous clause just transformed. Rewrite
+        // ONLY `attachment`; the fully-named host (`target`) keeps its own
+        // binding.
+        //
+        // `ParentTarget` is the only admitted encoding. The bare-pronoun
+        // attachment route (`imperative::parse_attachment_anaphor`) parses
+        // through a default `ParseContext` and therefore yields `ParentTarget`
+        // (the declared-slot and source-animation branches are the only
+        // alternatives, and neither applies here). The corpus's single
+        // `TriggeringSource` attachment operand (Ajani's Chosen, "you may attach
+        // it to the token") legitimately names the trigger event's object — a
+        // DIFFERENT antecedent — so admitting that encoding here would re-point
+        // a valid binding.
+        Effect::Attach { attachment, .. } if matches!(attachment, TargetFilter::ParentTarget) => {
+            *attachment = TargetFilter::SelfRef;
         }
         Effect::GenericEffect {
             target,
@@ -30951,6 +30978,46 @@ fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
     }
 }
 
+/// CR 400.7j + CR 608.2c + CR 608.2d: The NEAREST earlier `ChooseFromZone`
+/// clause of this chain, when it is a single-card exile partition — reported
+/// as a [`PriorZoneChoicePartition`] carrying that pile's
+/// `ZoneChoiceCandidateSource`.
+///
+/// Feeds `ParseContext::prior_zone_choice_partition`, the state that lets the
+/// very next instruction's bare "the other" name the UNCHOSEN card (Coin of
+/// Fate). The runtime publishes the CHOSEN cards as the continuation's targets —
+/// and, when the continuation consumes one, as the fresh tracked set — while the
+/// complement reaches only the continuation's immediate `sub_ability` targets.
+/// So "the other" must lower to `ParentTarget` on that sub-ability, not to a
+/// `TrackedSet` (which would name the chosen card, i.e. exactly the wrong half).
+///
+/// The scan STOPS at the nearest `ChooseFromZone` rather than searching for a
+/// matching one: a chain whose most recent choice is some OTHER provenance is
+/// not this partition, and must keep its existing binding. Returning the source
+/// rather than a bool is what keeps "no partition here" and "a partition from a
+/// different source" distinguishable — that is what pins Wake to Slaughter ("An
+/// opponent chooses one of them. … Return the other …", `Legacy`) in place while
+/// leaving the distinction visible to consumers.
+fn chain_prior_zone_choice_partition(clauses: &[ClauseIr]) -> Option<PriorZoneChoicePartition> {
+    clauses
+        .iter()
+        .rev()
+        .find_map(|clause| match &clause.parsed.effect {
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                candidate_source,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                ..
+            } => Some(Some(PriorZoneChoicePartition {
+                candidate_source: *candidate_source,
+            })),
+            Effect::ChooseFromZone { .. } => Some(None),
+            _ => None,
+        })
+        .flatten()
+}
+
 /// The match arms naming every effect that establishes a NON-targeting
 /// object POPULATION — the `*All` / scope-`All` family whose `target` (or
 /// `filter`) is a population filter rather than a chosen target. This is why they
@@ -38877,6 +38944,16 @@ pub(crate) fn parse_effect_chain_ir(
                 .clauses()
                 .iter()
                 .any(clause_ir_is_self_library_peek),
+            // CR 400.7j + CR 608.2c + CR 608.2d: the nearest earlier single-card
+            // exile partition of this chain, with its candidate provenance. When
+            // that provenance is the source-bound cost-paid pile (Coin of Fate),
+            // this chunk's bare "the other" names the UNCHOSEN half — the runtime
+            // forwards it on the continuation's immediate sub-ability targets
+            // (`ParentTarget`), never on the tracked set. Carrying the source
+            // rather than a bool keeps every other `ChooseFromZone` partition
+            // (Wake to Slaughter's `Legacy`) visibly distinct from "no partition",
+            // and forces the consumer to name `CostPaidObjects` explicitly.
+            prior_zone_choice_partition: chain_prior_zone_choice_partition(builder.clauses()),
             // CR 400.1/400.2 + CR 608.2c: most-recent earlier same-chain
             // `RevealHand` target, so a later "cast a spell from among those
             // cards" anaphor (Silent-Blade Oni) binds to that player's hand
@@ -39904,7 +39981,31 @@ pub(crate) fn parse_effect_chain_ir(
                 }
             )
         });
-        if (typed_trigger_subject || exile_then_return_transformed)
+        // CR 608.2c (FIN Sidequest class): "transform ~, then attach it to <host>".
+        // The previous clause named the source via `~` (a `SelfRef` Transform), so this
+        // clause's bare-pronoun attachment operand names that same source. Admitted as
+        // a third structural class beside the typed-subject and exile-then-return
+        // branches; the shared `has_anaphoric_reference` + prior-SelfRef-clause
+        // conjuncts below are the same authorities those two branches use.
+        let attach_anaphor_after_self_ref_transform =
+            matches!(
+                &clause.effect,
+                Effect::Attach {
+                    attachment: TargetFilter::ParentTarget,
+                    ..
+                }
+            ) && builder.clauses().last().is_some_and(|prev| {
+                matches!(
+                    &prev.parsed.effect,
+                    Effect::Transform {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            });
+        if (typed_trigger_subject
+            || exile_then_return_transformed
+            || attach_anaphor_after_self_ref_transform)
             && has_anaphoric_reference(&text_lower)
             && builder
                 .clauses()

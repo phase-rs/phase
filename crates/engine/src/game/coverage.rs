@@ -1835,6 +1835,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             let group = match group_by {
                 None => "ungrouped".to_string(),
                 Some(crate::types::ability::DamageGroupKey::SourceId) => "by-source".to_string(),
+                Some(crate::types::ability::DamageGroupKey::Target) => "by-target".to_string(),
             };
             let kind = match damage_kind {
                 crate::types::ability::DamageKindFilter::Any => "",

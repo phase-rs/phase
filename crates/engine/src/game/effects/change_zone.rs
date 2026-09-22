@@ -55,7 +55,10 @@ fn resolve_forward_result_search_attach_host(
         return None;
     }
     let sub = ability.sub_ability.as_ref()?;
-    let Effect::Attach { attachment, target } = &sub.effect else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = &sub.effect
+    else {
         return None;
     };
     if !matches!(attachment, TargetFilter::SelfRef) {

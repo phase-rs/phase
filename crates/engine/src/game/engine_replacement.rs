@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
-    AbilityDefinition, CopyTargetPurpose, Effect, PostReplacementContinuation, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, AttachCardinality, AttachSelection, CopyTargetPurpose, Effect,
+    PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -2677,6 +2677,9 @@ fn finish_copy_target_choice_entry(
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
                         target: TargetFilter::Any,
+                        selection: AttachSelection::AtResolution {
+                            count: AttachCardinality::One,
+                        },
                     },
                     Vec::new(),
                     source_id,

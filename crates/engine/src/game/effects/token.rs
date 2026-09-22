@@ -8,12 +8,12 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission,
-    Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
-    Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction,
-    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
-    SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachCardinality,
+    AttachSelection, CastingPermission, Comparator, ContinuousModification, ControllerRef,
+    CopiableValues, DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind, FilterProp,
+    ManaContribution, ManaProduction, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -1889,6 +1889,9 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
                         target: TargetFilter::Any,
+                        selection: AttachSelection::AtResolution {
+                            count: AttachCardinality::One,
+                        },
                     },
                     Vec::new(),
                     entry.source_id,

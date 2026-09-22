@@ -5267,6 +5267,7 @@ mod tests {
                         engine::types::ability::TypedFilter::creature()
                             .controller(ControllerRef::You),
                     ),
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             ));
         }
@@ -5383,6 +5384,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::Any,
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             ));
         }

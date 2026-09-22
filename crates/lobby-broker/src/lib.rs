@@ -21,7 +21,7 @@ pub mod validation;
 
 pub use broker::{
     check_build_commit, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound,
-    MAX_LOBBY_ENTRIES,
+    ReapOutcome, MAX_LOBBY_ENTRIES,
 };
 pub use directory::{
     compare_announcement_to_info, info_url, normalize_announced_url, score, validate_announcement,
@@ -38,7 +38,8 @@ pub use inbound_guard::{
     LookupJoinTargetInbound,
 };
 pub use lobby::{
-    JoinTargetInfo, LobbyManager, LobbyReservation, RegisterGameRequest, PUBLIC_SEAT_RESERVATION_MS,
+    ExpiredLobbyGame, ExpiryConsumption, JoinTargetInfo, LobbyManager, LobbyReservation,
+    RegisterGameRequest, PUBLIC_SEAT_RESERVATION_MS,
 };
 pub use protocol::{
     parse_lobby_client_message, DraftLobbyMetadata, LobbyClientMessage, LobbyGame,

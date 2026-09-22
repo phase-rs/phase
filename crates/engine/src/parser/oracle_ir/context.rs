@@ -6,7 +6,7 @@
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     ControllerRef, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
-    TargetSelectionMode,
+    TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::zones::Zone;
 
@@ -90,6 +90,31 @@ pub(crate) enum ChosenColorQualifierScope {
     /// one place. Phrased by role rather than by count so it cannot go stale
     /// when the loop grows another emit arm.
     ChainBound,
+}
+
+/// CR 608.2c + CR 608.2d: The nearest EARLIER single-card zone-choice
+/// partition in this same effect chain, and where its candidate pile came
+/// from.
+///
+/// A clause of the shape `Effect::ChooseFromZone { count: 1, zone: Exile,
+/// selection: Chosen, .. }` splits a pile into a chosen half and an unchosen
+/// complement, which is what lets the very next instruction say "the other".
+/// Which binding that complement lowers to depends on the pile's PROVENANCE,
+/// so the provenance — not a yes/no flag — is what this carries: a bare bool
+/// would collapse "no prior partition at all" and "a prior partition from a
+/// different [`ZoneChoiceCandidateSource`]" into the same `false`, and a
+/// newly added candidate source would then be silently indistinguishable from
+/// the one shape this gate is keyed to.
+///
+/// `None` means the chain has no earlier single-card exile partition at all
+/// (including the case where its nearest zone choice is some other shape).
+/// Consumers must match the carried source EXPLICITLY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PriorZoneChoicePartition {
+    /// The `candidate_source` of that `ChooseFromZone` clause — i.e. where the
+    /// partitioned pile came from (`CostPaidObjects` for Coin of Fate's
+    /// cost-exiled pair, `Legacy` for Wake to Slaughter's, …).
+    pub candidate_source: ZoneChoiceCandidateSource,
 }
 
 /// Parser-only provenance: the enclosing trigger body is resolving a PROVEN
@@ -533,6 +558,31 @@ pub(crate) struct ParseContext {
     /// lingering path. Mirrors `chain_has_prior_exile_producer`.
     // CR 608.2g + CR 701.20e
     pub chain_prior_self_library_peek: bool,
+    /// CR 400.7j + CR 608.2c + CR 608.2d: the NEAREST earlier single-card exile
+    /// partition in this same effect chain, carrying that pile's
+    /// [`ZoneChoiceCandidateSource`] — `None` when the chain has none.
+    ///
+    /// `Some(CostPaidObjects)` is the source-bound cost-paid exile choice
+    /// (`Effect::ChooseFromZone { count: 1, zone: Exile, candidate_source:
+    /// CostPaidObjects, selection: Chosen }`) that Coin of Fate's "An opponent
+    /// chooses one of the exiled cards" lowers to. That choice partitions a
+    /// two-card pile, so the very next instruction's "the other" names the
+    /// UNCHOSEN card — which the runtime forwards on the continuation's
+    /// immediate `sub_ability` targets, i.e. `TargetFilter::ParentTarget`, NOT
+    /// the chain tracked set (the tracked set, when republished at all, carries
+    /// the CHOSEN cards).
+    ///
+    /// Consumers must match that source EXPLICITLY rather than testing for
+    /// "some partition exists": a `Legacy`/`Tracked`/`Direct` partition (Wake to
+    /// Slaughter's "An opponent chooses one of them. … Return the other …")
+    /// keeps its existing `TrackedSet` binding, and a future candidate source
+    /// must not inherit the `CostPaidObjects` rewrite by default. Carrying the
+    /// source instead of a bare bool is what keeps those cases distinguishable.
+    ///
+    /// Seeded per chunk in `parse_effect_chain_ir` from the clauses already
+    /// built; `None` via `derive(Default)` on every standalone parse, and never
+    /// serialized.
+    pub prior_zone_choice_partition: Option<PriorZoneChoicePartition>,
     /// CR 603.10 + CR 400.7 + CR 122.2: the enclosing trigger body's PROVEN
     /// zone-change event pair, when this parse continues that body. Consumed by
     /// the trigger-body past-tense counter grammar in

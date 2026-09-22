@@ -1,11 +1,10 @@
-import type { DataConnection } from "peerjs";
-
 import { trackEvent } from "../services/telemetry";
 import { boundedDiagnosticProbe, diagnosticIdFor, projectCandidateStats, recordDiagnostic, registerPeerDiagnostics } from "../services/troubleshooting";
 import type { CandidateDiagnosticSnapshot, ConnectionDiagnosticError, DisconnectCause, TransportDiagnosticSnapshot } from "../services/troubleshooting";
 import { safeConnectionError } from "./connection";
 import type { P2PMessage } from "./protocol";
 import { decodeWireMessage, encodeWireMessage } from "./protocol";
+import type { TransportConnection } from "./transport";
 
 function tracePeerSession(event: string, data?: Record<string, unknown>): void {
   console.debug("[PeerSession Trace]", performance.now().toFixed(1), event, data ?? {});
@@ -52,7 +51,7 @@ export interface PeerSessionOptions {
 }
 
 export function createPeerSession(
-  conn: DataConnection,
+  conn: TransportConnection,
   options: PeerSessionOptions = {},
 ): PeerSession {
   tracePeerSession("create-session", { connOpen: conn.open });

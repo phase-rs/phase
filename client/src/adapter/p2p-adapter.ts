@@ -1,6 +1,3 @@
-import type Peer from "peerjs";
-import type { DataConnection } from "peerjs";
-
 import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
@@ -44,6 +41,7 @@ import {
 } from "./ws-adapter";
 import { dialPeer, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
 import { createPeerSession, type PeerSession } from "../network/peer";
+import type { TransportConnection, TransportPeer } from "../network/transport";
 import type { P2PMessage } from "../network/protocol";
 import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
 import type {
@@ -1013,7 +1011,7 @@ export class P2PHostAdapter implements EngineAdapter {
 
   constructor(
     private readonly hostDeckData: unknown,
-    private readonly hostPeer: Peer,
+    private readonly hostPeer: TransportPeer,
     /**
      * Subscribe to inbound guest `DataConnection`s via `hostRoom()`'s
      * documented API. Using this (instead of `hostPeer.on("connection")`
@@ -1022,7 +1020,7 @@ export class P2PHostAdapter implements EngineAdapter {
      * adapter was still under construction.
      */
     private readonly onGuestConnected: (
-      handler: (conn: DataConnection) => void,
+      handler: (conn: TransportConnection) => void,
     ) => () => void,
     private readonly playerCount: number,
     private readonly formatConfig?: FormatConfig,
@@ -1818,7 +1816,7 @@ export class P2PHostAdapter implements EngineAdapter {
     }
   }
 
-  private handleNewConnection(conn: DataConnection): void {
+  private handleNewConnection(conn: TransportConnection): void {
     if (!this.ownsAuthority()) {
       const session = createPeerSession(conn, {});
       this.rejectSuperseded(session);
@@ -2000,6 +1998,15 @@ export class P2PHostAdapter implements EngineAdapter {
         this.rejectSuperseded(session);
         return;
       }
+      if (this.closedPregameSessions.has(session)) {
+        // The native attach can outlive the PeerJS channel. Release the
+        // server-side seat before returning, and never publish a local guest
+        // session for a connection that already closed.
+        if (this.ownsAuthority()) {
+          await this.releaseNativePregameSeat(pid, "disconnect during guest attachment");
+        }
+        return;
+      }
 
       const token = crypto.randomUUID();
       this.playerTokens.set(pid, token);
@@ -2012,7 +2019,7 @@ export class P2PHostAdapter implements EngineAdapter {
       await this.refreshPregameSeatView();
       this.saveSession();
 
-      session.onMessage((msg) => this.handleGuestMessage(pid, session, msg));
+      session.onMessage((msg) => this.handleGuestMessage(session, msg));
 
       this.broadcastSeatSnapshot();
       this.syncLobbyMetadata(reservationToken ? [reservationToken] : []);
@@ -3082,11 +3089,22 @@ export class P2PHostAdapter implements EngineAdapter {
     this.dispose();
   }
 
+  private guestPlayerIdForSession(sourceSession: PeerSession): PlayerId | null {
+    for (const [pid, session] of this.guestSessions) {
+      if (session === sourceSession) return pid;
+    }
+    return null;
+  }
+
   private async handleGuestMessage(
-    pid: PlayerId,
     sourceSession: PeerSession,
     msg: P2PMessage,
   ): Promise<void> {
+    // Seat mutations can compact the guest map while the PeerJS channel stays
+    // open. Resolve the actor from the current session map at receive time;
+    // the seat captured when the callback was installed may now be stale.
+    const pid = this.guestPlayerIdForSession(sourceSession);
+    if (pid === null) return;
     const session = this.guestSessions.get(pid);
     // A reconnecting channel is intentionally not installed in
     // `guestSessions` until its ACK has been delivered. Keep every control
@@ -3526,7 +3544,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.pendingReconnectSessions.delete(pid);
       this.disconnectedSeats.delete(pid);
       this.guestSessions.set(pid, session);
-      session.onMessage((msg) => this.handleGuestMessage(pid, session, msg));
+      session.onMessage((msg) => this.handleGuestMessage(session, msg));
       this.publishPlayerLatencies();
 
       for (const [otherPid, otherSession] of this.guestSessions) {
@@ -3842,9 +3860,9 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   constructor(
     private readonly deckData: unknown,
-    private readonly hostPeer: Peer,
+    private readonly hostPeer: TransportPeer,
     private readonly hostPeerId: string,
-    private readonly initialConn: DataConnection,
+    private readonly initialConn: TransportConnection,
     existingPlayerToken?: string,
     private readonly displayName?: string,
     private readonly reservationToken?: string,
@@ -3904,7 +3922,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     }
   }
 
-  private attachSession(conn: DataConnection): void {
+  private attachSession(conn: TransportConnection): void {
     if (this.terminated) {
       conn.close();
       return;
@@ -4714,6 +4732,16 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.authenticatedSession = null;
     this.matchConcedeSent = false;
     this.session = null;
+    if (!this.playerToken && !this.gameSetupSettled) {
+      // A fresh guest has no token with which a new connection could identify
+      // itself. Retrying the transport would reopen an unauthenticated channel
+      // that sends nothing, leaving initializeGame() pending forever.
+      const reason = i18n.t("multiplayer:reconnectRejected.hostDisconnectedBeforeSetup");
+      this.terminate();
+      this.rejectGameSetup(reason);
+      this.emit({ type: "reconnectFailed", reason });
+      return;
+    }
     // Suppress auto-reconnect in terminal states (kicked, explicitly rejected,
     // or adapter disposed). Without this, a kicked guest would spin the
     // backoff schedule (~30s total) hammering the host with a blacklisted
