@@ -8752,6 +8752,12 @@ fn pass_priority_once_with_pipeline(
             });
         }
     }
+    // A priority pass can resolve a nested object while leaving its popped
+    // resolution carrier behind.  Keep the whole pass transactional until
+    // the continuation/post-action pipeline has either settled that carrier
+    // or reported a real interactive/error boundary.
+    let boundary_snapshot = state.clone();
+    let event_start = events.len();
     state.cancelled_casts.clear();
     // CR 117.4 + 608.1: When all players pass in succession the stack begins
     // resolving; at that moment the AI guard against re-activating pending
@@ -8785,19 +8791,45 @@ fn pass_priority_once_with_pipeline(
     // this drain, a continuation queued after a no-choice effect would sit
     // until an unrelated action, by which point referenced stack objects may
     // have left the stack.
-    resume_pending_continuation_if_priority(state, events)?;
+    if let Err(error) = resume_pending_continuation_if_priority(state, events) {
+        *state = boundary_snapshot;
+        events.truncate(event_start);
+        return Err(error);
+    }
 
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let wf = engine_priority::run_post_action_pipeline(
+    let wf = match engine_priority::run_post_action_pipeline(
         state,
         events,
         &state.waiting_for.clone(),
         skip_triggers,
         false,
-    )?;
+    ) {
+        Ok(waiting_for) => waiting_for,
+        Err(error) => {
+            *state = boundary_snapshot;
+            events.truncate(event_start);
+            return Err(error);
+        }
+    };
     sync_waiting_for(state, &wf);
+
+    // The priority reducer deliberately returned the still-live Priority
+    // window when Cleanup wrapped with an unsettled carrier.  Once the shared
+    // continuation and post-action pipelines have completed, retry the same
+    // turn-interpreter unit exactly once.  Do not re-run cleanup while the
+    // carrier is still live or while the pipeline opened new stack work.
+    if boundary_snapshot.phase == Phase::Cleanup
+        && turns::phase_transition_requires_settlement(&boundary_snapshot)
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.stack.is_empty()
+        && !turns::phase_transition_requires_settlement(state)
+    {
+        let waiting_for = turns::auto_advance(state, events);
+        sync_waiting_for(state, &waiting_for);
+    }
 
     // PR-3 (Option C) CR 732.2a loop-shortcut window accumulation — relocated here
     // (PR3 Defect-1 fix). The refilling trigger is placed by

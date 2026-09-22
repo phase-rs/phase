@@ -12,6 +12,7 @@ use engine::game::engine::{
     resolve_all_ready_prefix_with, resume_restored_stack_automation, ResolveAllContinuation,
     ResolveAllReadyAccess, RestoredStackAutomation, RestoredStackAutomationOutcome,
 };
+use engine::game::scenario::GameScenario;
 use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
@@ -47,6 +48,9 @@ const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
 const P3: PlayerId = PlayerId(3);
+
+const KYNAIOS_STYLE_NESTED_LAND_ORACLE: &str =
+    "At the beginning of your end step, draw a card. Then each player may put a land card from their hand onto the battlefield. Then each opponent who didn't put a card onto the battlefield this way draws a card.";
 
 fn begin(state: &mut GameState) -> u64 {
     apply(
@@ -284,6 +288,143 @@ fn browser_partial_priority_equip_uses_the_shared_session_instead_of_a_prefix_pr
         Some(AttachTarget::Object(creature)),
     );
     assert!(state.auto_pass.is_empty());
+}
+
+/// The four-player Kynaios-and-Tiro shape keeps one triggered ability as the
+/// resolution owner while its effect fans out into one optional land choice
+/// per player.  Cleanup must wait for that nested chain to settle before the
+/// turn boundary is evaluated; otherwise the old path reached `start_next_turn`
+/// with the popped carrier still live.
+#[test]
+fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 4, 0x9200);
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Kynaios and Tiro of Meletis",
+        2,
+        8,
+        KYNAIOS_STYLE_NESTED_LAND_ORACLE,
+    );
+    for (player, library_name) in [(P0, "P0 draw"), (P1, "P1 draw"), (P2, "P2 draw"), (P3, "P3 draw")] {
+        scenario.with_library_top(player, &[library_name]);
+        scenario.add_land_to_hand(player, "Plains");
+    }
+
+    let mut runner = scenario.build();
+    runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { .. }));
+    assert!(!runner.state().stack.is_empty());
+
+    let starting_turn = runner.state().turn_number;
+    let starting_active = runner.state().active_player;
+    let mut events = Vec::new();
+    let result = runner
+        .act(GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Shared,
+        })
+        .expect("the active player may begin Resolve All for the nested trigger");
+    events.extend(result.events);
+
+    for representative in [P1, P2, P3] {
+        let epoch = match runner.state().waiting_for {
+            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+            ref other => panic!("expected the next four-player consent, got {other:?}"),
+        };
+        let result = runner
+            .act(GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: ResolveAllConsentDecision::Grant,
+            })
+            .expect("each player may grant the nested Resolve All run");
+        events.extend(result.events);
+        assert!(
+            runner.state().resolve_all_consent_run.is_none()
+                || matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ResolveAllConsent { representative: next, .. }
+                        if next != representative
+                ),
+            "consent must advance or materialize the shared run"
+        );
+    }
+
+    let mut saw_land_choice = false;
+    let mut crossed_turn_boundary = false;
+    for _ in 0..160 {
+        if runner.state().turn_number != starting_turn {
+            crossed_turn_boundary = true;
+            break;
+        }
+
+        if runner.state().resolving_stack_entry.is_some()
+            || runner.state().pending_liminal_entry_resume.is_some()
+        {
+            assert_eq!(
+                runner.state().turn_number,
+                starting_turn,
+                "a live nested resolution carrier must not advance the turn"
+            );
+            assert_eq!(
+                runner.state().active_player,
+                starting_active,
+                "a live nested resolution carrier must retain the active player"
+            );
+        }
+
+        let waiting_for = runner.state().waiting_for.clone();
+        let result = match waiting_for {
+            WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("priority pass must not panic in the nested land chain"),
+            WaitingFor::ResolveAllConsent { epoch, .. } => runner
+                .act(GameAction::RespondResolveAllConsent {
+                    epoch,
+                    decision: ResolveAllConsentDecision::Grant,
+                })
+                .expect("late consent must use the same production route"),
+            WaitingFor::OptionalEffectChoice { .. } => runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .expect("each player accepts the offered land choice"),
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                saw_land_choice = true;
+                let card = cards.first().copied().expect("land choice offers a card");
+                runner
+                    .act(GameAction::SelectCards { cards: vec![card] })
+                    .expect("each player selects the offered land through apply")
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("nested trigger order uses the production choice route"),
+            other => panic!("unexpected nested Kynaios prompt: {other:?}"),
+        };
+        events.extend(result.events);
+    }
+
+    assert!(saw_land_choice, "the fixture must exercise a nested land choice");
+    assert!(crossed_turn_boundary, "the settled chain must reach the next turn");
+    assert_eq!(runner.state().turn_number, starting_turn + 1);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(
+        matches!(runner.state().phase, Phase::Untap | Phase::Upkeep),
+        "the next turn must begin after one Cleanup -> Untap boundary, got {:?}",
+        runner.state().phase
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::TurnStarted { .. }))
+            .count(),
+        1,
+        "nested resolution must create exactly one next-turn event"
+    );
 }
 
 #[test]

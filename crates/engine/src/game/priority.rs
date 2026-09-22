@@ -66,6 +66,19 @@ pub(crate) fn handle_priority_pass_with_limit(
         clear_priority_passes(state);
 
         if state.stack.is_empty() {
+            // Cleanup -> Untap is owned by the phase interpreter, but only
+            // after the resolution pipeline has retired every popped carrier
+            // and typed continuation.  Returning the current Priority window
+            // lets `engine::pass_priority_once_with_pipeline` perform that
+            // settlement before asking the turn interpreter to retry.
+            if state.phase == crate::types::phase::Phase::Cleanup
+                && turns::phase_transition_requires_settlement(state)
+            {
+                return PriorityPassOutcome {
+                    waiting_for: state.waiting_for.clone(),
+                    consumed_stack_entries: 0,
+                };
+            }
             // CR 510.4: The combat damage step's turn-based action runs in two
             // sub-steps when a first-strike/double-strike creature is present. If
             // the first-strike sub-step paused on a CR 603.3b trigger-ordering
@@ -106,7 +119,11 @@ pub(crate) fn handle_priority_pass_with_limit(
                 }
             } else {
                 // CR 117.4: Empty stack — advance to next phase.
-                let _ = turns::advance_phase_once(state, events);
+                match turns::advance_phase_once(state, events) {
+                    turns::AdvancePhaseOnce::Deferred => {}
+                    turns::AdvancePhaseOnce::Entry(_)
+                    | turns::AdvancePhaseOnce::Skipped => {}
+                }
                 PriorityPassOutcome {
                     waiting_for: turns::auto_advance(state, events),
                     consumed_stack_entries: 0,
