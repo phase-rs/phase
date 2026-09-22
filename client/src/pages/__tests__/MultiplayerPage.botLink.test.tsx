@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useEffect, useLayoutEffect, useState } from "react";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider, useLocation } from "react-router";
@@ -41,7 +41,10 @@ vi.mock("../../components/lobby/HostSetup", () => ({
   HostSetup: (props: Record<string, unknown>) => {
     harness.hostSetup = props;
     const [firstProps] = useState(props);
-    useEffect(() => {
+    // Layout, not passive: it runs in the commit that inserts `host-setup`, so
+    // a `findByTestId("host-setup")` can never resolve before the mount is
+    // recorded. A passive effect can still be pending then under CI load.
+    useLayoutEffect(() => {
       harness.hostMounts.push(firstProps);
     }, [firstProps]);
     return <div data-testid="host-setup" />;
