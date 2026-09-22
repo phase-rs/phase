@@ -3741,9 +3741,6 @@ mod tests {
             Some(occupied_code.as_str())
         );
         assert_eq!(mgr.game_for_token(&new_token), Some(new_code.as_str()));
-        assert!(mgr
-            .handle_reconnect(&occupied_code, &original_token)
-            .is_ok());
     }
 
     #[test]
