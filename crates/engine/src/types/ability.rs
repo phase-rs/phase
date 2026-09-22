@@ -12299,7 +12299,70 @@ impl StaticCondition {
                     scope: AttackedYouScope::AttackedPlayer,
                 })
             }
-            _ => None,
+            // CLAUDE.md: exhaustive `match` without a wildcard when the enum is
+            // known. A future anchored condition must produce a compiler error
+            // here rather than silently inheriting an inert `None` gate — the
+            // wildcard this replaces would have swallowed it.
+            StaticCondition::DevotionGE { .. }
+            | StaticCondition::IsPresent { .. }
+            | StaticCondition::ChosenColorIs { .. }
+            | StaticCondition::ChosenLabelIs { .. }
+            | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::HasMaxSpeed
+            | StaticCondition::SpeedGE { .. }
+            | StaticCondition::And { .. }
+            | StaticCondition::Or { .. }
+            | StaticCondition::Not { .. }
+            | StaticCondition::DayNightIs { .. }
+            | StaticCondition::HasCounters { .. }
+            | StaticCondition::CastVariantPaid { .. }
+            | StaticCondition::RecipientHasCounters { .. }
+            | StaticCondition::ClassLevelGE { .. }
+            | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::SourceAttackingAlone
+            | StaticCondition::SourceIsAttacking
+            | StaticCondition::SourceIsBlocking
+            | StaticCondition::SourceIsBlocked
+            | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsInitiative
+            | StaticCondition::NoMonarch
+            | StaticCondition::HasCityBlessing
+            | StaticCondition::HasEnduringStory
+            | StaticCondition::CompletedADungeon
+            | StaticCondition::WasStartingPlayer { .. }
+            | StaticCondition::SpellCastWithVariantThisTurn { .. }
+            | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::UnlessPay { .. }
+            | StaticCondition::Unrecognized { .. }
+            | StaticCondition::DuringYourTurn
+            | StaticCondition::DuringOpponentsTurn
+            | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+            | StaticCondition::SourceEnteredThisTurn
+            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::WasCast { .. }
+            | StaticCondition::IsRingBearer
+            | StaticCondition::RingLevelAtLeast { .. }
+            | StaticCondition::ControlsCommander { .. }
+            | StaticCondition::SourceIsTapped
+            | StaticCondition::IsTapped { .. }
+            | StaticCondition::SourceIsFaceUp
+            | StaticCondition::SourceIsSaddled
+            | StaticCondition::SourceControllerEquals { .. }
+            | StaticCondition::SourceIsEquipped
+            | StaticCondition::SourceIsEnchanted
+            | StaticCondition::SourceIsMonstrous
+            | StaticCondition::SourceIsHarnessed
+            | StaticCondition::SourceAttachedToCreature
+            | StaticCondition::SourceMatchesFilter { .. }
+            | StaticCondition::TopOfLibraryMatches { .. }
+            | StaticCondition::RecipientMatchesFilter { .. }
+            | StaticCondition::RecipientAttackingOwnerTarget { .. }
+            | StaticCondition::SourceIsPaired
+            | StaticCondition::SourceInZone { .. }
+            | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::AdditionalCostPaid
+            | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::None => None,
         }
     }
 
