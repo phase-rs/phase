@@ -19114,6 +19114,90 @@ fn put_counter_each_of_up_to_two_target_creatures_is_multi_targeted() {
     );
 }
 
+/// Phase 11 Q-3 (i)–(iii) (building block, no card name). CR 601.2c + CR 115.3:
+/// "put … counter(s) on each of <N|X> target …" announces exactly N different
+/// targets, so the placement is stamped `exact(N)` with its printed counters.
+/// Parity row: the counter-placement recovery re-derives the same spec the counter
+/// parser returns for the same text (the two sites write the same grammar).
+#[test]
+fn put_counter_each_of_exact_count_target_is_exactly_multi_targeted() {
+    let x = QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    };
+    for (text, counter_type, count, spec) in [
+        (
+            "Put a +1/+1 counter on each of X target creatures.",
+            CounterType::Plus1Plus1,
+            1,
+            MultiTargetSpec::exact(x.clone()),
+        ),
+        (
+            "Put two -1/-1 counters on each of two target creatures.",
+            CounterType::Minus1Minus1,
+            2,
+            MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }),
+        ),
+        // The type change is a later instruction: recorded, not asserted.
+        (
+            "Put a +1/+1 counter on each of X target lands you control. They become 0/0 creatures.",
+            CounterType::Plus1Plus1,
+            1,
+            MultiTargetSpec::exact(x.clone()),
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(def.multi_target, Some(spec.clone()), "{text}");
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::PutCounter {
+                    counter_type: ct,
+                    count: QuantityExpr::Fixed { value },
+                    target: TargetFilter::Typed(_),
+                } if *ct == counter_type && *value == count
+            ),
+            "{text}: expected a targeted PutCounter, got {:?}",
+            def.effect
+        );
+
+        let lower = text.to_lowercase();
+        let (_, _, parser_spec) =
+            counter::try_parse_put_counter(&lower, text, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("{text}: the counter parser must accept the placement"));
+        assert_eq!(parser_spec, Some(spec), "{text}: counter parser's count");
+        assert_eq!(
+            extract_put_counter_multi_target(text),
+            parser_spec,
+            "{text}: the recovery must agree with the counter parser"
+        );
+    }
+}
+
+/// Phase 11 Q-3 (iv) (preservation). The "up to" placement, a single-target
+/// placement and a distribution (CR 601.2d) keep their base specs.
+#[test]
+fn put_counter_non_exact_recipient_specs_are_preserved() {
+    for (text, spec) in [
+        (
+            "Put a +1/+1 counter on each of up to two target creatures.",
+            Some(MultiTargetSpec::fixed(0, 2)),
+        ),
+        ("Put a +1/+1 counter on target creature.", None),
+        (
+            "Distribute two +1/+1 counters among one or two target creatures.",
+            Some(MultiTargetSpec::fixed(1, 2)),
+        ),
+    ] {
+        assert_eq!(
+            parse_effect_chain(text, AbilityKind::Spell).multi_target,
+            spec,
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn distribute_counters_among_any_number_caps_targets_to_pool() {
     let clause = parse_effect_clause(
