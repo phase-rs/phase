@@ -193,7 +193,14 @@ function MultiplayerPageContent({
   >(null);
   // The Discord-link version gate's dialog: "updating" while the tab waits to
   // reload onto the deployed build, "manual" when it did not.
-  const [buildUpdate, setBuildUpdate] = useState<BuildUpdateDialog | null>(null);
+  const [buildUpdate, setBuildUpdateState] = useState<BuildUpdateDialog | null>(null);
+  // Written with the state, so an awaiting refresh can tell whether a bot-link
+  // gate has since replaced its dialog.
+  const buildUpdateRef = useRef<BuildUpdateDialog | null>(null);
+  const setBuildUpdate = useCallback((dialog: BuildUpdateDialog | null) => {
+    buildUpdateRef.current = dialog;
+    setBuildUpdateState(dialog);
+  }, []);
   // Where to return when the user enters deck-select *without* a pending
   // host/join action (i.e. clicked the "Change" affordance on the active-
   // deck banner). Before this, back/confirm both assumed pendingAction
@@ -419,11 +426,13 @@ function MultiplayerPageContent({
       const updating: BuildUpdateDialog = { status: "updating" };
       setBuildUpdate(updating);
       if ((await updateToLatestBuild({ deadlineMs: BUILD_UPDATE_DEADLINE_MS })) === "reloading") return;
-      // Only this refresh's own dialog: a bot-link gate may have replaced it.
-      setBuildUpdate((current) => (current === updating ? null : current));
+      // A bot-link gate that replaced this refresh's dialog overtook it: a
+      // reload now would lose the link that gate applied or is gating.
+      if (buildUpdateRef.current !== updating) return;
+      setBuildUpdate(null);
     }
     reloadOrToast();
-  }, [reloadOrToast]);
+  }, [reloadOrToast, setBuildUpdate]);
 
   /**
    * Guest-path P2P resolve loop. Tries `resolveGuest` over the shared

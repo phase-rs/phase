@@ -596,9 +596,8 @@ describe("MultiplayerPage Discord bot links", () => {
         const user = userEvent.setup();
         renderRouted(JOIN_LINK);
 
-        const title = await screen.findByText(multiplayerEn.page.updateFailedTitle);
-        const backdrop = title.closest("div.fixed")!.firstElementChild!;
-        await user.click(backdrop);
+        await screen.findByText(multiplayerEn.page.updateFailedTitle);
+        await user.click(screen.getByTestId("join-error-dialog-backdrop"));
         await act(async () => {});
 
         expect(screen.getByText(multiplayerEn.page.updateFailedTitle)).toBeInTheDocument();
@@ -939,7 +938,7 @@ describe("MultiplayerPage Discord bot links", () => {
         expect(buildMocks.reloadIfNoLiveGame).not.toHaveBeenCalled();
       });
 
-      it("leaves a bot-link gate's updating dialog up when its own update fails", async () => {
+      it("neither reloads nor clears a bot-link gate's updating dialog when its own update fails", async () => {
         const user = userEvent.setup();
         const router = await openOutOfDateDialog();
         const refreshUpdate = deferred<string>();
@@ -952,8 +951,28 @@ describe("MultiplayerPage Discord bot links", () => {
         await waitFor(() => expect(buildMocks.updateToLatestBuild).toHaveBeenCalledTimes(2));
         await act(async () => refreshUpdate.resolve("manual"));
 
-        expect(buildMocks.reloadIfNoLiveGame).toHaveBeenCalledOnce();
+        expect(buildMocks.reloadIfNoLiveGame).not.toHaveBeenCalled();
         expect(screen.getByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
+        expect(stashedKind()).toBe("host");
+      });
+
+      it("does not reload over a bot-link gate that proceeded while its update ran", async () => {
+        const user = userEvent.setup();
+        const router = await openOutOfDateDialog();
+        const refreshUpdate = deferred<string>();
+        buildMocks.checkDeployedBuild.mockResolvedValueOnce("stale").mockResolvedValueOnce("unknown");
+        buildMocks.updateToLatestBuild.mockReturnValueOnce(refreshUpdate.promise);
+        await user.click(refreshButton());
+        await screen.findByText(multiplayerEn.page.updatingTitle);
+
+        await go(router, HOST_LINK);
+        await screen.findByTestId("host-setup");
+        await act(async () => refreshUpdate.resolve("manual"));
+
+        expect(buildMocks.reloadIfNoLiveGame).not.toHaveBeenCalled();
+        expect(seedOf(harness.hostSetup)).toEqual(SEED);
+        expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+        expect(screen.queryByText(multiplayerEn.page.updatingTitle)).not.toBeInTheDocument();
       });
 
       it.each(["current", "unknown"])("reloads at once on a %s build", async (build) => {

@@ -42,6 +42,7 @@ describe("OpenDesktopPage", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     Object.defineProperty(window, "location", {
       configurable: true,
       writable: true,
@@ -58,6 +59,19 @@ describe("OpenDesktopPage", () => {
     expect(openApp()).toHaveAttribute("href", to);
     expect(continueInBrowser()).toHaveAttribute("href", ARRIVAL);
     expect(invalid()).toBeNull();
+    expectDownloadLink();
+  });
+
+  it("skips the hand-off when reached by Back, leaving the Open-app link as the retry", () => {
+    vi.spyOn(performance, "getEntriesByType").mockReturnValue([
+      { type: "back_forward" } as PerformanceNavigationTiming,
+    ]);
+    const to = desktopLink(ARRIVAL);
+    renderPage(to);
+
+    expect(assign).not.toHaveBeenCalled();
+    expect(openApp()).toHaveAttribute("href", to);
+    expect(continueInBrowser()).toHaveAttribute("href", ARRIVAL);
     expectDownloadLink();
   });
 

@@ -39,7 +39,11 @@ export function JoinErrorDialog({
   const { t } = useTranslation("multiplayer");
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/70" onClick={dismissOnBackdrop ? onDismiss : undefined} />
+      <div
+        data-testid="join-error-dialog-backdrop"
+        className="absolute inset-0 bg-black/70"
+        onClick={dismissOnBackdrop ? onDismiss : undefined}
+      />
       <motion.div
         initial={{ opacity: 0, scale: 0.96 }}
         animate={{ opacity: 1, scale: 1 }}

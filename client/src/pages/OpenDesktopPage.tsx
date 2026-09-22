@@ -23,6 +23,9 @@ const DESKTOP_DOWNLOAD_URL = `${GITHUB_URL}/releases/latest`;
  * this page (and its fallbacks) visible, others show their own error page, and
  * the user must go Back to reach the fallbacks. The hand-off therefore assigns
  * rather than replaces, so this page's history entry survives for that Back.
+ * A document reached by that Back (a history traversal that was not restored
+ * from the bfcache) skips the automatic hand-off, so it cannot loop back to the
+ * error page; the "Open desktop app" link remains the manual retry.
  */
 export function OpenDesktopPage() {
   const { t } = useTranslation("multiplayer");
@@ -33,7 +36,9 @@ export function OpenDesktopPage() {
   const browserPath = webPath?.startsWith(MULTIPLAYER_PREFIX) ? webPath : null;
 
   useEffect(() => {
-    if (desktopLink !== null) location.assign(desktopLink);
+    // "navigation" entries are always PerformanceNavigationTiming; absent means a normal load.
+    const [navigation] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
+    if (desktopLink !== null && navigation?.type !== "back_forward") location.assign(desktopLink);
   }, [desktopLink]);
 
   return (
