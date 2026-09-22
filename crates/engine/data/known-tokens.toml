@@ -89226,6 +89226,256 @@ scryfall_oracle_id = "67f21c0c-2083-4eda-9dc3-cc8aee42289f"
 preset_id = "635c3b86-6abb-5d76-8cb9-edf324c55576"
 
 [[token]]
+id = "635f825d-d6fb-59ac-a807-af08713a3794"
+category = "Planeswalker"
+fidelity = "PartialMissingAbilities"
+source_card_names = [
+    "Academic Ascent",
+    "Arcane Amphisbaena",
+    "Avatar of Burgeoning Echoes",
+    "Campus Crier",
+    "Countersculpt",
+    "Hexhaven Battalion",
+    "Inspired Tethermage",
+    "Jace's Machinations",
+    "Keeper of the Quiet Hour",
+    "Mindseeker Oculus",
+    "No Admittance",
+    "Overwrite the Multiverse",
+    "Plan for All Outcomes",
+    "Protege's Awakening",
+    "Repurposed Enforcer",
+    "Rewrite Regrets",
+    "Solve for Disappointment",
+    "Tam's Resistance",
+    "Theorist's Proxy",
+    "Violent Echoes",
+    "Vraska's Final Mercy",
+    "Way of the Cryomancer",
+    "Way of the Deathbringer",
+    "Way of the Healer",
+    "Way of the Mentor",
+    "Way of the Mind Sculptor",
+    "Way of the Necromancer",
+    "Way of the Paradox",
+    "Way of the Pyromancer",
+    "Way of the Warlord",
+    "Way of the Wildspeaker",
+]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "5"
+released_at = "2026-10-02"
+type_line = "Token Planeswalker — Jace"
+rules_text = """
+[−1]: Surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)
+[−3]: Draw a card."""
+
+[token.body]
+display_name = "Jace"
+loyalty = 0
+core_types = ["Planeswalker"]
+subtypes = ["Jace"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Theorist's Proxy"
+scryfall_oracle_id = "0089acfe-da66-4dd7-b1e5-4d7407f58257"
+scryfall_id = "a46d570d-2abb-4270-87bc-b4b3baf5ed3b"
+
+[[token.source_card_refs]]
+card_name = "Jace's Machinations"
+scryfall_oracle_id = "89bd056d-8f5b-4d0e-b80a-58a984e21100"
+scryfall_id = "aabdc0a6-5d60-44c4-96cb-692eeeac0630"
+
+[[token.source_card_refs]]
+card_name = "Violent Echoes"
+scryfall_oracle_id = "e8ecec61-cc47-4051-a599-0e7470764488"
+scryfall_id = "ad03ba90-2442-4a71-94df-2088b5b63662"
+
+[[token.source_card_refs]]
+card_name = "Avatar of Burgeoning Echoes"
+scryfall_oracle_id = "08e8a63c-9fcc-48cf-a9af-15cbaeec943f"
+scryfall_id = "5905995b-7a20-4602-a7cc-90aa5089a082"
+
+[[token.source_card_refs]]
+card_name = "Way of the Cryomancer"
+scryfall_oracle_id = "7d32c63d-aa9e-4f5d-a3e6-51377a786009"
+scryfall_id = "838b0efb-7398-4df9-8fdf-b8af43b47938"
+
+[[token.source_card_refs]]
+card_name = "Jace's Machinations"
+scryfall_oracle_id = "89bd056d-8f5b-4d0e-b80a-58a984e21100"
+scryfall_id = "282588b9-3656-453b-aa25-2419e078ddc1"
+
+[[token.source_card_refs]]
+card_name = "Countersculpt"
+scryfall_oracle_id = "fc3353e9-fe24-4ca7-bff8-9da767f2903a"
+scryfall_id = "145b928d-a7ff-4fe5-ae4d-bbae7b1d955b"
+
+[[token.source_card_refs]]
+card_name = "Way of the Healer"
+scryfall_oracle_id = "cb27dc83-85ee-4f54-b032-41cd1806d3ac"
+scryfall_id = "50326a2a-7e10-464b-a97e-e880bda0558c"
+
+[[token.source_card_refs]]
+card_name = "Rewrite Regrets"
+scryfall_oracle_id = "42565432-3a17-4274-87fc-016ab900e313"
+scryfall_id = "453cfde7-c460-4b55-9472-b714e16f24bb"
+
+[[token.source_card_refs]]
+card_name = "Tam's Resistance"
+scryfall_oracle_id = "7500b7dc-588d-46bd-acc5-885dcd464668"
+scryfall_id = "b3d33df2-a77b-4c2e-ba7f-2cc9c1505f9b"
+
+[[token.source_card_refs]]
+card_name = "Way of the Necromancer"
+scryfall_oracle_id = "f3087daa-d2ff-4227-abff-3398da6297af"
+scryfall_id = "a0ff9689-ea49-4fff-b37c-4abbaeb0f73d"
+
+[[token.source_card_refs]]
+card_name = "Repurposed Enforcer"
+scryfall_oracle_id = "b775a404-ec0a-47ff-bb9d-eae2273d945b"
+scryfall_id = "ac0bd1be-36cb-483f-9c47-2714e534cb6c"
+
+[[token.source_card_refs]]
+card_name = "Vraska's Final Mercy"
+scryfall_oracle_id = "7799413d-e313-4a05-ad28-f4c926c26d28"
+scryfall_id = "992bd991-7cfb-459f-bafd-9a44f3c925c5"
+
+[[token.source_card_refs]]
+card_name = "Inspired Tethermage"
+scryfall_oracle_id = "80c2784b-f27d-4a51-9380-171eb32b961d"
+scryfall_id = "073f4998-a204-447b-93d5-746ae87fd6a1"
+
+[[token.source_card_refs]]
+card_name = "Hexhaven Battalion"
+scryfall_oracle_id = "158823ed-6015-437a-82b0-8dadb1e9aab2"
+scryfall_id = "3b6ac80e-c726-4bd0-893a-e666041a04a6"
+
+[[token.source_card_refs]]
+card_name = "Way of the Warlord"
+scryfall_oracle_id = "10721d62-dc68-43b4-bfa2-dcb8cf8ea980"
+scryfall_id = "6d86e410-20c4-4248-96bf-5780ece6274a"
+
+[[token.source_card_refs]]
+card_name = "Protege's Awakening"
+scryfall_oracle_id = "07617648-6490-4719-acec-7705671f7e01"
+scryfall_id = "a08c7ec2-4c6a-4db2-85a7-41afe8731523"
+
+[[token.source_card_refs]]
+card_name = "Keeper of the Quiet Hour"
+scryfall_oracle_id = "ecdfee75-15fd-41ea-89d4-4bfc1fa4d032"
+scryfall_id = "b6331218-dbb8-44a9-8ba5-5fb1ab41c5c0"
+
+[[token.source_card_refs]]
+card_name = "Vraska's Final Mercy"
+scryfall_oracle_id = "7799413d-e313-4a05-ad28-f4c926c26d28"
+scryfall_id = "c9535252-1a05-4d3a-98e1-54bfd7832ce4"
+
+[[token.source_card_refs]]
+card_name = "Way of the Mind Sculptor"
+scryfall_oracle_id = "94be2e86-ba0e-4b8d-9b9c-114adacb26db"
+scryfall_id = "5838af68-66c3-4fe8-ab89-0a1721b0cfeb"
+
+[[token.source_card_refs]]
+card_name = "Campus Crier"
+scryfall_oracle_id = "c1a9d60f-a469-48f9-8f1c-3ca5ae86bd64"
+scryfall_id = "6047b14c-91d5-4f8e-af3f-057a541e2546"
+
+[[token.source_card_refs]]
+card_name = "Avatar of Burgeoning Echoes"
+scryfall_oracle_id = "08e8a63c-9fcc-48cf-a9af-15cbaeec943f"
+scryfall_id = "58910deb-a99f-43c6-acc8-46563682b486"
+
+[[token.source_card_refs]]
+card_name = "Way of the Deathbringer"
+scryfall_oracle_id = "54775625-bf44-4035-969e-7e70578c8b98"
+scryfall_id = "12dd46b2-e892-4660-b120-55766fd4d878"
+
+[[token.source_card_refs]]
+card_name = "Plan for All Outcomes"
+scryfall_oracle_id = "7fd2cac5-cd29-4a47-9e89-9c6be39a0b67"
+scryfall_id = "c4effc17-0d0e-423a-b5f2-597ea6c71f67"
+
+[[token.source_card_refs]]
+card_name = "Arcane Amphisbaena"
+scryfall_oracle_id = "5c151e3b-fcf2-4adb-a60b-9eff0c360705"
+scryfall_id = "1bf923c4-f0b7-4271-978c-fd2e79fe1cc8"
+
+[[token.source_card_refs]]
+card_name = "Academic Ascent"
+scryfall_oracle_id = "406e853b-713f-4c89-9efb-aca74a11183f"
+scryfall_id = "730d8c28-1e58-4b8e-89e9-445d154d2e83"
+
+[[token.source_card_refs]]
+card_name = "Overwrite the Multiverse"
+scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
+scryfall_id = "f28b1518-8347-4385-9f34-a9c48818c770"
+
+[[token.source_card_refs]]
+card_name = "Way of the Mentor"
+scryfall_oracle_id = "ce924285-f4c5-44e6-909b-f5f7d302ebaf"
+scryfall_id = "1a59d5b1-12d6-486b-bd29-ca371359addd"
+
+[[token.source_card_refs]]
+card_name = "Way of the Paradox"
+scryfall_oracle_id = "76771cd1-6b74-49bb-9421-8845fe344567"
+scryfall_id = "98dc5470-507a-4364-8480-42607255e56c"
+
+[[token.source_card_refs]]
+card_name = "Solve for Disappointment"
+scryfall_oracle_id = "3241a3f5-7ae5-4497-9dd2-a55f3370a055"
+scryfall_id = "7beaa8c9-1a2c-4c88-b579-91e371d8d9e3"
+
+[[token.source_card_refs]]
+card_name = "No Admittance"
+scryfall_oracle_id = "d53ae01b-87e1-48e1-9fc3-23a734ce6622"
+scryfall_id = "11ba4fdd-cc03-4bb6-a493-91a9785771d0"
+
+[[token.source_card_refs]]
+card_name = "Way of the Wildspeaker"
+scryfall_oracle_id = "501580b9-692c-4804-be34-012a25ba8adf"
+scryfall_id = "a252cb01-537b-4afe-9abc-81a98c4a1439"
+
+[[token.source_card_refs]]
+card_name = "Repurposed Enforcer"
+scryfall_oracle_id = "b775a404-ec0a-47ff-bb9d-eae2273d945b"
+scryfall_id = "35000e93-85d3-44f8-976a-5918ee4c71e0"
+
+[[token.source_card_refs]]
+card_name = "Mindseeker Oculus"
+scryfall_oracle_id = "aa9547b3-e4e4-4557-9dd1-3aa9a7cb9937"
+scryfall_id = "f5324741-353a-4a70-adb2-b631b00806dd"
+
+[[token.source_card_refs]]
+card_name = "Way of the Pyromancer"
+scryfall_oracle_id = "68d3f547-674a-4d8a-b02f-01bc2f161916"
+scryfall_id = "c1a00020-7c14-4503-a057-5763704bb83e"
+
+[[token.source_card_refs]]
+card_name = "Overwrite the Multiverse"
+scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
+scryfall_id = "c4554f5b-791b-48f6-bf54-ad28699e1beb"
+
+[[token.source_card_refs]]
+card_name = "Overwrite the Multiverse"
+scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
+scryfall_id = "c318cd29-89db-4643-b3ef-5ff8492f5c1a"
+
+[[token.source_card_refs]]
+card_name = "Theorist's Proxy"
+scryfall_oracle_id = "0089acfe-da66-4dd7-b1e5-4d7407f58257"
+scryfall_id = "710302ca-c4be-4069-8ce1-f531414c74e9"
+
+[token.token_image_ref]
+scryfall_id = "8d1e424f-6407-4f8c-bed2-eaf148237c81"
+scryfall_oracle_id = "a6a09b69-dd86-4fda-8971-b77a2a4abddb"
+preset_id = "635f825d-d6fb-59ac-a807-af08713a3794"
+
+[[token]]
 id = "6367ef3e-ca9b-5df6-9803-9c9e2fb7fea8"
 category = "Creature"
 fidelity = "PartialMissingAbilities"

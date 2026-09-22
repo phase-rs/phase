@@ -1832,6 +1832,7 @@ mod tests {
             display_name: "Test Token".to_string(),
             power: Some(0),
             toughness: Some(0),
+            loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: Vec::new(),
             supertypes: Vec::new(),

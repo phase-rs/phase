@@ -340,6 +340,14 @@ pub struct TokenCharacteristics {
     pub power: Option<i32>,
     /// CR 208.2: Fixed toughness, or `None` for non-creature tokens.
     pub toughness: Option<i32>,
+    /// CR 306.5b: Printed loyalty, or `None` for non-planeswalker tokens.
+    ///
+    /// The token's *printed* value — the entry-counter baseline (CR 306.5b).
+    /// Battlefield loyalty itself remains counter-derived (CR 306.5c); this is the
+    /// number the entry replacement reads, exactly as `CardFace::loyalty` is for a
+    /// card-backed planeswalker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loyalty: Option<u32>,
     pub core_types: Vec<CoreType>,
     pub subtypes: Vec<String>,
     pub supertypes: Vec<Supertype>,

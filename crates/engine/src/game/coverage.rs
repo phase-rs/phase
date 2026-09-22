@@ -6423,6 +6423,7 @@ fn token_category_label(category: &crate::game::token_presets::TokenCategory) ->
         TokenCategory::Vehicle => "vehicle".to_string(),
         TokenCategory::Enchantment => "enchantment".to_string(),
         TokenCategory::Land => "land".to_string(),
+        TokenCategory::Planeswalker => "planeswalker".to_string(),
         TokenCategory::Artifact => "artifact".to_string(),
     }
 }
@@ -14143,6 +14144,7 @@ mod tests {
                 display_name: "Test Token".to_string(),
                 power,
                 toughness,
+                loyalty: None,
                 core_types,
                 subtypes: Vec::new(),
                 supertypes: Vec::new(),

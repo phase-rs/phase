@@ -1175,6 +1175,7 @@ export interface TokenCharacteristics {
   display_name: string;
   power: number | null;
   toughness: number | null;
+  loyalty?: number | null;
   core_types: CoreType[];
   subtypes: string[];
   supertypes: Supertype[];
