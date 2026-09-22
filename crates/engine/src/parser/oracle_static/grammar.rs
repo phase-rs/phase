@@ -1,5 +1,6 @@
 // CR 604 / CR 613 - shared static parser grammar utilities.
 
+use super::evasion::combine_conditions;
 use super::oracle_trigger::NthEventTimingKind;
 #[allow(unused_imports)]
 use super::prelude::*;
@@ -837,33 +838,6 @@ pub(crate) fn parse_enchanted_equipped_predicate(
             .description(description.to_string())];
     }
 
-    // CR 702.3b (:3915): "can attack [<class>] as though <pronoun> didn't have
-    // defender" on an attached subject (and on the plural subjects the
-    // creatures-you-control prefix handler at line ~620 routes here). Shares ONE
-    // recognizer with the non-attached static production, the effect-side
-    // production and both conjunctive grammars.
-    //
-    // The consuming policy is a PREFIX match, PRESERVED from base: this arm sits
-    // ABOVE the trailing-condition split below, so a trailing rider is (still) not
-    // peeled here. Measured: no corpus card reaching this arm carries one — the only
-    // one is Animate Wall, whose tail is ".". Replacing this PREFIX policy with an
-    // all-consuming one makes the arm decline, the line fall through, and the
-    // `AddKeyword(Defender)` inverse win; guarded by
-    // `attached_subject_production_still_fires_with_a_trailing_rider`.
-    if let Some((segment, _rest)) =
-        defender_exception::parse_defender_exception_predicate(pred_lower.as_str())
-    {
-        if !matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
-            let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
-                .affected(affected)
-                .description(description.to_string());
-            if let Some(condition) = segment.permission_condition() {
-                def = def.condition(condition);
-            }
-            return vec![def];
-        }
-    }
-
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature
     //
     // Only peel a trailing static-grant " unless " rider (Heroic Defiance:
@@ -906,6 +880,55 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         (pred_tp, None, String::new())
     };
     let body_lower = body_tp.lower;
+
+    // CR 702.3b (:3915) + CR 508.1c (:2270): "can attack [<class>] as though
+    // <pronoun> didn't have defender" on an attached subject (and on the plural
+    // subjects the creatures-you-control prefix handler at line ~620 routes here).
+    // Shares ONE recognizer with the non-attached static production, the
+    // effect-side production and both conjunctive grammars.
+    //
+    // This arm sits BELOW the trailing-condition split so a printed
+    // `" as long as …"` / `" unless …"` rider is peeled by the SAME machinery the
+    // sibling evasion arms use, then conjoined with any class the interposed
+    // segment carries. It previously sat ABOVE the split and matched a PREFIX of
+    // the unsplit predicate, which silently DISCARDED that rider and published an
+    // unconditional permission — an enchanted/equipped subject could attack with
+    // no regard for a condition this parser can represent.
+    //
+    // The recognizer is still a PREFIX match, and it must stay one: an
+    // all-consuming policy here makes the arm decline, the line fall through, and
+    // the `AddKeyword(Defender)` inverse win. What changed is WHAT it is offered —
+    // the split's body rather than the whole predicate. Animate Wall, whose tail is
+    // ".", takes the no-rider path and is unmoved; guarded by
+    // `attached_subject_production_still_fires_with_a_trailing_rider` and
+    // `attached_subject_defender_exception_keeps_its_trailing_condition`.
+    if let Some((segment, _rest)) =
+        defender_exception::parse_defender_exception_predicate(body_lower)
+    {
+        if !matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+            let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                .affected(affected.clone())
+                .description(description.to_string());
+            // ONE conjoin authority, shared with the non-attached production.
+            if let Some(condition) =
+                combine_conditions(segment.permission_condition(), suffix_condition.clone())
+            {
+                if suffix_condition.is_some() {
+                    // A printed trailing gate participates, so route the result
+                    // through the shared enforcement-point remedy: a gate this
+                    // parser cannot represent on `CanAttackWithDefender` becomes
+                    // the inert marker and the permission fails CLOSED.
+                    attach_gated_condition(&mut def, condition, &gap_text);
+                } else {
+                    // No printed rider: unchanged from base, and NOT routed through
+                    // the remedy, which would re-wrap an already-inert terminal with
+                    // an empty gap text and lose the clause it names.
+                    def = def.condition(condition);
+                }
+            }
+            return vec![def];
+        }
+    }
 
     if nom_tag_lower(body_lower, body_lower, "can't be blocked").is_some() {
         // "can't be blocked except by" → CantBeBlockedExceptBy

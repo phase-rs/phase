@@ -37394,6 +37394,33 @@ fn attached_subject_production_still_fires_with_a_trailing_rider() {
     assert_eq!(dispatched.mode, StaticMode::CanAttackWithDefender);
     assert_eq!(dispatched.affected, Some(enchanted.clone()));
 
+    // THE PRINTED CONDITION MUST SURVIVE. Before the arm moved below the
+    // trailing-condition split it matched a PREFIX of the unsplit predicate and
+    // DISCARDED the rider, publishing an unconditional permission — an
+    // enchanted/equipped subject could attack regardless of a gate this parser can
+    // represent. Asserting only that the production FIRES (above) cannot see that:
+    // both the correct and the defective parse fire. This is the assertion that
+    // discriminates, on BOTH entry points.
+    let mountain = StaticCondition::IsPresent {
+        filter: Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InZone {
+                zone: crate::types::zones::Zone::Battlefield,
+            }],
+        })),
+    };
+    assert_eq!(
+        direct[0].condition,
+        Some(mountain.clone()),
+        "production (a) must carry the printed `as long as` gate, not drop it"
+    );
+    assert_eq!(
+        dispatched.condition,
+        Some(mountain),
+        "and the dispatched path must agree with the direct one"
+    );
+
     // PAIRED POSITIVE CONTROL, SAME PRODUCTION: arm 7(i)'s plain attached-subject
     // form, and Animate Wall's verbatim line — the ONE corpus card that reaches
     // this arm.
@@ -37407,4 +37434,12 @@ fn attached_subject_production_still_fires_with_a_trailing_rider() {
         parse_static_line("Enchanted Wall can attack as though it didn't have defender.")
             .expect("control: Animate Wall's verbatim printed line");
     assert_eq!(animate_wall.mode, StaticMode::CanAttackWithDefender);
+    // PAIRED NEGATIVE CONTROL for the condition assertions above: the ONE corpus
+    // card on this arm prints NO rider, so it must stay unconditioned. Without
+    // this, a production that attached some condition unconditionally would still
+    // satisfy the two `Some(mountain)` assertions.
+    assert_eq!(
+        animate_wall.condition, None,
+        "Animate Wall prints no gate and must remain unconditioned"
+    );
 }

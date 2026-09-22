@@ -3116,7 +3116,10 @@ pub(crate) fn parse_can_attack_despite_defender(
 }
 
 /// CR 508.1c (:2270): two independent gates on one static conjoin.
-fn combine_conditions(
+///
+/// `pub(super)` so the attached-subject production in `grammar.rs` conjoins
+/// through this one authority rather than growing a second spelling.
+pub(super) fn combine_conditions(
     a: Option<StaticCondition>,
     b: Option<StaticCondition>,
 ) -> Option<StaticCondition> {
