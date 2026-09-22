@@ -1187,6 +1187,7 @@ const PARTITION_FIXTURES: Record<
   RemoveCountersChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseFromZoneChoice: NO_TARGET_REF_LEGAL_SET,
   BeholdChoice: NO_TARGET_REF_LEGAL_SET,
+  EmpowerJaceChoice: NO_TARGET_REF_LEGAL_SET,
   EffectZoneChoice: NO_TARGET_REF_LEGAL_SET,
   DrawnThisTurnTopdeckChoice: NO_TARGET_REF_LEGAL_SET,
   AssistChoosePlayer: NO_TARGET_REF_LEGAL_SET,

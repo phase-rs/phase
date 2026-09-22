@@ -1675,6 +1675,10 @@
       "labelExile": "Exilar",
       "labelBehold": "Contemplar"
     },
+    "empowerJace": {
+      "title": "Fortalecer Jace",
+      "subtitle": "Escolha uma ficha de Jace que você controla para receber +{{count}} de lealdade"
+    },
     "collectEvidence": {
       "title": "Coletar Evidências",
       "subtitle": "Exile cartas de seu cemitério com valor de mana total {{minimum}} ou maior"

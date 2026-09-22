@@ -287,6 +287,7 @@ mod elspeth_resplendent_conjoined_counter_choice;
 mod elusive_otter_repro;
 mod embiggen_typeline_pump;
 mod emissary_green;
+mod empower_jace;
 mod emptiness_mana_spent_evoke_5943;
 mod emrakul_control_turn_crash;
 #[cfg(feature = "proptest")]

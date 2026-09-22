@@ -916,6 +916,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
+            | WaitingFor::EmpowerJaceChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -3479,6 +3480,43 @@ pub(super) fn handle_resolution_choice(
                     .pending
                     .chain
                     .set_optional_effect_performed_recursive(true);
+            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::EmpowerJaceChoice {
+                player,
+                source_id,
+                choices,
+                count,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // CR 701.71a + CR 608.2d: choose exactly ONE Jace planeswalker token
+            // you control from the offered candidates.
+            if chosen.len() != 1 {
+                return Err(EngineError::InvalidAction(format!(
+                    "Empower Jace requires exactly one Jace token, got {}",
+                    chosen.len()
+                )));
+            }
+            // CR 704.4: no state-based action check occurs mid-resolution, so
+            // the stored candidates are still the legal set.
+            if !choices.contains(&chosen[0]) {
+                return Err(EngineError::InvalidAction(
+                    "Selected object is not a Jace token you control".to_string(),
+                ));
+            }
+            // CR 614.1 + CR 616.1: a counter-replacement choice (an optional
+            // replacement's accept/decline, or an ordering choice among several)
+            // can interrupt placement; leave it open and let the counter drain
+            // finish the instruction.
+            if !effects::empower_jace::place_loyalty_counters(
+                state, player, source_id, chosen[0], count, events,
+            ) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }

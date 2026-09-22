@@ -1675,6 +1675,10 @@
       "labelExile": "Wygnaj",
       "labelBehold": "Behold"
     },
+    "empowerJace": {
+      "title": "Wzmocnij Jace'a",
+      "subtitle": "Wybierz kontrolowany przez siebie żeton Jace'a, aby zyskał +{{count}} lojalności"
+    },
     "collectEvidence": {
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"

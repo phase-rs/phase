@@ -106,6 +106,7 @@ pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod each_player_copy_chosen;
 pub mod effect;
+pub mod empower_jace;
 pub mod encore;
 pub mod end_combat_phase;
 pub(super) mod end_phase;
@@ -3722,6 +3723,8 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::BeholdChoice { .. }
+            // CR 608.2c: riders run after the choice.
+            | WaitingFor::EmpowerJaceChoice { .. }
     )
 }
 
@@ -4671,6 +4674,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -6533,6 +6537,7 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::SkipNextStep { count: amount, .. }
         | Effect::Incubate { count: amount, .. }
         | Effect::Amass { count: amount, .. }
+        | Effect::EmpowerJace { count: amount }
         | Effect::Monstrosity { count: amount, .. }
         | Effect::Renown { count: amount, .. }
         | Effect::Bolster { count: amount, .. }
@@ -7115,6 +7120,7 @@ pub fn resolve_effect(
         Effect::ChangeTargets { .. } => change_targets::resolve(state, ability, events),
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
         Effect::Amass { .. } => amass::resolve(state, ability, events),
+        Effect::EmpowerJace { .. } => empower_jace::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
         Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),

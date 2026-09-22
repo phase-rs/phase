@@ -3925,6 +3925,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), fmt_quantity(count)));
             d.push(("player".into(), fmt_target(player)));
         }
+        Effect::EmpowerJace { count } => {
+            d.push(("count".into(), fmt_quantity(count)));
+        }
         Effect::Monstrosity { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
@@ -7592,6 +7595,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }

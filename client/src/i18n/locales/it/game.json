@@ -1675,6 +1675,10 @@
       "labelExile": "Esilia",
       "labelBehold": "Contempla"
     },
+    "empowerJace": {
+      "title": "Potenziare Jace",
+      "subtitle": "Scegli una pedina Jace che controlli perché ottenga +{{count}} fedeltà"
+    },
     "collectEvidence": {
       "title": "Raccogli prove",
       "subtitle": "Esilia carte dal tuo cimitero con valore di mana totale {{minimum}} o superiore"

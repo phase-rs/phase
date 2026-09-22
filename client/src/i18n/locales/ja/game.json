@@ -1718,6 +1718,10 @@
       "labelExile": "追放",
       "labelBehold": "注目"
     },
+    "empowerJace": {
+      "title": "ジェイスを強化する",
+      "subtitle": "あなたがコントロールするジェイス・トークンを1つ選び、忠誠度を+{{count}}する"
+    },
     "collectEvidence": {
       "title": "証拠収集",
       "subtitle": "あなたの墓地から、マナ総量の合計が{{minimum}}以上になるようにカードを追放"

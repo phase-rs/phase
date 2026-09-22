@@ -3175,6 +3175,7 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::Amass { count, player, .. } => {
             legacy_target_filter(player) || legacy_quantity_expr(count)
         }
+        Effect::EmpowerJace { count } => legacy_quantity_expr(count),
         // Deferred continuous-modification carrier — no `count`; descend the mods
         // for a nested frozen tag (AddType/AddSubtype return `false`).
         Effect::AddPendingEntersModifications { modifications } => {
@@ -4943,6 +4944,17 @@ fn rw_effect(
             subtype: _,
             player: _,
         } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::ObjectCounters);
+            p.writes_external_counter_census.merge(Census::Any);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_quantity_expr(count));
+            (p, Some(WriteScope::External))
+        }
+        // CR 701.71a: may create a Jace token (membership) and puts loyalty
+        // counters on a Jace token the controller controls — the Amass profile.
+        Effect::EmpowerJace { count } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_external.set(StateKind::ObjectCounters);
             p.writes_external_counter_census.merge(Census::Any);

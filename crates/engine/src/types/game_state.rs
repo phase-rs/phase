@@ -6546,6 +6546,14 @@ pub enum PendingCounterPostAction {
         subtype: String,
         ability: Box<ResolvedAbility>,
     },
+    /// CR 701.71a: a token-creation replacement paused the Jace token's
+    /// creation; once it settles, choose a Jace token and put `count` loyalty
+    /// counters on it. `count` is N, already determined (CR 608.2h).
+    ContinueEmpowerJaceAfterTokenCreation {
+        controller: PlayerId,
+        source_id: ObjectId,
+        count: u32,
+    },
     InjectPredefinedTokenAbilities {
         object_id: ObjectId,
     },
@@ -13363,6 +13371,17 @@ pub enum WaitingFor {
         player: PlayerId,
         choices: Vec<ObjectId>,
     },
+    /// CR 701.71a + CR 608.2d: choose a Jace planeswalker token you control.
+    /// Raised only when two or more candidates exist (one candidate
+    /// auto-collapses). `count` is N, determined once before the token-creation
+    /// step (CR 608.2h), so the handler places exactly that many loyalty
+    /// counters on the chosen token without re-reading the board.
+    EmpowerJaceChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        choices: Vec<ObjectId>,
+        count: u32,
+    },
     /// CR 701.55a: Player chooses one branch while facing a villainous choice,
     /// or another inline resolution-time "choose A or B" effect.
     ChooseOneOfBranch {
@@ -15458,6 +15477,7 @@ impl WaitingFor {
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
+            WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -15619,6 +15639,7 @@ impl WaitingFor {
             | WaitingFor::OutsideGameChoice { player, .. }
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::BeholdChoice { player, .. }
+            | WaitingFor::EmpowerJaceChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }

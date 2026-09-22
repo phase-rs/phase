@@ -1675,6 +1675,10 @@
       "labelExile": "Exiler",
       "labelBehold": "Contempler"
     },
+    "empowerJace": {
+      "title": "Renforcer Jace",
+      "subtitle": "Choisissez un jeton Jace que vous contrôlez pour qu'il gagne +{{count}} de loyauté"
+    },
     "collectEvidence": {
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"

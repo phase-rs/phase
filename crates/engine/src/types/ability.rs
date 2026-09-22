@@ -19232,6 +19232,16 @@ pub enum Effect {
         )]
         player: TargetFilter,
     },
+    /// CR 701.71a: To empower Jace N means "If you don't control a Jace
+    /// planeswalker token, create a blue Jace planeswalker token with 0
+    /// loyalty, '[−1]: Surveil 1,' and '[−3]: Draw a card.' Choose a Jace
+    /// planeswalker token you control. Put N loyalty counters on it."
+    /// The rule fixes the walker, the token and its abilities; N is the only
+    /// open axis.
+    EmpowerJace {
+        /// N: the number of loyalty counters to put on the chosen Jace token.
+        count: QuantityExpr,
+    },
     /// CR 701.37a: Monstrosity N — if not monstrous, put N +1/+1 counters and become monstrous.
     Monstrosity {
         /// Number of +1/+1 counters to place.
@@ -21549,6 +21559,7 @@ impl Effect {
             | Effect::AssembleContraptionOnSprocket { .. }
             | Effect::ProcessRadCounters
             | Effect::Incubate { .. }
+            | Effect::EmpowerJace { .. }
             | Effect::Monstrosity { .. }
             | Effect::Specialize
             | Effect::Renown { .. }
@@ -22170,6 +22181,8 @@ impl Effect {
             Effect::Incubate { .. } => false,
             // CR 701.47a: amass creates an Army token and/or adds +1/+1 counters.
             Effect::Amass { .. } => false,
+            // CR 701.71a: empower Jace creates a Jace token and/or adds loyalty counters.
+            Effect::EmpowerJace { .. } => false,
 
             // ---------- Bulk FALSE ----------
             // Everything not named above. These move no card at all, or move cards
@@ -22769,6 +22782,9 @@ impl Effect {
             Effect::Amass { count, .. } => {
                 f(count);
             }
+            Effect::EmpowerJace { count } => {
+                f(count);
+            }
             Effect::Monstrosity { count, .. } => {
                 f(count);
             }
@@ -23011,6 +23027,7 @@ impl Effect {
             | Effect::AdditionalPhase { count, .. }
             | Effect::Incubate { count, .. }
             | Effect::Amass { count, .. }
+            | Effect::EmpowerJace { count }
             | Effect::Monstrosity { count, .. }
             | Effect::Renown { count, .. }
             | Effect::Bolster { count, .. }
@@ -23275,6 +23292,7 @@ impl Effect {
             | Effect::AdditionalPhase { count, .. }
             | Effect::Incubate { count, .. }
             | Effect::Amass { count, .. }
+            | Effect::EmpowerJace { count }
             | Effect::Monstrosity { count, .. }
             | Effect::Renown { count, .. }
             | Effect::Bolster { count, .. }
@@ -23706,6 +23724,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ChangeTargets { .. } => "ChangeTargets",
         Effect::Incubate { .. } => "Incubate",
         Effect::Amass { .. } => "Amass",
+        Effect::EmpowerJace { .. } => "EmpowerJace",
         Effect::Monstrosity { .. } => "Monstrosity",
         Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
@@ -23957,6 +23976,7 @@ pub enum EffectKind {
     ChangeTargets,
     Incubate,
     Amass,
+    EmpowerJace,
     Monstrosity,
     Specialize,
     Renown,
@@ -24246,6 +24266,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChangeTargets { .. } => EffectKind::ChangeTargets,
             Effect::Incubate { .. } => EffectKind::Incubate,
             Effect::Amass { .. } => EffectKind::Amass,
+            Effect::EmpowerJace { .. } => EffectKind::EmpowerJace,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
             Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,

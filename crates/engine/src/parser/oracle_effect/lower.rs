@@ -2749,6 +2749,7 @@ impl ReflexiveGateParent {
             | Effect::RuntimeHandled { .. }
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
+            | Effect::EmpowerJace { .. }
             | Effect::Monstrosity { .. }
             | Effect::Specialize
             | Effect::Renown { .. }
