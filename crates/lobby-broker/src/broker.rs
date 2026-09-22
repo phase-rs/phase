@@ -66,7 +66,7 @@ pub const MAX_TOURNAMENT_ENTRIES: usize = 200;
 /// a client can join and re-join across many events on one long-lived socket.
 ///
 /// 50 is far past any real "your events" list for a single connection while
-/// keeping the worst case per socket trivial. See [`push_conn_tournament`] for
+/// keeping the worst case per socket trivial. See `push_conn_tournament` for
 /// why reaching the cap evicts rather than refuses.
 pub const MAX_CONN_TOURNAMENT_ENTRIES: usize = 50;
 
@@ -119,7 +119,7 @@ pub struct ConnState {
     /// `reservations`, which are socket-bound by design.
     ///
     /// Never pruned, but bounded: appends go through
-    /// [`push_conn_tournament`], which holds the list at
+    /// `push_conn_tournament`, which holds the list at
     /// [`MAX_CONN_TOURNAMENT_ENTRIES`] most-recent codes.
     #[serde(default)]
     pub organized_tournaments: Vec<String>,

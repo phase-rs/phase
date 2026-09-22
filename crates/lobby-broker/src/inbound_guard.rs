@@ -2,7 +2,7 @@
 //!
 //! The Cloudflare Worker shell validates through [`crate::protocol::parse_lobby_client_message`],
 //! which calls [`crate::validation::validate_lobby_message`]. The native `phase-server` shell
-//! deserializes the wider [`server_core::protocol::ClientMessage`] and projects lobby frames
+//! deserializes the wider `server_core::protocol::ClientMessage` and projects lobby frames
 //! onto [`crate::protocol::LobbyClientMessage`] without re-parsing, so those frames must be
 //! checked here before any handler runs. Without this gate, oversized display names, passwords,
 //! and deck payloads can be stored, cloned, and broadcast to every lobby subscriber.

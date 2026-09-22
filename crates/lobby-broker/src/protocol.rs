@@ -624,7 +624,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     (`#[serde(default)]`, optional) — the "a lobby field is added" trigger.
 ///     `renew_credential` used to mint a new secret, commit it, and invalidate
 ///     the old one atomically, so a renewal reply lost after the commit stranded
-///     the holder on a dead, unrenewable secret (the #8782 [HIGH]). Now a
+///     the holder on a dead, unrenewable secret (the #8782 \[HIGH\]). Now a
 ///     rotation from the current secret records the secret it superseded beside
 ///     that nonce, and a retry presenting the superseded secret WITH the same
 ///     nonce REPLAYS the already-committed secret instead of minting a second one
@@ -736,8 +736,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     added twelve variants across three crates and moved only this constant.
 ///     (Written as one unbroken paragraph on purpose. A blank `///` line
 ///     followed by this 4-space indentation is an indented CODE block to
-///     rustdoc, which then tries to compile the prose as a doctest — the
-///     latent defect entries 4 and 2 below already carry.)
+///     rustdoc, which then tries to compile the prose as a doctest.)
 /// 4 — The tournament-organizer message set: seven [`LobbyClientMessage`]
 ///     variants (`CreateTournament`, `JoinTournament`, `GetTournament`,
 ///     `StartTournamentRound`, `ReportMatchResult`, `DropFromTournament`,
@@ -746,7 +745,6 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     `TournamentRemoved`, `TournamentListUpdate`). "A lobby variant is
 ///     added" is the first of the four triggers listed above, so this bump is
 ///     required by this constant's own documented policy.
-///
 ///     Purely ADDITIVE, which is why [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does
 ///     **not** move alongside it — the asymmetry with 2 is deliberate. Bump 2
 ///     retyped a field three existing carriers already held in both
@@ -777,7 +775,6 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// 2 — `FormatConfig::deck_size` changed from a bare `u16` to the adjacently
 ///     tagged `DeckSizeRule` — a field TYPE change, one of the four triggers
 ///     listed above.
-///
 ///     Three lobby carriers hold a `FormatConfig`, in both directions:
 ///     `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
 ///     and `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`]
@@ -789,7 +786,6 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     runtime. That asymmetry is WHY a version number is the only available
 ///     signal here: on the broker → client half no per-frame check exists to
 ///     reject a stale shape.
-///
 ///     What the paired floor move evicts: the entire lobby session of every
 ///     client built against lobby version 1 — hosting, browsing and joining
 ///     alike — even though exactly one `LobbyClientMessage` variant actually
