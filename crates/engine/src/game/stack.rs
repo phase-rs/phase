@@ -8168,7 +8168,7 @@ mod tests {
             resolve_proven_inert_trigger_batch_with_proof_hook, resolve_top, self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
-        use super::setup;
+        use super::{pending_spell_entry, setup};
         use crate::game::triggers;
         use crate::game::zones::create_object;
         use crate::types::ability::{
@@ -8180,10 +8180,11 @@ mod tests {
         use crate::types::counter::CounterType;
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
-            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
-            StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
-            StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-            StackResolutionSession,
+            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, MeldSelection,
+            PendingLiminalEntryResume, PendingResolutionCompletion,
+            PendingTokenBattlefieldEntry, StackEntry, StackEntryKind, StackPaidSnapshot,
+            StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+            StackResolutionPolicy, StackResolutionSession,
         };
         use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
         use crate::types::mana::ManaColor;
@@ -9132,6 +9133,11 @@ mod tests {
                 context: MeldSelection {
                     source_id: ObjectId(92),
                     partner_id: ObjectId(93),
+                    controller: PlayerId(0),
+                    expected_source: "Meld source".to_string(),
+                    expected_partner: "Meld partner".to_string(),
+                    result: "Meld result".to_string(),
+                    entry: crate::types::ability::PermanentEntryMode::default(),
                 },
                 attack_target: None,
             });

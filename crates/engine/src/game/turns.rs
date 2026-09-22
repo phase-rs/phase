@@ -3262,13 +3262,16 @@ fn process_phase_triggers(
 /// CR 800.4: Skip an eliminated active player's remaining turn through the
 /// normal Cleanup-to-next-turn transition. This intentionally shares the
 /// phase-entry pipeline rather than fabricating a replacement priority prompt.
-fn skip_eliminated_active_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn skip_eliminated_active_turn(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> AutoAdvanceStep {
     state.phase = Phase::Cleanup;
     // CR 800.4 + CR 500.5: Cleanup-to-Untap is one transition unit; any
     // subsequently skipped step remains work for the outer interpreter.
     match advance_phase_once(state, events) {
-        AdvancePhaseOnce::Deferred => {}
-        AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {}
+        AdvancePhaseOnce::Deferred => AutoAdvanceStep::Deferred,
+        AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => AutoAdvanceStep::Continue,
     }
 }
 
@@ -3331,8 +3334,9 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
         // `elimination` has already pruned that seat's owed gains per-entry, so the
         // gains drained here belong to living controllers.
         //
-        // Placed HERE and not in `skip_eliminated_active_turn` (which returns `()`
-        // and would orphan a prompt the drain raises) and not in `enter_phase`
+        // Placed HERE and not in `skip_eliminated_active_turn` (which returns a
+        // turn-interpreter step and would orphan a prompt the drain raises) and
+        // not in `enter_phase`
         // (the shared funnel for all three abandonment doors, which cannot tell
         // this one from the CR 724.1a/724.2a doors that must NOT discharge).
         if state.pending_combat_lifelink.is_some() {
@@ -3364,8 +3368,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 }
             }
         }
-        skip_eliminated_active_turn(state, events);
-        return AutoAdvanceStep::Continue;
+        return skip_eliminated_active_turn(state, events);
     }
 
     match state.phase {

@@ -8800,7 +8800,7 @@ fn pass_priority_once_with_pipeline(
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let wf = match engine_priority::run_post_action_pipeline(
+    let mut wf = match engine_priority::run_post_action_pipeline(
         state,
         events,
         &state.waiting_for.clone(),
@@ -8829,6 +8829,7 @@ fn pass_priority_once_with_pipeline(
     {
         let waiting_for = turns::auto_advance(state, events);
         sync_waiting_for(state, &waiting_for);
+        wf = waiting_for;
     }
 
     // PR-3 (Option C) CR 732.2a loop-shortcut window accumulation — relocated here
