@@ -79,6 +79,21 @@ describe("game persistence", () => {
     });
   });
 
+  it("uses the Commander Draft registry rule for a legacy command-zone save", async () => {
+    const state = fixtureState();
+    state.format_config = {
+      ...state.format_config,
+      format: "CommanderDraft",
+      command_zone: true,
+      deck_size: 60 as never,
+    } as FormatConfig;
+    vi.mocked(idbGet).mockResolvedValueOnce(state);
+
+    await expect(loadGame("legacy-commander-draft-deck-size")).resolves.toMatchObject({
+      format_config: { deck_size: { type: "Minimum", data: 60 } },
+    });
+  });
+
   it("migrates the state inside a trusted envelope without dropping private fields", () => {
     const state = fixtureState();
     state.format_config = {
