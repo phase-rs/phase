@@ -38,7 +38,7 @@ pub use inbound_guard::{
     LookupJoinTargetInbound,
 };
 pub use lobby::{
-    ExpiredLobbyGame, ExpiryConsumption, JoinTargetInfo, LobbyManager, LobbyReservation,
+    ExpiryConsumption, JoinTargetInfo, LobbyManager, LobbyRegistration, LobbyReservation,
     RegisterGameRequest, PUBLIC_SEAT_RESERVATION_MS,
 };
 pub use protocol::{

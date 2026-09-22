@@ -42,7 +42,7 @@ use engine::types::GameLogEntry;
 use http::{HeaderMap, HeaderValue};
 use lobby_broker::{
     check_build_commit, conn_holds_reservation, validate_announcement, Broker, BrokerEnv,
-    BuildCommitCheck, ConnState, ExpiredLobbyGame, Outbound, RawAnnouncement, ServerAnnouncement,
+    BuildCommitCheck, ConnState, LobbyRegistration, Outbound, RawAnnouncement, ServerAnnouncement,
     ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH, MAX_SERVER_NAME_LEN, NOT_OWNED_RESERVATION,
 };
 use rand::TryRngCore;
@@ -990,7 +990,7 @@ struct SocketIdentity {
     /// the matching lobby entry so abandoned rooms don't linger until the
     /// 5-minute expiry. Empty in `Full` mode (handled via `game_code` +
     /// `SessionManager` cleanup).
-    lobby_host_game: Option<String>,
+    lobby_host_game: Option<LobbyRegistration>,
     seat_reservations: Vec<(String, String)>,
     lobby_reservations: Vec<(String, String)>,
     /// Tournament codes this socket created, mirroring
@@ -5756,7 +5756,7 @@ fn retire_unstarted_session_async(game_db: &SharedGameDb, session: &GameSession)
 /// that will never happen.
 ///
 /// `T` is whatever identifies a thing this sweep acted on. The forfeit sweep
-/// acts on game codes; the lobby sweep acts on [`ExpiredLobbyGame`]
+/// acts on game codes; the lobby sweep acts on [`LobbyRegistration`]
 /// observations, because the broker it hands them back to must be able to tell
 /// the registration it reported from a replacement.
 struct ExpirySweep<T = String> {
@@ -5865,9 +5865,9 @@ fn reap_expired_disconnects(
 fn handle_expired_lobby_games(
     mgr: &mut SessionManager,
     game_db: &SharedGameDb,
-    expired: &[ExpiredLobbyGame],
-) -> ExpirySweep<ExpiredLobbyGame> {
-    let mut handled: Vec<ExpiredLobbyGame> = Vec::new();
+    expired: &[LobbyRegistration],
+) -> ExpirySweep<LobbyRegistration> {
+    let mut handled: Vec<LobbyRegistration> = Vec::new();
     let mut deferred = 0usize;
     for observation in expired {
         // The observation is carried through, not reduced to its code: the
@@ -6563,23 +6563,32 @@ async fn require_host(identity: &SocketIdentity, socket: &mut NegotiatedSocket) 
     Ok(())
 }
 
-fn is_joining_current_game(identity: &SocketIdentity, target_game_code: &str) -> bool {
+/// Whether `target_game_code` is the game this socket is already in or hosts.
+/// A lobby host stamp counts only while its registration is still the one
+/// listed under the code: once reaped, the code may name another host's game.
+fn is_joining_current_game(
+    identity: &SocketIdentity,
+    lobby: &lobby_broker::LobbyManager,
+    target_game_code: &str,
+) -> bool {
     identity
         .game_code
         .as_deref()
         .is_some_and(|active| active == target_game_code)
-        || identity
-            .lobby_host_game
-            .as_deref()
-            .is_some_and(|hosted| hosted == target_game_code)
+        || identity.lobby_host_game.as_ref().is_some_and(|hosted| {
+            hosted.game_code() == target_game_code && lobby.is_current(hosted)
+        })
 }
 
 async fn reject_joining_current_game(
     identity: &SocketIdentity,
+    lobby: &SharedLobby,
     target_game_code: &str,
     socket: &mut NegotiatedSocket,
 ) -> Result<(), ()> {
-    if !is_joining_current_game(identity, target_game_code) {
+    let joining_current =
+        is_joining_current_game(identity, lobby.lock().await.lobby(), target_game_code);
+    if !joining_current {
         return Ok(());
     }
 
@@ -8129,7 +8138,7 @@ async fn handle_client_message(
                 }
                 return;
             }
-            if reject_joining_current_game(identity, &game_code, socket)
+            if reject_joining_current_game(identity, lobby, &game_code, socket)
                 .await
                 .is_err()
             {
@@ -9261,7 +9270,7 @@ async fn handle_client_message(
                 return;
             }
 
-            if reject_joining_current_game(identity, &game_code, socket)
+            if reject_joining_current_game(identity, lobby, &game_code, socket)
                 .await
                 .is_err()
             {
@@ -9628,7 +9637,7 @@ async fn handle_client_message(
                 return;
             }
 
-            if reject_joining_current_game(identity, &game_code, socket)
+            if reject_joining_current_game(identity, lobby, &game_code, socket)
                 .await
                 .is_err()
             {
@@ -16999,23 +17008,46 @@ mod handshake_tests {
 
     #[test]
     fn joining_current_game_is_rejected_by_helper() {
+        let mut lobby = lobby_broker::LobbyManager::new();
         let mut identity = empty_identity();
         identity.game_code = Some("GAME01".to_string());
         identity.player_id = Some(PlayerId(0));
 
-        assert!(is_joining_current_game(&identity, "GAME01"));
-        assert!(!is_joining_current_game(&identity, "GAME02"));
+        assert!(is_joining_current_game(&identity, &lobby, "GAME01"));
+        assert!(!is_joining_current_game(&identity, &lobby, "GAME02"));
 
         let mut lobby_identity = empty_identity();
-        lobby_identity.lobby_host_game = Some("GAME01".to_string());
-        assert!(is_joining_current_game(&lobby_identity, "GAME01"));
-        assert!(!is_joining_current_game(&lobby_identity, "GAME02"));
+        lobby_identity.lobby_host_game =
+            Some(lobby.register_game("GAME01", RegisterGameRequest::default(), &SysEnv));
+        assert!(is_joining_current_game(&lobby_identity, &lobby, "GAME01"));
+        assert!(!is_joining_current_game(&lobby_identity, &lobby, "GAME02"));
+    }
+
+    /// A host stamp whose listing was removed and whose code another host then
+    /// registered no longer makes that code "the game this socket is in" — the
+    /// stale host may join the new holder's game like any other guest.
+    #[test]
+    fn a_stale_lobby_host_stamp_does_not_claim_a_reregistered_code() {
+        let mut lobby = lobby_broker::LobbyManager::new();
+        let mut stale_host = empty_identity();
+        stale_host.lobby_host_game =
+            Some(lobby.register_game("GAME01", RegisterGameRequest::default(), &SysEnv));
+        assert!(is_joining_current_game(&stale_host, &lobby, "GAME01"));
+
+        lobby.unregister_game("GAME01");
+        let _new_holder = lobby.register_game("GAME01", RegisterGameRequest::default(), &SysEnv);
+
+        assert!(
+            !is_joining_current_game(&stale_host, &lobby, "GAME01"),
+            "the stamp names a registration no longer listed under GAME01"
+        );
     }
 
     #[test]
     fn joining_without_active_game_is_allowed_by_helper() {
         let identity = empty_identity();
-        assert!(!is_joining_current_game(&identity, "GAME01"));
+        let lobby = lobby_broker::LobbyManager::new();
+        assert!(!is_joining_current_game(&identity, &lobby, "GAME01"));
     }
 
     // ------------------------------------------------------------------
@@ -17704,7 +17736,7 @@ mod issue_4548_deadlock_tests {
     /// The codes an expiry report named. For assertions about *which listings*
     /// were seen; an assertion about *which registration* compares the
     /// observations themselves.
-    fn codes(observed: &[ExpiredLobbyGame]) -> Vec<String> {
+    fn codes(observed: &[LobbyRegistration]) -> Vec<String> {
         observed.iter().map(|e| e.game_code().to_string()).collect()
     }
 
