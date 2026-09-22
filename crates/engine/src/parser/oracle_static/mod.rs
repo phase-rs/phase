@@ -117,7 +117,8 @@ mod support {
     pub(super) use super::evasion::{
         classify_block_exception, parse_compound_subject_keyword_static,
         parse_compound_subject_rule_static, parse_leading_except_for_rule_static,
-        parse_property_descriptor, parse_rule_static_separator_nom, try_parse_compound_subtypes,
+        parse_property_descriptor, parse_rule_static_separator_nom,
+        try_defender_exception_with_companion, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
         try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
         try_split_and_cant_attack, try_split_and_cant_attack_or_block,

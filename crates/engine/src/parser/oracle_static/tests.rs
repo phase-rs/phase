@@ -36704,19 +36704,28 @@ fn weathered_sentinels_line_is_consumed_by_the_non_attached_static_production() 
 /// ROW 4, STATIC ARMS.
 ///
 /// CR 702.3b: `"can attack this turn as though it didn't have defender"` is a
-/// DURATION adverbial, not a player class. Both static productions decline it as
-/// a class, identically to base — production (b) returns `None`,
-/// production (a) keeps its base `Continuous`/`AddKeyword(Defender)` shape.
+/// DURATION adverbial, not a player class, and BOTH static productions now
+/// decline it — (b) returns `None`, (a) returns an EMPTY vec so its callers fall
+/// back instead of receiving a reversed grant.
+///
+/// (a) did NOT decline at base: it fell through to the generic continuous parser,
+/// which read the tail as a grant and emitted `AddKeyword(Defender)` — the exact
+/// INVERSE of the printed permission, i.e. the #8785 defect shape surviving on a
+/// sibling grammar. Corpus exposure was zero (no card prints this form as a static
+/// line), but the representation was wrong for the next card in the class, so the
+/// arm now returns before the generic path rather than after it.
 ///
 /// TWO DIFFERENT REVERTS, TWO DIFFERENT CONSEQUENCES:
 ///  * reverting the CLASSIFIER's `all_consuming(tag("this turn"))` arm routes
 ///    `"this turn"` to the INERT marker and moves all 20 duration-form corpus
 ///    cards — every one of which lives on production (c), NOT here;
-///  * reverting the `DurationAdverbial` DECLINE GUARD in a static production
-///    makes it emit an UNCONDITIONED (permanently ACTIVE, CR 611.3a :2926)
-///    permission with the printed duration DROPPED. Corpus movement is ZERO — no
-///    corpus card prints a duration-form defender-exception line as a STATIC line
-///    — so the SYNTHESIZED assertions below are the sole instruments.
+///  * reverting the `DurationAdverbial` DECLINE GUARD in production (b) makes it
+///    emit an UNCONDITIONED (permanently ACTIVE, CR 611.3a :2926) permission with
+///    the printed duration DROPPED; reverting (a)'s early return lets the generic
+///    continuous parser reverse the permission into `AddKeyword(Defender)`.
+///    Corpus movement is ZERO either way — no corpus card prints a duration-form
+///    defender-exception line as a STATIC line — so the SYNTHESIZED assertions
+///    below are the sole instruments.
 #[test]
 fn defender_exception_duration_form_is_declined_by_both_static_productions() {
     // (b) — the non-attached static production. Identical to base.
@@ -36726,16 +36735,35 @@ fn defender_exception_duration_form_is_declined_by_both_static_productions() {
         "CR 702.3b: a duration adverbial is not a player class and has no \
          static-line reading on production (b)"
     );
-    // (a) — the attached-subject production. The base AddKeyword(Defender) shape,
-    // UNMOVED.
+    // (a) — the attached-subject production. It DECLINES too, so the two static
+    // productions now agree. Base fell through to the generic continuous parser
+    // here and emitted `AddKeyword(Defender)` — the INVERSE of the printed
+    // permission, and the #8785 defect shape on a sibling grammar. Asserted by
+    // EXACT VALUE on the dispatched path: a `Continuous`/`AddKeyword(Defender)`
+    // result reds this.
     let attached = parse_static_line(
         "Enchanted creature can attack this turn as though it didn't have defender.",
     );
+    assert_eq!(
+        attached, None,
+        "CR 702.3b: a duration adverbial has no static-line reading on production \
+         (a) either; falling through to the generic grant reverses the permission"
+    );
+    // The direct entry point agrees with the dispatched one — the decline is in the
+    // production, not an artefact of dispatch not reaching it.
+    let attached_direct = super::grammar::parse_enchanted_equipped_predicate(
+        "can attack this turn as though it didn't have defender.",
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::EnchantedBy],
+        }),
+        "Enchanted creature can attack this turn as though it didn't have defender.",
+    );
     assert!(
-        attached
-            .as_ref()
-            .is_some_and(|d| d.mode == StaticMode::Continuous),
-        "production (a) must keep its base Continuous shape for the duration form; got {attached:?}"
+        attached_direct.is_empty(),
+        "production (a) must return an EMPTY vec for the duration form, so callers \
+         fall back rather than receiving a reversed grant; got {attached_direct:?}"
     );
     // The conjunctive static splitter declines it too — base had no `this turn` arm.
     let conjunctive = parse_static_line_multi(
@@ -37171,20 +37199,30 @@ fn adjacent_defender_grammars_keep_their_own_parse() {
     // line falls through, and this REAL card LOSES its permission — the
     // corpus-visible cost of the prefix/all-consuming asymmetry, held by a test
     // rather than by a comment.
-    let arm9 = parse_static_line(
+    // ARM 9 — STRICT-FAIL on a rules-bearing remainder, pinned on the ONE corpus
+    // card with a non-trivial tail (Expedition Lookout, VERBATIM). Base emitted a
+    // `CanAttackWithDefender` here and DISCARDED `and it can't be blocked`, so the
+    // card was reported as supported while the engine enforced only half its text.
+    // A partial prefix must not be green: the production now declines the whole
+    // clause and the line shows as an unimplemented gap instead.
+    //
+    // This COSTS the card its permission, which is the deliberate trade. Composing
+    // the companion `CantBeBlocked` would require distributing this line's shared
+    // subject and leading condition across two predicates — a follow-up with its
+    // own design, not a widening of this change.
+    let arm9 = parse_static_line_multi(
         "As long as an opponent has eight or more cards in their graveyard, this creature can attack as though it didn't have defender and it can't be blocked.",
-    )
-    .expect("arm 9: Expedition Lookout's verbatim line must keep its permission");
-    assert_eq!(arm9.mode, StaticMode::CanAttackWithDefender);
-    assert_eq!(arm9.affected, Some(TargetFilter::SelfRef));
+    );
+    let arm9_modes: Vec<StaticMode> = arm9.iter().map(|d| d.mode.clone()).collect();
+    assert_eq!(
+        arm9_modes.len(),
+        2,
+        "arm 9: Expedition Lookout composes BOTH halves; got {arm9:?}"
+    );
     assert!(
-        matches!(
-            arm9.condition,
-            Some(StaticCondition::QuantityComparison { .. })
-        ),
-        "the leading gate survives and the `and it can't be blocked` rider is IGNORED; \
-         got {:?}",
-        arm9.condition
+        arm9_modes.contains(&StaticMode::CanAttackWithDefender)
+            && arm9_modes.contains(&StaticMode::CantBeBlocked),
+        "arm 9: base kept the permission and dropped the evasion; got {arm9_modes:?}"
     );
 
     // ARM 10 — MULTI-AUTHORITY: an interposed class AND a trailing gate on ONE
@@ -37245,14 +37283,114 @@ fn word_boundary_guard_refuses_the_attackers_minimal_pair() {
 /// `parse_oracle_text` normalizes `"this creature"` to `~` before line dispatch.
 /// **Both are right; do NOT "correct" this assertion against the artifact.**
 ///
-/// The BARE `Unrecognized` is asserted by EXACT VALUE and is PRE-EXISTING: a bare
-/// `Unrecognized` evaluates TRUE (layers.rs:2120), so these four corpus cards'
-/// permissions apply unconditionally today (Novice Knight, Karsus Depthguard, Ichor
-/// Aberration, Surveillance Phantasm). That is production (b)'s
-/// `parse_static_condition(..).unwrap_or(Unrecognized{..})` fallback, which this
-/// phase does NOT change — this row is the measurement that it did not move.
+/// THE FAIL-CLOSED SHAPE, asserted by EXACT VALUE. A bare `Unrecognized` evaluates
+/// TRUE (`game/layers.rs`), so production (b)'s former
+/// `parse_static_condition(..).unwrap_or(Unrecognized{..})` fallback turned a printed
+/// gate it could not type into an UNCONDITIONAL attack permission. Four corpus cards
+/// print this shape — Novice Knight, Karsus Depthguard, Ichor Aberration and
+/// Surveillance Phantasm — and all four attacked without regard to their gate.
+///
+/// The fallback now routes through `unenforceable_gate_marker`, whose
+/// `Not(Unrecognized)` reads FALSE forever while `contains_unrecognized` and
+/// `coverage::check_statics` still report the clause as an unimplemented gap. The
+/// permission is therefore withheld rather than granted when the engine does not
+/// understand the condition — wrong in the safe direction, and visible.
+///
+/// This MOVES those four cards in the card-data artifact (condition shape) and at
+/// runtime (permission now withheld). That is the intended correction, not a
+/// regression: see `unsupported_trailing_gate_on_the_defender_permission_fails_closed`
+/// for the runtime half.
+/// CR 702.3b + CR 509.1b: a RULES-BEARING remainder after the defender-exception
+/// clause must COMPOSE both statics; a PUNCTUATION-ONLY tail stays on production (b).
+///
+/// Base bound the remainder as `_rest` and ignored it, so Expedition Lookout kept a
+/// `CanAttackWithDefender` while its printed `and it can't be blocked` vanished —
+/// coverage then reported support for behaviour the engine does not implement. The
+/// fix is a remainder check, and the risk it introduces is over-declining: a tail of
+/// `"."` (Animate Wall's shape, and every other corpus card on this arm) is not
+/// rules-bearing and must still parse.
+///
+/// TWO-SIDED ON ONE PRODUCTION: the rules-bearing fixture reds if the check is
+/// removed, the punctuation-only fixture reds if the check is widened to any
+/// non-empty tail. Neither alone pins the boundary.
 #[test]
-fn novice_knight_leading_condition_form_is_unmoved() {
+fn defender_exception_rules_bearing_remainder_composes_both_halves() {
+    // (1) RULES-BEARING tail — declines. Expedition Lookout's verbatim line.
+    const LOOKOUT: &str = "As long as an opponent has eight or more cards in their graveyard, this creature can attack as though it didn't have defender and it can't be blocked.";
+
+    // The SINGLE-RETURN path yields only the companion: production (b) declines
+    // (one `StaticDefinition` cannot carry two static modes) and the sibling
+    // `can't be blocked` arm answers instead. That is exactly half the printed
+    // text, which is why the multi path below has to compose.
+    let single = parse_static_line(LOOKOUT).expect("the companion arm still answers");
+    assert_eq!(
+        single.mode,
+        StaticMode::CantBeBlocked,
+        "single-return yields the evasion half only; got {single:?}"
+    );
+
+    // …and the MULTI path composes BOTH halves. Base emitted the permission and
+    // dropped the evasion; declining without this composer emits the evasion and
+    // drops the permission. Either way the card was green while half-enforced.
+    let composed = parse_static_line_multi(LOOKOUT);
+    assert_eq!(
+        composed.len(),
+        2,
+        "Expedition Lookout must compose BOTH statics; got {composed:?}"
+    );
+    let modes: Vec<StaticMode> = composed.iter().map(|d| d.mode.clone()).collect();
+    assert!(
+        modes.contains(&StaticMode::CanAttackWithDefender)
+            && modes.contains(&StaticMode::CantBeBlocked),
+        "both the permission and the printed evasion must survive; got {modes:?}"
+    );
+    // The printed gate governs BOTH halves — that is what the line says, and it is
+    // the assertion that fails if the composer forgets to inherit the condition.
+    for def in &composed {
+        assert!(
+            matches!(
+                def.condition,
+                Some(StaticCondition::QuantityComparison { .. })
+            ),
+            "the graveyard gate must govern {:?}; got {:?}",
+            def.mode,
+            def.condition
+        );
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::SelfRef),
+            "both halves affect the printed subject"
+        );
+    }
+
+    // (2) PUNCTUATION-ONLY tail — still parses. Without this control, widening the
+    // check to reject ANY non-empty remainder would also pass (1) and silently
+    // delete every card on this arm.
+    let plain = parse_static_line("This creature can attack as though it didn't have defender.")
+        .expect("control: a punctuation-only tail is NOT rules-bearing and must parse");
+    assert_eq!(plain.mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(plain.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        plain.condition, None,
+        "no interposed class and no printed gate, so the permission is unconditioned"
+    );
+
+    // (3) The INTERPOSED form on the same production also survives the check — its
+    // remainder is likewise punctuation only, so the strict-fail does not reach the
+    // class this PR exists to support.
+    let interposed = parse_static_line(&format!(
+        "This creature can attack {P3_SEG} as though it didn't have defender."
+    ))
+    .expect("control: the interposed form must still parse");
+    assert_eq!(interposed.mode, StaticMode::CanAttackWithDefender);
+    assert!(
+        interposed.condition.is_some(),
+        "the interposed class must still carry its condition"
+    );
+}
+
+#[test]
+fn novice_knight_leading_condition_form_fails_closed() {
     let def = parse_static_line(
         "As long as this creature is enchanted or equipped, it can attack as though it didn't have defender.",
     )
@@ -37261,11 +37399,13 @@ fn novice_knight_leading_condition_form_is_unmoved() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(
         def.condition,
-        Some(StaticCondition::Unrecognized {
-            text: "this creature is enchanted or equipped".to_string(),
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::Unrecognized {
+                text: "this creature is enchanted or equipped".to_string(),
+            }),
         }),
-        "a BARE Unrecognized, NOT the Not-wrapped inert marker — the leading peel is \
-         production (b)'s own condition hook and is untouched by this phase"
+        "the inert marker, NOT a bare Unrecognized: a bare one evaluates TRUE, which \
+         made this printed gate an unconditional attack permission"
     );
 
     // PAIRED POSITIVE CONTROL, SAME PRODUCTION, SAME FIXTURE: arm 1's plain form.
