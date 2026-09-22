@@ -94,8 +94,11 @@ pub struct ConnState {
     /// The registration this connection created as host, if any (ownership
     /// stamp). Disconnect / re-registration teardown and every host-only check
     /// key off this — and act only while it is still the registration listed
-    /// under its code ([`LobbyManager::is_current`]): the listing can be reaped
-    /// by age while this socket stays open, and the code then claimed by
+    /// under its code ([`LobbyManager::is_current`]): the listing is reaped
+    /// only once this socket has sent no frame for longer than the timeout
+    /// (its frames refresh the listing, see
+    /// [`LobbyManager::refresh_liveness`]), for example a half-open or
+    /// throttled socket that stays open, and the code can then be claimed by
     /// another host, whose listing this stamp must never touch.
     pub host_game: Option<LobbyRegistration>,
     /// `(game_code, token)` reservations this connection holds, released on
@@ -425,6 +428,15 @@ impl Broker {
         msg: LobbyClientMessage,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        // Any frame from the socket that owns the current listing is proof its
+        // host is alive, so it refreshes the listing's liveness clock. Scoped
+        // by identity, so a stale stamp cannot extend a reclaimer's listing;
+        // quantized, see `LIVENESS_REFRESH_SECS`. Ahead of the guard so a shell
+        // that persists on `host_liveness_refresh_due` sees exactly the frames
+        // that write — a guard-rejected frame from the host still proves life.
+        if let Some(registration) = &conn.host_game {
+            self.lobby.refresh_liveness(registration, env);
+        }
         // The correlator is read BEFORE the guard, so a gated frame refused at
         // the bounds check is refused *to that request* rather than by a bare
         // `Error` a correlated caller is designed to ignore — which would be a
@@ -696,6 +708,10 @@ impl Broker {
     /// expired codes from [`Broker::lobby`]`.check_expired` directly, and
     /// tournaments have no equivalent server-run session to clean up.
     ///
+    /// A lobby entry expires once its liveness clock — advanced by its host's
+    /// frames through [`Broker::handle`] — is older than `timeout_secs`, so a
+    /// host that keeps its socket talking is never reaped.
+    ///
     /// Consumes **every** expired lobby entry, which is right for a shell whose
     /// sweep cannot decline: a Durable Object has no session registry to
     /// contend on, so reporting an entry and disposing of it are the same act.
@@ -929,6 +945,16 @@ impl Broker {
 
         info!(game = %game_code, host = %display_name, "lobby-only game registered");
         out
+    }
+
+    /// Whether [`Broker::handle`] would advance the liveness clock of the
+    /// listing `conn` hosts if it handled a frame from `conn` now. The
+    /// persistence query for a shell that snapshots: evaluate it **before**
+    /// `handle`, since the refresh it predicts happens there.
+    pub fn host_liveness_refresh_due(&self, conn: &ConnState, env: &impl BrokerEnv) -> bool {
+        conn.host_game
+            .as_ref()
+            .is_some_and(|r| self.lobby.liveness_refresh_due(r, env))
     }
 
     /// Whether `conn` hosts the listing currently under `game_code`. A stamp
@@ -2069,6 +2095,107 @@ mod tests {
                 Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. })
             )),
             "A is answered as a guest of B's game: {out:?}"
+        );
+    }
+
+    fn ping(conn: &mut ConnState, broker: &mut Broker, env: &FakeEnv) -> Vec<Outbound> {
+        broker.handle(conn, LobbyClientMessage::Ping { timestamp: 0 }, env)
+    }
+
+    /// A connected host that keeps pinging is never reaped, while a silent
+    /// host's listing still is — and a guest's pings refresh nothing.
+    #[test]
+    fn a_pinging_hosts_listing_outlives_the_reap_timeout() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut a = ConnState::default();
+        let mut c = ConnState::default();
+        let mut g = ConnState::default();
+        hello(&mut a, &mut broker, &env);
+        hello(&mut c, &mut broker, &env);
+        hello(&mut g, &mut broker, &env);
+        assert_eq!(
+            game_code_of(&create_requesting(
+                &mut a,
+                &mut broker,
+                &env,
+                Some("LFGA01")
+            )),
+            "LFGA01"
+        );
+        assert_eq!(
+            game_code_of(&create_requesting(
+                &mut c,
+                &mut broker,
+                &env,
+                Some("LFGC01")
+            )),
+            "LFGC01"
+        );
+
+        let mut silent_reaped_after = None;
+        for minute in 1..=10u64 {
+            env.advance_secs(60);
+            ping(&mut a, &mut broker, &env);
+            assert!(
+                !broker.host_liveness_refresh_due(&g, &env),
+                "a guest holds no stamp, so its frames are never a liveness write"
+            );
+            ping(&mut g, &mut broker, &env);
+            let swept = broker.reap_expired(300, &env);
+            assert!(
+                !removes(&swept, "LFGA01"),
+                "the pinging host's listing was reaped after {minute} min"
+            );
+            if removes(&swept, "LFGC01") {
+                silent_reaped_after.get_or_insert(minute * 60);
+            }
+        }
+        assert_eq!(
+            silent_reaped_after,
+            Some(360),
+            "reach guard: the silent host's listing lapsed on the first sweep past 300 s"
+        );
+        assert!(
+            lookup(&mut g, &mut broker, &env, "LFGA01", None)
+                .iter()
+                .any(|o| matches!(
+                    o,
+                    Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. })
+                )),
+            "the pinging host's room is still joinable after 10 minutes"
+        );
+
+        // Abandonment is still reaped: once A falls silent, its listing lapses
+        // 300 s after its last refresh.
+        env.advance_secs(300);
+        assert!(!removes(&broker.reap_expired(300, &env), "LFGA01"));
+        env.advance_secs(1);
+        assert!(removes(&broker.reap_expired(300, &env), "LFGA01"));
+    }
+
+    /// A's stamp outlived its listing and B reclaimed the code: A's pings must
+    /// not keep B's listing alive.
+    #[test]
+    fn a_reaped_hosts_ping_does_not_refresh_the_code_reclaimer() {
+        let (env, mut broker, mut a, b) = reaped_then_reclaimed();
+
+        for _ in 0..5 {
+            env.advance_secs(60);
+            ping(&mut a, &mut broker, &env);
+        }
+        env.advance_secs(1);
+        assert!(
+            !broker.host_liveness_refresh_due(&a, &env),
+            "A's stale stamp names no current listing"
+        );
+        assert!(
+            broker.host_liveness_refresh_due(&b, &env),
+            "reach: B's listing is due a refresh it never received"
+        );
+        assert!(
+            removes(&broker.reap_expired(300, &env), "BOTAB1"),
+            "B's silent listing lapses 301 s after its registration"
         );
     }
 

@@ -42,8 +42,9 @@ use engine::types::GameLogEntry;
 use http::{HeaderMap, HeaderValue};
 use lobby_broker::{
     check_build_commit, conn_holds_reservation, validate_announcement, Broker, BrokerEnv,
-    BuildCommitCheck, ConnState, LobbyRegistration, Outbound, RawAnnouncement, ServerAnnouncement,
-    ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH, MAX_SERVER_NAME_LEN, NOT_OWNED_RESERVATION,
+    BuildCommitCheck, ConnState, LobbyRegistration, Outbound, RawAnnouncement, ReapOutcome,
+    ServerAnnouncement, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH, MAX_SERVER_NAME_LEN,
+    NOT_OWNED_RESERVATION,
 };
 use rand::TryRngCore;
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
@@ -2626,11 +2627,8 @@ async fn serve() {
                 let broker = bg_lobby.lock().await;
                 broker.lobby().check_expired(300, &SysEnv)
             };
-            let ExpirySweep {
-                acted: handled_lobby,
-                deferred: deferred_lobby,
-            } = if expired_lobby.is_empty() {
-                ExpirySweep::default()
+            let lobby_sweep = if expired_lobby.is_empty() {
+                LobbyExpirySweep::default()
             } else {
                 // Same discipline as the reaper above: `try_session` under the
                 // registry guard decides, the removal happens in the same
@@ -2645,7 +2643,7 @@ async fn serve() {
             // and has no shell-side decline to wait for.
             let reaped = {
                 let mut broker = bg_lobby.lock().await;
-                broker.reap_expired_handled(&handled_lobby, &SysEnv)
+                consume_lobby_expiry_sweep(&mut broker, &lobby_sweep, &SysEnv)
             };
             // Every disjunct is load-bearing, because each names work this tick
             // did that no other disjunct witnesses: a tick that deferred every
@@ -2654,8 +2652,9 @@ async fn serve() {
             // retired a session, which is exactly the tick worth seeing.
             if !reaped.lobby_removed.is_empty()
                 || !reaped.tournament.is_empty()
-                || deferred_lobby > 0
+                || lobby_sweep.sweep.deferred > 0
                 || reaped.superseded > 0
+                || !lobby_sweep.live.is_empty()
             {
                 // Every count comes from the sweep that produced it; nothing
                 // here is recovered by arithmetic over the outbounds. That is
@@ -2670,7 +2669,8 @@ async fn serve() {
                     lobby_games = reaped.lobby_removed.len(),
                     superseded = reaped.superseded,
                     tournament_events = reaped.tournament.len(),
-                    deferred = deferred_lobby,
+                    deferred = lobby_sweep.sweep.deferred,
+                    kept_live = lobby_sweep.live.len(),
                     "expiring stale lobby entries"
                 );
                 // Every code whose removal the broker announced — which is
@@ -4583,8 +4583,11 @@ async fn broadcast_player_slots(
 ///
 /// The guarantee is one-sided: destroying a session or draft removes its lobby
 /// entry. The reverse does not hold — `LobbyManager::check_expired` reaps on a
-/// registration timestamp that is never refreshed, so an entry is an
-/// advertisement with a TTL and can lapse while its subject is alive.
+/// liveness clock that only the listing's host refreshes (or, for a Full
+/// game-session room, the expiry sweep while its host seat is connected or in
+/// grace); a Full-mode draft pod's listing is not refreshed and still lapses on
+/// its registration age. So an entry is an advertisement with a TTL and can
+/// lapse while its subject is alive.
 ///
 /// `public_game` returns `None` both for a private entry and for a missing one,
 /// which is exactly the `existed && public_before` condition the game-start
@@ -5775,6 +5778,21 @@ impl<T> Default for ExpirySweep<T> {
     }
 }
 
+/// The lobby-expiry sweep's result: the [`ExpirySweep`] every expiry sweep
+/// reports, plus the lapsed listings it kept alive.
+///
+/// `live` holds lapsed listings whose unstarted room's host seat is connected
+/// or inside reconnect grace. They are neither retired nor consumed, and their
+/// liveness clock is refreshed ([`consume_lobby_expiry_sweep`]). A
+/// lobby-specific wrapper rather than a field on [`ExpirySweep`] because the
+/// forfeit sweep has no such outcome, and a field always empty there would be a
+/// lie in its type.
+#[derive(Default)]
+struct LobbyExpirySweep {
+    sweep: ExpirySweep<LobbyRegistration>,
+    live: Vec<LobbyRegistration>,
+}
+
 /// The forfeit sweep's registry critical section: act on the codes
 /// `ReconnectManager::check_expired` reported, and return the ones actually
 /// removed alongside the number left for the next tick. Extracted for the same
@@ -5862,12 +5880,20 @@ fn reap_expired_disconnects(
 /// broker keeps its listing and the next tick reports it again — `check_expired`
 /// no longer erases what it reports, and a lobby entry skipped for contention is
 /// retried rather than stranded holding an unstarted session that never retires.
+///
+/// An unstarted room whose host seat is connected, or disconnected but inside
+/// reconnect grace, is kept rather than retired: it goes to
+/// [`LobbyExpirySweep::live`], neither acted on nor deferred, and its listing's
+/// liveness clock is refreshed by [`consume_lobby_expiry_sweep`]. Abandonment
+/// of such a room is the reconnect-grace sweep's decision
+/// ([`reap_expired_disconnects`]), not the lobby TTL's.
 fn handle_expired_lobby_games(
     mgr: &mut SessionManager,
     game_db: &SharedGameDb,
     expired: &[LobbyRegistration],
-) -> ExpirySweep<LobbyRegistration> {
+) -> LobbyExpirySweep {
     let mut handled: Vec<LobbyRegistration> = Vec::new();
+    let mut live: Vec<LobbyRegistration> = Vec::new();
     let mut deferred = 0usize;
     for observation in expired {
         // The observation is carried through, not reduced to its code: the
@@ -5881,6 +5907,18 @@ fn handle_expired_lobby_games(
         // — the registry may never have held the code, or a transition may be
         // holding its guard — and `contains_game` is what separates them.
         let unstarted = match mgr.try_session(game_code) {
+            // The host is always seat 0. A connected host, or one inside
+            // reconnect grace, is waiting, not abandoned: abandonment of an
+            // unstarted Full room belongs to the reconnect-grace sweep
+            // (`reap_expired_disconnects`), which retires it once grace lapses.
+            Some(session)
+                if !session.game_started
+                    && (session.connected[0]
+                        || mgr.reconnect.is_disconnected(game_code, PlayerId(0))) =>
+            {
+                live.push(observation.clone());
+                continue;
+            }
             Some(session) if !session.game_started => {
                 retire_unstarted_session_async(game_db, &session);
                 true
@@ -5905,10 +5943,29 @@ fn handle_expired_lobby_games(
         // code the registry does not hold has nothing left to retire.
         handled.push(observation.clone());
     }
-    ExpirySweep {
-        acted: handled,
-        deferred,
+    LobbyExpirySweep {
+        sweep: ExpirySweep {
+            acted: handled,
+            deferred,
+        },
+        live,
     }
+}
+
+/// The lobby-expiry sweep's lobby critical section: refresh the liveness clock
+/// of every listing the registry sweep kept alive, then consume what it acted
+/// on. Extracted for the same stated reason as [`handle_expired_lobby_games`]
+/// and [`reap_expired_disconnects`] — the sweep and its regression test must
+/// share the production code path, not a description of it.
+fn consume_lobby_expiry_sweep(
+    broker: &mut Broker,
+    lobby_sweep: &LobbyExpirySweep,
+    env: &impl BrokerEnv,
+) -> ReapOutcome {
+    for registration in &lobby_sweep.live {
+        broker.lobby_mut().refresh_liveness(registration, env);
+    }
+    broker.reap_expired_handled(&lobby_sweep.sweep.acted, env)
 }
 
 #[derive(Debug, Clone)]
@@ -17771,6 +17828,21 @@ mod issue_4548_deadlock_tests {
         let code = {
             let mut mgr = state.lock().await;
             let (code, _token) = mgr.create_game(PlayerDeckPayload::default(), None);
+            // Seat 0 is disconnected with no reconnect record, so the
+            // keep-alive arm does not apply and the retire arm is exercised; in
+            // production an abandoned room is retired by the reconnect-grace
+            // sweep.
+            mgr.try_session(&code)
+                .expect("session")
+                .mark_disconnected(PlayerId(0));
+            assert!(
+                !mgr.try_session(&code).expect("session").connected[0],
+                "reach guard: the host seat is disconnected"
+            );
+            assert!(
+                !mgr.reconnect.is_disconnected(&code, PlayerId(0)),
+                "reach guard: and holds no reconnect record"
+            );
             code
         };
         list_in_lobby(&lobby, &code).await;
@@ -17801,17 +17873,17 @@ mod issue_4548_deadlock_tests {
             handle_expired_lobby_games(&mut mgr, &game_db, &reported)
         };
         assert!(
-            first.acted.is_empty(),
+            first.sweep.acted.is_empty(),
             "a contended game is skipped, not dispositioned"
         );
         assert_eq!(
-            first.deferred, 1,
+            first.sweep.deferred, 1,
             "and the sweep reports the skip, so an all-deferred tick is not silent"
         );
         {
             let mut lob = lobby.lock().await;
             assert!(
-                lob.reap_expired_handled(&first.acted, &SysEnv)
+                lob.reap_expired_handled(&first.sweep.acted, &SysEnv)
                     .into_outbounds()
                     .is_empty(),
                 "nothing is announced for a listing the sweep deferred"
@@ -17845,12 +17917,12 @@ mod issue_4548_deadlock_tests {
             handle_expired_lobby_games(&mut mgr, &game_db, &reported)
         };
         assert_eq!(
-            codes(&second.acted),
+            codes(&second.sweep.acted),
             vec![code.clone()],
             "the next tick must retire what the first could not"
         );
         assert_eq!(
-            second.deferred, 0,
+            second.sweep.deferred, 0,
             "and reports no deferral once the contention is gone"
         );
         assert!(
@@ -17859,7 +17931,7 @@ mod issue_4548_deadlock_tests {
         );
         let mut lob = lobby.lock().await;
         assert_eq!(
-            lob.reap_expired_handled(&second.acted, &SysEnv)
+            lob.reap_expired_handled(&second.sweep.acted, &SysEnv)
                 .into_outbounds()
                 .len(),
             1,
@@ -17903,17 +17975,17 @@ mod issue_4548_deadlock_tests {
             handle_expired_lobby_games(&mut mgr, &game_db, &reported)
         };
         assert_eq!(
-            codes(&handled.acted),
+            codes(&handled.sweep.acted),
             vec!["GONE01".to_string()],
             "there is no session to retire, so the listing is dispositioned"
         );
         assert_eq!(
-            handled.deferred, 0,
+            handled.sweep.deferred, 0,
             "a code the registry does not hold is consumed, never counted as a retry"
         );
 
         let mut lob = lobby.lock().await;
-        lob.reap_expired_handled(&handled.acted, &SysEnv);
+        lob.reap_expired_handled(&handled.sweep.acted, &SysEnv);
         assert!(
             lob.lobby()
                 .check_expired(LOBBY_EXPIRY_SECS, &LapsedEnv)
@@ -17960,12 +18032,12 @@ mod issue_4548_deadlock_tests {
             handle_expired_lobby_games(&mut mgr, &game_db, &reported)
         };
         assert_eq!(
-            codes(&handled.acted),
+            codes(&handled.sweep.acted),
             vec![code.clone()],
             "a listing the sweep refuses to retire is still dispositioned"
         );
         assert_eq!(
-            handled.deferred, 0,
+            handled.sweep.deferred, 0,
             "a refusal is a disposition, not a retry"
         );
         assert!(
@@ -17974,12 +18046,130 @@ mod issue_4548_deadlock_tests {
         );
 
         let mut lob = lobby.lock().await;
-        lob.reap_expired_handled(&handled.acted, &SysEnv);
+        lob.reap_expired_handled(&handled.sweep.acted, &SysEnv);
         assert!(
             lob.lobby()
                 .check_expired(LOBBY_EXPIRY_SECS, &LapsedEnv)
                 .is_empty(),
             "a started game loses its advertisement once, not once per tick"
+        );
+    }
+
+    /// An unstarted Full room whose host is still connected is waiting, not
+    /// abandoned: the lobby sweep keeps it and refreshes its listing instead of
+    /// retiring the session. Drives the production registry sweep and the
+    /// production lobby critical section.
+    #[tokio::test]
+    async fn a_lobby_expired_room_whose_host_is_connected_is_kept_and_refreshed() {
+        let state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
+        let (_file, game_db) = temp_game_db();
+        let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
+
+        let code = {
+            let mut mgr = state.lock().await;
+            let (code, _token) = mgr.create_game(PlayerDeckPayload::default(), None);
+            assert!(
+                mgr.try_session(&code).expect("session").connected[0],
+                "reach guard: the host seat is connected on creation"
+            );
+            code
+        };
+        list_in_lobby(&lobby, &code).await;
+
+        let reported = lobby
+            .lock()
+            .await
+            .lobby()
+            .check_expired(LOBBY_EXPIRY_SECS, &LapsedEnv);
+        assert_eq!(
+            codes(&reported),
+            vec![code.clone()],
+            "reach guard: the sweep must see the lapsed listing"
+        );
+
+        let lobby_sweep = {
+            let mut mgr = state.lock().await;
+            handle_expired_lobby_games(&mut mgr, &game_db, &reported)
+        };
+        assert!(
+            lobby_sweep.sweep.acted.is_empty(),
+            "a room whose host is connected is not retired"
+        );
+        assert_eq!(lobby_sweep.sweep.deferred, 0, "nor is it a deferral");
+        assert_eq!(lobby_sweep.live, reported, "it is kept alive");
+        assert!(
+            state.lock().await.contains_game(&code),
+            "the session stays in the registry"
+        );
+
+        let mut lob = lobby.lock().await;
+        assert!(
+            consume_lobby_expiry_sweep(&mut lob, &lobby_sweep, &LapsedEnv)
+                .into_outbounds()
+                .is_empty(),
+            "no removal is announced for a kept room"
+        );
+        assert!(lob.lobby().has_game(&code), "the listing stands");
+        assert!(
+            lob.lobby()
+                .check_expired(LOBBY_EXPIRY_SECS, &LapsedEnv)
+                .is_empty(),
+            "and its liveness clock was refreshed, so it is not re-reported every tick"
+        );
+    }
+
+    /// A host whose socket dropped is inside reconnect grace, not gone: the
+    /// lobby sweep keeps the room and leaves abandonment to the grace sweep.
+    #[tokio::test]
+    async fn a_lobby_expired_room_whose_host_is_inside_reconnect_grace_is_kept() {
+        let state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
+        let (_file, game_db) = temp_game_db();
+        let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
+
+        let code = {
+            let mut mgr = state.lock().await;
+            let (code, _token) = mgr.create_game(PlayerDeckPayload::default(), None);
+            // The pair the production socket-close path runs.
+            mgr.try_session(&code)
+                .expect("session")
+                .mark_disconnected(PlayerId(0));
+            mgr.record_disconnect(&code, PlayerId(0));
+            assert!(
+                !mgr.try_session(&code).expect("session").connected[0],
+                "reach guard: the host seat is disconnected"
+            );
+            assert!(
+                mgr.reconnect.is_disconnected(&code, PlayerId(0)),
+                "reach guard: and its reconnect grace is running"
+            );
+            code
+        };
+        list_in_lobby(&lobby, &code).await;
+
+        let reported = lobby
+            .lock()
+            .await
+            .lobby()
+            .check_expired(LOBBY_EXPIRY_SECS, &LapsedEnv);
+        assert_eq!(
+            codes(&reported),
+            vec![code.clone()],
+            "reach guard: the sweep must see the lapsed listing"
+        );
+
+        let lobby_sweep = {
+            let mut mgr = state.lock().await;
+            handle_expired_lobby_games(&mut mgr, &game_db, &reported)
+        };
+        assert!(
+            lobby_sweep.sweep.acted.is_empty(),
+            "a room whose host is inside reconnect grace is not retired"
+        );
+        assert_eq!(lobby_sweep.sweep.deferred, 0, "nor is it a deferral");
+        assert_eq!(lobby_sweep.live, reported, "it is kept alive");
+        assert!(
+            state.lock().await.contains_game(&code),
+            "the session stays in the registry"
         );
     }
 
