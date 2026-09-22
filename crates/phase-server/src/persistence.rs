@@ -937,6 +937,20 @@ impl GameDb {
         }
     }
 
+    /// Whether any ranked result is recorded under `game_code`.
+    ///
+    /// [`Self::save_ranked_result_idempotent`] treats existing rows under a code
+    /// as a retry of the same game, so a ranked game must not be created under a
+    /// code that has them: its result would be refused or replayed, never rated.
+    pub fn ranked_history_exists(&self, game_code: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ranked_match_history WHERE game_code = ?1)",
+            params![game_code],
+            |row| row.get(0),
+        )
+    }
+
     /// Records one ranked result exactly once per game. A retry returns the
     /// original receipt instead of applying a second rating change.
     pub fn save_ranked_result_idempotent(
@@ -2229,6 +2243,37 @@ mod tests {
         assert_eq!(receipt, initial);
         assert_eq!(db.load_rating("alice").unwrap(), Some(1212));
         assert_eq!(db.load_rating("bob").unwrap(), Some(1188));
+    }
+
+    #[test]
+    fn ranked_history_exists_only_for_a_code_with_saved_results() {
+        let db = test_db();
+        assert_eq!(db.ranked_history_exists("RANK01"), Ok(false));
+
+        db.save_ranked_result_idempotent(&[
+            RatingDelta {
+                player_key: "alice".to_string(),
+                game_code: "RANK01".to_string(),
+                opponent_key: "bob".to_string(),
+                won: true,
+                rating_before: 1200,
+                rating_after: 1212,
+                rating_delta: 12,
+            },
+            RatingDelta {
+                player_key: "bob".to_string(),
+                game_code: "RANK01".to_string(),
+                opponent_key: "alice".to_string(),
+                won: false,
+                rating_before: 1200,
+                rating_after: 1188,
+                rating_delta: -12,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(db.ranked_history_exists("RANK01"), Ok(true));
+        assert_eq!(db.ranked_history_exists("RANK02"), Ok(false));
     }
 
     #[test]

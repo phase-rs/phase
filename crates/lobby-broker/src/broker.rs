@@ -19,7 +19,8 @@ use tracing::{debug, info, warn};
 use crate::env::BrokerEnv;
 use crate::lobby::{ExpiredLobbyGame, ExpiryConsumption, LobbyManager, RegisterGameRequest};
 use crate::protocol::{
-    LobbyClientMessage, LobbyServerMessage, ServerMode, TournamentRequestId, TournamentView,
+    code_in_use_message, LobbyClientMessage, LobbyServerMessage, ServerErrorCode, ServerMode,
+    TournamentRequestId, TournamentView,
 };
 use crate::reservation_auth::{
     consume_owned_reservation, release_owned_reservation, ReservationConsume, ReservationRelease,
@@ -492,6 +493,7 @@ impl Broker {
                 draft_metadata,
                 start_when_full: _,
                 ranked,
+                requested_code,
             } => self.handle_create_game(
                 conn,
                 display_name,
@@ -505,6 +507,7 @@ impl Broker {
                 host_peer_id,
                 draft_metadata,
                 ranked,
+                requested_code,
                 env,
             ),
 
@@ -817,6 +820,7 @@ impl Broker {
         host_peer_id: Option<String>,
         draft_metadata: Option<crate::protocol::DraftLobbyMetadata>,
         ranked: bool,
+        requested_code: Option<String>,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
         let peer_id = match host_peer_id
@@ -863,7 +867,18 @@ impl Broker {
             return out;
         }
 
-        let game_code = env.new_game_code();
+        let game_code = match requested_code {
+            Some(code) if self.lobby.has_game(&code) => {
+                warn!(game = %code, "requested game code already registered");
+                out.push(Outbound::ToSelf(LobbyServerMessage::error_with_code(
+                    ServerErrorCode::CodeInUse,
+                    code_in_use_message(&code),
+                )));
+                return out;
+            }
+            Some(code) => code,
+            None => env.new_game_code(),
+        };
         let player_token = env.new_token();
         let pc = requested_player_count.clamp(2, 6);
         let (host_version, host_build_commit) = conn
@@ -947,6 +962,15 @@ impl Broker {
             ))];
         }
 
+        // Existence first: `verify_password` reports a missing game as untyped
+        // prose, and a caller waiting on a pre-minted code keys on the typed code.
+        let Some(info) = self.lobby.join_target_info(&game_code) else {
+            return vec![Outbound::ToSelf(LobbyServerMessage::error_with_code(
+                ServerErrorCode::GameNotFound,
+                format!("Game not found in lobby: {game_code}"),
+            ))];
+        };
+
         match self.lobby.verify_password(&game_code, password.as_deref()) {
             Ok(()) => {}
             Err(e) if e == "password_required" => {
@@ -960,10 +984,6 @@ impl Broker {
             }
         }
 
-        let info = match self.lobby.join_target_info(&game_code) {
-            Some(info) => info,
-            None => return vec![error(&format!("Game not found in lobby: {game_code}"))],
-        };
         if !info.is_p2p {
             return vec![error(&format!(
                 "Game {game_code} is hosted on a Full-mode server and cannot be brokered"
@@ -1048,11 +1068,16 @@ impl Broker {
             ))];
         }
 
-        let mut info = match self.lobby.verify_password(&game_code, password.as_deref()) {
-            Ok(()) => match self.lobby.join_target_info(&game_code) {
-                Some(info) => info,
-                None => return vec![error(&format!("Game not found in lobby: {game_code}"))],
-            },
+        // Existence first: `verify_password` reports a missing game as untyped
+        // prose, and a caller waiting on a pre-minted code keys on the typed code.
+        let Some(mut info) = self.lobby.join_target_info(&game_code) else {
+            return vec![Outbound::ToSelf(LobbyServerMessage::error_with_code(
+                ServerErrorCode::GameNotFound,
+                format!("Game not found in lobby: {game_code}"),
+            ))];
+        };
+        match self.lobby.verify_password(&game_code, password.as_deref()) {
+            Ok(()) => {}
             Err(e) if e == "password_required" => {
                 return vec![Outbound::ToSelf(LobbyServerMessage::PasswordRequired {
                     game_code,
@@ -1062,7 +1087,7 @@ impl Broker {
                 warn!(game = %game_code, error = %e, "lookup password verification failed");
                 return vec![error(&e)];
             }
-        };
+        }
 
         // --- optional reservation release ---
         if let Some(token) = release_reservation_token.as_deref() {
@@ -1802,6 +1827,15 @@ mod tests {
     }
 
     fn create(conn: &mut ConnState, broker: &mut Broker, env: &FakeEnv) -> Vec<Outbound> {
+        create_requesting(conn, broker, env, None)
+    }
+
+    fn create_requesting(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        requested: Option<&str>,
+    ) -> Vec<Outbound> {
         broker.handle(
             conn,
             LobbyClientMessage::CreateGameWithSettings {
@@ -1818,9 +1852,228 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: requested.map(str::to_string),
             },
             env,
         )
+    }
+
+    /// The single `Error` reply in `out`, as `(message, code)`.
+    fn only_error(out: &[Outbound]) -> (String, Option<ServerErrorCode>) {
+        match out {
+            [Outbound::ToSelf(LobbyServerMessage::Error { message, code })] => {
+                (message.clone(), *code)
+            }
+            other => panic!("expected exactly one Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_honors_a_requested_code() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+
+        let out = create_requesting(&mut conn, &mut broker, &env, Some("BOTAB1"));
+
+        // `FakeEnv` would have minted `CODE00`.
+        assert_eq!(game_code_of(&out), "BOTAB1");
+        assert_eq!(conn.host_game.as_deref(), Some("BOTAB1"));
+        assert!(broker.lobby().has_game("BOTAB1"));
+    }
+
+    #[test]
+    fn a_requested_code_held_by_another_socket_is_code_in_use() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut a = ConnState::default();
+        let mut b = ConnState::default();
+        hello(&mut a, &mut broker, &env);
+        hello(&mut b, &mut broker, &env);
+        assert_eq!(
+            game_code_of(&create_requesting(
+                &mut a,
+                &mut broker,
+                &env,
+                Some("BOTAB1")
+            )),
+            "BOTAB1"
+        );
+
+        let out = create_requesting(&mut b, &mut broker, &env, Some("BOTAB1"));
+
+        let (message, code) = only_error(&out);
+        assert_eq!(code, Some(ServerErrorCode::CodeInUse));
+        let lower = message.to_lowercase();
+        for legacy in ["not found", "full", "password", "build mismatch"] {
+            assert!(
+                !lower.contains(legacy),
+                "legacy classifiers must not match {legacy:?}: {message}"
+            );
+        }
+        assert_eq!(b.host_game, None);
+        assert!(
+            broker.lobby().public_game("BOTAB1").is_some(),
+            "the holder's listing survives the refused claim"
+        );
+    }
+
+    #[test]
+    fn the_same_socket_can_re_create_its_own_requested_code() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+        create_requesting(&mut conn, &mut broker, &env, Some("BOTAB1"));
+
+        let out = create_requesting(&mut conn, &mut broker, &env, Some("BOTAB1"));
+
+        // The claim runs after the same-socket cleanup, so the socket's own
+        // listing does not hold the code against it.
+        assert!(
+            matches!(
+                out.as_slice(),
+                [
+                    Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code: removed }),
+                    Outbound::ToSelf(LobbyServerMessage::GameCreated { game_code: created, .. }),
+                    Outbound::ToSubscribers(LobbyServerMessage::LobbyGameAdded { .. }),
+                ] if removed == "BOTAB1" && created == "BOTAB1"
+            ),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_requested_code_is_rejected_before_the_handler() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+
+        let out = create_requesting(&mut conn, &mut broker, &env, Some("bad"));
+
+        let (message, code) = only_error(&out);
+        assert_eq!(code, None);
+        assert!(message.contains("requested_code"), "{message}");
+        assert_eq!(broker.lobby().len(), 0);
+    }
+
+    fn lookup(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        code: &str,
+        password: Option<&str>,
+    ) -> Vec<Outbound> {
+        broker.handle(
+            conn,
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: code.into(),
+                password: password.map(str::to_string),
+                reserve: false,
+                display_name: None,
+                release_reservation_token: None,
+            },
+            env,
+        )
+    }
+
+    fn join(conn: &mut ConnState, broker: &mut Broker, env: &FakeEnv, code: &str) -> Vec<Outbound> {
+        broker.handle(
+            conn,
+            LobbyClientMessage::JoinGameWithPassword {
+                game_code: code.into(),
+                deck: test_deck(),
+                display_name: "Guest".into(),
+                password: None,
+                reservation_token: None,
+            },
+            env,
+        )
+    }
+
+    #[test]
+    fn lookup_of_an_unknown_code_is_game_not_found() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        let mut guest = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        hello(&mut guest, &mut broker, &env);
+        let code = game_code_of(&create(&mut host, &mut broker, &env));
+
+        let (message, error_code) =
+            only_error(&lookup(&mut guest, &mut broker, &env, "NOPE01", None));
+        assert_eq!(error_code, Some(ServerErrorCode::GameNotFound));
+        assert!(message.contains("not found"), "{message}");
+
+        // Positive: a listed code resolves.
+        assert!(
+            lookup(&mut guest, &mut broker, &env, &code, None)
+                .iter()
+                .any(|o| matches!(
+                    o,
+                    Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. })
+                )),
+            "a created game resolves"
+        );
+
+        // Sibling: a wrong password on a listed game stays uncoded.
+        let mut locked_host = ConnState::default();
+        hello(&mut locked_host, &mut broker, &env);
+        let locked = game_code_of(&broker.handle(
+            &mut locked_host,
+            LobbyClientMessage::CreateGameWithSettings {
+                deck: test_deck(),
+                display_name: "Host".into(),
+                public: true,
+                password: Some("secret".into()),
+                timer_seconds: None,
+                player_count: 4,
+                match_config: Default::default(),
+                format_config: None,
+                room_name: None,
+                host_peer_id: Some("peer-2".into()),
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+                requested_code: None,
+            },
+            &env,
+        ));
+        let (_, wrong_password_code) = only_error(&lookup(
+            &mut guest,
+            &mut broker,
+            &env,
+            &locked,
+            Some("wrong"),
+        ));
+        assert_eq!(wrong_password_code, None);
+    }
+
+    #[test]
+    fn join_of_an_unknown_code_is_game_not_found() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        let mut guest = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        hello(&mut guest, &mut broker, &env);
+        let code = game_code_of(&create(&mut host, &mut broker, &env));
+
+        let (message, error_code) = only_error(&join(&mut guest, &mut broker, &env, "NOPE01"));
+        assert_eq!(error_code, Some(ServerErrorCode::GameNotFound));
+        assert!(message.contains("not found"), "{message}");
+
+        // Positive: joining a listed P2P game reaches PeerInfo.
+        assert!(
+            matches!(
+                join(&mut guest, &mut broker, &env, &code).as_slice(),
+                [Outbound::ToSelf(LobbyServerMessage::PeerInfo { .. })]
+            ),
+            "a created P2P game is joinable"
+        );
     }
 
     fn game_code_of(out: &[Outbound]) -> String {
@@ -1924,6 +2177,7 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
             },
             &env,
         );
@@ -2301,6 +2555,7 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
             },
             &env,
         );
@@ -2336,6 +2591,7 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
             },
             &env,
         );
@@ -2369,6 +2625,7 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
             },
             &env,
         );

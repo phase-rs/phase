@@ -72,15 +72,15 @@ use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
-    build_commit, resolve_draft_source_intent, ClientMessage, RankedPlayerResult, ServerMessage,
-    ServerMode, WireFormat, LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION,
+    build_commit, resolve_draft_source_intent, ClientMessage, RankedPlayerResult, ServerErrorCode,
+    ServerMessage, ServerMode, WireFormat, LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION,
     MIN_SUPPORTED_LOBBY_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{
-    ActionResult, FullRuntime, GameSession, HostingMode, PreviewRefusal, RevisionedActionResult,
-    SessionActionError, SessionManager,
+    ActionResult, CreateGameError, FullRuntime, GameSession, HostingMode, PreviewRefusal,
+    RevisionedActionResult, SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
@@ -4838,6 +4838,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             draft_metadata,
             start_when_full,
             ranked,
+            requested_code,
             booster_pack_pool: _,
         } => L::CreateGameWithSettings {
             deck: deck.clone(),
@@ -4853,6 +4854,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             draft_metadata: draft_metadata.clone(),
             start_when_full: *start_when_full,
             ranked: *ranked,
+            requested_code: requested_code.clone(),
         },
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -5165,6 +5167,9 @@ struct MultiplayerSessionRequest {
     start_when_full: bool,
     ranked: bool,
     booster_pack_pool: Option<Vec<String>>,
+    /// The caller-requested room code, claimed under the registry lock that
+    /// inserts; `None` mints one.
+    requested_code: Option<String>,
     ai_requests: Vec<server_core::session::AiSeatSetup>,
     public: bool,
     password: Option<String>,
@@ -5246,6 +5251,37 @@ fn named_starter_or_random(name: &str) -> engine::starter_decks::DeckData {
     })
 }
 
+/// Allocates the Full key for a just-claimed code. A refusal while an active
+/// row still holds the code — fenced for recovery at boot, or a waiting-room
+/// retirement still pending on the blocking pool — is the code being in use,
+/// not an internal failure.
+fn bind_full_session_key(
+    game_db: &SharedGameDb,
+    game_code: &str,
+) -> Result<server_core::FullSessionKey, CreateGameError> {
+    game_db.create_full_session_key(game_code).map_err(|error| {
+        match game_db.load_active_full_key(game_code) {
+            Ok(Some(_)) => CreateGameError::CodeInUse {
+                game_code: game_code.to_string(),
+            },
+            Ok(None) | Err(_) => {
+                CreateGameError::Rejected(format!("Failed to bind game session identity: {error}"))
+            }
+        }
+    })
+}
+
+/// A newly created Full game owns no routes yet. A `connections` entry already
+/// under its code belongs to a prior holder whose registry entry is gone (the
+/// disconnect path and several game-over paths leave the entry behind), and
+/// the new game must not inherit that holder's senders. Registry ->
+/// connections is downward in the declared lock order (see `lock_session`).
+async fn drop_residual_routes_while_state_locked(connections: &SharedConnections, game_code: &str) {
+    if connections.lock().await.remove(game_code).is_some() {
+        warn!(game = %game_code, "dropped residual routes left by a prior holder of this code");
+    }
+}
+
 /// Phases 1–2 of the `CreateGameWithSettings` full multiplayer path.
 ///
 /// Creates the session, configures AI seats and lobby metadata, then registers
@@ -5261,7 +5297,7 @@ async fn create_and_connect_multiplayer_session(
     connections: &SharedConnections,
     game_db: &SharedGameDb,
     req: MultiplayerSessionRequest,
-) -> Result<(String, String, PlayerId, u32, server_core::FullSessionKey), String> {
+) -> Result<(String, String, PlayerId, u32, server_core::FullSessionKey), CreateGameError> {
     let MultiplayerSessionRequest {
         resolved,
         host_choice,
@@ -5273,6 +5309,7 @@ async fn create_and_connect_multiplayer_session(
         start_when_full,
         ranked,
         booster_pack_pool,
+        requested_code,
         ai_requests,
         public,
         password,
@@ -5294,9 +5331,11 @@ async fn create_and_connect_multiplayer_session(
             context
                 .metrics
                 .record_reject(metrics::RejectReason::GameLimit);
-            return Err("Server is at game capacity, please try again later".to_string());
+            return Err("Server is at game capacity, please try again later"
+                .to_string()
+                .into());
         }
-        let (game_code, player_token) = mgr.create_game_n_players(
+        let (game_code, player_token) = mgr.create_game_n_players_with_code(
             resolved,
             Some(host_choice),
             display_name.clone(),
@@ -5304,12 +5343,13 @@ async fn create_and_connect_multiplayer_session(
             pc,
             match_config,
             format_config,
+            requested_code,
         )?;
-        let full_key = match game_db.create_full_session_key(&game_code) {
+        let full_key = match bind_full_session_key(game_db, &game_code) {
             Ok(key) => key,
             Err(error) => {
                 mgr.remove_game(&game_code);
-                return Err(format!("Failed to bind game session identity: {error}"));
+                return Err(error);
             }
         };
         info!(game = %game_code, host = %display_name, players = pc, "game created via lobby");
@@ -5344,9 +5384,10 @@ async fn create_and_connect_multiplayer_session(
         });
         if let Err(error) = initialize_full_runtime(game_db, session, full_key.clone()) {
             mgr.remove_game(&game_code);
-            return Err(error);
+            return Err(error.into());
         }
 
+        drop_residual_routes_while_state_locked(connections, &game_code).await;
         install_full_sender_while_state_locked(connections, &game_code, host_player, &host_tx)
             .await;
 
@@ -8697,6 +8738,7 @@ async fn handle_client_message(
             draft_metadata,
             start_when_full,
             ranked,
+            requested_code,
             booster_pack_pool,
         } => {
             info!(
@@ -8742,6 +8784,7 @@ async fn handle_client_message(
                         draft_metadata,
                         start_when_full,
                         ranked,
+                        requested_code,
                     },
                     lobby,
                     lobby_subscribers,
@@ -8764,6 +8807,7 @@ async fn handle_client_message(
                     room_name: room_name.as_deref(),
                     host_peer_id: host_peer_id.as_deref(),
                     draft_metadata: draft_metadata.as_ref(),
+                    requested_code: requested_code.as_deref(),
                 },
                 &ai_seats,
             ) {
@@ -8776,6 +8820,47 @@ async fn handle_client_message(
                     return;
                 }
             };
+
+            if let Some(code) = requested_code.as_deref() {
+                // Server-hosted drafts share the code namespace (lobby listing
+                // and `connections` key), and their spawned matches' codes stay
+                // in `active_matches`, where `report_draft_game_over` finds a
+                // draft by code alone. Both live outside `SessionManager`, so
+                // its claim cannot see them. `draft_sessions` sits above the
+                // registry in the declared lock order, so this is taken alone,
+                // never nested.
+                let held_by_draft = {
+                    let mgr = draft_state.lock().await;
+                    mgr.sessions.contains_key(code) || mgr.draft_for_game_code(code).is_some()
+                };
+                // Ranked results are saved idempotently per code, so a ranked
+                // game under a code that already has ranked history would go
+                // unrated.
+                let refusal = if held_by_draft {
+                    Some(CreateGameError::CodeInUse {
+                        game_code: code.to_string(),
+                    })
+                } else if ranked {
+                    match game_db.ranked_history_exists(code) {
+                        Ok(true) => Some(CreateGameError::CodeInUse {
+                            game_code: code.to_string(),
+                        }),
+                        Ok(false) => None,
+                        Err(error) => Some(CreateGameError::Rejected(format!(
+                            "Failed to check ranked history: {error}"
+                        ))),
+                    }
+                } else {
+                    None
+                };
+                if let Some(error) = refusal {
+                    let msg = ServerMessage::from(error);
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            }
 
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
@@ -8820,11 +8905,14 @@ async fn handle_client_message(
                     Some(match_config.match_type),
                     usize::from(pc),
                 ) {
-                    let msg = ServerMessage::deck_rejected(format!(
-                        "Deck not legal for {}: {}",
-                        fc.format.label(),
-                        reasons.join("; ")
-                    ));
+                    let msg = ServerMessage::error_with_code(
+                        ServerErrorCode::DeckRejected,
+                        format!(
+                            "Deck not legal for {}: {}",
+                            fc.format.label(),
+                            reasons.join("; ")
+                        ),
+                    );
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
@@ -8880,22 +8968,21 @@ async fn handle_client_message(
                             db.card_names(),
                             format_config.clone(),
                             booster_pack_pool.clone(),
+                            requested_code.clone(),
                             db,
                         ) {
                         Ok(created) => created,
                         Err(error) => {
-                            let _ = tx.send(ServerMessage::error(error));
+                            let _ = tx.send(error.into());
                             return;
                         }
                     };
 
-                    let full_key = match game_db.create_full_session_key(&game_code) {
+                    let full_key = match bind_full_session_key(game_db, &game_code) {
                         Ok(key) => key,
                         Err(error) => {
                             mgr.remove_game(&game_code);
-                            let _ = tx.send(ServerMessage::error(format!(
-                                "Failed to bind game session identity: {error}"
-                            )));
+                            let _ = tx.send(error.into());
                             return;
                         }
                     };
@@ -8910,6 +8997,7 @@ async fn handle_client_message(
                         let _ = tx.send(ServerMessage::error(error));
                         return;
                     }
+                    drop_residual_routes_while_state_locked(connections, &game_code).await;
                     (game_code, player_token, full_key)
                 }; // registry released before the AI batch below
 
@@ -9022,6 +9110,7 @@ async fn handle_client_message(
                             start_when_full,
                             ranked,
                             booster_pack_pool,
+                            requested_code,
                             ai_requests,
                             public,
                             password: password.clone(), // original still needed for Phase 3
@@ -9033,7 +9122,7 @@ async fn handle_client_message(
                     {
                         Ok(session) => session,
                         Err(error) => {
-                            let msg = ServerMessage::error(error);
+                            let msg = ServerMessage::from(error);
                             if let Ok(json) = serde_json::to_string(&msg) {
                                 let _ = socket.send(Message::text(json)).await;
                             }
@@ -9204,19 +9293,21 @@ async fn handle_client_message(
                     }
                     return;
                 } else {
+                    // Existence first: `verify_password` reports a missing game
+                    // as untyped prose, and a caller waiting on a pre-minted
+                    // code keys on the typed code.
+                    let Some(info) = lob.join_target_info(&game_code) else {
+                        let msg = ServerMessage::error_with_code(
+                            ServerErrorCode::GameNotFound,
+                            format!("Game not found in lobby: {game_code}"),
+                        );
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    };
                     match lob.verify_password(&game_code, password.as_deref()) {
-                        Ok(()) => match lob.join_target_info(&game_code) {
-                            Some(info) => info,
-                            None => {
-                                let msg = ServerMessage::error(format!(
-                                    "Game not found in lobby: {game_code}"
-                                ));
-                                if let Ok(json) = serde_json::to_string(&msg) {
-                                    let _ = socket.send(Message::text(json)).await;
-                                }
-                                return;
-                            }
-                        },
+                        Ok(()) => info,
                         Err(e) if e == "password_required" => {
                             let msg = ServerMessage::PasswordRequired {
                                 game_code: game_code.clone(),
@@ -13123,8 +13214,8 @@ mod draft_socket_authority_tests {
         }
     }
 
-    fn test_draft() -> (SharedDraftState, SharedConnections, String, String) {
-        let config = DraftConfig {
+    pub(super) fn test_draft_config() -> DraftConfig {
+        DraftConfig {
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -13137,9 +13228,13 @@ mod draft_socket_authority_tests {
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
             spectator_visibility: SpectatorVisibility::default(),
-        };
+        }
+    }
+
+    fn test_draft() -> (SharedDraftState, SharedConnections, String, String) {
         let mut manager = DraftSessionManager::new();
-        let (draft_code, player_token, _) = manager.create_draft(config, "Alice".to_string());
+        let (draft_code, player_token, _) =
+            manager.create_draft(test_draft_config(), "Alice".to_string());
         (
             Arc::new(Mutex::new(manager)),
             Arc::new(Mutex::new(HashMap::new())),
@@ -14100,6 +14195,7 @@ mod full_create_guard_tests {
             room_name: None,
             host_peer_id,
             draft_metadata,
+            requested_code: None,
         }
     }
 
@@ -14218,6 +14314,8 @@ mod full_create_guard_tests {
 
 #[cfg(test)]
 mod issue_4548_full_create_tests {
+    use super::draft_socket_authority_tests::test_draft_config;
+    use super::game_submission_tests::connect_and_hello;
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use phase_ai::config::AiDifficulty;
@@ -14245,6 +14343,17 @@ mod issue_4548_full_create_tests {
         tempfile::TempDir,
         AppState,
     ) {
+        spawn_server_with_mode(ServerMode::Full).await
+    }
+
+    pub(super) async fn spawn_server_with_mode(
+        mode: ServerMode,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+        AppState,
+    ) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let game_db = Arc::new(
             persistence::GameDb::open(
@@ -14265,7 +14374,7 @@ mod issue_4548_full_create_tests {
             game_db,
             draft_spectators: Arc::new(Mutex::new(HashMap::new())),
             game_spectators: Arc::new(Mutex::new(HashMap::new())),
-            mode: ServerMode::Full,
+            mode,
             context: ServerContext::default(),
             public_url: None,
             allowed_origin: None,
@@ -14385,6 +14494,7 @@ mod issue_4548_full_create_tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
                 booster_pack_pool: None,
             };
             socket
@@ -14561,6 +14671,7 @@ mod issue_4548_full_create_tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
                 booster_pack_pool: None,
             };
             socket
@@ -14642,6 +14753,7 @@ mod issue_4548_full_create_tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
                 booster_pack_pool: None,
             };
             let create_json = serde_json::to_string(&create).expect("create json");
@@ -14667,6 +14779,351 @@ mod issue_4548_full_create_tests {
             result.is_ok(),
             "native multi-AI setup frame did not reach server validation"
         );
+    }
+
+    // ── Requested room codes (LFG Phase A) ─────────────────────────────────
+
+    /// A settings-create frame claiming `requested_code`, copied from
+    /// `full_mode_create_sends_slots_after_game_created`'s literal.
+    fn create_frame(
+        requested_code: Option<&str>,
+        host_peer_id: Option<&str>,
+        ai_seats: Vec<AiSeatRequest>,
+    ) -> ClientMessage {
+        ClientMessage::CreateGameWithSettings {
+            deck: empty_deck(),
+            display_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: Default::default(),
+            ai_seats,
+            format_config: None,
+            room_name: None,
+            host_peer_id: host_peer_id.map(str::to_string),
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: requested_code.map(str::to_string),
+            booster_pack_pool: None,
+        }
+    }
+
+    /// [`create_frame`] with `ranked` set.
+    fn ranked_create_frame(requested_code: &str) -> ClientMessage {
+        let mut frame = create_frame(Some(requested_code), None, vec![]);
+        let ClientMessage::CreateGameWithSettings { ranked, .. } = &mut frame else {
+            unreachable!()
+        };
+        *ranked = true;
+        frame
+    }
+
+    /// The AI seat `game_submission_tests::create_started_ai_game` uses: an
+    /// explicit empty list, because this harness runs on an empty
+    /// `CardDatabase`.
+    fn ai_seat() -> AiSeatRequest {
+        AiSeatRequest {
+            seat_index: 1,
+            difficulty: AiDifficulty::Easy,
+            deck_name: None,
+            deck: Some(DeckChoice::DeckList(Box::default())),
+        }
+    }
+
+    /// Send `frame` and return the first `GameCreated` or `Error` reply.
+    async fn create_outcome<S>(
+        socket: &mut WebSocketStream<S>,
+        frame: &ClientMessage,
+    ) -> ServerMessage
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        send_test_message(socket, frame, false).await;
+        loop {
+            if let reply @ (ServerMessage::GameCreated { .. } | ServerMessage::Error { .. }) =
+                recv_server_message(socket).await
+            {
+                return reply;
+            }
+        }
+    }
+
+    fn created_code(reply: ServerMessage) -> String {
+        match reply {
+            ServerMessage::GameCreated { game_code, .. } => game_code,
+            other => panic!("expected GameCreated, got {other:?}"),
+        }
+    }
+
+    fn assert_code_in_use(reply: ServerMessage) {
+        match reply {
+            ServerMessage::Error { code, message } => {
+                assert_eq!(code, Some(ServerErrorCode::CodeInUse), "{message}")
+            }
+            other => panic!("expected a CodeInUse Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lobby_only_create_forwards_the_requested_code_to_the_broker() {
+        let (url, server, _temp_dir, _app_state) =
+            spawn_server_with_mode(ServerMode::LobbyOnly).await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut socket = connect_and_hello(url).await;
+            let reply = create_outcome(
+                &mut socket,
+                &create_frame(Some("BOTLB1"), Some("peer-1"), vec![]),
+            )
+            .await;
+            assert_eq!(created_code(reply), "BOTLB1");
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
+    }
+
+    /// Covers the Full multiplayer claim and collision (P3) and the Full
+    /// lookup's typed not-found (P6), which needs a created game as its
+    /// positive.
+    #[tokio::test]
+    async fn full_create_claims_a_requested_code_and_a_second_claim_is_code_in_use() {
+        let (url, server, _temp_dir, _app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut a = connect_and_hello(url.clone()).await;
+            let mut b = connect_and_hello(url.clone()).await;
+
+            let reply = create_outcome(&mut a, &create_frame(Some("BOTFL1"), None, vec![])).await;
+            assert_eq!(created_code(reply), "BOTFL1");
+            assert_code_in_use(
+                create_outcome(&mut b, &create_frame(Some("BOTFL1"), None, vec![])).await,
+            );
+
+            // P6: a Full lookup of a code no listing holds is typed.
+            let mut c = connect_and_hello(url).await;
+            let lookup = |game_code: &str| ClientMessage::LookupJoinTarget {
+                game_code: game_code.to_string(),
+                password: None,
+                reserve: false,
+                display_name: None,
+                release_reservation_token: None,
+            };
+            send_test_message(&mut c, &lookup("NOPE01"), false).await;
+            match recv_server_message(&mut c).await {
+                ServerMessage::Error { code, message } => {
+                    assert_eq!(code, Some(ServerErrorCode::GameNotFound), "{message}");
+                    assert!(message.contains("not found"), "{message}");
+                }
+                other => panic!("expected a GameNotFound Error, got {other:?}"),
+            }
+            // Positive: a socket other than the creator resolves the claim.
+            send_test_message(&mut c, &lookup("BOTFL1"), false).await;
+            assert!(matches!(
+                recv_server_message(&mut c).await,
+                ServerMessage::JoinTargetInfo { .. }
+            ));
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
+    }
+
+    #[tokio::test]
+    async fn full_ai_create_claims_a_requested_code() {
+        let (url, server, _temp_dir, _app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut socket = connect_and_hello(url).await;
+            let reply = create_outcome(
+                &mut socket,
+                &create_frame(Some("BOTFA1"), None, vec![ai_seat()]),
+            )
+            .await;
+            assert_eq!(created_code(reply), "BOTFA1");
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
+    }
+
+    #[tokio::test]
+    async fn full_create_refuses_a_code_held_by_a_draft() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (draft_code, _, _) = app_state
+                .draft_sessions
+                .lock()
+                .await
+                .create_draft(test_draft_config(), "Alice".into());
+            let mut socket = connect_and_hello(url).await;
+
+            assert_code_in_use(
+                create_outcome(&mut socket, &create_frame(Some(&draft_code), None, vec![])).await,
+            );
+            assert!(!app_state.sessions.lock().await.contains_game(&draft_code));
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
+    }
+
+    #[tokio::test]
+    async fn full_create_refuses_a_code_held_by_a_draft_match() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            {
+                let mut mgr = app_state.draft_sessions.lock().await;
+                let (draft_code, _, _) = mgr.create_draft(test_draft_config(), "Alice".into());
+                mgr.sessions
+                    .get_mut(&draft_code)
+                    .unwrap()
+                    .active_matches
+                    .insert("r1-t0".into(), "BOTDM1".into());
+            }
+            let mut socket = connect_and_hello(url).await;
+
+            assert_code_in_use(
+                create_outcome(&mut socket, &create_frame(Some("BOTDM1"), None, vec![])).await,
+            );
+            assert!(!app_state.sessions.lock().await.contains_game("BOTDM1"));
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
+    }
+
+    #[tokio::test]
+    async fn full_ranked_create_refuses_a_code_with_ranked_history() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            app_state
+                .game_db
+                .save_ranked_result_idempotent(&[
+                    persistence::RatingDelta {
+                        player_key: "alice".to_string(),
+                        game_code: "BOTRK1".to_string(),
+                        opponent_key: "bob".to_string(),
+                        won: true,
+                        rating_before: 1200,
+                        rating_after: 1212,
+                        rating_delta: 12,
+                    },
+                    persistence::RatingDelta {
+                        player_key: "bob".to_string(),
+                        game_code: "BOTRK1".to_string(),
+                        opponent_key: "alice".to_string(),
+                        won: false,
+                        rating_before: 1200,
+                        rating_after: 1188,
+                        rating_delta: -12,
+                    },
+                ])
+                .expect("seed ranked history");
+            let mut socket = connect_and_hello(url.clone()).await;
+
+            assert_code_in_use(create_outcome(&mut socket, &ranked_create_frame("BOTRK1")).await);
+            assert!(!app_state.sessions.lock().await.contains_game("BOTRK1"));
+
+            // The refusal is conditioned on `ranked`: an unranked create of the
+            // same code succeeds.
+            let reply =
+                create_outcome(&mut socket, &create_frame(Some("BOTRK1"), None, vec![])).await;
+            assert_eq!(created_code(reply), "BOTRK1");
+
+            // ...and on history existing: a ranked create of a fresh code
+            // succeeds. A fresh socket, because the one above is now attached
+            // to the game it created.
+            let mut fresh = connect_and_hello(url).await;
+            let reply = create_outcome(&mut fresh, &ranked_create_frame("BOTRK2")).await;
+            assert_eq!(created_code(reply), "BOTRK2");
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
+    }
+
+    #[tokio::test]
+    async fn full_create_refuses_a_code_held_by_an_active_persisted_row() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            // An active row with no registry entry: a row fenced for recovery.
+            app_state
+                .game_db
+                .create_full_session_key("BOTDB1")
+                .expect("seed active row");
+            let mut socket = connect_and_hello(url).await;
+
+            assert_code_in_use(
+                create_outcome(&mut socket, &create_frame(Some("BOTDB1"), None, vec![])).await,
+            );
+            assert!(
+                !app_state.sessions.lock().await.contains_game("BOTDB1"),
+                "the refused create is rolled back out of the registry"
+            );
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
+    }
+
+    #[tokio::test]
+    async fn full_create_drops_residual_routes_under_its_code() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (stale_tx, mut stale_rx) = mpsc::unbounded_channel();
+            // Held so a dropped route reads as "nothing received", not as a
+            // closed channel.
+            let _stale_tx_alive = stale_tx.clone();
+            app_state
+                .connections
+                .lock()
+                .await
+                .insert("BOTRS1".into(), HashMap::from([(PlayerId(1), stale_tx)]));
+            let mut socket = connect_and_hello(url).await;
+
+            let reply =
+                create_outcome(&mut socket, &create_frame(Some("BOTRS1"), None, vec![])).await;
+            assert_eq!(created_code(reply), "BOTRS1");
+            while !matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::PlayerSlotsUpdate { .. }
+            ) {}
+
+            assert!(!app_state.connections.lock().await["BOTRS1"].contains_key(&PlayerId(1)));
+            assert!(matches!(
+                stale_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
+    }
+
+    #[tokio::test]
+    async fn full_ai_create_drops_residual_routes_under_its_code() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (stale_tx, _stale_rx) = mpsc::unbounded_channel();
+            app_state
+                .connections
+                .lock()
+                .await
+                .insert("BOTRS2".into(), HashMap::from([(PlayerId(1), stale_tx)]));
+            let mut socket = connect_and_hello(url).await;
+
+            let reply = create_outcome(
+                &mut socket,
+                &create_frame(Some("BOTRS2"), None, vec![ai_seat()]),
+            )
+            .await;
+            assert_eq!(created_code(reply), "BOTRS2");
+
+            assert!(!app_state.connections.lock().await["BOTRS2"].contains_key(&PlayerId(1)));
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "timed out");
     }
 }
 
@@ -14723,7 +15180,7 @@ mod game_submission_tests {
     /// `Ok(..)` broadcast fan-out is not reachable over this harness, because
     /// `spawn_full_mode_server` builds `AppState` with an empty
     /// `CardDatabase::default()`.
-    async fn connect_and_hello(
+    pub(super) async fn connect_and_hello(
         url: String,
     ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
         let (mut socket, _) = tokio_tungstenite::connect_async(url)
@@ -14771,6 +15228,7 @@ mod game_submission_tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool: None,
         };
         socket
@@ -14820,6 +15278,7 @@ mod game_submission_tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool,
         };
         socket
@@ -15452,6 +15911,7 @@ mod refused_auto_start_join_tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
                 booster_pack_pool: None,
             },
         )
@@ -15999,6 +16459,37 @@ mod mode_gate_tests {
                 "field dropped or renamed across the projection for {msg:?}"
             );
         }
+    }
+
+    /// `to_lobby_client_message` forwards the caller-requested room code.
+    #[test]
+    fn requested_code_survives_the_lobby_projection() {
+        let msg = ClientMessage::CreateGameWithSettings {
+            deck: deck(),
+            display_name: "Host".into(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: Default::default(),
+            ai_seats: Vec::new(),
+            format_config: None,
+            room_name: None,
+            host_peer_id: Some("peer-1".into()),
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: Some("AB12CD".into()),
+            booster_pack_pool: None,
+        };
+
+        let projected = to_lobby_client_message(&msg).expect("create projects");
+        let lobby_broker::LobbyClientMessage::CreateGameWithSettings { requested_code, .. } =
+            &projected
+        else {
+            panic!("expected CreateGameWithSettings, got {projected:?}");
+        };
+        assert_eq!(requested_code.as_deref(), Some("AB12CD"));
     }
 
     /// The server direction. `to_server_message` is wildcard-free, so a
@@ -17841,6 +18332,7 @@ mod issue_4548_deadlock_tests {
                     format_config: None,
                     start_when_full: false,
                     ranked: false,
+                    requested_code: None,
                     booster_pack_pool: None,
                     ai_requests: vec![],
                     public: false,
@@ -19603,6 +20095,7 @@ mod metrics_tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool: None,
         }
     }

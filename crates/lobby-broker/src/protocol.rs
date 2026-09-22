@@ -26,6 +26,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ServerErrorCode {
     DeckRejected,
+    /// A lookup or join names a game code that resolves to no listing.
+    GameNotFound,
+    /// A create requested a room code that is already held.
+    CodeInUse,
 }
 
 /// Client-minted correlator for one gated tournament action. Opaque to the
@@ -594,6 +598,27 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 10 — Requested room codes. `CreateGameWithSettings` gains an optional
+///     `requested_code` (`#[serde(default)]`) — the "a lobby field is added"
+///     trigger — carrying a caller-pre-minted `[A-Z0-9]{6}` code (the Discord
+///     LFG bot mints it before the host creates the room) that the host claims
+///     instead of a broker-minted one; `None` keeps broker minting.
+///     [`ServerErrorCode`], carried server → client on `Error.code`, gains
+///     `game_not_found` (a lookup or join code that resolves to no listing) and
+///     `code_in_use` (a requested code already held). Purely ADDITIVE, so
+///     [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does **not** move: a pre-10 broker drops
+///     the unknown field and mints its own code, a silent capability loss the
+///     client detects as `GameCreated.game_code != requested`; a pre-10 client
+///     reads the new codes as an ignored optional string, and every coded
+///     message keeps its prose, so substring classification still works — the
+///     only out-of-build consumer of these frames is the browser's
+///     `JSON.parse`. Any client-side floor gating on requested codes belongs to
+///     the client change that first relies on them. [`PROTOCOL_VERSION`] does
+///     not move: the `ClientMessage` twin is an optional `#[serde(default)]`
+///     field whose fallback the client derives, which that constant's policy
+///     exempts, and no variant here carries `GameState`. (One unbroken
+///     paragraph on purpose — see entry 5's note on the rustdoc
+///     indented-code-block trap.)
 /// 9 — Recoverable credential rotation via idempotent replay.
 ///     `RenewTournamentCredential` gains a `rotation_nonce` field
 ///     (`#[serde(default)]`, optional) — the "a lobby field is added" trigger.
@@ -775,7 +800,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 9;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 10;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -1133,6 +1158,12 @@ pub enum LobbyClientMessage {
         start_when_full: bool,
         #[serde(default)]
         ranked: bool,
+        /// Room code pre-minted by a caller (the Discord LFG bot) that the host
+        /// claims instead of a broker-minted one; `None` keeps broker minting.
+        /// Added in lobby protocol 10. A pre-10 broker ignores it and mints its
+        /// own, which the client detects as `GameCreated.game_code != requested`.
+        #[serde(default)]
+        requested_code: Option<String>,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -1543,6 +1574,21 @@ impl LobbyServerMessage {
             code: None,
         }
     }
+
+    pub fn error_with_code(code: ServerErrorCode, message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: Some(code),
+        }
+    }
+}
+
+/// Prose for a [`ServerErrorCode::CodeInUse`] refusal, shared by the lobby
+/// broker and the Full-mode server. It deliberately avoids "not found", "full"
+/// and "password": legacy clients classify errors by substring
+/// (`brokerClient.ts` `classifyError`), and a held code is none of those.
+pub fn code_in_use_message(game_code: &str) -> String {
+    format!("Game code {game_code} is already in use")
 }
 
 /// Advertised role of the server. Mirrors `server_core::protocol::ServerMode`
@@ -1663,9 +1709,9 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 9);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 10);
         // Deliberately still 2, not 6: lobby versions 3, 4 and 5 are purely
-        // additive, and 6 is additive in the only direction this floor governs
+        // additive, as are 7 through 10, and 6 is additive in the only direction this floor governs
         // — its server → client fields are ignored by a consumer that does not
         // name them, and its one relaxation makes the broker MORE permissive —
         // so a version-2 client parses every frame it already understood and is
@@ -1840,9 +1886,12 @@ mod tests {
     /// earlier steps share — it adds NO wire surface, because rotation's
     /// SEMANTICS changed while its frames stayed byte-identical — so it extends
     /// the chain as a BEHAVIORAL step rather than a surface one, named to say so,
-    /// all the same rather than re-pointing the tail.
+    /// all the same rather than re-pointing the tail. Version 10 is the first
+    /// step outside the tournament surface (requested room codes); it extends
+    /// the chain so the tail stays pinned rather than re-pointed, and the name
+    /// grows with it, by the same rule.
     #[test]
-    fn the_tournament_surface_spans_lobby_versions_four_through_nine() {
+    fn the_tournament_surface_spans_lobby_versions_four_through_ten() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
@@ -1851,7 +1900,9 @@ mod tests {
         const MATCH_STRUCTURE_LOBBY_VERSION: u32 = FORMAT_AND_PLUS_ROUNDS_LOBBY_VERSION + 1;
         // The first NON-surface step: rotation semantics, no new wire frames.
         const RECOVERABLE_ROTATION_LOBBY_VERSION: u32 = MATCH_STRUCTURE_LOBBY_VERSION + 1;
-        assert_eq!(LOBBY_PROTOCOL_VERSION, RECOVERABLE_ROTATION_LOBBY_VERSION);
+        // The first step outside the tournament surface: requested room codes.
+        const REQUESTED_ROOM_CODE_LOBBY_VERSION: u32 = RECOVERABLE_ROTATION_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, REQUESTED_ROOM_CODE_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and
@@ -2604,6 +2655,66 @@ mod tests {
         ));
     }
 
+    /// A `CreateGameWithSettings` frame carrying `requested_code`, serialized
+    /// from the enum so the field name on the wire is the one serde emits.
+    fn requested_code_frame(requested_code: &str) -> String {
+        serde_json::to_string(&LobbyClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Host".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: MatchConfig::default(),
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: Some(requested_code.to_string()),
+        })
+        .expect("message serializes")
+    }
+
+    #[test]
+    fn well_formed_requested_code_survives_the_parse_boundary() {
+        match parse_lobby_client_message(&requested_code_frame("AB12CD")) {
+            ParsedFrame::Message(msg) => match *msg {
+                LobbyClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                    assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+                }
+                other => panic!("expected CreateGameWithSettings, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_requested_code_routes_to_malformed() {
+        match parse_lobby_client_message(&requested_code_frame("ab12cd")) {
+            ParsedFrame::Malformed(reason) => assert!(
+                reason.contains("requested_code"),
+                "the refusal names the field: {reason}"
+            ),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absent_requested_code_defaults_to_none() {
+        let frame = r#"{"type":"CreateGameWithSettings","data":{"deck":{"main_deck":[]},"display_name":"Host","public":true,"password":null,"timer_seconds":null}}"#;
+        match parse_lobby_client_message(frame) {
+            ParsedFrame::Message(msg) => match *msg {
+                LobbyClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                    assert_eq!(requested_code, None);
+                }
+                other => panic!("expected CreateGameWithSettings, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
     /// Phase 1d: `FormatConfig::deserialize`'s admission gate now runs
     /// through this exact wire chokepoint (`parse_lobby_client_message` ->
     /// `serde_json::from_str::<LobbyClientMessage>` -> the embedded
@@ -2628,6 +2739,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
         };
         serde_json::to_string(&message).expect("message serializes")
     }
