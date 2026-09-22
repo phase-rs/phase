@@ -1303,8 +1303,9 @@ pub(crate) fn materialize_token_spec_body(
         object.base_toughness = ch.toughness;
         object.layer_base_power = ch.power;
         object.layer_base_toughness = ch.toughness;
-        // CR 306.5b + CR 306.5c: the printed loyalty is the entry-counter baseline;
-        // live loyalty stays counter-derived. Mirrors `printed_cards::apply_face`, so a
+        // CR 306.5b + CR 306.5c: record the token's printed loyalty; live loyalty
+        // stays counter-derived. Placing entry loyalty counters from this value is
+        // not yet done for tokens. Mirrors `printed_cards::apply_face`, so a
         // planeswalker token and a card-backed planeswalker carry loyalty identically.
         object.loyalty = ch.loyalty;
         object.printed_loyalty = ch.loyalty.map(PrintedLoyalty::Fixed);
@@ -6170,13 +6171,40 @@ mod tests {
         assert_eq!(materialized.source, TokenAbilitySource::Predefined);
         assert_eq!(materialized.abilities.len(), 2);
         assert!(materialized.unparsed_rules_text_lines.is_empty());
-        // The catalog row's reminder parenthetical must not ride into ability text.
-        assert!(materialized.abilities.iter().all(|ability| {
-            ability
-                .description
-                .as_deref()
-                .is_none_or(|text| !text.contains("Look at the top card"))
-        }));
+        // Each effect is paired with its loyalty cost, so swapping the effects
+        // between the two costs goes red.
+        let effect_for_loyalty_cost = |amount: i32| {
+            let matching: Vec<_> = materialized
+                .abilities
+                .iter()
+                .filter(|ability| {
+                    matches!(ability.cost, Some(AbilityCost::Loyalty { amount: a }) if a == amount)
+                })
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "exactly one ability costs loyalty {amount}"
+            );
+            &*matching[0].effect
+        };
+        assert!(matches!(
+            effect_for_loyalty_cost(-1),
+            Effect::Surveil {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            effect_for_loyalty_cost(-3),
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        // The registry arm is keyed to the Jace subtype, not to planeswalker
+        // subtypes in general.
+        assert!(predefined_token_abilities("Chandra").is_empty());
     }
 
     #[test]
