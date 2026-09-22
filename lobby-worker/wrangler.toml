@@ -119,6 +119,13 @@ name = "METRICS_LIMIT"
 namespace_id = "1002"
 simple = { limit = 60, period = 60 }
 
+# Bound TURN credential minting separately from the directory endpoints. This
+# is an abuse throttle, not an authentication boundary.
+[[ratelimits]]
+name = "TURN_LIMIT"
+namespace_id = "1005"
+simple = { limit = 30, period = 60 }
+
 # Workers Logs — persistent logs in the dashboard Observability tab. We keep this
 # ON for our structured console.* output: relay-mint failures surface via
 # `console.error({event:"turn_mint_failed"})` in turn.ts (the always-on Workers
@@ -242,6 +249,13 @@ simple = { limit = 10, period = 60 }
 name = "METRICS_LIMIT"
 namespace_id = "1004"
 simple = { limit = 60, period = 60 }
+
+# Rate-limit bindings are not inherited by named environments. Keep preview's
+# counter space separate so staging traffic cannot exhaust production's budget.
+[[env.preview.ratelimits]]
+name = "TURN_LIMIT"
+namespace_id = "1006"
+simple = { limit = 30, period = 60 }
 
 [env.preview.vars]
 TURN_KEY_ID = "97c7984d6c155084f9d0fdf8090e02f8"
