@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-09-21T00:00:00Z",
+  "updated": "2026-09-22T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -705,149 +705,6 @@
       ]
     },
     {
-      "name": "Dimir Excruciator",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 2,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 2,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 1,
-          "name": "Deadly Cover-Up"
-        },
-        {
-          "count": 4,
-          "name": "Deceit"
-        },
-        {
-          "count": 3,
-          "name": "Doomsday Excruciator"
-        },
-        {
-          "count": 3,
-          "name": "Duress"
-        },
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 1,
-          "name": "Harvester of Misery"
-        },
-        {
-          "count": 1,
-          "name": "Malboro"
-        },
-        {
-          "count": 4,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 4,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 4,
-          "name": "Stock Up"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 9,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 2,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 4,
-          "name": "Superior Spider-Man"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 2,
-          "name": "Flashfreeze"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "M.O.D.O.K."
-        },
-        {
-          "count": 1,
-          "name": "Negate"
-        },
-        {
-          "count": 2,
-          "name": "Oildeep Gearhulk"
-        },
-        {
-          "count": 2,
-          "name": "Qarsi Revenant"
-        },
-        {
-          "count": 1,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        }
-      ]
-    },
-    {
       "name": "Jund Sacrifice",
       "author": "MTGGoldfish",
       "colors": [
@@ -996,11 +853,11 @@
       ]
     },
     {
-      "name": "Selesnya Landfall",
+      "name": "Dimir Excruciator",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "G"
+        "B",
+        "U"
       ],
       "tags": [
         "metagame"
@@ -1008,97 +865,133 @@
       "main": [
         {
           "count": 3,
-          "name": "Ba Sing Se"
+          "name": "Bitter Triumph"
         },
         {
           "count": 2,
-          "name": "Plains"
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
         },
         {
           "count": 1,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 2,
-          "name": "Dyadrine, Synthesis Amalgam"
+          "name": "Deadly Cover-Up"
         },
         {
           "count": 4,
-          "name": "Mightform Harmonizer"
+          "name": "Deceit"
         },
         {
           "count": 3,
-          "name": "Esper Origins"
-        },
-        {
-          "count": 2,
-          "name": "Shared Roots"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Icetill Explorer"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Erode"
-        },
-        {
-          "count": 4,
-          "name": "Sazh's Chocobo"
+          "name": "Doomsday Excruciator"
         },
         {
           "count": 3,
-          "name": "Escape Tunnel"
+          "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Emeritus of Ideation"
         },
         {
           "count": 4,
-          "name": "Earthbender Ascension"
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 1,
+          "name": "Harvester of Misery"
+        },
+        {
+          "count": 1,
+          "name": "Malboro"
         },
         {
           "count": 4,
-          "name": "Fabled Passage"
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 4,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 4,
+          "name": "Stock Up"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
         },
         {
           "count": 9,
-          "name": "Forest"
+          "name": "Swamp"
         },
         {
-          "count": 3,
-          "name": "Mossborn Hydra"
+          "count": 2,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 2,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 4,
+          "name": "Superior Spider-Man"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Torpor Orb"
+          "count": 1,
+          "name": "Day of Black Sun"
         },
         {
           "count": 1,
-          "name": "Mossborn Hydra"
+          "name": "Disdainful Stroke"
         },
         {
-          "count": 3,
-          "name": "Sheltered by Ghosts"
+          "count": 1,
+          "name": "Duress"
         },
         {
-          "count": 3,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 4,
-          "name": "Sapling Nursery"
+          "count": 1,
+          "name": "Emeritus of Ideation"
         },
         {
           "count": 2,
-          "name": "Dawn's Truce"
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "M.O.D.O.K."
+        },
+        {
+          "count": 1,
+          "name": "Negate"
+        },
+        {
+          "count": 2,
+          "name": "Oildeep Gearhulk"
+        },
+        {
+          "count": 2,
+          "name": "Qarsi Revenant"
+        },
+        {
+          "count": 1,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
         }
       ]
     },
@@ -1214,6 +1107,113 @@
         {
           "count": 1,
           "name": "The Legend of Roku"
+        }
+      ]
+    },
+    {
+      "name": "Selesnya Landfall",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 3,
+          "name": "Ba Sing Se"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Hushwood Verge"
+        },
+        {
+          "count": 2,
+          "name": "Dyadrine, Synthesis Amalgam"
+        },
+        {
+          "count": 4,
+          "name": "Mightform Harmonizer"
+        },
+        {
+          "count": 3,
+          "name": "Esper Origins"
+        },
+        {
+          "count": 2,
+          "name": "Shared Roots"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
+          "name": "Icetill Explorer"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Sazh's Chocobo"
+        },
+        {
+          "count": 3,
+          "name": "Escape Tunnel"
+        },
+        {
+          "count": 4,
+          "name": "Earthbender Ascension"
+        },
+        {
+          "count": 4,
+          "name": "Fabled Passage"
+        },
+        {
+          "count": 9,
+          "name": "Forest"
+        },
+        {
+          "count": 3,
+          "name": "Mossborn Hydra"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Torpor Orb"
+        },
+        {
+          "count": 1,
+          "name": "Mossborn Hydra"
+        },
+        {
+          "count": 3,
+          "name": "Sheltered by Ghosts"
+        },
+        {
+          "count": 3,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 4,
+          "name": "Sapling Nursery"
+        },
+        {
+          "count": 2,
+          "name": "Dawn's Truce"
         }
       ]
     },
