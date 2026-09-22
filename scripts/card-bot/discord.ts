@@ -7,6 +7,8 @@ const API = "https://discord.com/api/v10";
 export const InteractionType = {
   PING: 1,
   APPLICATION_COMMAND: 2,
+  /** A button (or other message component) was pressed. */
+  MESSAGE_COMPONENT: 3,
   APPLICATION_COMMAND_AUTOCOMPLETE: 4,
 } as const;
 
@@ -15,12 +17,35 @@ export const ResponseType = {
   PONG: 1,
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
   DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5,
+  /** Edit the message a component is attached to (component interactions only). */
+  UPDATE_MESSAGE: 7,
   APPLICATION_COMMAND_AUTOCOMPLETE_RESULT: 8,
 } as const;
 
 /** Slash-command option types we use. */
 export const OptionType = {
   STRING: 3,
+  INTEGER: 4,
+} as const;
+
+/** Message flags we set. EPHEMERAL messages are visible only to the invoker; a
+ *  message's ephemeral state is fixed when it is first sent. */
+export const MessageFlags = {
+  EPHEMERAL: 1 << 6,
+} as const;
+
+/** Message component types (legacy action rows; no IS_COMPONENTS_V2 flag). */
+export const ComponentType = {
+  ACTION_ROW: 1,
+  BUTTON: 2,
+} as const;
+
+/** Button styles. A LINK button carries a `url` and never a `custom_id`. */
+export const ButtonStyle = {
+  PRIMARY: 1,
+  SECONDARY: 2,
+  SUCCESS: 3,
+  LINK: 5,
 } as const;
 
 export interface InteractionOption {

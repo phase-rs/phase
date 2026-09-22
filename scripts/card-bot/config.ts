@@ -85,3 +85,29 @@ export const PORT = Number(Bun.env.CARD_BOT_PORT ?? 9375);
 /** Identifies the bot to Scryfall per their API etiquette. */
 export const SCRYFALL_USER_AGENT =
   Bun.env.CARD_BOT_USER_AGENT ?? "phase-rs-card-bot/1.0 (+https://phase-rs.dev)";
+
+/**
+ * Where a build's players play, and the lobby its P2P games register on. The
+ * lobby URL MUST equal that build's client OFFICIAL_MULTIPLAYER_SERVER_URL
+ * (release: the multiplayerServerUrls.ts fallback; preview: deploy.yml) —
+ * pinned by __tests__/endpoints.test.ts. `lobbyHttp` is the same host over
+ * https (where `/health` and `/servers` are served).
+ */
+export const BUILD_ENDPOINTS: Record<Build, { site: string; lobbyWs: string; lobbyHttp: string }> = {
+  release: {
+    site: "https://phase-rs.dev",
+    lobbyWs: "wss://lobby.phase-rs.dev/ws",
+    lobbyHttp: "https://lobby.phase-rs.dev",
+  },
+  preview: {
+    site: "https://preview.phase-rs.dev",
+    lobbyWs: "wss://lobby-preview.phase-rs.dev/ws",
+    lobbyHttp: "https://lobby-preview.phase-rs.dev",
+  },
+};
+
+/** Default /lfg build: players play on the stable site (DEFAULT_BUILD stays preview for /card). */
+export const LFG_DEFAULT_BUILD: Build = "release";
+
+/** SQLite file for LFG state (a Docker volume in production). */
+export const LFG_DB_PATH = Bun.env.CARD_BOT_DB_PATH ?? "/data/lfg.sqlite";
