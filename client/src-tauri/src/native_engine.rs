@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+use crate::channels::{PREVIEW_ORIGIN, RELEASE_ORIGIN};
 use crate::lan::{self, LanServerStatus, RunningLan};
 use crate::native_bridge::BridgeHandle;
 use crate::native_engine_contract::{
@@ -48,8 +49,6 @@ const RELEASE_RATCHET_FILE: &str = "native-engine-highest-release-version.json";
 const PREVIEW_RATCHET_FILE: &str = "native-engine-preview-generated-at.json";
 const MANIFEST_DATA_FILE: &str = "manifest-data.json";
 const SIGNED_MANIFEST_ENVELOPE_FILE: &str = "signed-manifest-envelope.json";
-const RELEASE_ORIGIN: &str = "https://phase-rs.dev";
-const PREVIEW_ORIGIN: &str = "https://preview.phase-rs.dev";
 const PROGRESS_EVENT: &str = "native-engine-progress";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(250);

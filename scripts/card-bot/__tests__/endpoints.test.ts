@@ -34,11 +34,11 @@ describe("BUILD_ENDPOINTS matches each build's client", () => {
     }
   });
 
-  test("site origins match the desktop shell's RELEASE_ORIGIN / PREVIEW_ORIGIN", async () => {
-    const nativeEngine = await readRepo("client/src-tauri/src/native_engine.rs");
+  test("site origins match the desktop shell's channel origins", async () => {
+    const channels = await readRepo("client/src-tauri/src/channels.rs");
     const declared = (name: string) => {
       const matches = [
-        ...nativeEngine.matchAll(new RegExp(`^const ${name}: &str = "([^"]+)";$`, "gm")),
+        ...channels.matchAll(new RegExp(`^pub const ${name}: &str = "([^"]+)";$`, "gm")),
       ];
       expect(matches).toHaveLength(1);
       return matches[0][1];

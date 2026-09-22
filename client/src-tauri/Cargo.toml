@@ -30,7 +30,8 @@ mdns-sd = "0.21.3"
 if-addrs = "0.15"
 sha2 = "0.10"
 semver = "1"
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio = { version = "1", features = ["macros", "net", "io-util"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
