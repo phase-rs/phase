@@ -1,10 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
+  __resetBotLinkStashForTests,
+  BOT_LINK_STASH_MAX_AGE_MS,
   classifyCompatResult,
+  clearStashedBotLink,
+  hasContinuedOnStaleBuild,
   hostLinkSearch,
+  markContinuedOnStaleBuild,
   parseBotLink,
+  readStashedBotLinkOnce,
+  stashBotLink,
   type HostSeed,
 } from "../multiplayerPageState";
 
@@ -162,5 +169,75 @@ describe("hostLinkSearch", () => {
     expect(parseBotLink(`?${search}`)).toEqual({ kind: "host", seed });
     expect(search).not.toContain("view=");
     expect(search.startsWith("?")).toBe(false);
+  });
+});
+
+describe("bot link stash", () => {
+  const KEY = "phase:bot-link";
+  const JOIN_SEARCH = "?join=AB12CD@wss://x.example/ws";
+  const JOIN = { kind: "join", code: "AB12CD", serverUrl: "wss://x.example/ws" };
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    __resetBotLinkStashForTests();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is read once per document and survives the read", () => {
+    stashBotLink(JOIN_SEARCH);
+
+    expect(readStashedBotLinkOnce()).toEqual(JOIN);
+    expect(readStashedBotLinkOnce()).toBeNull();
+    expect(sessionStorage.getItem(KEY)).not.toBeNull();
+
+    // A new document reads it again.
+    __resetBotLinkStashForTests();
+    expect(readStashedBotLinkOnce()).toEqual(JOIN);
+  });
+
+  it("expires after ten minutes", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-22T12:00:00Z"));
+    stashBotLink(JOIN_SEARCH);
+
+    vi.setSystemTime(Date.now() + BOT_LINK_STASH_MAX_AGE_MS - 1);
+    expect(readStashedBotLinkOnce()).toEqual(JOIN);
+
+    __resetBotLinkStashForTests();
+    vi.setSystemTime(Date.now() + 2);
+    expect(readStashedBotLinkOnce()).toBeNull();
+    expect(sessionStorage.getItem(KEY)).toBeNull();
+  });
+
+  it.each([
+    ["unparseable JSON", "{"],
+    ["a non-string search", JSON.stringify({ search: 5 })],
+    ["a missing timestamp", JSON.stringify({ search: JOIN_SEARCH })],
+    ["an invalid link", JSON.stringify({ search: "?code=ab", at: Date.now() })],
+    ["no link at all", JSON.stringify({ search: "?view=lobby", at: Date.now() })],
+  ])("drops %s", (_label, raw) => {
+    sessionStorage.setItem(KEY, raw);
+
+    expect(readStashedBotLinkOnce()).toBeNull();
+    expect(sessionStorage.getItem(KEY)).toBeNull();
+  });
+
+  it("is gone after clearStashedBotLink", () => {
+    stashBotLink(JOIN_SEARCH);
+    clearStashedBotLink();
+
+    expect(readStashedBotLinkOnce()).toBeNull();
+  });
+
+  it("holds a Continue-anyway decision until the document is reset", () => {
+    expect(hasContinuedOnStaleBuild()).toBe(false);
+    markContinuedOnStaleBuild();
+    expect(hasContinuedOnStaleBuild()).toBe(true);
+
+    __resetBotLinkStashForTests();
+    expect(hasContinuedOnStaleBuild()).toBe(false);
   });
 });

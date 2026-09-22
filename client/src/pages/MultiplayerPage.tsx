@@ -23,8 +23,23 @@ import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/s
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import { expandParsedDeck } from "../services/deckParser";
-import type { BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
-import { classifyCompatResult, hostLinkSearch, parseBotLink } from "./multiplayerPageState";
+import type { ActionableBotLink, BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
+import {
+  classifyCompatResult,
+  clearStashedBotLink,
+  hasContinuedOnStaleBuild,
+  hostLinkSearch,
+  markContinuedOnStaleBuild,
+  parseBotLink,
+  readStashedBotLinkOnce,
+  stashBotLink,
+} from "./multiplayerPageState";
+import {
+  checkDeployedBuild,
+  isBuildUpdateInFlight,
+  reloadIfNoLiveGame,
+  updateToLatestBuild,
+} from "../pwa/registerServiceWorker";
 import { clearWsSession } from "../services/multiplayerSession";
 import { installServerMetricsLifecycle } from "../services/serverMetrics";
 import {
@@ -44,6 +59,14 @@ import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
+
+/** How long a Discord-link arrival waits for the service worker to move the
+ * tab onto the deployed build before offering Refresh / Continue anyway. */
+const BUILD_UPDATE_DEADLINE_MS = 15_000;
+
+type BuildUpdateDialog =
+  | { status: "updating" }
+  | { status: "manual"; link: ActionableBotLink };
 
 function parseViewParam(value: string | null): MultiplayerView {
   if (value === "host-setup" || value === "deck-select" || value === "draft-lobby") return value;
@@ -168,6 +191,9 @@ function MultiplayerPageContent({
       primaryAction?: { label: string; onClick: () => void };
     } | null
   >(null);
+  // The Discord-link version gate's dialog: "updating" while the tab waits to
+  // reload onto the deployed build, "manual" when it did not.
+  const [buildUpdate, setBuildUpdate] = useState<BuildUpdateDialog | null>(null);
   // Where to return when the user enters deck-select *without* a pending
   // host/join action (i.e. clicked the "Change" affordance on the active-
   // deck banner). Before this, back/confirm both assumed pendingAction
@@ -378,6 +404,25 @@ function MultiplayerPageContent({
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);
   const lookupJoinTargetFromStore = useMultiplayerStore((s) => s.lookupJoinTarget);
 
+  // The single user-driven reload site; never reloads a live game (a draft-pod
+  // lobby renders on this page).
+  const reloadOrToast = useCallback(() => {
+    if (!reloadIfNoLiveGame()) showToast(t("page.refreshAfterGame"));
+  }, [showToast, t]);
+
+  // "Client out of date" Refresh. A current (or unknown) client reloads at
+  // once: the host is the stale party, and a reload is all this ever offered.
+  // A stale client waits for the updater first.
+  const refreshToLatestBuild = useCallback(async () => {
+    setJoinErrorDialog(null);
+    if ((await checkDeployedBuild()) === "stale") {
+      setBuildUpdate({ status: "updating" });
+      if ((await updateToLatestBuild({ deadlineMs: BUILD_UPDATE_DEADLINE_MS })) === "reloading") return;
+      setBuildUpdate(null);
+    }
+    reloadOrToast();
+  }, [reloadOrToast]);
+
   /**
    * Guest-path P2P resolve loop. Tries `resolveGuest` over the shared
    * subscription socket, prompts for a password on `password_required`
@@ -418,7 +463,7 @@ function MultiplayerPageContent({
             message: result.message,
             primaryAction: {
               label: t("page.joinErrorRefresh"),
-              onClick: () => window.location.reload(),
+              onClick: () => void refreshToLatestBuild(),
             },
           });
           return false;
@@ -437,7 +482,7 @@ function MultiplayerPageContent({
         return false;
       }
     },
-    [navigate, resolveGuestFromStore, showToast, t],
+    [navigate, refreshToLatestBuild, resolveGuestFromStore, showToast, t],
   );
 
   // Execute a pending action (host or join) with the currently active deck.
@@ -815,6 +860,7 @@ function MultiplayerPageContent({
         showToast(t("page.invalidGameLink"));
         return;
       case "host":
+        setJoinErrorDialog(null);
         setPendingAction(null);
         setHostSeed(link.seed);
         setView("host-setup");
@@ -831,19 +877,87 @@ function MultiplayerPageContent({
     }
   };
 
+  // Bumped by every gated arrival. A gate that a newer arrival overtook while
+  // it awaited neither applies its link nor touches the stash.
+  const latestArrival = useRef(0);
+
+  const proceedWithBotLink = (link: ActionableBotLink) => {
+    clearStashedBotLink();
+    setBuildUpdate(null);
+    applyBotLink(link);
+  };
+
+  // "Continue anyway" on this build. While an update is in flight the stash
+  // stays, so the reload that update causes re-applies (and re-gates) the
+  // link. The decision holds for the rest of this document.
+  const continueOnThisBuild = (link: ActionableBotLink) => {
+    markContinuedOnStaleBuild();
+    if (!isBuildUpdateInFlight()) {
+      proceedWithBotLink(link);
+      return;
+    }
+    setBuildUpdate(null);
+    applyBotLink(link);
+  };
+
+  // Same-version gate: players on different builds cannot share a game, so a
+  // stale tab first tries to reload onto the deployed build.
+  const gateBotLink = async (link: ActionableBotLink) => {
+    const arrival = ++latestArrival.current;
+    const superseded = () => arrival !== latestArrival.current;
+    const build = await checkDeployedBuild();
+    if (superseded()) return;
+    if (build !== "stale") {
+      proceedWithBotLink(link);
+      return;
+    }
+    if (hasContinuedOnStaleBuild()) {
+      continueOnThisBuild(link);
+      return;
+    }
+    setJoinErrorDialog(null);
+    setBuildUpdate({ status: "updating" });
+    const outcome = await updateToLatestBuild({ deadlineMs: BUILD_UPDATE_DEADLINE_MS });
+    if (superseded()) return;
+    if (outcome === "manual") setBuildUpdate({ status: "manual", link });
+  };
+
   // Discord bot links (`?code=…` host, `?join=…` guest). One arrival = one
   // history entry: StrictMode (DevStrict wraps /multiplayer) re-runs this
   // effect with the same location in dev, and refs survive that re-run. The
   // strip is a new entry with an empty search, so its run is a no-op; the same
   // link opened again is a new entry and is handled again.
+  //
+  // A link is stashed before the strip so a reload onto a newer build still
+  // finds it. Three read-frequency rules hold: the stash is read at most once
+  // per document (on its first run here), the URL's params once per entry,
+  // and each arrival is gated at most once.
   const handledArrival = useRef<string | null>(null);
   useEffect(() => {
     if (handledArrival.current === location.key) return;
     handledArrival.current = location.key;
-    const link = parseBotLink(location.search);
-    if (link === null) return;
-    navigate(location.pathname, { replace: true });
-    applyBotLink(link);
+    // Consulted on the document's first run even when this entry carries a
+    // link, so the strip entry (and every later entry) never reads it as a new
+    // arrival.
+    const stashed = readStashedBotLinkOnce();
+    const fromUrl = parseBotLink(location.search);
+    if (fromUrl !== null) {
+      // Stash before strip: an autoUpdate reload after the strip must still
+      // find the link.
+      if (fromUrl.kind !== "invalid") stashBotLink(location.search);
+      navigate(location.pathname, { replace: true });
+      if (fromUrl.kind === "invalid") {
+        // The newest arrival is unusable, so a stash read by this run is
+        // stale. Only a stash read by this run is deleted: on a later run
+        // `stashed` is null, and the stash belongs either to a pending gate or
+        // to an update in flight after "Continue anyway".
+        if (stashed !== null) clearStashedBotLink();
+        applyBotLink(fromUrl);
+        return;
+      }
+    }
+    const link = fromUrl ?? stashed;
+    if (link !== null) void gateBotLink(link);
   }, [location.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleBack = () => {
@@ -1134,6 +1248,18 @@ function MultiplayerPageContent({
           message={joinErrorDialog.message}
           primaryAction={joinErrorDialog.primaryAction}
           onDismiss={() => setJoinErrorDialog(null)}
+        />
+      )}
+      {buildUpdate?.status === "updating" && (
+        <JoinErrorDialog title={t("page.updatingTitle")} message={t("page.updatingMessage")} />
+      )}
+      {buildUpdate?.status === "manual" && (
+        <JoinErrorDialog
+          title={t("page.updateFailedTitle")}
+          message={t("page.updateFailedMessage")}
+          primaryAction={{ label: t("page.joinErrorRefresh"), onClick: reloadOrToast }}
+          dismissLabel={t("page.continueAnyway")}
+          onDismiss={() => continueOnThisBuild(buildUpdate.link)}
         />
       )}
     </div>

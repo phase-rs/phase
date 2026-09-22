@@ -278,7 +278,9 @@
     "customFormatResolveFailed": "Impossible de charger ce format enregistré.",
     "customFormatHostingUnavailable": "Héberger avec un format personnalisé n'est pas encore pris en charge — la légalité du deck ne peut pas être vérifiée pour ce format. Enregistrez-le et prévisualisez-le pour l'instant.",
     "botGameNotice": "Vous hébergez la partie Discord {{code}}. La connexion et la confidentialité sont fixées par la publication Discord.",
-    "botSeedIgnored": "Certains paramètres de la publication Discord ne peuvent pas être utilisés ici — vérifiez le format et le nombre de joueurs."
+    "botSeedIgnored": "Certains paramètres de la publication Discord ne peuvent pas être utilisés ici — vérifiez le format et le nombre de joueurs.",
+    "botP2PNotice": "Votre appareil exécute la partie. Gardez l’application ouverte et restez connecté.",
+    "botServerNotice": "Un serveur dédié exécute la partie. Il peut ralentir ou se déconnecter."
   },
   "page": {
     "deckRejected": "Le deck a été refusé par l'hôte.",
@@ -315,7 +317,13 @@
     "invalidGameLink": "Ce lien de partie est invalide ou incomplet.",
     "waitingForHostTitle": "En attente de l’hôte…",
     "waitingForHostMessage": "L’hôte n’a pas encore ouvert cette partie, ou elle a été fermée. Réessayez une fois que l’hôte a ouvert son lien.",
-    "botLinkBrokerUnreachable": "Impossible de joindre le serveur de salon pour ouvrir cette partie Discord. Vérifiez votre connexion, puis rouvrez votre lien d’hôte."
+    "botLinkBrokerUnreachable": "Impossible de joindre le serveur de salon pour ouvrir cette partie Discord. Vérifiez votre connexion, puis rouvrez votre lien d’hôte.",
+    "updatingTitle": "Mise à jour vers la dernière version…",
+    "updatingMessage": "Une version plus récente de phase.rs est disponible. La page se rechargera dès qu’elle sera prête.",
+    "refreshAfterGame": "Terminez votre partie en cours, puis actualisez pour mettre à jour.",
+    "updateFailedTitle": "Impossible de mettre à jour automatiquement",
+    "updateFailedMessage": "Actualisez pour obtenir la dernière version, ou continuez avec celle-ci. Les joueurs sur des versions différentes ne peuvent pas rejoindre la même partie.",
+    "continueAnyway": "Continuer quand même"
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de draft",

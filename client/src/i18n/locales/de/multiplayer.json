@@ -278,7 +278,9 @@
     "customFormatResolveFailed": "Dieses gespeicherte Format konnte nicht geladen werden.",
     "customFormatHostingUnavailable": "Das Hosten mit einem eigenen Format wird noch nicht unterstützt — die Deck-Legalität kann dafür nicht geprüft werden. Speichere und sieh es dir vorerst nur an.",
     "botGameNotice": "Du hostest das Discord-Spiel {{code}}. Verbindung und Privatsphäre legt der Discord-Beitrag fest.",
-    "botSeedIgnored": "Einige Einstellungen aus dem Discord-Beitrag können hier nicht verwendet werden — prüfe Format und Spielerzahl."
+    "botSeedIgnored": "Einige Einstellungen aus dem Discord-Beitrag können hier nicht verwendet werden — prüfe Format und Spielerzahl.",
+    "botP2PNotice": "Dein Gerät führt das Spiel aus. Lass die App geöffnet und bleib verbunden.",
+    "botServerNotice": "Ein dedizierter Server führt das Spiel aus. Er kann langsamer werden oder offline gehen."
   },
   "page": {
     "deckRejected": "Das Deck wurde vom Host abgelehnt.",
@@ -315,7 +317,13 @@
     "invalidGameLink": "Dieser Spiellink ist ungültig oder unvollständig.",
     "waitingForHostTitle": "Warte auf den Host…",
     "waitingForHostMessage": "Der Host hat dieses Spiel noch nicht geöffnet, oder es wurde geschlossen. Versuche es erneut, sobald der Host seinen Link geöffnet hat.",
-    "botLinkBrokerUnreachable": "Der Lobby-Server für dieses Discord-Spiel ist nicht erreichbar. Prüfe deine Verbindung und öffne dann deinen Host-Link erneut."
+    "botLinkBrokerUnreachable": "Der Lobby-Server für dieses Discord-Spiel ist nicht erreichbar. Prüfe deine Verbindung und öffne dann deinen Host-Link erneut.",
+    "updatingTitle": "Aktualisierung auf die neueste Version…",
+    "updatingMessage": "Eine neuere Version von phase.rs ist verfügbar. Die Seite wird neu geladen, sobald sie bereit ist.",
+    "refreshAfterGame": "Beende dein aktuelles Spiel und aktualisiere dann, um die neue Version zu laden.",
+    "updateFailedTitle": "Automatische Aktualisierung nicht möglich",
+    "updateFailedMessage": "Aktualisiere, um die neueste Version zu laden, oder fahre mit dieser fort. Spieler mit unterschiedlichen Versionen können nicht demselben Spiel beitreten.",
+    "continueAnyway": "Trotzdem fortfahren"
   },
   "draftLobbyPanel": {
     "draftPod": "Draft-Pod",

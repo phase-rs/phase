@@ -909,7 +909,10 @@ export function HostSetup({
       )}
 
       <p className="max-w-2xl text-sm leading-6 text-slate-400">
-        {t(isP2P ? "hostSetup.p2pNotice" : "hostSetup.hostServerHelp")}
+        {/* A Discord game is listed by its post, so its copy drops the lobby sentence. */}
+        {t(seed
+          ? (isP2P ? "hostSetup.botP2PNotice" : "hostSetup.botServerNotice")
+          : (isP2P ? "hostSetup.p2pNotice" : "hostSetup.hostServerHelp"))}
       </p>
 
       {/* Two-column table-setup grammar (design mockup HostScreen): form panel

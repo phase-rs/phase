@@ -123,3 +123,80 @@ export function hostLinkSearch(seed: HostSeed): string {
   if (seed.serverUrl !== null) params.set("server", seed.serverUrl);
   return params.toString();
 }
+
+/** A bot link the page can act on. */
+export type ActionableBotLink = Exclude<BotLink, { kind: "invalid" }>;
+
+const BOT_LINK_STASH_KEY = "phase:bot-link";
+/** Covers the version gate's slowest automatic path (build check, update
+ * deadline, reload) and a user reading its manual dialog before refreshing. */
+export const BOT_LINK_STASH_MAX_AGE_MS = 10 * 60 * 1000;
+
+// Per document: a reload re-evaluates this module and resets both flags.
+let stashRead = false;
+/**
+ * Set by "Continue anyway" on the version gate. It is document-wide: after one
+ * Continue, every later arrival in this document that finds the build stale
+ * skips the updater (not only the seeded host's deck-builder return). That is
+ * acceptable because the service worker's hourly check still reloads the tab
+ * when no game is live, and a real version mismatch with another player still
+ * surfaces as the join's `build_mismatch` dialog. A reload loads a (possibly)
+ * new build, which is gated afresh.
+ */
+let continuedOnStaleBuild = false;
+
+/**
+ * Persist a bot link's search before the page strips it from the URL, so a
+ * reload onto a newer build (which starts a new document) can still apply it.
+ */
+export function stashBotLink(search: string): void {
+  sessionStorage.setItem(BOT_LINK_STASH_KEY, JSON.stringify({ search, at: Date.now() }));
+}
+
+/**
+ * The stashed bot link, read at most once per document: every later call
+ * returns `null`. Reading does not delete it; the gate does, once it proceeds.
+ * An expired, malformed, or non-actionable stash is deleted and yields `null`.
+ */
+export function readStashedBotLinkOnce(): ActionableBotLink | null {
+  if (stashRead) return null;
+  stashRead = true;
+  const raw = sessionStorage.getItem(BOT_LINK_STASH_KEY);
+  if (raw === null) return null;
+  const link = parseStashedBotLink(raw);
+  if (link === null) clearStashedBotLink();
+  return link;
+}
+
+function parseStashedBotLink(raw: string): ActionableBotLink | null {
+  let entry: unknown;
+  try {
+    entry = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (entry === null || typeof entry !== "object") return null;
+  const { search, at } = entry as { search?: unknown; at?: unknown };
+  if (typeof search !== "string" || typeof at !== "number") return null;
+  if (Date.now() - at > BOT_LINK_STASH_MAX_AGE_MS) return null;
+  const link = parseBotLink(search);
+  return link === null || link.kind === "invalid" ? null : link;
+}
+
+export function clearStashedBotLink(): void {
+  sessionStorage.removeItem(BOT_LINK_STASH_KEY);
+}
+
+export function markContinuedOnStaleBuild(): void {
+  continuedOnStaleBuild = true;
+}
+
+export function hasContinuedOnStaleBuild(): boolean {
+  return continuedOnStaleBuild;
+}
+
+/** Test seam: simulates a new document for the per-document flags. */
+export function __resetBotLinkStashForTests(): void {
+  stashRead = false;
+  continuedOnStaleBuild = false;
+}

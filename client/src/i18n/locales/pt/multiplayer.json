@@ -278,7 +278,9 @@
     "customFormatResolveFailed": "Não foi possível carregar esse formato salvo.",
     "customFormatHostingUnavailable": "Hospedar com um formato personalizado ainda não é suportado — a legalidade do baralho não pode ser verificada para ele. Por enquanto, salve e apenas visualize.",
     "botGameNotice": "Hospedando a partida do Discord {{code}}. A conexão e a privacidade vêm da publicação no Discord.",
-    "botSeedIgnored": "Algumas configurações da publicação no Discord não puderam ser usadas aqui — verifique o formato e o número de jogadores."
+    "botSeedIgnored": "Algumas configurações da publicação no Discord não puderam ser usadas aqui — verifique o formato e o número de jogadores.",
+    "botP2PNotice": "Seu dispositivo executa a partida. Mantenha o app aberto e conectado.",
+    "botServerNotice": "Um servidor dedicado executa a partida. Ele pode ficar lento ou sair do ar."
   },
   "page": {
     "deckRejected": "O deck foi rejeitado pelo anfitrião.",
@@ -315,7 +317,13 @@
     "invalidGameLink": "Este link de partida é inválido ou está incompleto.",
     "waitingForHostTitle": "Aguardando o anfitrião…",
     "waitingForHostMessage": "O anfitrião ainda não abriu esta partida, ou ela foi encerrada. Tente novamente quando o anfitrião tiver aberto o link dele.",
-    "botLinkBrokerUnreachable": "Não foi possível acessar o servidor do lobby para abrir esta partida do Discord. Verifique sua conexão e abra seu link de anfitrião novamente."
+    "botLinkBrokerUnreachable": "Não foi possível acessar o servidor do lobby para abrir esta partida do Discord. Verifique sua conexão e abra seu link de anfitrião novamente.",
+    "updatingTitle": "Atualizando para a versão mais recente…",
+    "updatingMessage": "Há uma versão mais nova do phase.rs. A página será recarregada quando estiver pronta.",
+    "refreshAfterGame": "Termine sua partida atual e depois atualize para obter a nova versão.",
+    "updateFailedTitle": "Não foi possível atualizar automaticamente",
+    "updateFailedMessage": "Atualize para obter a versão mais recente ou continue nesta. Jogadores em versões diferentes não podem entrar na mesma partida.",
+    "continueAnyway": "Continuar mesmo assim"
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de Draft",

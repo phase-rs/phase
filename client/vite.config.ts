@@ -234,6 +234,17 @@ function offlineShellMarker(buildHash: string): Plugin {
   };
 }
 
+/** `/build.json`: the deployed build's identity, fetched network-only by the Discord-link version gate. */
+function buildManifest(buildHash: string): Plugin {
+  return {
+    name: "build-manifest",
+    apply: "build",
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName: "build.json", source: JSON.stringify({ build: buildHash }) });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const buildHash = gitHash();
   const offlineShellMarkerFilename = `offline-shell-${buildHash}.json`;
@@ -250,6 +261,7 @@ export default defineConfig(({ mode }) => {
     externalEngineWasm(),
     trimManaFont(),
     offlineShellMarker(buildHash),
+    buildManifest(buildHash),
     react(),
     tailwindcss(),
     wasm(),

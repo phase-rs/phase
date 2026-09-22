@@ -1390,6 +1390,9 @@ describe("HostSetup", () => {
         screen.getByText(i18n.t("multiplayer:hostSetup.botGameNotice", { code: "AB12CD" })),
       ).toBeInTheDocument();
       expect(screen.queryByText(enMultiplayer.hostSetup.botSeedIgnored)).not.toBeInTheDocument();
+      // The Discord post lists the game, so the copy omits the lobby sentence.
+      expect(screen.getByText(enMultiplayer.hostSetup.botP2PNotice)).toBeInTheDocument();
+      expect(screen.queryByText(enMultiplayer.hostSetup.p2pNotice)).not.toBeInTheDocument();
       // Mode, listing and password are fixed by the Discord post.
       expect(screen.queryByRole("button", { name: "Dedicated server" })).not.toBeInTheDocument();
       expect(screen.queryByText("List in lobby")).not.toBeInTheDocument();
@@ -1436,6 +1439,8 @@ describe("HostSetup", () => {
       // Reach guard for the seeded case: Commander at 4 seats over P2P does
       // support AI seats, so their absence there comes from the seed.
       expect(screen.getAllByRole("button", { name: "Human" })).toHaveLength(3);
+      // Likewise the unseeded copy keeps the lobby sentence.
+      expect(screen.getByText(enMultiplayer.hostSetup.p2pNotice)).toBeInTheDocument();
     });
 
     it("submits the seeded dedicated server over a better-scored candidate", async () => {
@@ -1454,6 +1459,8 @@ describe("HostSetup", () => {
       );
 
       expect(screen.queryByText("Host on")).not.toBeInTheDocument();
+      expect(screen.getByText(enMultiplayer.hostSetup.botServerNotice)).toBeInTheDocument();
+      expect(screen.queryByText(enMultiplayer.hostSetup.hostServerHelp)).not.toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "Host Game" }));
 
       expect(onHost).toHaveBeenCalledWith(

@@ -29,6 +29,14 @@ const metricsMocks = vi.hoisted(() => ({
 }));
 vi.mock("../../services/serverMetrics", () => metricsMocks);
 
+const buildMocks = vi.hoisted(() => ({
+  checkDeployedBuild: vi.fn(),
+  updateToLatestBuild: vi.fn(),
+  isBuildUpdateInFlight: vi.fn(),
+  reloadIfNoLiveGame: vi.fn(),
+}));
+vi.mock("../../pwa/registerServiceWorker", () => buildMocks);
+
 vi.mock("../../components/lobby/HostSetup", () => ({
   HostSetup: (props: Record<string, unknown>) => {
     harness.hostSetup = props;
@@ -105,7 +113,7 @@ vi.mock("../../services/multiplayerSession", () => ({
 }));
 
 import { MultiplayerPage } from "../MultiplayerPage";
-import { hostLinkSearch, type HostSeed } from "../multiplayerPageState";
+import { __resetBotLinkStashForTests, hostLinkSearch, parseBotLink, type HostSeed } from "../multiplayerPageState";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import multiplayerEn from "../../i18n/locales/en/multiplayer.json";
 
@@ -121,6 +129,21 @@ const SEED: HostSeed = {
 const HOST_LINK = `/multiplayer?${hostLinkSearch(SEED)}`;
 
 const lookupJoinTarget = vi.fn();
+const resolveGuest = vi.fn();
+const STASH_KEY = "phase:bot-link";
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+/** The kind of the link the stash holds, or null when there is none. */
+function stashedKind(): string | null {
+  const raw = sessionStorage.getItem(STASH_KEY);
+  if (raw === null) return null;
+  return parseBotLink((JSON.parse(raw) as { search: string }).search)?.kind ?? null;
+}
 
 function DeckBuilderStub() {
   const location = useLocation();
@@ -185,6 +208,8 @@ const joinTargetNotFound = {
 };
 
 describe("MultiplayerPage Discord bot links", () => {
+  let reload: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     vi.clearAllMocks();
     harness.hostSetup = null;
@@ -193,6 +218,16 @@ describe("MultiplayerPage Discord bot links", () => {
     harness.hostMounts = [];
     harness.deckBuilderSearches = [];
     localStorage.clear();
+    sessionStorage.clear();
+    __resetBotLinkStashForTests();
+    // Reset, not just clear: a test's unconsumed `…Once` value must not leak.
+    for (const mock of Object.values(buildMocks)) mock.mockReset();
+    buildMocks.checkDeployedBuild.mockResolvedValue("current");
+    buildMocks.updateToLatestBuild.mockResolvedValue("manual");
+    buildMocks.isBuildUpdateInFlight.mockReturnValue(false);
+    buildMocks.reloadIfNoLiveGame.mockReturnValue(true);
+    reload = vi.fn();
+    Object.defineProperty(window.location, "reload", { configurable: true, value: reload });
     vi.stubGlobal("navigator", { sendBeacon: vi.fn(() => true) });
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 599 })));
     lookupJoinTarget.mockResolvedValue(joinTargetOk);
@@ -206,6 +241,7 @@ describe("MultiplayerPage Discord bot links", () => {
       displayName: "Tester",
       toasts: new Map(),
       lookupJoinTarget,
+      resolveGuest,
       ensureSubscriptionSocket: vi.fn(async () => null),
     });
   });
@@ -270,6 +306,9 @@ describe("MultiplayerPage Discord bot links", () => {
       expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
         multiplayerEn.page.invalidGameLink,
       );
+      // Neither stashed nor gated.
+      expect(buildMocks.checkDeployedBuild).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
     });
   });
 
@@ -282,7 +321,7 @@ describe("MultiplayerPage Discord bot links", () => {
       expect(await screen.findByText(multiplayerEn.page.waitingForHostTitle)).toBeInTheDocument();
       expect(screen.getByText(multiplayerEn.page.waitingForHostMessage)).toBeInTheDocument();
 
-      await user.click(screen.getByRole("button", { name: "Retry" }));
+      await user.click(screen.getByRole("button", { name: multiplayerEn.connectionToast.retry }));
 
       await screen.findByTestId("my-decks");
       expect(lookupJoinTarget).toHaveBeenCalledTimes(2);
@@ -481,6 +520,400 @@ describe("MultiplayerPage Discord bot links", () => {
       await screen.findByTestId("deck-builder");
 
       expect(lastReturnTo()).toBe("/multiplayer?view=deck-select");
+    });
+  });
+
+  describe("version gate", () => {
+    const toastMessage = () => useMultiplayerStore.getState().toasts.get("generic")?.message;
+
+    it("proceeds on a current build and clears the stash", async () => {
+      renderRouted(JOIN_LINK);
+
+      await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+      expect(buildMocks.checkDeployedBuild).toHaveBeenCalledOnce();
+      expect(buildMocks.updateToLatestBuild).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+    });
+
+    it("proceeds when the deployed build cannot be read", async () => {
+      buildMocks.checkDeployedBuild.mockResolvedValue("unknown");
+      renderRouted(JOIN_LINK);
+
+      await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+      expect(buildMocks.updateToLatestBuild).not.toHaveBeenCalled();
+      expect(screen.queryByText(multiplayerEn.page.updatingTitle)).not.toBeInTheDocument();
+      expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+    });
+
+    it("holds a link on a stale build while the update runs", async () => {
+      buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+      buildMocks.updateToLatestBuild.mockReturnValue(new Promise(() => {}));
+      const router = renderRouted(JOIN_LINK);
+
+      expect(await screen.findByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
+      expect(screen.getByText(multiplayerEn.page.updatingMessage)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: multiplayerEn.joinErrorDialog.dismiss })).not.toBeInTheDocument();
+      expect(buildMocks.updateToLatestBuild).toHaveBeenCalledWith({ deadlineMs: 15_000 });
+      expect(lookupJoinTarget).not.toHaveBeenCalled();
+      expect(stashedKind()).toBe("join");
+      expect(router.state.location.search).toBe("");
+    });
+
+    it("keeps the updating dialog when the update reloads", async () => {
+      buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+      buildMocks.updateToLatestBuild.mockResolvedValue("reloading");
+      renderRouted(JOIN_LINK);
+
+      expect(await screen.findByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
+      await act(async () => {});
+      expect(screen.getByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
+      expect(screen.queryByText(multiplayerEn.page.updateFailedTitle)).not.toBeInTheDocument();
+      expect(lookupJoinTarget).not.toHaveBeenCalled();
+    });
+
+    describe("manual fallback", () => {
+      beforeEach(() => {
+        buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+      });
+
+      it("continues on this build and drops the stash when no update is in flight", async () => {
+        const user = userEvent.setup();
+        renderRouted(JOIN_LINK);
+
+        await screen.findByText(multiplayerEn.page.updateFailedTitle);
+        expect(screen.getByText(multiplayerEn.page.updateFailedMessage)).toBeInTheDocument();
+        await user.click(screen.getByRole("button", { name: multiplayerEn.page.continueAnyway }));
+
+        await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+        const [code, origin] = lookupJoinTarget.mock.calls[0];
+        expect(code).toBe("AB12CD");
+        expect((origin as { url: string }).url).toBe(LINK_SERVER);
+        expect(screen.queryByText(multiplayerEn.page.updateFailedTitle)).not.toBeInTheDocument();
+        expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+      });
+
+      it("refreshes through the live-game guard and keeps the stash", async () => {
+        const user = userEvent.setup();
+        renderRouted(JOIN_LINK);
+
+        await screen.findByText(multiplayerEn.page.updateFailedTitle);
+        await user.click(screen.getByRole("button", { name: multiplayerEn.page.joinErrorRefresh }));
+
+        expect(buildMocks.reloadIfNoLiveGame).toHaveBeenCalledOnce();
+        expect(toastMessage()).toBeUndefined();
+        expect(stashedKind()).toBe("join");
+      });
+
+      it("never reloads a live game from the manual Refresh", async () => {
+        const user = userEvent.setup();
+        buildMocks.reloadIfNoLiveGame.mockReturnValue(false);
+        renderRouted(JOIN_LINK);
+
+        await screen.findByText(multiplayerEn.page.updateFailedTitle);
+        await user.click(screen.getByRole("button", { name: multiplayerEn.page.joinErrorRefresh }));
+
+        expect(buildMocks.reloadIfNoLiveGame).toHaveBeenCalledOnce();
+        expect(toastMessage()).toBe(multiplayerEn.page.refreshAfterGame);
+        expect(screen.getByText(multiplayerEn.page.updateFailedTitle)).toBeInTheDocument();
+        expect(reload).not.toHaveBeenCalled();
+        expect(stashedKind()).toBe("join");
+        expect(lookupJoinTarget).not.toHaveBeenCalled();
+      });
+
+      it("keeps the stash on Continue anyway while an update is in flight, and the reload re-applies it", async () => {
+        const user = userEvent.setup();
+        buildMocks.isBuildUpdateInFlight.mockReturnValue(true);
+        renderRouted(JOIN_LINK);
+
+        await screen.findByText(multiplayerEn.page.updateFailedTitle);
+        await user.click(screen.getByRole("button", { name: multiplayerEn.page.continueAnyway }));
+
+        await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+        expect(screen.queryByText(multiplayerEn.page.updateFailedTitle)).not.toBeInTheDocument();
+        expect(stashedKind()).toBe("join");
+
+        // The in-flight update reloads: a new document on the current build.
+        cleanup();
+        __resetBotLinkStashForTests();
+        buildMocks.checkDeployedBuild.mockResolvedValue("current");
+        renderRouted("/multiplayer");
+
+        await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledTimes(2));
+        const [code, origin] = lookupJoinTarget.mock.calls[1];
+        expect(code).toBe("AB12CD");
+        expect((origin as { url: string }).url).toBe(LINK_SERVER);
+        expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+      });
+
+      it("does not re-gate a seeded host's Edit return after Continue anyway", async () => {
+        const user = userEvent.setup();
+        localStorage.setItem("active-deck", "Test Deck");
+        const router = renderRouted(HOST_LINK);
+
+        await screen.findByText(multiplayerEn.page.updateFailedTitle);
+        await user.click(screen.getByRole("button", { name: multiplayerEn.page.continueAnyway }));
+        await screen.findByTestId("host-setup");
+        expect(seedOf(harness.hostMounts[0])).toEqual(SEED);
+
+        await user.click(screen.getByRole("button", { name: multiplayerEn.page.edit }));
+        await screen.findByTestId("deck-builder");
+        const returnTo = lastReturnTo();
+        expect(returnTo).toBe(`/multiplayer?${hostLinkSearch(SEED)}`);
+        harness.hostMounts = [];
+        await go(router, returnTo!);
+
+        // Reach guard: the return is a new arrival and its build is checked.
+        await waitFor(() => expect(buildMocks.checkDeployedBuild).toHaveBeenCalledTimes(2));
+        await act(async () => {});
+        // Soft, so a regression reports both symptoms of a re-gate.
+        expect.soft(buildMocks.updateToLatestBuild).toHaveBeenCalledOnce();
+        expect.soft(screen.queryByText(multiplayerEn.page.updateFailedTitle)).not.toBeInTheDocument();
+        expect(screen.queryByText(multiplayerEn.page.updatingTitle)).not.toBeInTheDocument();
+        await screen.findByTestId("host-setup");
+        expect(seedOf(harness.hostMounts[0])?.code).toBe("AB12CD");
+        expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+      });
+    });
+
+    it.each([
+      ["a join link", JOIN_LINK],
+      ["a host link", HOST_LINK],
+    ])("re-applies %s from the stash after the update reloads", async (_label, entry) => {
+      buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+      buildMocks.updateToLatestBuild.mockResolvedValue("reloading");
+      renderRouted(entry);
+      await screen.findByText(multiplayerEn.page.updatingTitle);
+
+      cleanup();
+      __resetBotLinkStashForTests();
+      buildMocks.checkDeployedBuild.mockResolvedValue("current");
+      renderRouted("/multiplayer");
+
+      if (entry === JOIN_LINK) {
+        await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+        const [code, origin] = lookupJoinTarget.mock.calls[0];
+        expect(code).toBe("AB12CD");
+        expect((origin as { url: string }).url).toBe(LINK_SERVER);
+      } else {
+        await screen.findByTestId("host-setup");
+        expect(seedOf(harness.hostMounts[0])).toEqual(SEED);
+      }
+      expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+    });
+
+    it.each([false, true])("gates the strip entry's arrival once (StrictMode %s)", async (strict) => {
+      buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+      buildMocks.updateToLatestBuild.mockReturnValue(new Promise(() => {}));
+      const router = renderRouted(JOIN_LINK, { strict });
+
+      await screen.findByText(multiplayerEn.page.updatingTitle);
+      expect(router.state.location.search).toBe("");
+      await act(async () => {});
+      expect(buildMocks.checkDeployedBuild).toHaveBeenCalledOnce();
+      expect(buildMocks.updateToLatestBuild).toHaveBeenCalledOnce();
+    });
+
+    it("reads the stash once per document across a remount", async () => {
+      buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+      buildMocks.updateToLatestBuild.mockReturnValue(new Promise(() => {}));
+      const router = renderRouted(HOST_LINK);
+      await screen.findByText(multiplayerEn.page.updatingTitle);
+
+      await go(router, "/deck-builder");
+      await screen.findByTestId("deck-builder");
+      await go(router, "/multiplayer");
+      await screen.findByTestId("lobby");
+      await act(async () => {});
+
+      expect(buildMocks.checkDeployedBuild).toHaveBeenCalledOnce();
+    });
+
+    it("prefers the URL's link over an earlier document's stash", async () => {
+      sessionStorage.setItem(STASH_KEY, JSON.stringify({ search: JOIN_LINK.slice("/multiplayer".length), at: Date.now() }));
+      renderRouted(HOST_LINK);
+
+      await screen.findByTestId("host-setup");
+      expect(seedOf(harness.hostMounts[0])).toEqual(SEED);
+      await act(async () => {});
+      expect(lookupJoinTarget).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+    });
+
+    it.each([
+      ["an expired stash is ignored and removed", 11 * 60 * 1000, false],
+      ["a fresh stash is applied", 0, true],
+    ])("%s", async (_label, age, applied) => {
+      sessionStorage.setItem(
+        STASH_KEY,
+        JSON.stringify({ search: JOIN_LINK.slice("/multiplayer".length), at: Date.now() - age }),
+      );
+      renderRouted("/multiplayer");
+      await screen.findByTestId("lobby");
+
+      if (applied) {
+        await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+      } else {
+        await act(async () => {});
+        expect(lookupJoinTarget).not.toHaveBeenCalled();
+        expect(buildMocks.checkDeployedBuild).not.toHaveBeenCalled();
+      }
+      expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+    });
+
+    it("drops a stash read by an invalid link's run", async () => {
+      sessionStorage.setItem(STASH_KEY, JSON.stringify({ search: JOIN_LINK.slice("/multiplayer".length), at: Date.now() }));
+      const router = renderRouted("/multiplayer?code=ab");
+
+      await waitFor(() => expect(router.state.location.search).toBe(""));
+      expect(toastMessage()).toBe(multiplayerEn.page.invalidGameLink);
+      expect(sessionStorage.getItem(STASH_KEY)).toBeNull();
+      expect(lookupJoinTarget).not.toHaveBeenCalled();
+      expect(buildMocks.checkDeployedBuild).not.toHaveBeenCalled();
+    });
+
+    it("leaves a pending gate's stash alone when a later invalid link arrives", async () => {
+      buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+      buildMocks.updateToLatestBuild.mockReturnValue(new Promise(() => {}));
+      const router = renderRouted(JOIN_LINK);
+      await screen.findByText(multiplayerEn.page.updatingTitle);
+
+      await go(router, "/multiplayer?code=ab");
+      await waitFor(() => expect(toastMessage()).toBe(multiplayerEn.page.invalidGameLink));
+      expect(stashedKind()).toBe("join");
+    });
+
+    it("replaces a join error dialog with the updating dialog", async () => {
+      lookupJoinTarget.mockResolvedValueOnce(joinTargetNotFound);
+      const router = renderRouted(JOIN_LINK);
+      await screen.findByText(multiplayerEn.page.waitingForHostTitle);
+
+      buildMocks.checkDeployedBuild.mockResolvedValue("stale");
+      buildMocks.updateToLatestBuild.mockReturnValue(new Promise(() => {}));
+      await go(router, HOST_LINK);
+
+      await screen.findByText(multiplayerEn.page.updatingTitle);
+      await waitFor(() => expect(screen.queryByText(multiplayerEn.page.waitingForHostTitle)).not.toBeInTheDocument());
+    });
+
+    it("clears the guest's waiting dialog on a host arrival", async () => {
+      lookupJoinTarget.mockResolvedValueOnce(joinTargetNotFound);
+      const router = renderRouted(JOIN_LINK);
+      await screen.findByText(multiplayerEn.page.waitingForHostTitle);
+
+      await go(router, HOST_LINK);
+
+      await screen.findByTestId("host-setup");
+      expect(seedOf(harness.hostMounts[harness.hostMounts.length - 1])).toEqual(SEED);
+      expect(screen.queryByText(multiplayerEn.page.waitingForHostTitle)).not.toBeInTheDocument();
+    });
+
+    describe("a gate overtaken by a newer arrival", () => {
+      it("does not apply its link after the newer one proceeded", async () => {
+        const first = deferred<string>();
+        buildMocks.checkDeployedBuild.mockReturnValueOnce(first.promise);
+        const router = renderRouted(HOST_LINK);
+        await screen.findByTestId("lobby");
+
+        await go(router, JOIN_LINK);
+        await waitFor(() => expect(lookupJoinTarget).toHaveBeenCalledOnce());
+        await act(async () => first.resolve("current"));
+
+        expect(screen.queryByTestId("host-setup")).not.toBeInTheDocument();
+        expect(harness.hostMounts).toHaveLength(0);
+        expect(lookupJoinTarget).toHaveBeenCalledOnce();
+      });
+
+      it("leaves the newer arrival's stash and dialog alone", async () => {
+        const first = deferred<string>();
+        buildMocks.checkDeployedBuild.mockReturnValueOnce(first.promise).mockResolvedValue("stale");
+        buildMocks.updateToLatestBuild.mockReturnValue(new Promise(() => {}));
+        const router = renderRouted(HOST_LINK);
+        await screen.findByTestId("lobby");
+
+        await go(router, JOIN_LINK);
+        await screen.findByText(multiplayerEn.page.updatingTitle);
+        expect(stashedKind()).toBe("join");
+        await act(async () => first.resolve("current"));
+
+        expect(stashedKind()).toBe("join");
+        expect(screen.getByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
+        expect(screen.queryByTestId("host-setup")).not.toBeInTheDocument();
+      });
+    });
+
+    describe("\"Client out of date\" Refresh", () => {
+      async function openOutOfDateDialog(): Promise<void> {
+        resolveGuest.mockResolvedValue({ ok: false, reason: "build_mismatch", message: "m" });
+        renderRouted(JOIN_LINK);
+        await screen.findByTestId("my-decks");
+        act(() => (harness.myDecks!.onSelectDeck as (name: string) => void)("Deck"));
+        await screen.findByText(multiplayerEn.page.joinErrorOutOfDateTitle);
+      }
+
+      function refreshButton(): HTMLElement {
+        return screen.getByRole("button", { name: multiplayerEn.page.joinErrorRefresh });
+      }
+
+      it("goes through the updater on a stale build", async () => {
+        const user = userEvent.setup();
+        await openOutOfDateDialog();
+        const update = deferred<string>();
+        buildMocks.checkDeployedBuild.mockResolvedValueOnce("stale");
+        buildMocks.updateToLatestBuild.mockReturnValueOnce(update.promise);
+
+        await user.click(refreshButton());
+
+        expect(await screen.findByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
+        expect(screen.getByText(multiplayerEn.page.updatingMessage)).toBeInTheDocument();
+        expect(screen.queryByText(multiplayerEn.page.joinErrorOutOfDateTitle)).not.toBeInTheDocument();
+        expect(buildMocks.updateToLatestBuild).toHaveBeenCalledWith({ deadlineMs: 15_000 });
+
+        await act(async () => update.resolve("manual"));
+        await waitFor(() => expect(screen.queryByText(multiplayerEn.page.updatingTitle)).not.toBeInTheDocument());
+        expect(buildMocks.reloadIfNoLiveGame).toHaveBeenCalledOnce();
+      });
+
+      it("leaves the updating dialog up while the updater reloads", async () => {
+        const user = userEvent.setup();
+        await openOutOfDateDialog();
+        buildMocks.checkDeployedBuild.mockResolvedValueOnce("stale");
+        buildMocks.updateToLatestBuild.mockResolvedValueOnce("reloading");
+
+        await user.click(refreshButton());
+
+        expect(await screen.findByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
+        await act(async () => {});
+        expect(screen.getByText(multiplayerEn.page.updatingTitle)).toBeInTheDocument();
+        expect(buildMocks.reloadIfNoLiveGame).not.toHaveBeenCalled();
+      });
+
+      it.each(["current", "unknown"])("reloads at once on a %s build", async (build) => {
+        const user = userEvent.setup();
+        await openOutOfDateDialog();
+        buildMocks.checkDeployedBuild.mockResolvedValueOnce(build);
+
+        await user.click(refreshButton());
+
+        await waitFor(() => expect(buildMocks.reloadIfNoLiveGame).toHaveBeenCalledOnce());
+        expect(buildMocks.updateToLatestBuild).not.toHaveBeenCalled();
+        expect(screen.queryByText(multiplayerEn.page.updatingTitle)).not.toBeInTheDocument();
+        expect(toastMessage()).toBeUndefined();
+      });
+
+      it.each(["current", "stale"])("never reloads a live game (%s build)", async (build) => {
+        const user = userEvent.setup();
+        await openOutOfDateDialog();
+        buildMocks.checkDeployedBuild.mockResolvedValueOnce(build);
+        buildMocks.reloadIfNoLiveGame.mockReturnValue(false);
+
+        await user.click(refreshButton());
+
+        await waitFor(() => expect(toastMessage()).toBe(multiplayerEn.page.refreshAfterGame));
+        expect(reload).not.toHaveBeenCalled();
+        expect(screen.queryByText(multiplayerEn.page.joinErrorOutOfDateTitle)).not.toBeInTheDocument();
+        expect(screen.queryByText(multiplayerEn.page.updatingTitle)).not.toBeInTheDocument();
+        expect(screen.queryByText(multiplayerEn.page.updateFailedTitle)).not.toBeInTheDocument();
+      });
     });
   });
 });

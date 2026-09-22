@@ -278,7 +278,9 @@
     "customFormatResolveFailed": "Could not load that saved format.",
     "customFormatHostingUnavailable": "Hosting with a custom format isn't supported yet — deck legality can't be checked for it. Save and preview it for now.",
     "botGameNotice": "Hosting Discord game {{code}}. Connection and privacy come from the Discord post.",
-    "botSeedIgnored": "Some settings from the Discord post couldn't be used here — check the format and player count."
+    "botSeedIgnored": "Some settings from the Discord post couldn't be used here — check the format and player count.",
+    "botP2PNotice": "Your device runs the game. Keep the app open and stay connected.",
+    "botServerNotice": "A dedicated server runs the game. It may slow down or go offline."
   },
   "page": {
     "deckRejected": "Deck was rejected by the host.",
@@ -315,7 +317,13 @@
     "invalidGameLink": "This game link is invalid or incomplete.",
     "waitingForHostTitle": "Waiting for host…",
     "waitingForHostMessage": "The host hasn't opened this game yet, or it has closed. Retry once the host has opened their link.",
-    "botLinkBrokerUnreachable": "Couldn't reach the lobby server to open this Discord game. Check your connection, then open your host link again."
+    "botLinkBrokerUnreachable": "Couldn't reach the lobby server to open this Discord game. Check your connection, then open your host link again.",
+    "updatingTitle": "Updating to the latest version…",
+    "updatingMessage": "A newer version of phase.rs is out. The page will reload when it's ready.",
+    "refreshAfterGame": "Finish your current game, then refresh to update.",
+    "updateFailedTitle": "Couldn't update automatically",
+    "updateFailedMessage": "Refresh to get the latest version, or continue on this one. Players on different versions can't join the same game.",
+    "continueAnyway": "Continue anyway"
   },
   "draftLobbyPanel": {
     "draftPod": "Draft Pod",

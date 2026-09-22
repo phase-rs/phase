@@ -278,7 +278,9 @@
     "customFormatHostingUnavailable": "カスタムフォーマットでのホストにはまだ対応していません — デッキ適性を確認できません。今は保存してプレビューしてください。",
     "hostGame": "ルームを作成",
     "botGameNotice": "Discordゲーム {{code}} をホストしています。接続とプライバシーの設定はDiscordの投稿に従います。",
-    "botSeedIgnored": "Discordの投稿の一部の設定はここでは使用できません — フォーマットとプレイヤー数を確認してください。"
+    "botSeedIgnored": "Discordの投稿の一部の設定はここでは使用できません — フォーマットとプレイヤー数を確認してください。",
+    "botP2PNotice": "この端末がゲームを実行します。アプリを開いたまま接続を維持してください。",
+    "botServerNotice": "専用サーバーがゲームを実行します。遅くなったりオフラインになったりする場合があります。"
   },
   "page": {
     "deckRejected": "ホストにデッキを拒否されました。",
@@ -315,7 +317,13 @@
     "invalidGameLink": "このゲームリンクは無効か、不完全です。",
     "waitingForHostTitle": "ホストを待っています…",
     "waitingForHostMessage": "ホストがまだこのゲームを開いていないか、ゲームが終了しています。ホストがリンクを開いたら再試行してください。",
-    "botLinkBrokerUnreachable": "このDiscordゲームを開くためのロビーサーバーに接続できませんでした。接続を確認してから、ホスト用リンクをもう一度開いてください。"
+    "botLinkBrokerUnreachable": "このDiscordゲームを開くためのロビーサーバーに接続できませんでした。接続を確認してから、ホスト用リンクをもう一度開いてください。",
+    "updatingTitle": "最新バージョンに更新しています…",
+    "updatingMessage": "phase.rsの新しいバージョンがあります。準備ができるとページが再読み込みされます。",
+    "refreshAfterGame": "現在のゲームを終えてから、更新してください。",
+    "updateFailedTitle": "自動で更新できませんでした",
+    "updateFailedMessage": "更新して最新バージョンを取得するか、このバージョンのまま続行してください。異なるバージョンのプレイヤーは同じゲームに参加できません。",
+    "continueAnyway": "このまま続行"
   },
   "draftLobbyPanel": {
     "draftPod": "ドラフトポッド",
