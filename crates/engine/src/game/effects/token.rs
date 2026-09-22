@@ -6153,7 +6153,7 @@ mod tests {
     /// FRA Jace planeswalker token (MTGJSON uuid).
     const JACE_TOKEN_PRESET_ID: &str = "635f825d-d6fb-59ac-a807-af08713a3794";
 
-    /// CR 701.71a + sequencing constraint #3: through `materialize_token_ability_payload`,
+    /// CR 701.71a: through `materialize_token_ability_payload`,
     /// the Jace token's abilities come from the subtype-keyed registry, so its catalog
     /// rules-text fallback is not taken. (What the debug-preset creation path leaves on
     /// the created object is asserted by the planeswalker-token integration test.)

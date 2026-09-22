@@ -232,8 +232,8 @@ fn build_preset(
     };
 
     // CR 306.5b: a printed loyalty > 0 must become that many loyalty counters on
-    // entry. Phase 1 wires the printed value onto the object but does not yet seed
-    // those entry counters through the CR 614.1c replacement pipeline, so admitting
+    // entry. The printed value is recorded on the object, but entry counters are not
+    // yet seeded from it through the CR 614.1c replacement pipeline, so admitting
     // such a row would produce a walker that dies to CR 704.5i the instant it
     // enters. Drop it with a message rather than emit a row the runtime mishandles.
     if body.core_types.contains(&CoreType::Planeswalker)

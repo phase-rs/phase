@@ -84,8 +84,8 @@ pub enum TokenCategory {
     /// CR 305.1: Land token (manlands, etc.).
     Land,
     /// CR 306.5 + CR 306.3: Any token with the Planeswalker core type — loyalty is a
-    /// characteristic only planeswalkers have, which is why this category alone
-    /// carries a printed-loyalty field. Its loyalty abilities are attached at
+    /// characteristic only planeswalkers have, so only these presets have a `Some`
+    /// loyalty. Its loyalty abilities are attached at
     /// runtime by `predefined_token_abilities`, keyed by planeswalker subtype
     /// (CR 306.3) — the Eldrazi Spawn route, not the `PredefinedArtifact` route,
     /// because `PredefinedTokenKind` enumerates artifact subtypes only.
