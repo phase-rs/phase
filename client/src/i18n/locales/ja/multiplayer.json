@@ -343,5 +343,16 @@
   "botLink": {
     "codeUnsupported": "このサーバーはまだDiscordゲームに対応していません。",
     "codeInUse": "このゲームのコードは、以前のルームがまだ使用しています。数分待ってから、Discordのホスト用リンクをもう一度開いてください。それでも解決しない場合は、新しく /lfg を始めてください。"
+  },
+  "openDesktop": {
+    "title": "phase.rs デスクトップアプリを開いています…",
+    "invalid": "このリンクはデスクトップアプリで開けません。",
+    "openApp": "デスクトップアプリを開く",
+    "continueInBrowser": "開きませんか？ブラウザで続ける",
+    "getDesktopApp": "デスクトップアプリを入手"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "ゲーム進行中",
+    "gameInProgressBody": "現在のゲームを終了するか退出してから、もう一度リンクを開いてください。"
   }
 }

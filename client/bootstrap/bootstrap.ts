@@ -52,11 +52,29 @@ async function stashLegacyStorage(): Promise<LegacyStorageResult> {
   }
 }
 
+/** The validated deep link this page took from the shell, kept across a
+ *  failed probe so Retry still lands on it. */
+let pendingDeepLink: string | null = null;
+
+/** The shell's validated `phase://` destination, or null. Older shells lack the
+ *  command, so a rejection means "no link". */
+async function takePendingDeepLink(): Promise<string | null> {
+  try {
+    return await invoke<string | null>("take_pending_deep_link");
+  } catch {
+    return null;
+  }
+}
+
 async function navigateToChannel(): Promise<void> {
   retry.hidden = true;
   status.textContent = "Connecting…";
   const { remote_load_ok: remoteLoadOk, channel } = await stashLegacyStorage();
-  const destination = channelUrl(channel);
+  // A deep link replaces the channel root, and the probe targets it. A null
+  // take is not final: a macOS link that arrives after it stays in the shell's
+  // slot and the web app takes it on mount. A newer take wins over a kept one.
+  pendingDeepLink = (await takePendingDeepLink()) ?? pendingDeepLink;
+  const destination = pendingDeepLink ?? channelUrl(channel);
 
   if (remoteLoadOk) {
     location.replace(destination);

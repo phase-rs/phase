@@ -343,5 +343,16 @@
   "botLink": {
     "codeUnsupported": "Este servidor aún no admite partidas de Discord.",
     "codeInUse": "El código de esta partida todavía lo ocupa una sala anterior. Espera unos minutos y vuelve a abrir tu enlace de anfitrión desde Discord. Si sigue ocurriendo, inicia un nuevo /lfg."
+  },
+  "openDesktop": {
+    "title": "Abriendo la aplicación de escritorio de phase.rs…",
+    "invalid": "Este enlace no se puede abrir en la aplicación de escritorio.",
+    "openApp": "Abrir la aplicación de escritorio",
+    "continueInBrowser": "¿No se abrió? Continuar en el navegador",
+    "getDesktopApp": "Obtener la aplicación de escritorio"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Partida en curso",
+    "gameInProgressBody": "Termina o abandona tu partida actual y vuelve a abrir el enlace."
   }
 }

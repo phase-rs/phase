@@ -343,5 +343,16 @@
   "botLink": {
     "codeUnsupported": "Ten serwer nie obsługuje jeszcze gier z Discorda.",
     "codeInUse": "Kod tej gry jest wciąż zajęty przez wcześniejszy pokój. Odczekaj kilka minut, a potem ponownie otwórz swój link hosta z Discorda. Jeśli problem się powtarza, rozpocznij nowe /lfg."
+  },
+  "openDesktop": {
+    "title": "Otwieranie aplikacji desktopowej phase.rs…",
+    "invalid": "Tego linku nie można otworzyć w aplikacji desktopowej.",
+    "openApp": "Otwórz aplikację desktopową",
+    "continueInBrowser": "Nie otworzyło się? Kontynuuj w przeglądarce",
+    "getDesktopApp": "Pobierz aplikację desktopową"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Gra w toku",
+    "gameInProgressBody": "Zakończ lub opuść bieżącą grę, a potem otwórz link ponownie."
   }
 }

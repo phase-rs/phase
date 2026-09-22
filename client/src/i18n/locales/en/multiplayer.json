@@ -343,5 +343,16 @@
   "botLink": {
     "codeUnsupported": "This server doesn't support Discord games yet.",
     "codeInUse": "This game's code is still held by an earlier room. Wait a few minutes, then open your host link from Discord again. If it keeps happening, start a new /lfg."
+  },
+  "openDesktop": {
+    "title": "Opening the phase.rs desktop app…",
+    "invalid": "This link can't be opened in the desktop app.",
+    "openApp": "Open desktop app",
+    "continueInBrowser": "Didn't open? Continue in browser",
+    "getDesktopApp": "Get the desktop app"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Game in progress",
+    "gameInProgressBody": "Finish or leave your current game, then open the link again."
   }
 }

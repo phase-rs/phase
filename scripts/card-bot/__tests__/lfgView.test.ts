@@ -5,9 +5,11 @@ import { findFormat, FORMATS } from "../formats";
 import type { Lfg } from "../lfg";
 import {
   customId,
+  desktopLink,
   guestLink,
   hostLink,
   type LfgAction,
+  LINK_BUTTON_URL_MAX,
   linkButtons,
   linkReply,
   parseCustomId,
@@ -101,8 +103,15 @@ describe("guest link", () => {
   });
 });
 
+const linkButtonOf = (label: string, url: string) => ({
+  type: ComponentType.BUTTON,
+  style: ButtonStyle.LINK,
+  label,
+  url,
+});
+
 describe("Get-my-link reply", () => {
-  test("host gets one LINK button to the host link; guest to the guest link", () => {
+  test("host gets the host link then its desktop link; guest the guest link then its desktop link", () => {
     const l = lfg();
     const host = linkReply(l, "111");
     expect(host.data.flags).toBe(64);
@@ -112,14 +121,18 @@ describe("Get-my-link reply", () => {
     const [row] = host.data.components;
     expect(row.type).toBe(ComponentType.ACTION_ROW);
     expect(row.components).toEqual([
-      { type: ComponentType.BUTTON, style: ButtonStyle.LINK, label: "Open as host", url: hostLink(l) },
+      linkButtonOf("Open as host", hostLink(l)),
+      linkButtonOf("Open in desktop app", desktopLink(l, hostLink(l))),
     ]);
-    expect(row.components[0].style).toBe(5);
-    expect("custom_id" in row.components[0]).toBe(false);
+    for (const button of row.components) {
+      expect(button.style).toBe(5);
+      expect("custom_id" in button).toBe(false);
+    }
 
     const guest = linkReply(l, "222").data.components[0].components;
     expect(guest).toEqual([
-      { type: ComponentType.BUTTON, style: ButtonStyle.LINK, label: "Join game", url: guestLink(l) },
+      linkButtonOf("Join game", guestLink(l)),
+      linkButtonOf("Open in desktop app", desktopLink(l, guestLink(l))),
     ]);
   });
 
@@ -128,6 +141,56 @@ describe("Get-my-link reply", () => {
     for (const user of l.seated) {
       expect(linkReply(l, user).data.components[0].components).toEqual(linkButtons(l, user));
       for (const button of linkButtons(l, user)) expect(button.label.length).toBeLessThanOrEqual(80);
+    }
+  });
+});
+
+describe("desktop link (Phase E grammar)", () => {
+  const cases: [string, Lfg][] = [
+    ["P2P release", lfg()],
+    ["P2P preview", lfg({ build: "preview" })],
+    ["server release", serverLfg()],
+    ["server preview", serverLfg({ build: "preview" })],
+  ];
+
+  test("round-trips to the web link through the /open-desktop trampoline", () => {
+    for (const [name, l] of cases) {
+      for (const webLink of [hostLink(l), guestLink(l)]) {
+        const out = new URL(desktopLink(l, webLink));
+        expect({ name, origin: out.origin, pathname: out.pathname }).toEqual({
+          name,
+          origin: new URL(webLink).origin,
+          pathname: "/open-desktop",
+        });
+        expect([...out.searchParams.keys()]).toEqual(["to"]);
+        const to = new URL(out.searchParams.get("to")!);
+        expect(to.protocol).toBe("phase:");
+        expect(to.host).toBe("open");
+        expect([...to.searchParams.keys()]).toEqual(["site", "path"]);
+        expect(to.searchParams.get("site")).toBe(l.build);
+        expect(new URL(webLink).origin + to.searchParams.get("path")).toBe(webLink);
+      }
+    }
+  });
+
+  test("an over-limit desktop link is left out and the web button survives", () => {
+    const longest = [...FORMATS].sort((a, b) => b.label.length - a.label.length)[0];
+    const server = { url: `wss://${"/".repeat(94)}`, name: "x" };
+    expect(server.url).toHaveLength(100);
+    const seated = ["1", "2", "3", "4", "5", "6", "7", "8"];
+    const heavy = serverLfg({ build: "preview", seats: 8, seated, creatorId: "1", format: longest, server });
+    // Reach guard: the fixture really drives the desktop link past the limit.
+    expect(desktopLink(heavy, hostLink(heavy)).length).toBeGreaterThan(LINK_BUTTON_URL_MAX);
+    expect(desktopLink(heavy, guestLink(heavy)).length).toBeGreaterThan(LINK_BUTTON_URL_MAX);
+    expect(linkButtons(heavy, "1")).toEqual([linkButtonOf("Open as host", hostLink(heavy))]);
+    expect(linkButtons(heavy, "2")).toEqual([linkButtonOf("Join game", guestLink(heavy))]);
+
+    for (const l of [...cases.map(([, c]) => c), heavy]) {
+      for (const user of [l.creatorId, l.seated.find((id) => id !== l.creatorId)!]) {
+        const buttons = linkButtons(l, user);
+        expect(linkReply(l, user).data.components[0].components).toEqual(buttons);
+        for (const button of buttons) expect(button.url.length).toBeLessThanOrEqual(LINK_BUTTON_URL_MAX);
+      }
     }
   });
 });

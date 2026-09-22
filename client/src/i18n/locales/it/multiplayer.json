@@ -343,5 +343,16 @@
   "botLink": {
     "codeUnsupported": "Questo server non supporta ancora le partite Discord.",
     "codeInUse": "Il codice di questa partita è ancora occupato da una stanza precedente. Attendi qualche minuto, poi riapri il tuo link da host da Discord. Se continua a succedere, avvia un nuovo /lfg."
+  },
+  "openDesktop": {
+    "title": "Apertura dell'app desktop di phase.rs…",
+    "invalid": "Questo link non può essere aperto nell'app desktop.",
+    "openApp": "Apri l'app desktop",
+    "continueInBrowser": "Non si è aperta? Continua nel browser",
+    "getDesktopApp": "Scarica l'app desktop"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Partita in corso",
+    "gameInProgressBody": "Termina o abbandona la partita in corso, poi riapri il link."
   }
 }

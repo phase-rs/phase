@@ -343,5 +343,16 @@
   "botLink": {
     "codeUnsupported": "Ce serveur ne prend pas encore en charge les parties Discord.",
     "codeInUse": "Le code de cette partie est encore occupé par un salon précédent. Attendez quelques minutes, puis rouvrez votre lien d’hôte depuis Discord. Si cela continue, lancez un nouveau /lfg."
+  },
+  "openDesktop": {
+    "title": "Ouverture de l’application de bureau phase.rs…",
+    "invalid": "Ce lien ne peut pas être ouvert dans l’application de bureau.",
+    "openApp": "Ouvrir l’application de bureau",
+    "continueInBrowser": "Rien ne s’est ouvert ? Continuer dans le navigateur",
+    "getDesktopApp": "Obtenir l’application de bureau"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Partie en cours",
+    "gameInProgressBody": "Terminez ou quittez votre partie en cours, puis rouvrez le lien."
   }
 }

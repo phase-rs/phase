@@ -5,6 +5,9 @@
 //   host:  <site>/multiplayer?code=CODE&format=<GameFormat>&players=N&room=<name>[&server=<ws url>]
 //   guest: <site>/multiplayer?join=CODE@<ws url>
 // Both are built with URLSearchParams in B's field order; never `view=`.
+//
+// Desktop grammar is Phase E's (client /open-desktop trampoline → desktop shell):
+//   desktop: <site>/open-desktop?to=<phase://open?site=<build>&path=</multiplayer?… of the web link>>
 
 import { BUILD_ENDPOINTS } from "./config";
 import { ButtonStyle, ComponentType, MessageFlags, ResponseType } from "./discord";
@@ -154,12 +157,33 @@ export function renderEnded(): { content: string; embeds: []; components: [] } {
   return { content: "This LFG has ended.", embeds: [], components: [] };
 }
 
-/** The Get-my-link buttons for a seated user of a ready LFG. A list, so later
- *  phases can append more (≤ 5 per action row). */
+/** Discord's link-button URL limit. One over-limit component rejects the whole
+ *  message, so a button that might exceed it must be left out, not sent. */
+export const LINK_BUTTON_URL_MAX = 512;
+
+/** The desktop-app link for a web link: the site's /open-desktop trampoline,
+ *  because Discord link buttons must be http(s). The web link's path is encoded
+ *  inside `phase://`, which is encoded again inside `to=`, so every encoded byte
+ *  compounds; callers check the result against `LINK_BUTTON_URL_MAX`. */
+export function desktopLink(lfg: Lfg, webLink: string): string {
+  const url = new URL(webLink);
+  const to = `phase://open?${new URLSearchParams({ site: lfg.build, path: url.pathname + url.search })}`;
+  return `${BUILD_ENDPOINTS[lfg.build].site}/open-desktop?${new URLSearchParams({ to })}`;
+}
+
+function linkButton(label: string, url: string): LinkButton {
+  return { type: ComponentType.BUTTON, style: ButtonStyle.LINK, label, url };
+}
+
+/** The Get-my-link buttons for a seated user of a ready LFG: the web link
+ *  first, always, then the desktop link when it fits Discord's URL limit. */
 export function linkButtons(lfg: Lfg, userId: string): LinkButton[] {
-  return userId === lfg.creatorId
-    ? [{ type: ComponentType.BUTTON, style: ButtonStyle.LINK, label: "Open as host", url: hostLink(lfg) }]
-    : [{ type: ComponentType.BUTTON, style: ButtonStyle.LINK, label: "Join game", url: guestLink(lfg) }];
+  const [label, url] =
+    userId === lfg.creatorId ? ["Open as host", hostLink(lfg)] : ["Join game", guestLink(lfg)];
+  const desktop = desktopLink(lfg, url);
+  return desktop.length <= LINK_BUTTON_URL_MAX
+    ? [linkButton(label, url), linkButton("Open in desktop app", desktop)]
+    : [linkButton(label, url)];
 }
 
 export interface LinkReply {
