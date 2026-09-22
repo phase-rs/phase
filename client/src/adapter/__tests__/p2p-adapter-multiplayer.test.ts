@@ -1150,6 +1150,48 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     current.dispose();
   });
 
+  it("fences a stale resume after restore before publishing or clearing state", async () => {
+    const restored = deferred<RestoredGameStateResult>();
+    mocks.resumeMultiplayerHostState.mockImplementationOnce(() => restored.promise);
+    const stale = makeResumedHost();
+    const staleInitialize = stale.adapter.initialize();
+    await vi.waitFor(() => expect(mocks.resumeMultiplayerHostState).toHaveBeenCalledOnce());
+
+    const current = makeResumedHost();
+    await current.adapter.initialize();
+    persistenceMocks.clearGame.mockClear();
+    persistenceMocks.saveResumableGameStrict.mockClear();
+    terminalMocks.commitP2PTerminalResult.mockClear();
+    mocks.releaseHostSession.mockClear();
+
+    restored.resolve({
+      snapshot: {
+        state: {
+          players: [],
+          objects: {},
+          waiting_for: { type: "GameOver", data: { winner: 0 } },
+        } as unknown as GameState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 1,
+      },
+      presentation: {
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
+    });
+
+    await expect(staleInitialize).rejects.toThrow("Host session superseded");
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
+    expect(persistenceMocks.clearGame).not.toHaveBeenCalled();
+    expect(persistenceMocks.saveResumableGameStrict).not.toHaveBeenCalled();
+    expect(terminalMocks.commitP2PTerminalResult).not.toHaveBeenCalled();
+
+    stale.adapter.dispose();
+    current.adapter.dispose();
+  });
+
   it("persists resumed authority before acknowledging a reconnect", async () => {
     const persisted = deferred<void>();
     persistenceMocks.saveResumableGameStrict.mockImplementationOnce(() => persisted.promise);

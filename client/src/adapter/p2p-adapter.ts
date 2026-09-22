@@ -1783,6 +1783,15 @@ export class P2PHostAdapter implements EngineAdapter {
         // flag. Its await window is the widest in the adapter (the full card
         // DB load happens inside), so re-check before recording the claim.
         if (this.disposed) await this.bailDisposed(true, "resume", owner);
+        // A same-session resume may have superseded this host while the engine
+        // was restoring the persisted state. The stale adapter must release
+        // only the owner it captured for this attempt and must not publish,
+        // persist, or clear the resumed game belonging to the live host.
+        if (!this.ownsAuthority()) {
+          await this.wasm.releaseHostSession(true, owner);
+          if (this.wasmHostOwner === owner) this.wasmHostOwner = null;
+          throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+        }
         sharedEngineHost = this.engineClaim;
         // Persist the post-automation authority before any reconnect can be
         // accepted or snapshot published. A terminal restore first creates its
