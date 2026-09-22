@@ -11489,9 +11489,17 @@ pub enum AttackedYouScope {
     #[default]
     AnyPlayer,
     /// CR 508.1b + CR 508.6 + CR 506.3: anchored to the player the attacking
-    /// creature is PROPOSED to attack (CR 508.1c) or, once it is an attacking
-    /// creature, the player recorded for it (CR 508.1k) — "players WHO attacked
-    /// you", a per-pairing question rather than an existential one.
+    /// creature is PROPOSED to attack (CR 508.1b — the announcement step, where
+    /// the active player declares which player each chosen creature is
+    /// attacking) or, once it is an attacking creature, the player recorded for
+    /// it (CR 508.1k) — "players WHO attacked you", a per-pairing question
+    /// rather than an existential one.
+    ///
+    /// CR 508.1c is deliberately NOT cited here: that rule governs checking
+    /// RESTRICTIONS against a declaration, which is a different step from
+    /// selecting the target this scope anchors to. It is cited where this engine
+    /// actually validates restrictions (`game::combat`'s declaration
+    /// validator).
     ///
     /// KIND-PRESERVING (CR 506.3): an attack on a planeswalker or a battle has
     /// no attacked PLAYER and answers false. It deliberately does NOT take
@@ -11706,8 +11714,10 @@ pub enum StaticCondition {
     ///   EXISTENTIAL over every player other than you. Avenge's self-spell cost
     ///   reduction.
     /// - `AttackedYouScope::AttackedPlayer` (CR 508.1b + CR 506.3): anchored to
-    ///   the player this creature is declared to be attacking (CR 508.1c) or
-    ///   recorded as attacking (CR 508.1k) — "can attack PLAYERS WHO attacked
+    ///   the player this creature is declared to be attacking (CR 508.1b, the
+    ///   announcement step — NOT CR 508.1c, which checks restrictions against a
+    ///   declaration) or recorded as attacking (CR 508.1k) — "can attack PLAYERS
+    ///   WHO attacked
     ///   you". Kind-preserving: a planeswalker or battle attack has no attacked
     ///   player and answers false, deliberately NOT taking CR 508.5's collapse.
     ///   Answerable only with an attack anchor bound, which is why
