@@ -12284,14 +12284,20 @@ impl StaticCondition {
     /// files they would drift — a condition could report `true` there with no
     /// production able to produce it, or the reverse.
     ///
-    /// An OPT-IN ALLOWLIST with a `_ => None` default, NOT an exhaustive match.
-    /// `StaticCondition` carries ~100 variants and the default here is the
-    /// FAIL-CLOSED direction: a condition with no anchored reading routes to the
-    /// permanently-inert marker and the card stays red, never to a silent
-    /// mis-anchoring. (This is the OPPOSITE choice from
-    /// `StaticMode::defending_player_anchor_polarity`, whose default was the
-    /// dangerous direction and which is therefore exhaustive. Do not "fix" this one
-    /// to match.)
+    /// An OPT-IN ALLOWLIST, written as an EXHAUSTIVE match: one arm produces the
+    /// anchored reading and every other `StaticCondition` variant is enumerated
+    /// explicitly to `None`. There is no `_` wildcard, and one must not be
+    /// reintroduced — CLAUDE.md requires exhaustive matches over wildcard
+    /// fallbacks when the enum is known, and here the compiler is the only thing
+    /// that forces a DECISION when a variant is added.
+    ///
+    /// `None` remains the FAIL-CLOSED direction: a condition with no anchored
+    /// reading routes to the permanently-inert marker and the card stays red,
+    /// never to a silent mis-anchoring. What the exhaustive form buys is that a
+    /// NEW anchored condition cannot inherit that default silently — it fails the
+    /// build until someone chooses. (An earlier revision of this comment described
+    /// a `_ => None` default and told the reader not to "fix" it; the wildcard was
+    /// removed in this branch and the note is corrected here.)
     ///
     /// A pass-through arm for conditions that ALREADY report
     /// `needs_defending_player_anchor` (e.g. `DefendingPlayerControls`) was
