@@ -367,9 +367,22 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
             WaitingFor::Priority { .. } => runner
                 .act(GameAction::PassPriority)
                 .expect("priority pass must not panic in the nested land chain"),
-            WaitingFor::OptionalEffectChoice { .. } => runner
-                .act(GameAction::DecideOptionalEffect { accept: true })
-                .expect("each player accepts the offered land choice"),
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                let result = runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("each player accepts the offered land choice");
+                let expected_land = *land_ids
+                    .get(&player)
+                    .expect("each optional land choice must belong to a known participant");
+                assert_eq!(
+                    runner.state().objects[&expected_land].zone,
+                    Zone::Battlefield,
+                    "participant {player:?}'s accepted land must enter the battlefield"
+                );
+                land_choice_players.insert(player);
+                land_placements.insert(player);
+                result
+            }
             WaitingFor::EffectZoneChoice { player, cards, .. } => {
                 let expected_land = *land_ids
                     .get(&player)
