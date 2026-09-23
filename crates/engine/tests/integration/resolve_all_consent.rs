@@ -314,15 +314,15 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
     scenario.at_phase(Phase::PostCombatMain);
     scenario.add_real_card(P0, "Kynaios and Tiro of Meletis", Zone::Battlefield, db);
     let mut land_ids = BTreeMap::new();
-    let mut draw_ids = BTreeMap::new();
+    let p0_draw = scenario.add_card_to_library_top(P0, "P0 draw");
     for (player, library_name) in [
-        (P0, "P0 draw"),
-        (P1, "P1 draw"),
-        (P2, "P2 draw"),
-        (P3, "P3 draw"),
+        (P1, "P1 draw filler"),
+        (P2, "P2 draw filler"),
+        (P3, "P3 draw filler"),
     ] {
-        let draw = scenario.add_card_to_library_top(player, library_name);
-        draw_ids.insert(player, draw);
+        scenario.add_card_to_library_top(player, library_name);
+    }
+    for player in [P0, P1, P2, P3] {
         let land = scenario.add_land_to_hand(player, "Plains").id();
         land_ids.insert(player, land);
     }
@@ -426,13 +426,11 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
         land_placements, expected_players,
         "every participant's selected land must be placed independently"
     );
-    for player in [P0, P1, P2, P3] {
-        assert_eq!(
-            runner.state().objects[&draw_ids[&player]].zone,
-            Zone::Hand,
-            "the nested draw for participant {player:?} must not be skipped"
-        );
-    }
+    assert_eq!(
+        runner.state().objects[&p0_draw].zone,
+        Zone::Hand,
+        "the trigger's mandatory controller draw must not be skipped"
+    );
     assert!(
         crossed_turn_boundary,
         "the settled chain must reach the next turn"
