@@ -17,7 +17,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
     CombatAloneAction, CombatAloneRequirement, CostPaymentProhibition, CrewAction,
-    CrewContributionKind, ProhibitionScope, StaticMode, StaticModeKind,
+    CrewContributionKind, DefendingPlayerAnchorPolarity, ProhibitionScope, StaticMode,
+    StaticModeKind,
 };
 
 /// Handler function type for static ability modes.
@@ -792,6 +793,121 @@ pub fn check_static_ability(
     })
 }
 
+/// CR 604.1: the carriers of every functioning static of `mode`, resolved by ONE
+/// whole-battlefield + command-zone sweep. The CONDITION and the AFFECTED FILTER
+/// are deliberately NOT evaluated here — the condition is the only part of
+/// applicability an attack target can change (CR 508.1c), and the affected filter
+/// is per-QUERY-object — so a caller that must re-ask the same statics under many
+/// targets pays this sweep once and then calls [`carrier_static_applies`] per
+/// target, which takes no sweep and no counter.
+///
+/// Same presence gate, same counter, same iteration and same CR gates
+/// (CR 702.26b phasing, CR 113.6 zone of function) as [`check_static_ability`],
+/// because it is that function's first half, extracted. The presence gate stays
+/// AHEAD of `record_static_full_scan`, exactly as in [`check_static_ability`] —
+/// revert-failing on
+/// `defender_with_no_permission_on_the_board_takes_no_whole_battlefield_scan`.
+///
+/// DEDUPED. `game_functioning_statics` yields `(obj, def)` PAIRS, so a carrier
+/// holding TWO definitions of `mode` appears TWICE in the raw sweep; this
+/// function returns each carrier id AT MOST ONCE. The de-duplication is
+/// verdict-neutral only because [`carrier_static_applies`] re-asks with
+/// `.any(..)` over that object's matching definitions — see its doc.
+pub(crate) fn functioning_static_carriers(state: &GameState, mode: &StaticMode) -> Vec<ObjectId> {
+    // CR 604.1: static abilities are always on; when the O(1) presence index
+    // reports zero statics of this discriminant, no fall-through scan can match.
+    // AHEAD of the counter, exactly as in `check_static_ability`.
+    if !static_kind_present(state, mode.kind()) {
+        return Vec::new();
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    let mut carriers: Vec<ObjectId> = Vec::new();
+    for (obj, def) in game_functioning_statics(state) {
+        if def.mode == *mode && !carriers.contains(&obj.id) {
+            carriers.push(obj.id);
+        }
+    }
+    carriers
+}
+
+/// CR 604.1: does ANY functioning static of `mode` carried by `carrier_id` apply
+/// to `context`? The whole-battlefield sweep is HOISTED by the caller (which
+/// passes a carrier from [`functioning_static_carriers`]), so this re-asks only
+/// what `context` changes.
+///
+/// ANY-SEMANTICS, not first-def-wins (binding). [`check_static_ability`]'s own
+/// loop is `.any(|(obj, def)| def.mode == mode && static_ability_match_applies(..))`
+/// over PAIRS, so a carrier with two matching definitions grants the mode if
+/// EITHER applies. Re-asking with `find`/`first` would silently drop the second
+/// grant. Guarded by
+/// `remote_carrier_with_two_permission_definitions_grants_through_either`.
+///
+/// Delegates every gate: `functioning_abilities::object_functioning_statics` for
+/// CR 702.26b + CR 113.6, and the untouched [`static_ability_match_applies`] for
+/// the affected filter, the polarity deferral, the condition, `attack_defended`
+/// (CR 508.1c) and `per_player_condition` (CR 101.2 + CR 109.5). No CR gate is
+/// restated here, so none can be dropped here.
+pub(crate) fn carrier_static_applies(
+    state: &GameState,
+    carrier_id: ObjectId,
+    mode: &StaticMode,
+    context: &StaticCheckContext,
+) -> bool {
+    let Some(obj) = state.objects.get(&carrier_id) else {
+        return false;
+    };
+    crate::game::functioning_abilities::object_functioning_statics(obj).any(|def| {
+        def.mode == *mode && static_ability_match_applies(state, mode, context, obj, def)
+    })
+}
+
+/// CR 506.2 + CR 508.1c + CR 508.5 + CR 702.3b: the SINGLE deferral rule both
+/// condition-evaluation entry points a combat-legality static reaches consult.
+///
+/// Returns `None` when the static must be evaluated normally, and `Some(verdict)`
+/// when it must be DEFERRED to the per-pairing authority
+/// (`combat::attacker_can_attack_target`), where `verdict` is what the static's
+/// applicability answers at creature level.
+///
+/// Three inputs, three reasons:
+///  * `attack_target.is_some()` => `None`. With an anchor BOUND there is nothing
+///    to defer: CR 508.1c checks restrictions against the declaration, so the
+///    gate can and must be answered here. Without this guard the per-pairing arm
+///    would answer `Permission => true` for EVERY target and a scoped permission
+///    would admit the whole defender universe.
+///  * the condition does not report `needs_defending_player_anchor` => `None`.
+///    That predicate (`StaticCondition::needs_defending_player_anchor`) is the
+///    single authority for "cannot be answered at creature level"; this function
+///    adds no second notion of it. It walks COMPOUND conditions via `any_leaf`,
+///    so an `And`/`Or`/`Not` carrying an anchored leaf defers too. Dropping this
+///    guard would defer a permission whose PRESENT but UNANCHORED condition is
+///    FALSE — offering a creature that must not be offered (guarded by
+///    `unconditional_permission_keeps_its_whole_target_set_beside_an_anchored_one`'s
+///    unsatisfied-condition arm).
+///  * the mode has no polarity => `None`. FAIL-CLOSED: an unclassified mode
+///    behaves exactly as at base.
+///
+/// A `None` CONDITION never defers: `condition?` short-circuits. That is
+/// deliberate (an unconditional permission is answerable at creature level) and
+/// is pinned by the unit line `(CanAttackWithDefender, None, None) == None` in
+/// `unanchored_defending_player_deferral_is_polarity_typed_and_fails_closed`.
+pub(crate) fn unanchored_defending_player_deferral(
+    mode: &StaticMode,
+    condition: Option<&StaticCondition>,
+    attack_target: Option<AttackTarget>,
+) -> Option<bool> {
+    if attack_target.is_some() {
+        return None;
+    }
+    if !condition?.needs_defending_player_anchor() {
+        return None;
+    }
+    match mode.defending_player_anchor_polarity()? {
+        DefendingPlayerAnchorPolarity::Prohibition => Some(false),
+        DefendingPlayerAnchorPolarity::Permission => Some(true),
+    }
+}
+
 /// CR 604.1: the shared per-`(obj, def)` applicability predicate — the single
 /// authority both `check_static_ability` (early-return bool driver) and
 /// `check_static_ability_sources` (full-scan collector driver) consume. Returns
@@ -812,22 +928,29 @@ fn static_ability_match_applies(
         }
     }
 
-    // CR 506.2 + CR 508.1c + CR 508.5: a `CantAttack` restriction gated on the
-    // DEFENDING PLAYER's board cannot be answered without an attack target. An
-    // eligibility query (`combat::creature_cant_attack_gated`, display badges)
-    // carries none, so skip the static here and let the per-pairing authority
-    // `combat::attacker_can_attack_target` — which DOES carry one — decide. Same
-    // deferral the CR 508.1c (+ CR 508.1d for the cost form) `attack_defended`
-    // block below performs for target-SCOPED prohibitions, generalized to
-    // condition-CARRIED ones.
-    if matches!(mode, StaticMode::CantAttack | StaticMode::CantAttackOrBlock)
-        && context.attack_target.is_none()
-        && def
-            .condition
-            .as_ref()
-            .is_some_and(StaticCondition::needs_defending_player_anchor)
+    // CR 506.2 + CR 508.1c + CR 508.5 + CR 702.3b: a gate that names the
+    // DEFENDING PLAYER cannot be answered without an attack target. An
+    // eligibility query (`combat::creature_cant_attack_gated`, the display
+    // badges, `combat::creature_can_attack_despite_defender` at creature level)
+    // carries none, so defer to the per-pairing authority
+    // `combat::attacker_can_attack_target` — which DOES carry one. WHICH WAY the
+    // deferral falls is the mode's POLARITY, not a fixed `false`: a restriction
+    // defers to "not prohibited" (CR 508.1c) and a permission to "permitted"
+    // (CR 702.3b), and both leave the creature OFFERED so the pairing decides.
+    //
+    // POSITION IS LOAD-BEARING (do not hoist this above the affected-filter
+    // check): `Permission => Some(true)` returns out of this function, which
+    // would DISCARD the per-object half of applicability and offer a creature
+    // this carrier's own `affected` filter excludes. Guarded by
+    // `narrow_affected_filter_excludes_a_defender_the_carrier_does_not_name`.
+    //
+    // Same deferral the CR 508.1c (+ CR 508.1d for the cost form)
+    // `attack_defended` block below performs for target-SCOPED prohibitions,
+    // generalized to condition-CARRIED ones and typed by polarity.
+    if let Some(deferred) =
+        unanchored_defending_player_deferral(mode, def.condition.as_ref(), context.attack_target)
     {
-        return false;
+        return deferred;
     }
 
     if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
@@ -2220,6 +2343,165 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    // ===== ROW B — the polarity-typed deferral rule, BEHAVIOURAL half =====
+
+    /// CR 508.1c + CR 702.3b: the ONE deferral rule is POLARITY-TYPED and
+    /// FAIL-CLOSED.
+    ///
+    /// Seven unit lines on the rule itself — no board, no `||`, nothing that can
+    /// mask a mutation — plus one board-level reading that proves the
+    /// classification path is LIVE rather than inert: on ONE board, a `CantBlock`
+    /// static carrying the anchored condition answers exactly as it did before
+    /// this change (`false` — unclassified, so no deferral, and the
+    /// unanchored condition refuses), while a `CanAttackWithDefender` static with
+    /// the SAME condition on the SAME board FLIPS to `true` (classified
+    /// `Permission`, so it defers).
+    #[test]
+    fn unanchored_defending_player_deferral_is_polarity_typed_and_fails_closed() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::ability::AttackedYouScope;
+        use crate::types::counter::CounterMatch;
+
+        let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AttackedPlayer,
+        };
+        // The shipped Demon Wall shape — PRESENT but UNANCHORED. The same
+        // condition the present-but-unanchored walls in `combat.rs`'s row 4 carry,
+        // so the unit and board halves of the `needs_defending_player_anchor` guard
+        // test the same shape.
+        let unanchored = StaticCondition::HasCounters {
+            counters: CounterMatch::Any,
+            minimum: 1,
+            maximum: None,
+        };
+        let compound_anchored = StaticCondition::And {
+            conditions: vec![anchored.clone(), unanchored.clone()],
+        };
+
+        // 1 — CR 508.1c: a restriction defers to "not prohibited".
+        assert_eq!(
+            unanchored_defending_player_deferral(&StaticMode::CantAttack, Some(&anchored), None),
+            Some(false),
+            "CantAttack is a Prohibition: the deferred verdict is `does not apply`"
+        );
+        // 2 — CR 702.3b: a permission defers to "permitted".
+        assert_eq!(
+            unanchored_defending_player_deferral(
+                &StaticMode::CanAttackWithDefender,
+                Some(&anchored),
+                None
+            ),
+            Some(true),
+            "CanAttackWithDefender is a Permission: the deferred verdict is `applies`"
+        );
+        // 3 — FAIL-CLOSED: an UNCLASSIFIED mode never defers. This unit line is the
+        // ONLY instrument for that rule; no board can see it, because every board
+        // carries classified modes.
+        assert_eq!(
+            unanchored_defending_player_deferral(&StaticMode::CantBlock, Some(&anchored), None),
+            None,
+            "an unclassified mode must behave exactly as at base"
+        );
+        // 4 — with an anchor BOUND there is nothing to defer (CR 508.1c checks
+        // restrictions against the DECLARATION).
+        assert_eq!(
+            unanchored_defending_player_deferral(
+                &StaticMode::CanAttackWithDefender,
+                Some(&anchored),
+                Some(AttackTarget::Player(PlayerId(1)))
+            ),
+            None,
+            "a bound attack target must be answered here, not deferred"
+        );
+        // 5 — a condition that needs NO anchor is answerable at creature level.
+        assert_eq!(
+            unanchored_defending_player_deferral(
+                &StaticMode::CanAttackWithDefender,
+                Some(&unanchored),
+                None
+            ),
+            None,
+            "a PRESENT but UNANCHORED condition must be evaluated, never deferred"
+        );
+        // 6 — no condition at all never defers (`condition?` short-circuits).
+        assert_eq!(
+            unanchored_defending_player_deferral(&StaticMode::CanAttackWithDefender, None, None),
+            None,
+            "an unconditional permission is answerable at creature level"
+        );
+        // 7 — the rule delegates to `needs_defending_player_anchor` over the whole
+        // condition TREE, not just the top-level leaf.
+        assert_eq!(
+            unanchored_defending_player_deferral(
+                &StaticMode::CanAttackWithDefender,
+                Some(&compound_anchored),
+                None
+            ),
+            Some(true),
+            "an And/Or/Not carrying an anchored leaf must defer too"
+        );
+
+        // --- BOARD-LEVEL READING: the classification path is LIVE. ---
+        let mut state = setup();
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Defender Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        // BINDING FIXTURE RULE: push into BOTH definition lists before the first
+        // flush, so the layers reseed cannot wipe them.
+        for def in [
+            StaticDefinition::new(StaticMode::CantBlock)
+                .affected(TargetFilter::SelfRef)
+                .condition(anchored.clone()),
+            StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                .affected(TargetFilter::SelfRef)
+                .condition(anchored.clone()),
+        ] {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        crate::game::layers::evaluate_layers(&mut state);
+        // Fixture self-check: a silently-empty board passes a negative for
+        // entirely the wrong reason.
+        let survived: Vec<StaticMode> = state.objects[&creature]
+            .static_definitions
+            .iter_all()
+            .map(|d| d.mode.clone())
+            .collect();
+        assert!(
+            survived.contains(&StaticMode::CantBlock)
+                && survived.contains(&StaticMode::CanAttackWithDefender),
+            "fixture: both statics must survive the layers flush; got {survived:?}"
+        );
+
+        let ctx = StaticCheckContext {
+            target_id: Some(creature),
+            ..Default::default()
+        };
+        assert!(
+            !check_static_ability(&state, StaticMode::CantBlock, &ctx),
+            "UNCHANGED FROM PHASE_BASE_SHA (032c71408): an unclassified mode does \
+             not defer, so its anchored condition is evaluated unanchored and refuses"
+        );
+        assert!(
+            check_static_ability(&state, StaticMode::CanAttackWithDefender, &ctx),
+            "FLIPPED FROM PHASE_BASE_SHA (032c71408, where this was false): a \
+             classified Permission defers at creature level — the paired positive \
+             control proving the classification path is live, not inert"
+        );
     }
 
     #[test]

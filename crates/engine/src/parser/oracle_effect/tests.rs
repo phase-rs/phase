@@ -41651,8 +41651,8 @@ fn leading_conditional_accepts_the_then_if_connector() {
     );
 }
 
-/// V13 — a non-rider EVENT body gaps rather than lowering. At `PHASE_BASE_SHA` the
-/// guard was dropped and `Effect::PreventDamage` was emitted unconditionally.
+/// V13 — a non-rider EVENT body gaps rather than lowering. Without the guard,
+/// `Effect::PreventDamage` is emitted unconditionally.
 ///
 /// No terminating period: `push_clause_chunk` strips one before the seam sees the text,
 /// so a fixture ending in `.` cannot produce a byte-equal description. Do not weaken
@@ -71995,5 +71995,621 @@ fn frost_breath_plural_anaphor_keeps_parent_target() {
         vec![Some(TargetFilter::ParentTarget)],
         "CR 608.2c: one declared instance is not two, so the grant keeps its \
          parent's declared targets"
+    );
+}
+
+// =========================================================================
+// THE INTERPOSED DEFENDER-CLASS GRAMMAR, EFFECT SIDE (CR 702.3b :3915 +
+// CR 609.4 :2854 + CR 611.2c :2913). The `ROW n` / `ARM n` banners below label
+// the sections of this group and share their numbering with the static-side
+// counterparts in `oracle_static/tests.rs`.
+//
+// Every arm attributes its production by OUTPUT SHAPE — a multi-element
+// `static_abilities` vec on ONE `GenericEffect` is
+// `build_defender_attack_continuous_compound`'s signature, which the sequence
+// splitter (a 1-element vec plus a `sub_ability`) cannot produce — rather than by
+// naming a function the fixture is assumed to reach.
+// =========================================================================
+
+/// The interposed player class Weathered Sentinels prints.
+const P3E_SEG: &str = "players who attacked you during their last turn";
+
+/// Walking Bulwark's VERBATIM printed text — the ONLY corpus card that reaches
+/// `build_defender_attack_continuous_compound` (its gate is a `','` split with
+/// `segments.len() >= 2` plus an all-consuming defender predicate, replicated over
+/// the complete 56-card defender-exception candidate set).
+const P3E_WALKING_BULWARK: &str = "Defender\n{2}: Until end of turn, target creature with defender gains haste, can attack as though it didn't have defender, and assigns combat damage equal to its toughness rather than its power. Activate only as a sorcery.";
+
+/// The first `GenericEffect`'s `static_abilities` vec — the compound's signature.
+fn p3e_generic_statics(text: &str) -> Vec<crate::types::ability::StaticDefinition> {
+    let parsed = parse_oracle_text(
+        text,
+        "Walking Bulwark",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Wall".to_string()],
+    );
+    parsed
+        .abilities
+        .iter()
+        .find_map(|ability| match ability.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => Some(static_abilities.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn p3e_modes(defs: &[crate::types::ability::StaticDefinition]) -> Vec<StaticMode> {
+    defs.iter().map(|d| d.mode.clone()).collect()
+}
+
+fn p3e_anchored() -> StaticCondition {
+    StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: crate::types::ability::AttackedYouScope::AttackedPlayer,
+    }
+}
+
+/// ROW 4, EFFECT ARM: where the permission's duration comes from.
+///
+/// CR 611.2a (:2911): the duration of the granted permission is the one the
+/// PERMISSION prints, and production (c) reads it off the RECOGNIZED
+/// defender-exception segment. Base instead asked `lower.contains("this turn")`
+/// over the whole clause, which cannot distinguish two different jobs the same
+/// two words do:
+///
+///  * `"can attack THIS TURN as though it didn't have defender"` — the adverbial
+///    IS the segment. The permission expires at end of turn.
+///  * `"target creature that was dealt damage THIS TURN can attack as though it
+///    didn't have defender"` — the adverbial qualifies the SUBJECT's damage
+///    history, selecting WHICH creature is targeted. It says nothing about when
+///    the permission ends, and reading it as a duration published a permission
+///    that silently expired at cleanup.
+///
+/// All 20 duration-form corpus lines live on THIS production (14 activated, 6
+/// triggered; ZERO printed statics), so the classifier's
+/// `all_consuming(tag("this turn"))` decision is corpus-visible here.
+///
+/// TWO-SIDED by construction — neither fixture alone buys the scoping:
+///  * the DURATION-FORM fixture reds if the derivation narrows to always-`None`;
+///  * the SUBJECT-CARRIED fixture reds if it widens back to the whole clause.
+///
+/// The reach-guard between them proves the production actually saw the line.
+///
+/// The subject-carried fixture is composed from two printed templates — Crushing
+/// Pain's `"target creature that was dealt damage this turn"` and the CR 702.3b
+/// tail — rather than lifted from one card: measured over the 56 corpus lines
+/// printing that tail, every one carrying `"this turn"` OUTSIDE the segment does
+/// so in an `"As long as ... this turn,"` prefix and parses to the printed-static
+/// production, never to (c).
+#[test]
+fn defender_exception_duration_comes_from_the_segment_not_the_subject() {
+    // (1) GENUINE PERMISSION DURATION: the adverbial IS the segment.
+    let parsed = parse_oracle_text(
+        "Target creature can attack this turn as though it didn't have defender.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    }) = parsed.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!("expected a GenericEffect, got {:?}", parsed.abilities);
+    };
+    assert_eq!(
+        duration,
+        &Some(Duration::UntilEndOfTurn),
+        "a DurationAdverbial segment is the one shape that sets the duration; \
+         narrowing the derivation to always-None reds here"
+    );
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(static_abilities[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(
+        static_abilities[0].condition, None,
+        "a duration adverbial is NOT a player class and must carry no condition"
+    );
+
+    // (2) REACH-GUARD, same production: the INTERPOSED form IS accepted here, so
+    // the `condition: None` above is a measured routing decision rather than a
+    // production that never saw the line.
+    let reach = parse_oracle_text(
+        &format!("Target creature can attack {P3E_SEG} as though it didn't have defender."),
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities, ..
+    }) = reach.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "reach-guard: expected a GenericEffect, got {:?}",
+            reach.abilities
+        );
+    };
+    assert_eq!(static_abilities[0].condition, Some(p3e_anchored()));
+
+    // (3) UNRESTRICTED DAMAGE-HISTORY SUBJECT: `"this turn"` sits in the SUBJECT
+    // and the interposed segment is EMPTY, so the classifier answers
+    // `Unrestricted` and the permission carries NO duration. This is the fixture
+    // the whole-clause derivation got wrong; it reds if that derivation returns.
+    let subject_carried = parse_oracle_text(
+        "Target creature that was dealt damage this turn can attack as though it didn't have defender.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    }) = subject_carried.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "subject-carried: expected a GenericEffect, got {:?}",
+            subject_carried.abilities
+        );
+    };
+    assert_eq!(
+        static_abilities[0].condition, None,
+        "the interposed segment is empty, so no player class is carried"
+    );
+    assert_eq!(
+        duration, &None,
+        "CR 611.2a: `this turn` qualifies the SUBJECT's damage history, not the \
+         permission — a whole-clause derivation reds here"
+    );
+
+    // (4) NO-ADVERBIAL CONTROL: nothing anywhere in the clause.
+    let no_adverbial = parse_oracle_text(
+        "Target creature can attack as though it didn't have defender.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect { duration, .. }) =
+        no_adverbial.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "no-adverbial control: expected a GenericEffect, got {:?}",
+            no_adverbial.abilities
+        );
+    };
+    assert_eq!(
+        duration, &None,
+        "with no adverbial anywhere in the clause the production carries no duration"
+    );
+}
+
+/// ROW 7 ARM (iii): the class is supported on production
+/// (c), `try_parse_can_attack_with_defender` — a RESOLUTION-side continuous
+/// effect, authorized by CR 611.2c (:2913) rather than CR 611.3a.
+///
+/// Attributed by OUTPUT SHAPE: an `Effect::GenericEffect` carrying an
+/// `AddStaticMode` modification, which ONLY production (c) produces, plus a direct
+/// unit assertion on the shared recognition predicate.
+#[test]
+fn interposed_class_is_supported_on_the_effect_production() {
+    let parse = |text: &str| {
+        let p = parse_oracle_text(text, "Probe", &[], &["Instant".to_string()], &[]);
+        match p.abilities.first().map(|a| a.effect.as_ref()) {
+            Some(Effect::GenericEffect {
+                static_abilities, ..
+            }) => static_abilities.clone(),
+            other => panic!("expected a GenericEffect, got {other:?}"),
+        }
+    };
+
+    let subject = parse(&format!(
+        "Target creature can attack {P3E_SEG} as though it didn't have defender."
+    ));
+    assert_eq!(subject.len(), 1);
+    assert_eq!(subject[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(subject[0].affected, Some(TargetFilter::ParentTarget));
+    assert_eq!(
+        subject[0].modifications,
+        vec![ContinuousModification::AddStaticMode {
+            mode: StaticMode::CanAttackWithDefender,
+        }],
+        "the AddStaticMode modification is production (c)'s signature"
+    );
+    assert_eq!(subject[0].condition, Some(p3e_anchored()));
+
+    // PAIRED POSITIVE CONTROL, SAME PRODUCTION, SAME FIXTURE: the PLAIN form keeps
+    // its unconditioned permission and the SAME `affected`.
+    let control = parse("Target creature can attack as though it didn't have defender.");
+    assert_eq!(control.len(), 1);
+    assert_eq!(control[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(control[0].affected, Some(TargetFilter::ParentTarget));
+    assert_eq!(control[0].condition, None);
+
+    // HOSTILE FIXTURE, SAME PRODUCTION: the shared classifier's inert terminal, so
+    // this arm's classifier call is measurably the SHARED one.
+    let hostile = parse(
+        "Target creature can attack players who wear a hat as though it didn't have defender.",
+    );
+    assert!(matches!(
+        hostile[0].condition,
+        Some(StaticCondition::Not { .. })
+    ));
+
+    // The shared recognition predicate itself (8a), reachable from this module.
+    assert!(super::subject::is_can_attack_despite_defender_predicate(
+        &format!("can attack {P3E_SEG} as though it didn't have defender.")
+    ));
+    assert!(super::subject::is_can_attack_despite_defender_predicate(
+        "can attack as though it didn't have defender."
+    ));
+}
+
+/// ROW 8, ARM 6: the CONTINUOUS COMPOUND
+/// (`build_defender_attack_continuous_compound`, CR 702.3b + CR 510.1c :2403 +
+/// CR 611.2c :2913) carries the anchored condition.
+///
+/// A PAIR in ONE test on Walking Bulwark's VERBATIM printed line — the only corpus
+/// card that reaches this production.
+///
+/// THE CONTROL DOES TWO JOBS. Beyond proving the compound fires, its ARITY and
+/// ORDER are what discriminate the module's emptiness check: relax
+/// `all_consuming_defender_tail`'s `rest.is_empty()` to a prefix and production (c)
+/// claims the whole clause BEFORE the compound is reached, collapsing this
+/// three-element vec to ONE `CanAttackWithDefender` whose `description` is the
+/// whole predicate, with the `gains haste` and damage-assignment conjuncts LOST.
+/// Dropping the same policy at production (c)'s OWN call site
+/// (`split_defender_exception_predicate_all_consuming`) produces the identical
+/// collapse, so this test guards both.
+///
+/// Inside the compound's loop the alternative to the defender branch is
+/// `parse_continuous_modifications`, which for this exact grammar returns
+/// `[AddKeyword(Defender)]` — the INVERSE of the printed clause. Reverting the
+/// LOOP's `permission_condition()` attachment ALONE, with the gate's predicate
+/// widened, makes the SUBJECT's
+/// middle element `condition: null` — byte-identical to the CONTROL's, which is
+/// PRECISELY the #8785 defect shape on a sibling grammar. The two halves differ on
+/// exactly that one value.
+#[test]
+fn walking_bulwark_comma_compound_carries_the_anchored_condition() {
+    let expected_modes = vec![
+        StaticMode::Continuous,
+        StaticMode::CanAttackWithDefender,
+        StaticMode::Continuous,
+    ];
+
+    // CONTROL — the unmodified printed line. THREE elements IN ORDER.
+    let control = p3e_generic_statics(P3E_WALKING_BULWARK);
+    assert_eq!(
+        p3e_modes(&control),
+        expected_modes,
+        "control: the compound must fire and keep all three conjuncts IN ORDER; got {control:?}"
+    );
+    assert_eq!(
+        control[0].modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }]
+    );
+    assert_eq!(control[1].condition, None);
+    assert_eq!(
+        control[2].modifications,
+        vec![ContinuousModification::AssignDamageFromToughness]
+    );
+
+    // SUBJECT — the same line with the class interposed. SAME three elements in the
+    // SAME order; only the middle element's `condition` moves.
+    let subject = p3e_generic_statics(&P3E_WALKING_BULWARK.replace(
+        "can attack as though",
+        &format!("can attack {P3E_SEG} as though"),
+    ));
+    assert_eq!(
+        p3e_modes(&subject),
+        expected_modes,
+        "subject: the interposed line must keep all three conjuncts; got {subject:?}"
+    );
+    assert_eq!(
+        subject[1].condition,
+        Some(p3e_anchored()),
+        "C3.9: NEVER an unconditioned CanAttackWithDefender on an interposed line"
+    );
+    assert_eq!(subject[0].modifications, control[0].modifications);
+    assert_eq!(subject[2].modifications, control[2].modifications);
+    // and NO AddKeyword(Defender) anywhere in the vec — the base defect, measured
+    // before this change as ONE fused `Continuous{[AssignDamageFromToughness,
+    // AddKeyword(Defender)]}` with the `gains haste` conjunct LOST.
+    assert!(
+        !subject.iter().any(|d| d
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Defender
+            })),
+        "the INVERSE grant must not reappear; got {subject:?}"
+    );
+}
+
+/// ROW 8, ARM 12: THE SHARED ALL-CONSUMING POLICY AT THE PREDICATE'S CALL SITE —
+/// `is_can_attack_despite_defender_predicate`'s choice of
+/// `defender_exception_predicate_all_consuming` over the bare adapter.
+///
+/// THE FIXTURE IS SYNTHESIZED AND ITS CORPUS EXPOSURE IS MEASURED ZERO: the tail
+/// census over all 56 corpus defender-exception lines finds 44 tails of `"."`,
+/// three `". Activate only …"`, three `" as long as <cond>."` riders, two `"."`
+/// inside quoted granted text, one `" and it can't be blocked."`, one
+/// `", and assigns combat damage …"`, one `". Exile it at the beginning of the
+/// next end step."` and one `". (Equipment, … are modifications.)"` reminder —
+/// 44+3+3+2+1+1+1+1 = 56, and NONE is a trailing-text tail inside a comma
+/// compound. No printed card can buy this line, so a synthesized fixture is the
+/// only instrument.
+///
+/// Deleting `all_consuming_defender_tail(rest)?` from
+/// `defender_exception_predicate_all_consuming` flips the SUBJECT from ONE fused
+/// element to THREE, the middle an UNCONDITIONED `CanAttackWithDefender` on a
+/// segment carrying trailing text — where base and the candidate both refuse —
+/// while the CONTROL stays byte-identical.
+///
+/// It is a SEPARATE `#[test]` from arm 6 and from arm 13 because the three
+/// discriminate three DIFFERENT call sites of one policy: arm 6's control fails
+/// when production (c) stops applying it, THIS arm fails when
+/// `is_can_attack_despite_defender_predicate` stops applying it, and arm 13 fails
+/// when the compound's per-segment LOOP stops applying it. Merging any two leaves
+/// one call site with no test of its own.
+#[test]
+fn defender_segment_with_trailing_text_is_refused_by_the_shared_all_consuming_policy() {
+    // CONTROL — the reach-guard: the compound fires on the verbatim printed line.
+    // Without it the SUBJECT's assertion is a zero on an instrument that never ran.
+    let control = p3e_generic_statics(P3E_WALKING_BULWARK);
+    assert_eq!(
+        p3e_modes(&control),
+        vec![
+            StaticMode::Continuous,
+            StaticMode::CanAttackWithDefender,
+            StaticMode::Continuous,
+        ],
+        "control: the compound must fire; got {control:?}"
+    );
+
+    // SUBJECT — trailing text appended INSIDE the defender segment, after the tail.
+    // The gate stays SHUT and the compound declines, so the whole predicate falls to
+    // the generic continuous parser as ONE fused element.
+    let subject = p3e_generic_statics(
+        &P3E_WALKING_BULWARK.replace("didn't have defender,", "didn't have defender QUICKLY,"),
+    );
+    assert_eq!(
+        subject.len(),
+        1,
+        "the retained all-consuming policy must REFUSE a segment with trailing text; \
+         got {subject:?}"
+    );
+    assert_eq!(subject[0].mode, StaticMode::Continuous);
+    assert!(
+        !subject
+            .iter()
+            .any(|d| d.mode == StaticMode::CanAttackWithDefender),
+        "no CanAttackWithDefender may be pushed for a segment the policy refuses"
+    );
+
+    // The predicate itself, at the seam the mutation bites: the trailing-text form is
+    // REFUSED and the clean form is ACCEPTED, in one pair.
+    assert!(!super::subject::is_can_attack_despite_defender_predicate(
+        "can attack as though it didn't have defender quickly"
+    ));
+    assert!(super::subject::is_can_attack_despite_defender_predicate(
+        "can attack as though it didn't have defender"
+    ));
+}
+
+/// ROW 8, ARM 13: THE SHARED ALL-CONSUMING POLICY AT THE COMPOUND LOOP'S CALL
+/// SITE — the per-segment LOOP's choice of
+/// `defender_exception_predicate_all_consuming` over the bare adapter.
+///
+/// THE FIXTURE IS SYNTHESIZED AND ITS CORPUS EXPOSURE IS MEASURED ZERO (the same
+/// tail census arm 12 cites).
+///
+/// ARM 12 SPECIFICALLY DOES NOT CATCH THIS, and the reason is measured rather than
+/// argued: under this mutation arm 12's per-segment LOOP verdict does flip, but the
+/// GATE — which runs `is_can_attack_despite_defender_predicate`, untouched by a
+/// change to the loop — stays SHUT, so the loop is never
+/// entered. THIS fixture carries TWO defender segments, the first clean and the
+/// second with trailing text, so the gate OPENS on segment 2, the loop is ENTERED,
+/// a `CanAttackWithDefender` is PUSHED, and only then does the loop bail on the
+/// trailing-text segment — reach demonstrated in the UNMUTATED direction.
+///
+/// With the LOOP reverted to the bare PREFIX adapter the SUBJECT flips from ONE
+/// element to FOUR, the THIRD an UNCONDITIONED
+/// `CanAttackWithDefender{description: "can attack as though it didn't have defender quickly"}`
+/// — the #8785 defect shape on the continuous compound's own production — while the
+/// CONTROL stays byte-identical.
+#[test]
+fn two_defender_segments_in_one_compound_keep_the_all_consuming_policy_at_the_loop() {
+    // CONTROL — Walking Bulwark's verbatim printed line, the reach-guard.
+    let control = p3e_generic_statics(P3E_WALKING_BULWARK);
+    assert_eq!(
+        p3e_modes(&control),
+        vec![
+            StaticMode::Continuous,
+            StaticMode::CanAttackWithDefender,
+            StaticMode::Continuous,
+        ],
+        "control: the compound must fire; got {control:?}"
+    );
+
+    // SUBJECT — TWO defender segments, the second carrying trailing text. The loop
+    // bails on it and the whole compound declines, so the generic continuous parser
+    // claims the predicate and emits the `AddKeyword(Defender)` INVERSE as one fused
+    // element. That is the candidate's (and base's) behaviour, and it is what the
+    // loop-call-site mutation destroys.
+    let subject = p3e_generic_statics(&P3E_WALKING_BULWARK.replace(
+        "can attack as though it didn't have defender,",
+        "can attack as though it didn't have defender, can attack as though it didn't have defender quickly,",
+    ));
+    assert_eq!(
+        subject.len(),
+        1,
+        "the loop must apply the all-consuming policy to EVERY segment; got {subject:?}"
+    );
+    assert_eq!(subject[0].mode, StaticMode::Continuous);
+    assert!(
+        !subject
+            .iter()
+            .any(|d| d.mode == StaticMode::CanAttackWithDefender),
+        "no CanAttackWithDefender may be pushed for the trailing-text segment"
+    );
+}
+
+/// ROW 8, ARMS 3 / 7 / 9's EFFECT COUNTERPART: the effect-side
+/// adjacent grammars keep THEIR OWN parse.
+#[test]
+fn adjacent_defender_grammars_keep_their_own_parse_on_the_effect_side() {
+    // ARM 7 — the SEQUENCE SPLITTER (`combat_requirement_conjunct_prepend`), which
+    // re-attaches the subject so the conjunct RE-ENTERS production (c). Attributed by
+    // OUTPUT SHAPE: a `Pump` with a `sub_ability`, which the comma compound (a
+    // multi-element `static_abilities` vec) cannot produce.
+    //
+    // THE CONTROL HALF IS WHAT DISCRIMINATES THE TERMINATOR ARM: deleting
+    // `all_consuming_defender_tail`'s `opt(tag("."))` turns this parse from
+    // `Pump + sub_ability{CanAttackWithDefender}` into ONE bare
+    // `GenericEffect{CanAttackWithDefender}` with the `Pump` LOST, because
+    // `combat_requirement_conjunct_prepend` hands the predicate a conjunct that still
+    // carries its terminator. So BOTH facts are asserted: the `sub_ability` is
+    // present AND the outer effect is still the `Pump`.
+    //
+    // This row also MEASURES 8d's "no edit needed": the splitter emits nothing itself
+    // and reaches the shared recognizer through 8a, so the condition arrives from (c).
+    let seq = |text: &str| {
+        let p = parse_oracle_text(text, "Probe", &[], &["Instant".to_string()], &[]);
+        let ability = p.abilities.first().expect("an ability").clone();
+        let sub = ability
+            .sub_ability
+            .clone()
+            .expect("the sequence splitter must produce a sub_ability");
+        assert!(
+            matches!(ability.effect.as_ref(), Effect::Pump { .. }),
+            "the outer effect must still be the Pump; got {:?}",
+            ability.effect
+        );
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.clone(),
+            other => panic!("expected a GenericEffect sub_ability, got {other:?}"),
+        }
+    };
+
+    let arm7_control =
+        seq("Target creature gets +2/+0 and can attack as though it didn't have defender.");
+    assert_eq!(arm7_control.len(), 1);
+    assert_eq!(arm7_control[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(arm7_control[0].condition, None);
+
+    let arm7_subject = seq(&format!(
+        "Target creature gets +2/+0 and can attack {P3E_SEG} as though it didn't have defender."
+    ));
+    assert_eq!(arm7_subject.len(), 1);
+    assert_eq!(arm7_subject[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(
+        arm7_subject[0].condition,
+        Some(p3e_anchored()),
+        "C3.9: the re-attached conjunct must carry the interposed class's condition"
+    );
+
+    // ARM 3 — the block-exception sibling on a targeted line. A too-greedy
+    // `can attack` scan destroys it.
+    let blocked = parse_oracle_text(
+        "Target creature can't be blocked this turn.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Some(Effect::GenericEffect {
+        static_abilities, ..
+    }) = blocked.abilities.first().map(|a| a.effect.as_ref())
+    else {
+        panic!(
+            "the block-exception sibling must keep its own parse; got {:?}",
+            blocked.abilities
+        );
+    };
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(static_abilities[0].mode, StaticMode::CantBeBlocked);
+    assert_eq!(static_abilities[0].condition, None);
+
+    // ARM 9's EFFECT COUNTERPART — pinned as a ROUTING measurement, because arm 9
+    // itself must live on the STATIC side and a future author must not re-map a
+    // policy line to a fixture that cannot see it.
+    //
+    // **THE ROUTING IS TYPE-FRAME DEPENDENT, and that is measured here rather than
+    // assumed.** The same trailing-rider line goes two different ways depending on
+    // the card's type line, and NEITHER way reaches production (b)'s retained PREFIX
+    // policy — which is the property arm 9 exists to buy and the reason it cannot be
+    // bought from this file:
+    //
+    //  * CREATURE frame: the STATIC side claims the whole line first, so `abilities`
+    //    is EMPTY and production (c) is never offered it;
+    //  * INSTANT frame: the SEQUENCE SPLITTER splits at `" and "`, so the rider is
+    //    peeled into a `sub_ability` and the defender conjunct that re-enters (c)
+    //    carries no tail at all.
+    //
+    // Both verdicts were measured before this change in an isolated
+    // worktree and reproduce byte-identically at this candidate — the widening moves
+    // neither.
+    let creature_frame = parse_oracle_text(
+        "Target creature can attack as though it didn't have defender and it can't be blocked.",
+        "Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        creature_frame.abilities.is_empty(),
+        "CREATURE frame: the trailing-rider form is claimed by the static side, not by \
+         production (c); got {:?}",
+        creature_frame.abilities
+    );
+    assert!(
+        creature_frame
+            .statics
+            .iter()
+            .any(|d| d.mode == StaticMode::CantBeBlocked),
+        "CREATURE frame: and the static side's own verdict is unmoved; got {:?}",
+        creature_frame.statics
+    );
+
+    let instant_frame = parse_oracle_text(
+        "Target creature can attack as though it didn't have defender and it can't be blocked.",
+        "Probe",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let outer = instant_frame
+        .abilities
+        .first()
+        .expect("INSTANT frame: the sequence splitter must produce an ability");
+    assert!(
+        outer.sub_ability.is_some(),
+        "INSTANT frame: the `and it can't be blocked` rider is SPLIT OFF into a \
+         sub_ability, so the conjunct re-entering production (c) carries no tail"
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = outer.effect.as_ref()
+    else {
+        panic!(
+            "INSTANT frame: expected a GenericEffect, got {:?}",
+            outer.effect
+        );
+    };
+    assert_eq!(static_abilities.len(), 1);
+    assert_eq!(static_abilities[0].mode, StaticMode::CanAttackWithDefender);
+    assert_eq!(
+        static_abilities[0].condition, None,
+        "no interposed class is printed here, so the permission stays unconditioned"
     );
 }

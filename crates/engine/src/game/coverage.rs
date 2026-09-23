@@ -18,11 +18,11 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGap, OracleDiagnostic};
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
-    ActivationRestriction, AdditionalCost, AggregateFunction, AttackSubject, CardTypeSetSource,
-    ChoiceType, CoinFlipResult, CombatHistoryScope, CommanderOwnership, Comparator,
-    ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
-    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ActivationRestriction, AdditionalCost, AggregateFunction, AttackSubject, AttackedYouScope,
+    CardTypeSetSource, ChoiceType, CoinFlipResult, CombatHistoryScope, CommanderOwnership,
+    Comparator, ContinuousModification, ControllerRef, CountScope, CounterKindChooser,
+    CounterKindDomain, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
+    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction,
     MassLibraryShuffleMode, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
     ObjectSelectionEligibility, ParsedCondition, PerpetualModification, PlayerFilter,
@@ -4875,7 +4875,12 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SpellCastWithVariantThisTurn { .. } => {
             "a spell was cast with this variant this turn".into()
         }
-        SC::AnyPlayerAttackedYouLastTurn => "a player attacked you during their last turn".into(),
+        SC::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AnyPlayer,
+        } => "a player attacked you during their last turn".into(),
+        SC::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AttackedPlayer,
+        } => "the attacked player attacked you during their last turn".into(),
         SC::OpponentPoisonAtLeast { count } => format!("an opponent has {count}+ poison"),
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
@@ -9971,8 +9976,16 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             ("SpellCastWithVariantThisTurn", Handled)
         }
         // CR 508.6: runtime-handled by `layers::evaluate_condition` over the
-        // cleanup-time attack snapshot (drives Avenge's cost reduction).
-        StaticCondition::AnyPlayerAttackedYouLastTurn => ("AnyPlayerAttackedYouLastTurn", Handled),
+        // cleanup-time attack snapshot. BOTH scopes are Handled: the default
+        // scope drives Avenge's cost reduction today, and the anchored scope has
+        // its own evaluator arm in the same walker. Deliberately ONE arm, not
+        // the `IsMonarch` two-arm asymmetry above: that asymmetry exists because
+        // the non-`Controller` monarch scopes are REJECTED at the evaluator's
+        // entry boundary and have no runtime support at all, whereas the
+        // anchored revenge scope is evaluated.
+        StaticCondition::AnyPlayerAttackedYouLastTurn { .. } => {
+            ("AnyPlayerAttackedYouLastTurn", Handled)
+        }
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         // CR 903.3d: the RUNTIME does evaluate this static
@@ -14430,6 +14443,57 @@ mod tests {
         ];
         let gaps = merge_coverage_gaps(&[], vec![], &warnings);
         assert!(gaps.is_empty());
+    }
+
+    /// C1.5: the anchored revenge scope's COVERAGE LABELLING IS FINAL AT PHASE 1.
+    /// Both walkers are synthesized-condition asserted here because no card emits
+    /// the anchored scope yet, which makes a corpus-level "coverage unchanged"
+    /// assertion vacuous for it.
+    ///
+    /// The two `fmt_static_condition` arms must stay DISTINCT: the coverage
+    /// receipt is read at card granularity, so collapsing two runtime-distinct
+    /// predicates into one signature is exactly the defect
+    /// `player_filter_signatures_keep_every_behavior_bearing_field` exists to
+    /// prevent. The `static_condition_feature` half is deliberately ONE `{ .. }`
+    /// arm — both scopes are runtime-evaluated — and is a FORWARD REGRESSION
+    /// GUARD, not a discriminator.
+    #[test]
+    fn attacked_you_last_turn_scope_labels_are_final_at_this_phase() {
+        use crate::types::ability::AttackedYouScope;
+
+        let default = StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AnyPlayer,
+        };
+        let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AttackedPlayer,
+        };
+
+        let default_label = fmt_static_condition(&default);
+        let anchored_label = fmt_static_condition(&anchored);
+        assert_eq!(
+            default_label, "a player attacked you during their last turn",
+            "the default scope's description is byte-unchanged from base"
+        );
+        assert_eq!(
+            anchored_label,
+            "the attacked player attacked you during their last turn"
+        );
+        assert_ne!(
+            default_label, anchored_label,
+            "two runtime-distinct predicates must not collapse to one coverage \
+             signature"
+        );
+
+        assert_eq!(
+            static_condition_feature(&default),
+            ("AnyPlayerAttackedYouLastTurn", FeatureSupport::Handled)
+        );
+        assert_eq!(
+            static_condition_feature(&anchored),
+            ("AnyPlayerAttackedYouLastTurn", FeatureSupport::Handled),
+            "the anchored scope has its own evaluator arm, so Handled is the \
+             deliberate end-state verdict — not an inherited one"
+        );
     }
 
     /// CR 903.3d: the Lieutenant STATIC's `Unhandled` coverage tag is a

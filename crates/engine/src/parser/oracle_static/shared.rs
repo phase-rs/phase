@@ -2971,6 +2971,16 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 702.3b + CR 509.1b: the MIRROR shape — a defender exception printed FIRST
+    // with a rules-bearing companion after it ("…didn't have defender and it can't
+    // be blocked", Expedition Lookout). Production (b) declines that line because a
+    // single `StaticDefinition` cannot carry two static modes; this composes both
+    // halves so the card keeps its permission AND its printed evasion instead of
+    // whichever one the arm order happened to reach first.
+    if let Some(defs) = try_defender_exception_with_companion(&stripped) {
+        return defs;
+    }
+
     // CR 508.1d / CR 509.1c / CR 701.15b: Cross-mode conjunctions of the form
     // "<predicate_1> and attack/block each combat if able/is goaded" combine a
     // continuous static (usually a keyword grant) with a combat requirement.

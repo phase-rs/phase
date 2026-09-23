@@ -28,8 +28,8 @@ use crate::game::quantity::{
 };
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
-    CardTypeSetSource, CastingPermission, ChosenSubtypeKind, CommanderOwnership,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttackedYouScope,
+    BasicLandType, CardTypeSetSource, CastingPermission, ChosenSubtypeKind, CommanderOwnership,
     ContinuousModification, CopiableValues, Duration, Effect, FilterProp, ManaContribution,
     ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
     StaticDefinition, TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
@@ -1621,7 +1621,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
@@ -1779,7 +1779,12 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        // CR 506.3: the anchored revenge gate reads the ATTACK TARGET VALUE and
+        // the turn-history snapshot — never an object characteristic — unlike
+        // `DefendingPlayerControls` above, which reads the target's CONTROLLER.
+        // It therefore belongs in the empty bucket, not with the controller
+        // readers.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
@@ -1904,7 +1909,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
@@ -2159,14 +2164,55 @@ fn evaluate_condition_inner(
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
-        // CR 508.6 + CR 109.5: True when any other player declared a creature
-        // attacking the controller ("you") during that player's most recent
-        // completed turn. Existential; the defender is the controller, so a player
-        // who attacked someone else — or the controller's own attacks — do not
-        // satisfy it.
-        StaticCondition::AnyPlayerAttackedYouLastTurn => state.players.iter().any(|p| {
+        // CR 508.6 + CR 109.5: True when any player OTHER than the controller
+        // declared a creature attacking the controller ("you") during that
+        // player's most recent completed turn. Existential; the defender is the
+        // controller, so a player who attacked someone else — or the
+        // controller's own attacks — do not satisfy it.
+        StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AnyPlayer,
+        } => state.players.iter().any(|p| {
             p.id != controller && state.player_attacked_player_last_turn(p.id, controller)
         }),
+        // CR 508.6 + CR 508.1b + CR 506.3: the SAME CR 508.6 question, asked
+        // about ONE player — the player this creature is attacking. "This
+        // creature can attack PLAYERS WHO attacked you during their last turn."
+        //
+        // Anchor resolution mirrors the `DefendingPlayerControls` arm below,
+        // over the kind-PRESERVING accessors instead of the kind-collapsing
+        // ones. CR 508.1c: while a declaration is under validation,
+        // `declared_attack` is AUTHORITATIVE and does not fall through to the
+        // latch — a bound planeswalker/battle target yielding no attacked player
+        // IS the CR 508.1c answer. CR 508.1k: once declared, the latched
+        // `AttackerInfo` answers, until CR 506.4 removal drops the record.
+        //
+        // CR 506.3 + CR 310.9d: kind-preserving. CR 508.5 would collapse a
+        // planeswalker attack to its controller and a battle attack to its
+        // protector; that is the DEFENDING-PLAYER rule and is deliberately NOT
+        // applied here, because the printed text restricts the attack target to
+        // a player. CR 508.5 is the CONTRAST, not the warrant.
+        //
+        // No anchor bindable => no attacked player => false.
+        //
+        // CR 508.6 + CR 109.5: the `!= controller` guard mirrors the existential
+        // arm's `p.id != controller`, so the two scopes agree on CR 508.6's
+        // subject exclusion and the anchored reading stays a strict REFINEMENT
+        // of the existential one (anchored-true => existential-true). The
+        // creature-level deferral in `static_abilities::unanchored_defending_player_deferral`
+        // depends on that ordering.
+        StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AttackedPlayer,
+        } => {
+            let attacking = context.recipient.unwrap_or(source_id);
+            let attacked = match context.declared_attack {
+                Some(target) => crate::game::combat::attacked_player_for_target(target),
+                None => crate::game::combat::attacked_player_for_attacker(state, attacking),
+            };
+            attacked.is_some_and(|attacked| {
+                attacked != controller
+                    && state.player_attacked_player_last_turn(attacked, controller)
+            })
+        }
         // CR 105.2 + CR 611.3a: the subject is the recipient (the enchanted
         // creature, "it"), not the Aura source; fall back to the source only when
         // evaluated without a recipient (the source gate defers to per-recipient).
@@ -4350,7 +4396,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }

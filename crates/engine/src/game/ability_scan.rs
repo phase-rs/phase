@@ -4264,7 +4264,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         },
         // CR 508.6: turn-history projection over the cleanup-time attack snapshot;
         // mirrors `SpellCastWithVariantThisTurn` (projected, not event/sibling).
-        StaticCondition::AnyPlayerAttackedYouLastTurn => Axes {
+        StaticCondition::AnyPlayerAttackedYouLastTurn { .. } => Axes {
             event: false,
             sibling: false,
             projected: true,

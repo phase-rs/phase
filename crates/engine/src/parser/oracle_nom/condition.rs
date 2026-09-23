@@ -27,7 +27,7 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, CardTypeSetSource, CastManaObjectScope,
+    AbilityCondition, AggregateFunction, AttackedYouScope, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel,
     DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
@@ -7039,7 +7039,9 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
         // the "you attacked this turn" arms above (attacker-timeline "last turn",
         // not current-turn), so it is its own typed condition.
         value(
-            StaticCondition::AnyPlayerAttackedYouLastTurn,
+            StaticCondition::AnyPlayerAttackedYouLastTurn {
+                scope: AttackedYouScope::AnyPlayer,
+            },
             (
                 alt((tag("a player"), tag("an opponent"))),
                 tag(" attacked you during their last turn"),
@@ -22846,21 +22848,33 @@ mod tests {
         ] {
             let (rest, c) = parse_inner_condition(text).unwrap();
             assert_eq!(rest, "", "must fully consume {text:?}");
-            assert_eq!(c, StaticCondition::AnyPlayerAttackedYouLastTurn, "{text}");
+            assert_eq!(
+                c,
+                StaticCondition::AnyPlayerAttackedYouLastTurn {
+                    scope: AttackedYouScope::AnyPlayer
+                },
+                "{text}"
+            );
         }
 
-        // Sibling non-shadow: the pre-existing "you attacked this turn" arm in the
-        // same `parse_combat_history_condition` combinator still lowers to the
-        // AttackedThisTurn count gate, never the new revenge gate.
+        // Sibling non-shadow: the pre-existing "you attacked this turn" arm in
+        // the same `parse_combat_history_condition` combinator still lowers to
+        // the AttackedThisTurn count gate, never the revenge gate — ON EITHER
+        // SCOPE. Written as a `{ .. }` non-match rather than `assert_ne!`
+        // against one scope, which a future anchored emission would pass.
         let (_, you) = parse_inner_condition("you attacked this turn").unwrap();
-        assert_ne!(you, StaticCondition::AnyPlayerAttackedYouLastTurn);
+        assert!(
+            !matches!(you, StaticCondition::AnyPlayerAttackedYouLastTurn { .. }),
+            "the 'you attacked this turn' arm must not lower to the revenge gate \
+             on any scope, got {you:?}"
+        );
 
         // Negative: the "this turn" (wrong window) sibling is not matched as the
         // "last turn" gate — no false positive on a near-miss phrase.
         assert!(
             !matches!(
                 parse_inner_condition("a player attacked you this turn"),
-                Ok((_, StaticCondition::AnyPlayerAttackedYouLastTurn))
+                Ok((_, StaticCondition::AnyPlayerAttackedYouLastTurn { .. }))
             ),
             "the this-turn near-miss must not lower to the last-turn revenge gate"
         );

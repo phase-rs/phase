@@ -8739,6 +8739,32 @@ struct PriorityPassPipelineOutcome {
     consumed_stack_entries: u32,
 }
 
+// Test-only reach signal for the production Cleanup-deferral seam. It is not
+// part of release consumers or serialized game state.
+#[cfg(test)]
+mod cleanup_deferred_probe {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static REACHED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn record() {
+        REACHED.with(|reached| reached.set(true));
+    }
+
+    pub(super) fn take() -> bool {
+        REACHED.with(|reached| reached.replace(false))
+    }
+}
+
+/// Consume the test-only signal that the production priority pipeline observed
+/// `cleanup_deferred`. This does not alter game state or release behavior.
+#[cfg(test)]
+pub fn take_cleanup_deferred_probe_for_test() -> bool {
+    cleanup_deferred_probe::take()
+}
+
 fn pass_priority_once_with_pipeline(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -8777,7 +8803,38 @@ fn pass_priority_once_with_pipeline(
         events,
         stack_resolution_limit,
     );
+    let cleanup_deferred = priority_outcome.cleanup_deferred;
+    #[cfg(test)]
+    if cleanup_deferred {
+        cleanup_deferred_probe::record();
+    }
     sync_waiting_for(state, &priority_outcome.waiting_for);
+
+    // The continuation and post-action drains are fallible. Keep a rollback
+    // boundary only for passes that can actually enter resolution-owned work;
+    // ordinary priority handoffs should not clone the whole GameState. The
+    // stack, continuation, and pending-trigger predicates cover both the
+    // Cleanup retry and non-Cleanup trigger-target selection errors.
+    let needs_boundary_rollback = priority_outcome.consumed_stack_entries > 0
+        || cleanup_deferred
+        || !state.stack.is_empty()
+        || !state.deferred_triggers.is_empty()
+        || !state.pending_trigger_event_batch.is_empty()
+        || state.pending_trigger.is_some()
+        || state.pending_trigger_entry.is_some()
+        || state.pending_trigger_order.is_some()
+        || state.pending_replacement.is_some()
+        || state.pending_phase_transition_progress.is_some()
+        || state.deferred_step_trigger_resume.is_some()
+        || state.active_ability_continuation().is_some()
+        || state.resolving_stack_entry.is_some()
+        || state.pending_deferred_life_cost_resume.is_some()
+        || state.pending_cost_move_resume.is_some()
+        || state.pending_resolution_completion.is_some()
+        || state.pending_liminal_entry_resume.is_some()
+        || state.pending_token_battlefield_entry.is_some();
+    let boundary_snapshot = needs_boundary_rollback.then(|| state.clone());
+    let event_start = events.len();
 
     // CR 608.2 + CR 117.4: Drain any pending continuation queued during the
     // priority pass (e.g. effects that chain a sub-resolution after the parent
@@ -8785,19 +8842,50 @@ fn pass_priority_once_with_pipeline(
     // this drain, a continuation queued after a no-choice effect would sit
     // until an unrelated action, by which point referenced stack objects may
     // have left the stack.
-    resume_pending_continuation_if_priority(state, events)?;
+    if let Err(error) = resume_pending_continuation_if_priority(state, events) {
+        if let Some(snapshot) = boundary_snapshot.as_ref() {
+            *state = snapshot.clone();
+            events.truncate(event_start);
+        }
+        return Err(error);
+    }
 
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let wf = engine_priority::run_post_action_pipeline(
+    let mut wf = match engine_priority::run_post_action_pipeline(
         state,
         events,
         &state.waiting_for.clone(),
         skip_triggers,
         false,
-    )?;
+    ) {
+        Ok(waiting_for) => waiting_for,
+        Err(error) => {
+            if let Some(snapshot) = boundary_snapshot.as_ref() {
+                *state = snapshot.clone();
+                events.truncate(event_start);
+            }
+            return Err(error);
+        }
+    };
     sync_waiting_for(state, &wf);
+
+    // The priority reducer deliberately returned the still-live Priority
+    // window when Cleanup wrapped with an unsettled carrier.  Once the shared
+    // continuation and post-action pipelines have completed, retry the same
+    // turn-interpreter unit exactly once.  Do not re-run cleanup while the
+    // carrier is still live or while the pipeline opened new stack work.
+    if cleanup_deferred
+        && state.phase == Phase::Cleanup
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.stack.is_empty()
+        && !turns::phase_transition_requires_settlement(state)
+    {
+        let waiting_for = turns::auto_advance(state, events);
+        sync_waiting_for(state, &waiting_for);
+        wf = waiting_for;
+    }
 
     // PR-3 (Option C) CR 732.2a loop-shortcut window accumulation — relocated here
     // (PR3 Defect-1 fix). The refilling trigger is placed by
@@ -9202,6 +9290,31 @@ fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
 #[path = "engine_auto_pass_decision_tests.rs"]
 mod auto_pass_decision_tests;
 
+/// Whether the next automatic pass can enter a fallible continuation,
+/// resolution, post-action, or trigger-target boundary. Ordinary passes do not
+/// clone the state; only a beat that can cross one of these boundaries gets a
+/// local checkpoint so an error cannot be swallowed as a successful boundary.
+fn priority_pass_needs_checkpoint(state: &GameState) -> bool {
+    !state.stack.is_empty()
+        || !super::stack::priority_checkpoint_is_settled(state)
+        || turns::phase_transition_requires_settlement(state)
+        || !state.deferred_triggers.is_empty()
+        || state.pending_trigger.is_some()
+        || state.pending_trigger_order.is_some()
+        || state.pending_replacement.is_some()
+        || state.pending_deferred_life_cost_resume.is_some()
+        || state.pending_cost_move_resume.is_some()
+        || state.pending_triggered_mana_resume.is_some()
+        || state.pending_phase_transition_progress.is_some()
+        || triggers::is_pending_trigger_construction_active(state)
+        || priority_pass_will_close_window(state)
+}
+
+fn priority_pass_will_close_window(state: &GameState) -> bool {
+    let participants = super::topology::priority_pass_participants(state);
+    !participants.is_empty() && state.priority_passes.len().saturating_add(1) >= participants.len()
+}
+
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool {
@@ -9298,6 +9411,11 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 };
 
                 let mut events = Vec::new();
+                let checkpoint = if priority_pass_needs_checkpoint(state) {
+                    Some((state.clone(), events.len()))
+                } else {
+                    None
+                };
                 match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
                     Ok(outcome) => {
                         advanced = true;
@@ -9386,7 +9504,13 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        if let Some((checkpoint, event_start)) = checkpoint {
+                            *state = checkpoint;
+                            events.truncate(event_start);
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -25147,14 +25271,18 @@ mod bounded_offer_conjunct_tests {
 #[cfg(test)]
 mod resolving_carrier_settle_tests {
     use super::{
-        resolving_carrier_parity_is_coherent, resolving_stack_entry_can_settle,
+        apply, resolving_carrier_parity_is_coherent, resolving_stack_entry_can_settle,
         settle_resolving_stack_entry_after_continuation_resume,
+        take_cleanup_deferred_probe_for_test,
     };
-    use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+    use crate::types::actions::GameAction;
+    use crate::types::events::GameEvent;
     use crate::types::game_state::{
         GameState, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{ObjectId, TriggerFiring};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
 
     const SOURCE: ObjectId = ObjectId(60);
@@ -25323,6 +25451,68 @@ mod resolving_carrier_settle_tests {
                 "{described}"
             );
         }
+    }
+
+    /// Production-path regression for the #9194 shape: a triggered ability has
+    /// already popped from the stack, its next two instructions are parked as
+    /// a continuation, and the final Cleanup pass must drain both instructions
+    /// before the turn interpreter is allowed to call `start_next_turn`.
+    #[test]
+    fn cleanup_priority_pass_drains_triggered_multistep_carrier_before_turn_wrap() {
+        let mut state = GameState::new_two_player(0x9194);
+        state.phase = Phase::Cleanup;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 1;
+
+        state.resolving_stack_entry = Some(carrier(triggered_kind()));
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+
+        let gain_life = |amount| {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                SOURCE,
+                PlayerId(0),
+            )
+        };
+        let chain = gain_life(1).sub_ability(gain_life(1));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(chain), &state));
+
+        let starting_turn = state.turn_number;
+        let starting_life = state.players[0].life;
+        let _ = take_cleanup_deferred_probe_for_test();
+        let result = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("the final Cleanup pass must settle the continuation");
+
+        assert!(
+            take_cleanup_deferred_probe_for_test(),
+            "the production priority pipeline must observe Cleanup deferral before retrying the boundary"
+        );
+        assert_eq!(state.turn_number, starting_turn + 1);
+        assert_eq!(state.active_player, PlayerId(1));
+        assert!(matches!(state.phase, Phase::Untap | Phase::Upkeep));
+        assert_eq!(state.players[0].life, starting_life + 2);
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_trigger_firing.is_none());
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::TurnStarted { .. }))
+                .count(),
+            1,
+            "the settled continuation must cross exactly one turn boundary"
+        );
     }
 }
 

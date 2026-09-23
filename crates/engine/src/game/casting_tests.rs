@@ -6,15 +6,15 @@ use crate::parser::oracle_effect::parse_effect_chain;
 use crate::parser::oracle_static::parse_static_line;
 use crate::types::ability::{
     AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
-    BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission, ChosenAttribute,
-    ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef, CostCategory, CountScope,
-    EffectScope, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
-    ManaSpendPermission, ManaSpendRestriction, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, RestrictionPlayerScope, SacrificeCost, SacrificeRequirement,
-    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    AttackedYouScope, BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
+    ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
+    CostCategory, CountScope, EffectScope, FilterProp, GameRestriction, KickerVariant,
+    ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalChoice,
+    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
+    ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, RestrictionPlayerScope,
+    SacrificeCost, SacrificeRequirement, SearchSelectionConstraint, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
@@ -3660,7 +3660,9 @@ fn avenge_cost_reduction_gated_on_attacked_you_last_turn() {
                 reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::SelfRef)
-            .condition(StaticCondition::AnyPlayerAttackedYouLastTurn);
+            .condition(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                scope: AttackedYouScope::AnyPlayer,
+            });
             def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
             obj.static_definitions.push(def);
         }
@@ -3725,7 +3727,9 @@ fn attacked_you_last_turn_condition_is_existential_over_players() {
     use crate::game::layers::evaluate_condition_for_test;
     use crate::types::format::FormatConfig;
 
-    let cond = StaticCondition::AnyPlayerAttackedYouLastTurn;
+    let cond = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AnyPlayer,
+    };
     let you = PlayerId(0);
     let src = ObjectId(0); // unused by this nullary, source-agnostic condition
 
@@ -3754,6 +3758,614 @@ fn attacked_you_last_turn_condition_is_existential_over_players() {
         .attacked_defenders_last_turn
         .insert(PlayerId(2), [PlayerId(1)].into_iter().collect());
     assert!(!evaluate_condition_for_test(&state, &cond, you, src));
+}
+
+/// CR 508.6 + CR 508.1b + CR 508.1c: the ANCHORED scope of the revenge gate is
+/// asked about the player the creature is DECLARED to be attacking, not
+/// existentially over players. Phase 1 verification-matrix row 1.
+///
+/// Discriminating by construction: the DEFAULT scope is true in BOTH bindings on
+/// the same board, so the anchored `false` cell cannot be an empty ledger or an
+/// unreachable evaluator — and the anchored `true` cell is the reach-guard
+/// proving `evaluate_condition_with_context`'s designation-anchor entry reject
+/// does not fire on this scope. The board carries a SECOND ledger row (P2
+/// attacked P1) so that the anchored `false` for P2 is a wrong-DEFENDER false
+/// (CR 508.6) and not merely a missing row.
+#[test]
+fn attacked_player_scope_anchors_to_the_declared_attack_target() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+    use crate::types::format::FormatConfig;
+
+    let you = PlayerId(0);
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    // P1 attacked you during their last turn; P2 did not.
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    // CR 508.6: "a player has 'attacked [a player]' if the first player declared
+    // one or more creatures as attackers attacking the SECOND player" — the
+    // relation is two-place, so the DEFENDER argument of the history query is
+    // load-bearing. P2 is a live attacker last turn, but of P1, not of you, so
+    // the anchored `false` for P2 below is a WRONG-DEFENDER false rather than an
+    // absent-ledger-row one: a query that asked only "did P2 attack anybody?"
+    // would answer true here and the assertion would fail. The existential
+    // sibling buys the same half of CR 508.6 the same way — see
+    // `attacked_you_last_turn_condition_is_existential_over_players`'s
+    // "opponents attacked each other but not you" board, which this row mirrors
+    // into the anchored scope.
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(2), [PlayerId(1)].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9201),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let default = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AnyPlayer,
+    };
+    let bind = |target| ConditionContext::NONE.with_declared_attack(Some(target));
+    let eval =
+        |cond: &StaticCondition, ctx| evaluate_condition_with_context(&state, cond, you, src, ctx);
+
+    assert!(
+        eval(&anchored, bind(AttackTarget::Player(PlayerId(1)))),
+        "P1 attacked you last turn, so attacking P1 satisfies the anchored gate"
+    );
+    assert!(
+        !eval(&anchored, bind(AttackTarget::Player(PlayerId(2)))),
+        "P2 attacked P1 last turn, not you, so attacking P2 must NOT satisfy the \
+         anchored gate — the defender argument decides this cell, not the \
+         presence of a ledger row for P2"
+    );
+    assert!(
+        eval(&default, bind(AttackTarget::Player(PlayerId(1)))),
+        "the default scope is existential, so the binding is irrelevant to it"
+    );
+    assert!(
+        eval(&default, bind(AttackTarget::Player(PlayerId(2)))),
+        "the default scope is TRUE in both bindings on this board — the anchored \
+         false above is discrimination, not a dead ledger"
+    );
+}
+
+/// CR 508.1k + CR 506.4 + CR 611.3a: with no declaration under validation the
+/// anchored revenge gate answers from the LATCHED `AttackerInfo` of the
+/// attacking creature, keyed on its object id and read kind-preservingly; with
+/// no latch either it answers false. Phase 1 verification-matrix row 1b — the
+/// only coverage of the `None` branch and of
+/// `combat::attacked_player_for_attacker`. Arms (g)/(h)/(i) bind BOTH anchors at
+/// once and are the only coverage of the bound-vs-latched PRECEDENCE — (i) being
+/// the only arm anywhere that binds a NON-player target over a live latch, and so
+/// the only guard that row 2's kind-preservation falses are not merely falses
+/// from an empty latch. Arm (f2) is the only board anywhere that binds a
+/// RECIPIENT and a declaration at once, and so the only coverage of that pair's
+/// precedence (CR 508.1c).
+#[test]
+fn attacked_player_scope_falls_back_to_the_latched_attacker_record() {
+    use crate::game::combat::{self, AttackTarget, AttackerInfo, CombatState};
+    use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+    use crate::types::format::FormatConfig;
+
+    let you = PlayerId(0);
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9202),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+    let other = create_object(
+        &mut state,
+        CardId(9203),
+        you,
+        "Fellow Attacker".to_string(),
+        Zone::Battlefield,
+    );
+    // CR 508.5: the planeswalker is CONTROLLED by P1, which is what makes the
+    // kind-COLLAPSING counterfactual answer `Some(P1)` in arm (c) instead of
+    // passing vacuously as `None`.
+    let pw = create_object(
+        &mut state,
+        CardId(9204),
+        PlayerId(1),
+        "Decoy Planeswalker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&pw)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Planeswalker);
+    assert_eq!(
+        combat::defending_player_for_target(&state, AttackTarget::Planeswalker(pw)),
+        Some(PlayerId(1)),
+        "instrument check: the kind-collapsing sibling DOES resolve this \
+         planeswalker to P1, so arm (c)'s false is not vacuous"
+    );
+
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let latch = |info: AttackerInfo| CombatState {
+        attackers: vec![info],
+        ..Default::default()
+    };
+
+    // (a) A bound declaration is AUTHORITATIVE (CR 508.1c) and needs no latch.
+    state.combat = None;
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Player(PlayerId(1)))),
+        ),
+        "(a) the bound anchor answers on its own, with `state.combat` empty"
+    );
+
+    // (b) Unbound: the latched record answers (CR 508.1k). Reach-guard for
+    // (c), (d) and (e).
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        evaluate_condition_with_context(&state, &anchored, you, src, ConditionContext::NONE),
+        "(b) the latched attacker record answers when no declaration is bound"
+    );
+
+    // (c) Multi-authority hostile: the latched `defending_player` field, the
+    // planeswalker's controller and CR 508.5's collapse ALL say P1 — and the
+    // answer is still false, because a planeswalker is not a player (CR 506.3).
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Planeswalker(pw),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(&state, &anchored, you, src, ConditionContext::NONE),
+        "(c) a latched PLANESWALKER attack has no attacked player, even though \
+         three kind-collapsing authorities all resolve to P1"
+    );
+
+    // (d) Neither anchor bound ⇒ false.
+    state.combat = None;
+    assert!(
+        !evaluate_condition_with_context(&state, &anchored, you, src, ConditionContext::NONE),
+        "(d) no declaration and no combat ⇒ no attacked player ⇒ false"
+    );
+
+    // (e) Record selection: a DIFFERENT creature is in combat and `src` is not.
+    // A lookup that drops the `object_id` equality reads `other`'s target and
+    // wrongly answers true.
+    state.combat = Some(latch(AttackerInfo::new(
+        other,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(&state, &anchored, you, src, ConditionContext::NONE),
+        "(e) `src` is not in combat, so another attacker's record must not answer \
+         for it"
+    );
+
+    // (f) CR 611.3a: the creature whose latch answers is the RECIPIENT when one
+    // is bound, not the source. Same combat state as (e).
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::recipient(other),
+        ),
+        "(f) the bound recipient IS the attacking creature, so its latch answers"
+    );
+
+    // (f2) BOTH a recipient and a declaration bound at once — the only board
+    // anywhere that binds the two sources together, and the only one on which
+    // they DISAGREE. Same combat state as (e)/(f): `other`'s latch says P1, who
+    // did attack you. The bound declaration names P2, who did not.
+    //
+    // CR 508.1c: the declaration under validation is what the restriction is
+    // being checked against, so it outranks the recipient's latched
+    // `AttackerInfo`; the recipient only selects WHOSE latch would answer in the
+    // unbound case (f). A form that preferred the recipient's latch whenever a
+    // recipient is bound reads P1 here and wrongly answers true. Phase 2's
+    // `attacker_can_attack_target` is the consumer that binds both at once.
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::recipient(other)
+                .with_declared_attack(Some(AttackTarget::Player(PlayerId(2)))),
+        ),
+        "(f2) with a recipient AND a declaration bound and disagreeing, the \
+         DECLARED target (P2, who never attacked you) outranks the recipient's \
+         latch (P1, who did)"
+    );
+
+    // (g) and (h) BOTH anchors bound at once with the SOURCE as the attacking
+    // creature — arms that express PRECEDENCE. Arms (a)-(f) each leave at most
+    // one anchor bindable, so any of them passes under a latch-first reading
+    // too; only a board where the two anchors DISAGREE — (f2), (g), (h), (i) —
+    // makes the ordering the thing that decides the answer.
+    //
+    // CR 508.1c: the declaration under validation is what the restriction is
+    // being checked against, so a bound `declared_attack` is AUTHORITATIVE and
+    // outranks the latched `AttackerInfo` left over from an earlier declaration
+    // — it does not fall through to the latch.
+
+    // (g) Latch says P2 (who never attacked you); the bound declaration says P1
+    // (who did). Bound-first ⇒ P1 ⇒ true. A latch-first reading answers P2 ⇒ false.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(2)),
+        PlayerId(2),
+    )));
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Player(PlayerId(1)))),
+        ),
+        "(g) with both anchors bound and disagreeing, the DECLARED target (P1, \
+         who attacked you) outranks the latched one (P2, who did not)"
+    );
+
+    // (h) The converse, so neither direction of the inversion survives: latch
+    // says P1 (who attacked you), declaration says P2 (who did not).
+    // Bound-first ⇒ P2 ⇒ false. A latch-first reading answers P1 ⇒ true.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Player(PlayerId(2)))),
+        ),
+        "(h) the stale latch (P1) must NOT rescue a declaration against P2, who \
+         never attacked you"
+    );
+
+    // (i) Precedence when the bound anchor yields NO attacked player. The
+    // sibling kind-preservation test (row 2,
+    // `attacked_player_scope_is_kind_preserving_on_the_bound_anchor`) never
+    // assigns `state.combat` on either of its boards, so every `false` it
+    // asserts is equally explained by an EMPTY latch; it cannot tell
+    // kind-preservation apart from a fallback that is merely dead. This arm
+    // supplies the missing discrimination: the latch is LIVE and says P1, who
+    // really did attack you.
+    //
+    // CR 508.1c: the declaration under validation is the authority, and CR
+    // 506.3: a planeswalker is not a player — so a bound planeswalker target
+    // yields no attacked player and the answer is false OUTRIGHT, without
+    // consulting the latch. A bound-first reading that FALLS THROUGH on `None`
+    // reads the latch, finds P1, and wrongly answers true.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Planeswalker(pw))),
+        ),
+        "(i) a bound PLANESWALKER target attacks no player (CR 506.3) and must \
+         not fall through to the live latch (P1, who did attack you)"
+    );
+}
+
+/// CR 508.6 + CR 109.5: the anchored scope keeps the existential scope's subject
+/// exclusion — YOU attacking YOURSELF last turn does not satisfy "players who
+/// attacked you". Phase 1 verification-matrix row 1c. The guard is what keeps
+/// the anchored reading a strict REFINEMENT of the existential one.
+#[test]
+fn attacked_player_scope_excludes_the_controller() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+    use crate::types::format::FormatConfig;
+
+    let you = PlayerId(0);
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(you, [you].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9205),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let default = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AnyPlayer,
+    };
+    let bind = |target| ConditionContext::NONE.with_declared_attack(Some(target));
+
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Player(you)),
+        ),
+        "the controller is excluded from CR 508.6's subject on the anchored scope"
+    );
+    // Sibling symmetry: the default scope agrees on the exclusion (`p.id !=
+    // controller`) on the very same board.
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &default,
+            you,
+            src,
+            bind(AttackTarget::Player(you))
+        ),
+        "the default scope excludes the controller too — the two scopes agree"
+    );
+
+    // Paired positive control, SAME board: with a real opponent attack seeded,
+    // the ledger is readable and the evaluator live, so the falses above are the
+    // exclusion guard rather than an empty ledger.
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Player(PlayerId(1))),
+        ),
+        "P1 did attack you, so the anchored gate fires for P1 on this same board"
+    );
+}
+
+/// CR 506.3 + CR 310.9d: the anchored scope is KIND-PRESERVING on the BOUND
+/// path — a planeswalker or battle attack target has no attacked PLAYER and
+/// answers false, deliberately NOT taking CR 508.5's collapse to the
+/// planeswalker's controller or the battle's protector. Phase 1
+/// verification-matrix row 2; each non-player arm carries its own player-target
+/// positive control on its own board.
+#[test]
+fn attacked_player_scope_is_kind_preserving_on_the_bound_anchor() {
+    use crate::game::combat::{self, AttackTarget};
+    use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+    use crate::types::format::FormatConfig;
+
+    let you = PlayerId(0);
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let bind = |target| ConditionContext::NONE.with_declared_attack(Some(target));
+
+    // --- Planeswalker arm, own board.
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9206),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+    let pw = create_object(
+        &mut state,
+        CardId(9207),
+        PlayerId(1),
+        "Decoy Planeswalker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&pw)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Planeswalker);
+    assert_eq!(
+        combat::defending_player_for_target(&state, AttackTarget::Planeswalker(pw)),
+        Some(PlayerId(1)),
+        "instrument check: the kind-COLLAPSING sibling resolves this planeswalker \
+         to P1, so the false below is a real discrimination"
+    );
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Planeswalker(pw)),
+        ),
+        "attacking a planeswalker attacks no PLAYER (CR 506.3)"
+    );
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Player(PlayerId(1))),
+        ),
+        "paired positive control on the SAME board: P1 as a player target ⇒ true"
+    );
+
+    // --- Battle arm, own board. `GameObject::protector()` needs BOTH
+    // `CoreType::Battle` AND a `ChosenAttribute::Player`; without both the
+    // kind-collapsing counterfactual also answers `None` and this arm would
+    // pass vacuously.
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9208),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+    let battle = create_object(
+        &mut state,
+        CardId(9209),
+        PlayerId(2),
+        "Decoy Siege".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&battle).unwrap();
+        obj.card_types.core_types.push(CoreType::Battle);
+        obj.chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+    }
+    assert_eq!(
+        combat::defending_player_for_target(&state, AttackTarget::Battle(battle)),
+        Some(PlayerId(1)),
+        "instrument check: the battle really does have a protector (P1), so the \
+         kind-collapsing counterfactual is LIVE on this board"
+    );
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Battle(battle)),
+        ),
+        "attacking a battle attacks no PLAYER (CR 506.3); its protector is CR \
+         508.5's collapse and is deliberately not taken"
+    );
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Player(PlayerId(1))),
+        ),
+        "paired positive control on the SAME board: P1 as a player target ⇒ true"
+    );
+}
+
+/// CR 508.1c + CR 508.1k: `needs_defending_player_anchor` answers by FIELD
+/// INSPECTION — "can this leaf be answered at creature level?" — not by variant
+/// identity. Phase 1 verification-matrix row 3: a
+/// `matches!(leaf, AnyPlayerAttackedYouLastTurn { .. })` implementation reports
+/// the DEFAULT scope too and fails the first assertion.
+#[test]
+fn needs_defending_player_anchor_inspects_the_scope_field() {
+    let default = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AnyPlayer,
+    };
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+
+    assert!(
+        !default.needs_defending_player_anchor(),
+        "the existential scope is answerable at creature level"
+    );
+    assert!(
+        anchored.needs_defending_player_anchor(),
+        "the anchored scope needs the attack target as a player"
+    );
+    // Sibling positive control — the predicate answers true for SOMETHING here,
+    // so the first assertion's false is not a dead predicate.
+    assert!(StaticCondition::DefendingPlayerControls {
+        filter: TargetFilter::Any
+    }
+    .needs_defending_player_anchor());
+    // Sibling negative control.
+    assert!(!StaticCondition::DuringYourTurn.needs_defending_player_anchor());
+
+    // Nesting: the `any_leaf` delegation is intact through the boolean
+    // combinators.
+    assert!(StaticCondition::Not {
+        condition: Box::new(anchored.clone())
+    }
+    .needs_defending_player_anchor());
+    assert!(!StaticCondition::And {
+        conditions: vec![StaticCondition::DuringYourTurn, default.clone()]
+    }
+    .needs_defending_player_anchor());
+}
+
+/// C1.1: the legacy `{"type":"AnyPlayerAttackedYouLastTurn"}` encoding still
+/// deserializes to the DEFAULT scope and re-serializes BYTE-IDENTICALLY, so no
+/// committed or cached card-data artifact's encoding moves. Phase 1
+/// verification-matrix row 4 — bought by an actual round-trip, not by inspecting
+/// the derive.
+#[test]
+fn any_player_attacked_you_last_turn_legacy_tag_round_trips() {
+    const LEGACY: &str = r#"{"type":"AnyPlayerAttackedYouLastTurn"}"#;
+
+    let decoded: StaticCondition = serde_json::from_str(LEGACY).expect("legacy tag must decode");
+    assert_eq!(
+        decoded,
+        StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AnyPlayer
+        },
+        "the legacy tag keeps its pre-parameterization meaning"
+    );
+    let reencoded = serde_json::to_string(&decoded).unwrap();
+    assert_eq!(
+        reencoded, LEGACY,
+        "the default scope must re-serialize byte-identically to the legacy tag"
+    );
+
+    // Paired positive control in the same test: the anchored scope round-trips
+    // to itself, proving the round-trip machinery is live and that the brevity
+    // above is the `skip_serializing_if`, not a broken serializer.
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let anchored_json = serde_json::to_string(&anchored).unwrap();
+    assert_eq!(
+        serde_json::from_str::<StaticCondition>(&anchored_json).unwrap(),
+        anchored
+    );
+    assert_ne!(
+        anchored_json, reencoded,
+        "the anchored scope must not be silently erased on the wire"
+    );
 }
 
 #[test]

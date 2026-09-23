@@ -2418,6 +2418,29 @@ pub enum StaticModeKind {
     Other,
 }
 
+/// CR 508.1c + CR 702.3b: which DIRECTION an attack-legality static defers when
+/// its gate names a defending player that no creature-level query can supply.
+///
+/// Not a bool: the two arms are two different rules that happen to defer in
+/// opposite directions, and the deferred verdict for each is the one that leaves
+/// the creature OFFERED so the per-pairing authority
+/// (`combat::attacker_can_attack_target`) can decide.
+///
+/// CR 508.1c (docs/MagicCompRules.txt:2270) checks restrictions against the
+/// DECLARATION, so an unanchored restriction is not yet disobeyed.
+/// CR 702.3b (:3915) is excepted by a permission, so an unanchored permission is
+/// not yet spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefendingPlayerAnchorPolarity {
+    /// CR 508.1c: "can't attack" — a restriction. Deferred verdict: the static
+    /// does NOT apply at creature level (the creature is not prohibited yet).
+    Prohibition,
+    /// CR 702.3b: "can attack ... as though it didn't have defender" — a
+    /// permission. Deferred verdict: the static DOES apply at creature level
+    /// (the creature is offered, and each pairing is judged on its own).
+    Permission,
+}
+
 impl StaticMode {
     /// Maps this [`StaticMode`] to its fieldless [`StaticModeKind`] discriminant.
     ///
@@ -2571,6 +2594,150 @@ impl StaticMode {
             StaticMode::CountersCantBeRemoved { .. } => StaticModeKind::CountersCantBeRemoved,
             StaticMode::CountsAsNamed { .. } => StaticModeKind::CountsAsNamed,
             StaticMode::Other(..) => StaticModeKind::Other,
+        }
+    }
+
+    /// CR 508.1c + CR 702.3b: this mode's anchored-deferral polarity, or `None`
+    /// when the mode has no defending-player-anchored semantics at all.
+    ///
+    /// EXHAUSTIVE and wildcard-free, mirroring [`StaticMode::as_keyword`] in this
+    /// file: a future combat-legality mode is a COMPILE ERROR here and must be
+    /// classified deliberately. `None` is the FAIL-CLOSED default — an unclassified
+    /// mode never defers and behaves exactly as it does today — and it is a LISTED
+    /// default, not a `_` wildcard, so the default can never be reached by accident.
+    ///
+    /// EVERY ARM ALTERNATIVE NAMES A `StaticMode` VARIANT EXPLICITLY. That is the
+    /// durable property, and it is asserted structurally by
+    /// `defending_player_anchor_polarity_names_every_arm` in this file's tests: no
+    /// `_`, and no bare-binding catch-all (`other => None`) either. Sub-patterns
+    /// INSIDE a variant (`StaticMode::Other(_)`, `StaticMode::Foo { .. }`) are
+    /// deliberately fine — they name the variant.
+    pub(crate) fn defending_player_anchor_polarity(&self) -> Option<DefendingPlayerAnchorPolarity> {
+        match self {
+            StaticMode::CantAttack | StaticMode::CantAttackOrBlock => {
+                Some(DefendingPlayerAnchorPolarity::Prohibition)
+            }
+            StaticMode::CanAttackWithDefender => Some(DefendingPlayerAnchorPolarity::Permission),
+            StaticMode::Indestructible
+            | StaticMode::Shroud
+            | StaticMode::Hexproof
+            | StaticMode::Flying
+            | StaticMode::Vigilance
+            | StaticMode::Menace
+            | StaticMode::Reach
+            | StaticMode::Trample
+            | StaticMode::Deathtouch
+            | StaticMode::Lifelink
+            | StaticMode::Continuous
+            | StaticMode::CantBlock
+            | StaticMode::AttackOnlyNeighbor
+            | StaticMode::CantBecomeSuspected
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
+            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeCast { .. }
+            | StaticMode::CantBeActivated { .. }
+            | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::RestrictLibrarySearchToTop { .. }
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+            | StaticMode::CantCauseSacrificeOrExile { .. }
+            | StaticMode::CantCauseForcedAction { .. }
+            | StaticMode::CastWithFlash
+            | StaticMode::GrantsExtraVote
+            | StaticMode::GrantsExtraVillainousChoice
+            | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CastWithAlternativeCost { .. }
+            | StaticMode::AlternativeKeywordCost { .. }
+            | StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
+            | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::ReduceActionCost { .. }
+            | StaticMode::ModifyActivationLimit { .. }
+            | StaticMode::ActivateAsInstant { .. }
+            | StaticMode::CantPayCost { .. }
+            | StaticMode::CantGainLife
+            | StaticMode::CantLoseLife
+            | StaticMode::PlayerProtection(_)
+            | StaticMode::MustAttack
+            | StaticMode::MustAttackDefender { .. }
+            | StaticMode::MustBlock
+            | StaticMode::MustBlockAttacker { .. }
+            | StaticMode::CantDraw { .. }
+            | StaticMode::DrawFromBottom { .. }
+            | StaticMode::DoubleTriggers { .. }
+            | StaticMode::IgnoreHexproof
+            | StaticMode::ExtraBlockers { .. }
+            | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::RevealHand { .. }
+            | StaticMode::GraveyardCastPermission { .. }
+            | StaticMode::TopOfLibraryCastPermission { .. }
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
+            | StaticMode::CastFromHandFree { .. }
+            | StaticMode::ExileCastPermission { .. }
+            | StaticMode::CountersPersistAcrossZones { .. }
+            | StaticMode::CantBeCountered
+            | StaticMode::CantBeCopied
+            | StaticMode::CantEnterBattlefieldFrom
+            | StaticMode::CantCastFrom { .. }
+            | StaticMode::CantCastDuring { .. }
+            | StaticMode::CantActivateDuring { .. }
+            | StaticMode::PerTurnCastLimit { .. }
+            | StaticMode::PerTurnDrawLimit { .. }
+            | StaticMode::SuppressTriggers { .. }
+            | StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedExceptBy { .. }
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedByMoreThan { .. }
+            | StaticMode::CantBeBlockedUnlessAllBlock
+            | StaticMode::AttachmentRestriction { .. }
+            | StaticMode::Protection
+            | StaticMode::CantBeDestroyed
+            | StaticMode::CantBeRegenerated
+            | StaticMode::FlashBack
+            | StaticMode::CantTap
+            | StaticMode::CantUntap
+            | StaticMode::MustBeBlocked { .. }
+            | StaticMode::MustBeBlockedByAll { .. }
+            | StaticMode::Goaded
+            | StaticMode::MustAttackAwayFromSource
+            | StaticMode::CombatAlone { .. }
+            | StaticMode::CantCrew
+            | StaticMode::CantPhaseIn
+            | StaticMode::CrewContribution { .. }
+            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayLookAtFaceDown
+            | StaticMode::CantBeTurnedFaceUp
+            | StaticMode::MayChooseNotToUntap
+            | StaticMode::AdditionalLandDrop { .. }
+            | StaticMode::EmblemStatic
+            | StaticMode::BlockRestriction { .. }
+            | StaticMode::NoMaximumHandSize
+            | StaticMode::MaximumHandSize { .. }
+            | StaticMode::MayPlayAdditionalLand
+            | StaticMode::CantHaveKeyword { .. }
+            | StaticMode::CantWinTheGame
+            | StaticMode::CantLoseTheGame
+            | StaticMode::LegendRuleDoesntApply
+            | StaticMode::SpeedCanIncreaseBeyondFour
+            | StaticMode::DefilerCostReduction { .. }
+            | StaticMode::SkipStep { .. }
+            | StaticMode::SpendManaAsAnyColor { .. }
+            | StaticMode::PayLifeAsColoredMana { .. }
+            | StaticMode::StepEndUnspentMana { .. }
+            | StaticMode::UnspentManaLossCausesLifeLoss
+            | StaticMode::IgnoreLandwalkForBlocking { .. }
+            | StaticMode::CanActivateAbilitiesAsThoughHaste
+            | StaticMode::CanBlockShadow
+            | StaticMode::AssignNoCombatDamage
+            | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            | StaticMode::MaxUntapPerType { .. }
+            | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::CountersCantBeRemoved { .. }
+            | StaticMode::CountsAsNamed { .. }
+            | StaticMode::LinkedCollectionCounterPlayPermission
+            | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::Other(_) => None,
         }
     }
 }
@@ -4259,6 +4426,183 @@ mod tests {
     use super::*;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+
+    // ===== ROW C — the polarity-typed deferral rule, STRUCTURAL half =====
+
+    /// Flatten `Pat::Or` recursively and unwrap `Pat::Paren`, yielding the
+    /// TOP-LEVEL alternatives of one arm pattern.
+    fn arm_alternatives(pat: &syn::Pat, out: &mut Vec<syn::Pat>) {
+        match pat {
+            syn::Pat::Or(or) => or.cases.iter().for_each(|c| arm_alternatives(c, out)),
+            syn::Pat::Paren(p) => arm_alternatives(&p.pat, out),
+            other => out.push(other.clone()),
+        }
+    }
+
+    /// Does this top-level alternative NAME a `StaticMode` variant explicitly?
+    /// A WHITELIST: it rejects `Pat::Wild` (`_`) and bare-binding `Pat::Ident`
+    /// (`other`) together, without enumerating irrefutable shapes, so it cannot
+    /// be defeated by a future irrefutable spelling nobody listed. Sub-patterns
+    /// INSIDE a `Pat::TupleStruct` / `Pat::Struct` are deliberately out of scope
+    /// — that is what lets `StaticMode::Other(_)` and
+    /// `StaticMode::Foo { .. }` through, which are correct Rust and correct
+    /// design.
+    fn names_a_static_mode_variant(alt: &syn::Pat) -> bool {
+        let path = match alt {
+            syn::Pat::Path(p) => &p.path,
+            syn::Pat::TupleStruct(p) => &p.path,
+            syn::Pat::Struct(p) => &p.path,
+            _ => return false,
+        };
+        path.segments
+            .first()
+            .is_some_and(|s| s.ident == "StaticMode")
+    }
+
+    /// Locate the single top-level `ExprMatch` in an `ImplItemFn` body.
+    fn sole_top_level_match(f: &syn::ImplItemFn) -> &syn::ExprMatch {
+        let matches: Vec<&syn::ExprMatch> = f
+            .block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Expr(syn::Expr::Match(m), _) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "`defending_player_anchor_polarity`'s body must contain EXACTLY ONE \
+             top-level `match` expression, or this row silently reads the wrong \
+             one (or none); found {}",
+            matches.len()
+        );
+        matches[0]
+    }
+
+    /// CR 508.1c + CR 702.3b, STRUCTURAL half: every arm alternative of
+    /// `StaticMode::defending_player_anchor_polarity` NAMES a `StaticMode`
+    /// variant explicitly, so a future `StaticMode` variant is a COMPILE ERROR
+    /// that must be classified deliberately rather than silently falling into
+    /// the `None` default.
+    ///
+    /// A behavioural row (row B) passes identically under `_ => None`; only a
+    /// source-level assertion can buy this. The predicate is a WHITELIST and is
+    /// measured green on `StaticMode::as_keyword`, the in-tree spelling
+    /// precedent this classification is copied from.
+    #[test]
+    fn defending_player_anchor_polarity_names_every_arm() {
+        // ROUTED through the repo's single comment-policy authority
+        // (`crate::source_census`), per `no_source_reading_file_carries_a_private_comment_policy`:
+        // every line's comment half is removed by the SHARED rule before the
+        // source is read, so a doc comment quoting an irrefutable arm cannot be
+        // read as one.
+        let stripped = crate::source_census::code_lines(include_str!("statics.rs"));
+        let file = syn::parse_file(&stripped)
+            .expect("this file must parse as Rust for the structural row to mean anything");
+
+        let mut found: Option<syn::ImplItemFn> = None;
+        for item in &file.items {
+            let syn::Item::Impl(imp) = item else { continue };
+            for sub in &imp.items {
+                let syn::ImplItem::Fn(f) = sub else { continue };
+                if f.sig.ident == "defending_player_anchor_polarity" {
+                    assert!(
+                        found.is_none(),
+                        "exactly one `defending_player_anchor_polarity` must exist"
+                    );
+                    found = Some(f.clone());
+                }
+            }
+        }
+        let f = found.expect(
+            "`StaticMode::defending_player_anchor_polarity` must exist — this row is \
+             reading the real function, not a renamed or deleted one",
+        );
+
+        // (a) exactly one top-level `ExprMatch`.
+        let m = sole_top_level_match(&f);
+
+        // PAIRED POSITIVE CONTROL: the row is reading the real classification.
+        assert!(
+            m.arms.len() >= 3,
+            "the classification must have at least three arms; got {}",
+            m.arms.len()
+        );
+        let rendered: Vec<String> = m.arms.iter().map(|a| quote_pat(&a.pat)).collect();
+        for expected in [
+            "StaticMode :: CanAttackWithDefender",
+            "StaticMode :: CantAttack",
+            "StaticMode :: CantAttackOrBlock",
+        ] {
+            assert!(
+                rendered.iter().any(|r| r.contains(expected)),
+                "the classification must still mention {expected}; arms were {rendered:?}"
+            );
+        }
+
+        // (b) every top-level alternative of every arm names a variant.
+        let mut total_alternatives = 0usize;
+        for arm in &m.arms {
+            let mut alts = Vec::new();
+            arm_alternatives(&arm.pat, &mut alts);
+            for alt in &alts {
+                total_alternatives += 1;
+                assert!(
+                    names_a_static_mode_variant(alt),
+                    "EVERY arm alternative must NAME a `StaticMode` variant \
+                     explicitly — no `_`, no bare-binding catch-all. Offending \
+                     alternative: {}",
+                    quote_pat(alt)
+                );
+            }
+        }
+        assert!(
+            total_alternatives >= 3,
+            "instrument control: the walk must have seen alternatives at all; got \
+             {total_alternatives}"
+        );
+
+        // (c) THE INSTRUMENT FIRES. Without this a predicate that accepted
+        // everything would satisfy (b) vacuously.
+        for irrefutable in [
+            "_ => None",
+            "other => None",
+            "StaticMode::CantAttack | _ => None",
+        ] {
+            let arm: syn::Arm = syn::parse_str(irrefutable)
+                .unwrap_or_else(|e| panic!("{irrefutable} must parse as an arm: {e}"));
+            let mut alts = Vec::new();
+            arm_alternatives(&arm.pat, &mut alts);
+            assert!(
+                !alts.iter().all(names_a_static_mode_variant),
+                "the predicate must REJECT the irrefutable arm `{irrefutable}`"
+            );
+        }
+        for accepted in [
+            "StaticMode::Other(_) => None",
+            "StaticMode::Continuous => None",
+            "StaticMode::IgnoreLandwalkForBlocking { .. } => None",
+            "StaticMode::CantAttack | StaticMode::CantBlock => None",
+        ] {
+            let arm: syn::Arm = syn::parse_str(accepted)
+                .unwrap_or_else(|e| panic!("{accepted} must parse as an arm: {e}"));
+            let mut alts = Vec::new();
+            arm_alternatives(&arm.pat, &mut alts);
+            assert!(
+                alts.iter().all(names_a_static_mode_variant),
+                "the predicate must ACCEPT the variant-naming arm `{accepted}` — \
+                 sub-patterns inside a variant are deliberately out of scope"
+            );
+        }
+    }
+
+    /// Render a `syn::Pat` for assertion messages without pulling in `quote`.
+    fn quote_pat(pat: &syn::Pat) -> String {
+        use syn::__private::ToTokens;
+        pat.to_token_stream().to_string()
+    }
 
     fn static_mode_hash(mode: &StaticMode) -> u64 {
         let mut hasher = DefaultHasher::new();

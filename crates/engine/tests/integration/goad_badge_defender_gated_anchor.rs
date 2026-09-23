@@ -930,3 +930,164 @@ fn must_attack_gate_short_circuits_on_the_first_legal_pairing() {
         );
     }
 }
+
+// ===========================================================================
+// ROW 5 — CONTAINMENT: the PROHIBITION polarity's published state is UNCHANGED
+// by the permission authority.
+// ===========================================================================
+
+/// Badge emission for the deferred-anchor PROHIBITION polarity is a pre-existing
+/// engine follow-up, whose defining comment sits inside
+/// `combat::attacker_constraints_for_active_player`'s declare-attackers badge
+/// walk. That gap belongs to the OPPOSITE polarity from the defender-anchored
+/// PERMISSION class, and the permission work must neither create, widen nor
+/// repair it.
+///
+/// The gap is defined by TWO observables, and this row reads BOTH plus
+/// membership, because asserting the badge half alone would leave the
+/// legal-target half — the half a permission-side change is most likely to move
+/// — unguarded. All three are published together by
+/// `combat::build_declare_attackers_waiting_for`, so the row is a single
+/// published snapshot rather than three independent probes.
+///
+/// BASE VALUES ARE RECORDED, NOT INHERITED. Read at commit
+/// `032c71408dbe9eb2a08707dc2e214066147f7c26` — the last commit before the
+/// permission authority landed — on this exact board:
+///
+/// | observable | `gated` (deferred-anchor `CantAttack`) |
+/// |---|---|
+/// | `valid_attacker_ids` | PRESENT |
+/// | `attacker_constraints` | NO entry (no `CantAttack` badge) |
+/// | `valid_attack_targets_by_attacker` | EMPTY |
+///
+/// PAIRED POSITIVE CONTROLS, SAME FIXTURE: `badged` carries an UNCONDITIONAL
+/// `CantAttack` — it is ABSENT from the eligible set AND carries the badge, so
+/// both surfaces are proven to be read on this board and the badge-ABSENCE
+/// assertion above cannot pass vacuously. `bear` is unrestricted — offered and
+/// badge-free — so the eligibility surface is proven live in the other direction.
+///
+/// FIXTURE CONSTRUCTION: every static is attached with
+/// `GameScenario::with_static_definition`, which pushes into BOTH
+/// `static_definitions` and `base_static_definitions`. A bare
+/// `obj.static_definitions.push(..)` is FORBIDDEN in this file: a
+/// scenario-built object's `base_static_definitions` may already be non-empty,
+/// in which case the one-shot live->base back-fill declines to copy and the
+/// push is wiped by the FIRST layers flush. Each attached static's survival is
+/// self-checked after `build()`, before the payload is read.
+#[test]
+fn deferred_anchor_prohibition_published_state_is_unchanged_by_the_permission_authority() {
+    const LABEL: &str = "C2.7 containment";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // The land the deferred anchor names. P1 is the defending player, and P1
+    // DOES control it — so at every pairing the prohibition APPLIES and the
+    // published target list is empty, while the creature-level query still
+    // defers and offers the creature.
+    let land = scenario.add_basic_land(P1, ManaColor::Green);
+    let gated = scenario
+        .add_creature(P0, "Anchored Prohibition", 2, 2)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CantAttack)
+                .affected(TargetFilter::SelfRef)
+                .condition(StaticCondition::DefendingPlayerControls {
+                    filter: TargetFilter::SpecificObject { id: land },
+                }),
+        )
+        .id();
+    // POSITIVE CONTROL for BOTH the badge surface and the eligibility surface:
+    // an UNCONDITIONAL `CantAttack` is answerable at creature level, so this
+    // creature is filtered OUT of the eligible set and lands in the `else if`
+    // branch that emits the badge.
+    let badged = scenario
+        .add_creature(P0, "Plainly Restrained", 2, 2)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CantAttack).affected(TargetFilter::SelfRef),
+        )
+        .id();
+    // POSITIVE CONTROL in the other direction: unrestricted, offered, badge-free.
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+
+    // REACH-GUARDS, after `build()` (and therefore after the first layers flush).
+    assert_one_defender_gated_static(&runner, gated, &StaticMode::CantAttack, LABEL);
+    assert_land_with_subtype(&runner, land, P1, "Forest", LABEL);
+    let badged_statics: Vec<&StaticDefinition> = runner.state().objects[&badged]
+        .static_definitions
+        .iter_unchecked()
+        .filter(|def| def.mode == StaticMode::CantAttack)
+        .collect();
+    assert_eq!(
+        badged_statics.len(),
+        1,
+        "REACH-GUARD ({LABEL}): the control creature must carry exactly ONE \
+         CantAttack static after the flush; got {:?}",
+        runner.state().objects[&badged]
+            .static_definitions
+            .iter_unchecked()
+            .map(|def| def.mode.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        badged_statics[0].condition.is_none(),
+        "REACH-GUARD ({LABEL}): the control's CantAttack must be UNCONDITIONAL, \
+         or it defers like `gated` and proves nothing about the badge surface"
+    );
+
+    advance_to_declare_attackers(&mut runner, LABEL);
+    let AttackersPayload {
+        valid,
+        constraints,
+        legal_targets,
+    } = attackers_payload(&runner);
+
+    // --- The controls FIRST, so nothing below can pass vacuously. ---
+    assert!(
+        valid.contains(&bear) && !constraints.contains_key(&bear),
+        "CONTROL ({LABEL}): the unrestricted creature must be OFFERED and \
+         BADGE-FREE — the eligibility surface is live; got valid={valid:?} \
+         constraints={constraints:?}"
+    );
+    assert!(
+        !valid.contains(&badged),
+        "CONTROL ({LABEL}): an UNCONDITIONAL CantAttack must remove its creature \
+         from the eligible set — the eligibility surface really filters; got \
+         {valid:?}"
+    );
+    assert!(
+        matches!(
+            constraints.get(&badged),
+            Some(CombatRequirement::CantAttack { .. })
+        ),
+        "CONTROL ({LABEL}): ... and must emit the CantAttack badge — the badge \
+         surface is being read on this board, so the badge-ABSENCE assertion \
+         below is not vacuous; got {:?}",
+        constraints.get(&badged)
+    );
+
+    // --- The three base observables, UNCHANGED. ---
+    assert!(
+        valid.contains(&gated),
+        "C2.7 ({LABEL}): base observable 1 of 3 — the deferred-anchor PROHIBITION \
+         creature is OFFERED (the creature-level query DEFERS). Mapping \
+         `CantAttack` to `Permission`, or returning `Some(true)` for a \
+         prohibition, moves this; got {valid:?}"
+    );
+    assert!(
+        !matches!(
+            constraints.get(&gated),
+            Some(CombatRequirement::CantAttack { .. })
+        ),
+        "C2.7 ({LABEL}): base observable 2 of 3 — it carries NO CantAttack badge. \
+         This is the pre-existing display gap, held UNCHANGED; got {:?}",
+        constraints.get(&gated)
+    );
+    let gated_targets = legal_targets.get(&gated).cloned().unwrap_or_default();
+    assert!(
+        gated_targets.is_empty(),
+        "C2.7 ({LABEL}): base observable 3 of 3 — its published legal-target list \
+         is EMPTY, because the per-pairing authority refuses every pairing. This \
+         is the half a permission-side change is most likely to move, which is why \
+         the badge half is not asserted alone; got {gated_targets:?}"
+    );
+}

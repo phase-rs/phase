@@ -5678,11 +5678,19 @@ pub(crate) fn static_condition_to_ability_condition(
         // no `AbilityCondition` counterpart yet. Return `None` rather than
         // lowering it to `Not(IsYourTurn)`, which would be wrong in 2HG.
         | StaticCondition::DuringOpponentsTurn
-        // CR 508.6: the existential "a player attacked you during their last turn"
-        // gate drives a self-spell cost reduction (Avenge), not an
-        // effect-resolution rider; no `AbilityCondition` equivalent — lowering
-        // returns `None`.
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        // CR 508.6 + CR 608.2: no `AbilityCondition` equivalent on either scope;
+        // `None` for DIFFERENT reasons.
+        //
+        // Default (`AnyPlayer`) scope: it drives a self-spell cost reduction
+        // (Avenge), not an effect-resolution rider.
+        //
+        // Anchored (`AttackedPlayer`) scope: an `AbilityCondition` is evaluated
+        // during RESOLUTION (CR 608.2), by which point the declare-attackers
+        // turn-based action is long past and no `declared_attack` is in context;
+        // the resolving ability need not belong to an attacking creature at all,
+        // so there is no attacker whose latched record could answer. The anchor
+        // is structurally unavailable here, not merely unused.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::None => None,
     }
 }

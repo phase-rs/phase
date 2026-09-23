@@ -5253,10 +5253,24 @@ pub(super) fn handle_resolution_choice(
             )?;
             public_state::sync_waiting_for(state, &settled);
 
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty() {
-                let _ = turns::advance_phase_once(state, events);
-                let advanced = turns::auto_advance(state, events);
-                public_state::sync_waiting_for(state, &advanced);
+            // A cleanup discard can be the final child of a nested resolution.
+            // Retire a now-complete carrier before asking the phase interpreter
+            // to cross Cleanup -> Untap; an unfinished carrier remains visible
+            // and the guarded transition below leaves the Priority window in
+            // place for the owner pipeline to resume it.
+            super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
+
+            if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.stack.is_empty()
+                && !turns::phase_transition_requires_settlement(state)
+            {
+                match turns::advance_phase_once(state, events) {
+                    turns::AdvancePhaseOnce::Deferred => {}
+                    turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {
+                        let advanced = turns::auto_advance(state, events);
+                        public_state::sync_waiting_for(state, &advanced);
+                    }
+                }
             }
 
             // The suffix pipeline above already processed this action's discard

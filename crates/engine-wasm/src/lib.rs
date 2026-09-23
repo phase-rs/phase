@@ -2642,51 +2642,24 @@ fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), St
 
 fn decode_and_rehydrate_restored_game_state(
     json_str: &str,
-    restore_runtime: impl FnOnce(&mut GameState),
+    restore_runtime: impl FnOnce(&mut GameState) -> Result<(), String>,
 ) -> Result<DecodedRestoredGameState, String> {
     let restored = prepare_restored_game_state(json_str)?;
     let debug_permitted_was_serialized = restored.debug_permitted_was_serialized;
     let state = restored
         .state
         .finalize_after_rehydration(|state| {
-            // Deliberate, accepted asymmetry with
-            // `server_core::session::GameSession::from_persisted`: that path
-            // rejects a persisted `player_count` outside its format's
-            // registry range; this closure does not bound the persisted seat
-            // count against the registry range at all. This is the shared
-            // body of both `restore_game_state` (undo, and resuming a
-            // localStorage save) and `resume_multiplayer_host_state` (P2P
-            // host crash recovery), so a hard rejection here would strand
-            // user-owned state that was already playable. A repair that
-            // widens `min_players`/`max_players` to admit the persisted seat
-            // count was tried and reverted: `min_players` is a Locked row in
-            // `built_in_axes_no_looser_than_rules` (must equal the format
-            // registry's value exactly), so a widened config fails
-            // `FormatConfig::deserialize`'s own admission gate the very next
-            // time it is loaded — permanently bricking the save, and, since
-            // this state is autosaved and broadcast to P2P guests, taking
-            // them down with it. The residual risk of leaving this
-            // unvalidated is reachable, not merely hypothetical — the same
-            // legacy-save framing `validate_for_player_count`'s own doc
-            // comment uses at `from_persisted`: e.g. a `CommanderDraft` save
-            // (registry range 3..=8) persisted with `player_count` 2 from
-            // before this bound existed on whichever path created it, no
-            // hand-editing required. `MULTIPLAYER_MODE` mitigates only the
-            // `restore_game_state` (undo) path, which refuses outright once
-            // the flag is set; it does not cover `resume_multiplayer_host_
-            // state`, whose own guard refuses only when the flag is ALREADY
-            // set and then sets it — the P2P host path, whose restored state
-            // is broadcast to guests, has no seat-count mitigation at all.
-            // One option this leaves unexplored: this closure takes a
-            // per-caller `|state|` hook (`restore_runtime`), so a bound
-            // could be applied on the `resume_multiplayer_host_state` path
-            // alone, leaving undo unaffected. Not implemented here. Accepted
-            // as-is; untracked.
+            // Keep the generic decode body compatible with legacy local undo
+            // and localStorage restores. The P2P resume caller uses the
+            // per-caller `restore_runtime` hook to validate the restored seat
+            // count before installing state that can be broadcast to guests
+            // (Issue #8692); widening the format bounds would instead make
+            // the saved config fail its own deserialization admission gate.
             rehydrate_restored_state_from_card_db(state)?;
             // Combat declaration snapshots are display data derived from the rehydrated
             // live board. Rebuild them before this external state becomes interactive.
             engine::game::combat::refresh_combat_declaration_waiting_for(state);
-            restore_runtime(state);
+            restore_runtime(state)?;
             Ok(())
         })
         .map_err(|error| format!("Failed to restore GameState: {error}"))?;
@@ -2766,7 +2739,10 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
         return Err("restore_game_state refused: undo is disabled in multiplayer sessions".into());
     }
-    let restored = decode_and_rehydrate_restored_game_state(json_str, GameState::rehydrate_rng)?;
+    let restored = decode_and_rehydrate_restored_game_state(json_str, |state| {
+        state.rehydrate_rng();
+        Ok(())
+    })?;
     let mut state = restored.state;
     state.debug_mode = true;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
@@ -2857,24 +2833,44 @@ fn resume_loaded_stack_automation(
 /// entry point. Callers must clear any existing state first.
 #[wasm_bindgen]
 pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue> {
+    resume_multiplayer_host_state_inner(json_str)
+        .map(|presentation| to_js(&presentation))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// The natively-callable body of [`resume_multiplayer_host_state`].
+///
+/// Keep the fallible engine path separate from the WASM shell so native tests
+/// can assert restore failures without constructing `JsValue` off-wasm32.
+fn resume_multiplayer_host_state_inner(
+    json_str: &str,
+) -> Result<RestoredStackAutomationPresentation, String> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
-        return Err(JsValue::from_str(
-            "resume_multiplayer_host_state refused: multiplayer mode already set",
-        ));
+        return Err("resume_multiplayer_host_state refused: multiplayer mode already set".into());
     }
     if game_state_present() {
-        return Err(JsValue::from_str(
-            "resume_multiplayer_host_state refused: engine already initialized; call clear_game_state first",
-        ));
+        return Err(
+            "resume_multiplayer_host_state refused: engine already initialized; call clear_game_state first"
+                .into(),
+        );
     }
 
     let restored = decode_and_rehydrate_restored_game_state(json_str, |state| {
+        let player_count = u8::try_from(state.players.len()).map_err(|_| {
+            format!(
+                "player_count {} exceeds the supported range",
+                state.players.len()
+            )
+        })?;
+        state
+            .format_config
+            .validate_for_player_count(player_count)?;
         let fresh_seed: u64 = rand::rng().random();
         state.rng_seed = fresh_seed;
         state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
         state.rng_word_pos = 0;
-    })
-    .map_err(|error| JsValue::from_str(&error))?;
+        Ok(())
+    })?;
     let mut state = restored.state;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, true);
 
@@ -2886,8 +2882,6 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue>
     // session, and no caller can observe the hosted snapshot until this
     // returns its bounded engine presentation.
     resume_loaded_stack_automation(true)
-        .map(|presentation| to_js(&presentation))
-        .map_err(|error| JsValue::from_str(&error))
 }
 
 #[cfg(test)]
@@ -2901,26 +2895,25 @@ mod restored_card_db_requirements_tests {
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
         let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
 
-        let error = decode_and_rehydrate_restored_game_state(&json, |_| {})
+        let error = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
             .expect_err("restore must require CARD_DB");
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
     }
 
-    /// Pins a deliberate NON-check at this closure, not a behavior: rounds
-    /// 4-6 tried, in turn, (a) a hard rejection of a persisted seat count
-    /// outside its format's registry range (reverted — it would strand
-    /// already-playable user-owned state, since this closure is the shared
-    /// body of `restore_game_state` undo/localStorage-save restore and
-    /// `resume_multiplayer_host_state` P2P host crash recovery) and (b) a
+    /// Pins the legacy-compatible generic restore boundary: rounds 4-6 tried,
+    /// in turn, (a) a hard rejection of a persisted seat count outside its
+    /// format's registry range (reverted here because this shared decode body
+    /// serves `restore_game_state` undo/localStorage-save restore) and (b) a
     /// repair that widens the restored config's `min_players`/`max_players`
     /// to admit the persisted seat count (also reverted — `min_players` is a
     /// Locked row in `built_in_axes_no_looser_than_rules`, so a widened
     /// config fails `FormatConfig::deserialize`'s own admission gate the
     /// very next time it is loaded, permanently bricking the save). Neither
     /// alternative survived review; this test fails if either is
-    /// re-introduced. `FormatConfig::commander_draft()` (registry range
+    /// re-introduced into the generic restore path. The P2P resume caller
+    /// applies the separate #8692 boundary after this hook. `FormatConfig::commander_draft()` (registry range
     /// 3..=8) persisted with 2 seats reproduces both hazards at once: a
     /// hard-reject alternative would return `Err`, and a repair alternative
     /// would leave `min_players` widened to 2, which is exactly the
@@ -2938,7 +2931,7 @@ mod restored_card_db_requirements_tests {
         state.format_config = FormatConfig::commander_draft();
         let json = serde_json::to_string(&state).unwrap();
 
-        let restored = decode_and_rehydrate_restored_game_state(&json, |_| {}).expect(
+        let restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(())).expect(
             "2 seats against CommanderDraft's 3-8 registry range must not be hard-rejected \
              (that is the reverted reject alternative)",
         );
@@ -2963,6 +2956,50 @@ mod restored_card_db_requirements_tests {
              built_in_axes_no_looser_than_rules on the very next load"
         );
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
+    }
+
+    #[test]
+    fn multiplayer_host_resume_rejects_out_of_range_persisted_seat_count_before_install() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let json = serde_json::to_string(&state).unwrap();
+
+        restore_game_state_inner(&json).expect("legacy local restore must remain compatible");
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        let error = resume_multiplayer_host_state_inner(&json)
+            .expect_err("P2P host resume must reject an invalid seat count before broadcast");
+        assert!(
+            error.contains("player_count"),
+            "resume error must identify the seat-count boundary"
+        );
+        assert!(!game_state_present());
+        assert!(!is_multiplayer_mode());
+    }
+
+    #[test]
+    fn multiplayer_host_resume_rejects_unrepresentable_persisted_seat_count_before_install() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let mut state = GameState::new_two_player(17);
+        state.format_config = FormatConfig::commander_draft();
+        let player_template = state.players[0].clone();
+        state.players.resize(259, player_template);
+        let json = serde_json::to_string(&state).unwrap();
+
+        let error = resume_multiplayer_host_state_inner(&json)
+            .expect_err("P2P host resume must reject a seat count that cannot fit in u8");
+        assert!(
+            error.contains("player_count"),
+            "resume error must identify the seat-count conversion boundary"
+        );
+        assert!(!game_state_present());
+        assert!(!is_multiplayer_mode());
     }
 }
 

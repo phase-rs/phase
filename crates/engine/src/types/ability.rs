@@ -11487,6 +11487,58 @@ impl StaticMode {
     }
 }
 
+/// CR 508.6 + CR 506.3: which player the "attacked you during their last turn"
+/// revenge gate (`StaticCondition::AnyPlayerAttackedYouLastTurn`) is asked
+/// about.
+///
+/// Parameterization axis, not a sibling variant: both readings ask the SAME
+/// CR 508.6 question ("has [a player] attacked you?") and differ only in which
+/// player is the subject, so they stay one condition with one history
+/// authority (`GameState::player_attacked_player_last_turn`). A sibling
+/// variant would fork every leaf walker in this file forever.
+///
+/// Categorical boundary: both variants lie within CR 508 (declare attackers),
+/// a single rule section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum AttackedYouScope {
+    /// CR 508.6 + CR 109.5: existential over players — true when ANY player
+    /// other than you declared a creature attacking you during THAT player's
+    /// most recent completed turn. The pre-parameterization reading (Avenge's
+    /// self-spell cost reduction), and the serde default, so every legacy
+    /// `{"type":"AnyPlayerAttackedYouLastTurn"}` tag keeps its meaning.
+    #[default]
+    AnyPlayer,
+    /// CR 508.1b + CR 508.6 + CR 506.3: anchored to the player the attacking
+    /// creature is PROPOSED to attack (CR 508.1b — the announcement step, where
+    /// the active player declares which player each chosen creature is
+    /// attacking) or, once it is an attacking creature, the player recorded for
+    /// it (CR 508.1k) — "players WHO attacked you", a per-pairing question
+    /// rather than an existential one.
+    ///
+    /// CR 508.1c is deliberately NOT cited here: that rule governs checking
+    /// RESTRICTIONS against a declaration, which is a different step from
+    /// selecting the target this scope anchors to. It is cited where this engine
+    /// actually validates restrictions (`game::combat`'s declaration
+    /// validator).
+    ///
+    /// KIND-PRESERVING (CR 506.3): an attack on a planeswalker or a battle has
+    /// no attacked PLAYER and answers false. It deliberately does NOT take
+    /// CR 508.5's collapse to the planeswalker's controller or the battle's
+    /// protector — see `game::combat::attacked_player_for_target`.
+    AttackedPlayer,
+}
+
+impl AttackedYouScope {
+    /// serde `skip_serializing_if` for the default reading, so a condition
+    /// carrying the default scope re-serializes to the legacy tag
+    /// byte-identically. Associated-fn predicate, mirroring
+    /// `EtbTapState::is_unspecified` and the `PlayerScope::AllPlayers
+    /// { exclude }` field attribute.
+    pub fn is_any_player(&self) -> bool {
+        matches!(self, AttackedYouScope::AnyPlayer)
+    }
+}
+
 /// Condition for static ability applicability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -11661,16 +11713,39 @@ pub enum StaticCondition {
     SpellCastWithVariantThisTurn {
         variant: crate::types::game_state::CastingVariant,
     },
-    /// CR 508.6 + CR 514.2 + CR 109.5: True when any (non-eliminated) player
-    /// declared a creature attacking the ability's controller ("you") during
-    /// that player's most recent COMPLETED turn. Existential over players; the
-    /// defender is the source controller (CR 109.5). Backed by the
-    /// `attacked_defenders_last_turn` snapshot taken at each turn's cleanup step
-    /// (CR 514.2). Shared "attacked you during their last turn" revenge
-    /// predicate: Avenge (this self-spell cost reduction), with O-Kagachi and
-    /// Weathered Sentinels as future adopters via
-    /// `GameState::player_attacked_player_last_turn`.
-    AnyPlayerAttackedYouLastTurn,
+    /// CR 508.6 + CR 109.5: the "attacked you during their last
+    /// turn" revenge gate. TRUE when a player declared one or more creatures
+    /// attacking the ability's controller ("you", CR 109.5) during that
+    /// player's most recent COMPLETED turn. Backed by the
+    /// `attacked_defenders_last_turn` snapshot, read through the single history
+    /// authority `GameState::player_attacked_player_last_turn`.
+    ///
+    /// The snapshot rolls over at the cleanup step, and that timing is ENGINE
+    /// IMPLEMENTATION rather than a CR mandate. CR 514.2 — previously cited
+    /// here — governs only damage removal and the end of "until end of turn"
+    /// and "this turn" effects; no rule defines an attack-history snapshot.
+    /// CR 508.6 supplies the semantics ("has attacked [a player]"); the
+    /// cleanup boundary is merely where this engine advances "last turn".
+    ///
+    /// `scope` selects WHICH player is asked about, and is the only difference
+    /// between the two readings:
+    ///
+    /// - `AttackedYouScope::AnyPlayer` (default, and the legacy tag's meaning):
+    ///   EXISTENTIAL over every player other than you. Avenge's self-spell cost
+    ///   reduction.
+    /// - `AttackedYouScope::AttackedPlayer` (CR 508.1b + CR 506.3): anchored to
+    ///   the player this creature is declared to be attacking (CR 508.1b, the
+    ///   announcement step — NOT CR 508.1c, which checks restrictions against a
+    ///   declaration) or recorded as attacking (CR 508.1k) — "can attack PLAYERS
+    ///   WHO attacked
+    ///   you". Kind-preserving: a planeswalker or battle attack has no attacked
+    ///   player and answers false, deliberately NOT taking CR 508.5's collapse.
+    ///   Answerable only with an attack anchor bound, which is why
+    ///   `Self::needs_defending_player_anchor` reports it.
+    AnyPlayerAttackedYouLastTurn {
+        #[serde(default, skip_serializing_if = "AttackedYouScope::is_any_player")]
+        scope: AttackedYouScope,
+    },
     /// CR 701.27: True when any opponent has at least this many poison counters.
     OpponentPoisonAtLeast {
         count: u32,
@@ -11941,7 +12016,7 @@ impl StaticCondition {
             | StaticCondition::CompletedADungeon
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
-            | StaticCondition::AnyPlayerAttackedYouLastTurn
+            | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
@@ -12060,7 +12135,7 @@ impl StaticCondition {
             | StaticCondition::CompletedADungeon
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
-            | StaticCondition::AnyPlayerAttackedYouLastTurn
+            | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -12168,21 +12243,163 @@ impl StaticCondition {
         self.any_leaf(|leaf| matches!(leaf, StaticCondition::Unrecognized { .. }))
     }
 
-    /// CR 506.2 + CR 508.5: true when this condition tree contains a leaf whose
-    /// answer depends on WHICH player is the defending player. That is only
-    /// answerable relative to a specific attacking creature — from the target it is
-    /// declared to be attacking, or from the target recorded for it once it is an
-    /// attacking creature (CR 508.1k). A CREATURE-LEVEL query ("can this creature
-    /// attack at all?") carries neither, so it must defer to the per-pairing
-    /// authority rather than evaluate the gate unanchored — exactly as
-    /// `StaticDefinition::attack_defended` scoping already defers (CR 508.1c,
-    /// + CR 508.1d for the cost form).
+    /// CR 508.1c + CR 508.1k: true when this condition tree contains a leaf that
+    /// CANNOT BE ANSWERED AT CREATURE LEVEL — a leaf whose truth depends on an
+    /// attack anchor (the target a creature is proposed to attack, CR 508.1b, or
+    /// the target recorded for it once it is an attacking creature, CR 508.1k).
+    /// A creature-level query ("can this creature attack at all?") carries
+    /// neither, so it must defer to the per-pairing authority rather than
+    /// evaluate the gate unanchored — exactly as `StaticDefinition::attack_defended`
+    /// scoping already defers (CR 508.1c, + CR 508.1d for the cost form).
+    ///
+    /// "Cannot be answered at creature level" is the predicate's REAL job at both
+    /// of its deferral sites, and it is deliberately BROADER than the CR 506.2 +
+    /// CR 508.5 notion it originally named ("depends on which player is the
+    /// defending player"). The two leaves it reports are anchor-dependent in
+    /// different ways:
+    ///
+    /// - `DefendingPlayerControls` (CR 506.2 + CR 508.5): needs THE DEFENDING
+    ///   PLAYER, which CR 508.5 resolves from a planeswalker's controller or a
+    ///   battle's protector as readily as from an attacked player.
+    /// - `AnyPlayerAttackedYouLastTurn { scope: AttackedPlayer }` (CR 508.1b +
+    ///   CR 506.3): needs THE ATTACK TARGET AS A PLAYER — strictly NARROWER, and
+    ///   deliberately kind-preserving, since a planeswalker or battle attack has
+    ///   no attacked player at all.
+    ///
+    /// Reporting both from one predicate is right BECAUSE the deferral sites ask
+    /// the broader question; matching on variant identity instead of on the
+    /// anchor-dependence of the leaf is what this function must not do.
     ///
     /// Delegates to [`Self::any_leaf`], the same compiler-forced leaf walker
     /// `contains_unrecognized` and `has_unbindable_designation_anchor` use, so a
     /// future nested-condition variant is a compile error here too.
     pub(crate) fn needs_defending_player_anchor(&self) -> bool {
-        self.any_leaf(|leaf| matches!(leaf, StaticCondition::DefendingPlayerControls { .. }))
+        self.any_leaf(|leaf| {
+            matches!(
+                leaf,
+                StaticCondition::DefendingPlayerControls { .. }
+                    | StaticCondition::AnyPlayerAttackedYouLastTurn {
+                        scope: AttackedYouScope::AttackedPlayer
+                    }
+            )
+        })
+    }
+
+    /// CR 508.1b (docs/MagicCompRules.txt:2268) announces which player each chosen
+    /// creature is attacking — THE PAIRING THIS WHOLE MAP IS RELATIVE TO; CR 508.1c
+    /// (:2270) then checks restrictions against that pairing. CR 611.3a (:2926)
+    /// keeps a STATIC-ability continuous effect unlocked, and CR 611.2c (:2913)
+    /// does the same for a RESOLUTION-generated one (a `CanAttackWithDefender`
+    /// grant modifies neither characteristics nor controller, so it is
+    /// rules-modifying and its affected set is not locked in) — both are needed
+    /// because this map serves production (c) and the continuous compound as well
+    /// as the static productions.
+    ///
+    /// This condition's reading ANCHORED to the player an attacking creature is
+    /// proposed to attack, if it has one.
+    ///
+    /// The other half of [`Self::needs_defending_player_anchor`], and deliberately
+    /// adjacent to it: that predicate answers "can this be answered at creature
+    /// level?", this map answers "what IS the per-pairing reading?". Split across
+    /// files they would drift — a condition could report `true` there with no
+    /// production able to produce it, or the reverse.
+    ///
+    /// An OPT-IN ALLOWLIST, written as an EXHAUSTIVE match: one arm produces the
+    /// anchored reading and every other `StaticCondition` variant is enumerated
+    /// explicitly to `None`. There is no `_` wildcard, and one must not be
+    /// reintroduced — CLAUDE.md requires exhaustive matches over wildcard
+    /// fallbacks when the enum is known, and here the compiler is the only thing
+    /// that forces a DECISION when a variant is added.
+    ///
+    /// `None` remains the FAIL-CLOSED direction: a condition with no anchored
+    /// reading routes to the permanently-inert marker and the card stays red,
+    /// never to a silent mis-anchoring. What the exhaustive form buys is that a
+    /// NEW anchored condition cannot inherit that default silently — it fails the
+    /// build until someone chooses. (An earlier revision of this comment described
+    /// a `_ => None` default and told the reader not to "fix" it; the wildcard was
+    /// removed in this branch and the note is corrected here.)
+    ///
+    /// A pass-through arm for conditions that ALREADY report
+    /// `needs_defending_player_anchor` (e.g. `DefendingPlayerControls`) was
+    /// considered and rejected: no interposed segment can normalize to one —
+    /// `parse_inner_condition` declines "a player controls a creature" — so the arm
+    /// would be unreachable and undiscriminated.
+    ///
+    /// KIND-PRESERVING by inheritance (CR 506.3 :2208): the anchored scope answers
+    /// false for a planeswalker or battle target. See
+    /// `game::combat::attacked_player_for_target`.
+    pub(crate) fn defending_player_anchored_form(&self) -> Option<StaticCondition> {
+        match self {
+            StaticCondition::AnyPlayerAttackedYouLastTurn { .. } => {
+                Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                    scope: AttackedYouScope::AttackedPlayer,
+                })
+            }
+            // CLAUDE.md: exhaustive `match` without a wildcard when the enum is
+            // known. A future anchored condition must produce a compiler error
+            // here rather than silently inheriting an inert `None` gate — the
+            // wildcard this replaces would have swallowed it.
+            StaticCondition::DevotionGE { .. }
+            | StaticCondition::IsPresent { .. }
+            | StaticCondition::ChosenColorIs { .. }
+            | StaticCondition::ChosenLabelIs { .. }
+            | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::HasMaxSpeed
+            | StaticCondition::SpeedGE { .. }
+            | StaticCondition::And { .. }
+            | StaticCondition::Or { .. }
+            | StaticCondition::Not { .. }
+            | StaticCondition::DayNightIs { .. }
+            | StaticCondition::HasCounters { .. }
+            | StaticCondition::CastVariantPaid { .. }
+            | StaticCondition::RecipientHasCounters { .. }
+            | StaticCondition::ClassLevelGE { .. }
+            | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::SourceAttackingAlone
+            | StaticCondition::SourceIsAttacking
+            | StaticCondition::SourceIsBlocking
+            | StaticCondition::SourceIsBlocked
+            | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsInitiative
+            | StaticCondition::NoMonarch
+            | StaticCondition::HasCityBlessing
+            | StaticCondition::HasEnduringStory
+            | StaticCondition::CompletedADungeon
+            | StaticCondition::WasStartingPlayer { .. }
+            | StaticCondition::SpellCastWithVariantThisTurn { .. }
+            | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::UnlessPay { .. }
+            | StaticCondition::Unrecognized { .. }
+            | StaticCondition::DuringYourTurn
+            | StaticCondition::DuringOpponentsTurn
+            | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+            | StaticCondition::SourceEnteredThisTurn
+            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::WasCast { .. }
+            | StaticCondition::IsRingBearer
+            | StaticCondition::RingLevelAtLeast { .. }
+            | StaticCondition::ControlsCommander { .. }
+            | StaticCondition::SourceIsTapped
+            | StaticCondition::IsTapped { .. }
+            | StaticCondition::SourceIsFaceUp
+            | StaticCondition::SourceIsSaddled
+            | StaticCondition::SourceControllerEquals { .. }
+            | StaticCondition::SourceIsEquipped
+            | StaticCondition::SourceIsEnchanted
+            | StaticCondition::SourceIsMonstrous
+            | StaticCondition::SourceIsHarnessed
+            | StaticCondition::SourceAttachedToCreature
+            | StaticCondition::SourceMatchesFilter { .. }
+            | StaticCondition::TopOfLibraryMatches { .. }
+            | StaticCondition::RecipientMatchesFilter { .. }
+            | StaticCondition::RecipientAttackingOwnerTarget { .. }
+            | StaticCondition::SourceIsPaired
+            | StaticCondition::SourceInZone { .. }
+            | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::AdditionalCostPaid
+            | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::None => None,
+        }
     }
 
     /// Returns the text of every [`StaticCondition::Unrecognized`] leaf found
@@ -12267,7 +12484,7 @@ impl StaticCondition {
             | StaticCondition::CompletedADungeon
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
-            | StaticCondition::AnyPlayerAttackedYouLastTurn
+            | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
