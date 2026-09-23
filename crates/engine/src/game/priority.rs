@@ -1,8 +1,8 @@
 use crate::game::engine::EngineError;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
-use crate::types::player::PlayerId;
 use crate::types::phase::Phase;
+use crate::types::player::PlayerId;
 
 use super::players;
 use super::precast_copy_shortcut;
@@ -455,18 +455,16 @@ mod tests {
         });
         state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
 
-        let outcome = handle_priority_pass_with_limit(
-            PlayerId(1),
-            &mut state,
-            &mut Vec::new(),
-            None,
-        );
+        let outcome =
+            handle_priority_pass_with_limit(PlayerId(1), &mut state, &mut Vec::new(), None);
 
         assert!(outcome.cleanup_deferred);
         assert_eq!(state.phase, Phase::Cleanup);
         assert!(matches!(
             outcome.waiting_for,
-            WaitingFor::Priority { player: PlayerId(1) }
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
         ));
     }
 
