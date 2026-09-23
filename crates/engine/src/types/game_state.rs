@@ -7365,6 +7365,14 @@ pub struct ManaAbilityCostCursor {
     pub next_exiled: usize,
     #[serde(default)]
     pub next_sacrificed: usize,
+    /// Index into `PendingManaAbility::chosen_counter_counts` for the NEXT
+    /// chosen-count `RemoveCounter` leaf to consume, mirroring
+    /// `next_discard`/`next_tapper`/`next_sacrificed`: a composite cost may
+    /// carry more than one such leaf (a literal-X leaf alongside an unrelated
+    /// "any number of" leaf), each needing its own independently-announced
+    /// count rather than sharing one value.
+    #[serde(default)]
+    pub next_counter_choice: usize,
     /// The current selected-exile component, after the move that paused has
     /// been consumed. Its remaining objects must move before the cost cursor
     /// advances to the next component.
@@ -8217,10 +8225,34 @@ pub struct PendingManaAbility {
     /// surfaces `WaitingFor::PayManaAbilityMana` for a genuine choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_mana_payment: Option<Vec<ManaType>>,
-    /// CR 107.1c + CR 605.3a: Chosen count for "remove any number of counters"
-    /// in a mana-ability cost. The amount is chosen before mana production.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chosen_counter_count: Option<u32>,
+    /// CR 107.3a (literal "Remove X counters") / CR 107.1c (literal "any
+    /// number of" counters): chosen counts for a mana-ability cost's
+    /// self-RemoveCounter components that require an announced count. One
+    /// entry per such component, appended in the SAME order those components
+    /// are encountered when the cost is flattened
+    /// (`append_mana_ability_cost_components`) — a composite cost with
+    /// multiple independent chosen-count `RemoveCounter` leaves (e.g. a
+    /// literal-X leaf alongside an unrelated "any number of" leaf) gets one
+    /// independent entry per leaf rather than collapsing them into a single
+    /// value. Consumed sequentially during payment via
+    /// `ManaAbilityCostCursor::next_counter_choice`. The amount(s) are chosen
+    /// before mana production.
+    ///
+    /// A retype like this is normally version-backed rather than left silent
+    /// — see the `chosen_tappers_pre_option_wire_shape_is_rejected` doc block
+    /// above for the precedent this follows: `PROTOCOL_VERSION` moved to 78
+    /// (#9207) for the same reason. This field intentionally carries NO
+    /// `#[serde(default)]` and NO `skip_serializing_if`, unlike the scalar
+    /// `chosen_counter_count: Option<u32>` field it replaces: a `Vec` field
+    /// (unlike `Option`) already fails deserialization on a missing key
+    /// without any extra machinery, so simply never omitting it on write (an
+    /// empty `Vec` serializes as `[]`, not skipped) is enough to make an old
+    /// pre-78 payload — which carries the old field name and can therefore
+    /// never populate this one — a loud parse failure instead of a silently
+    /// empty (and therefore wrongly reopened) choice stage. Pinned by
+    /// `chosen_counter_counts_missing_field_wire_shape_is_rejected` in this
+    /// file's test module.
+    pub chosen_counter_counts: Vec<u32>,
     /// CR 107.3a + CR 601.2b: Announced value of X for this mana ability. Two
     /// writers, both binding the same CR 107.3a announcement:
     ///
@@ -33067,7 +33099,7 @@ mod tests {
                         chosen_tappers,
                         chosen_discards: Vec::new(),
                         chosen_mana_payment: None,
-                        chosen_counter_count: None,
+                        chosen_counter_counts: Vec::new(),
                         chosen_x: None,
                         collected_evidence: Vec::new(),
                         chosen_exiled: Vec::new(),
@@ -33131,6 +33163,120 @@ mod tests {
         assert!(
             omitted_error.to_string().contains("chosen_tappers"),
             "expected a missing-`chosen_tappers` deserialize error, got: {omitted_error}"
+        );
+    }
+
+    /// PR #9207 review follow-up: `PendingManaAbility::chosen_counter_count:
+    /// Option<u32>` retyped to `chosen_counter_counts: Vec<u32>` so a
+    /// composite mana-ability cost with more than one chosen-count
+    /// `RemoveCounter` leaf (a literal-X leaf alongside an unrelated "any
+    /// number of" leaf) carries an independently-announced amount per leaf
+    /// instead of collapsing them into one scalar. The field intentionally
+    /// carries NO `#[serde(default)]` and no `skip_serializing_if`, backed by
+    /// `lobby_broker::PROTOCOL_VERSION` 78 / `WIRE_PROTOCOL_VERSION` 60 — the
+    /// same convention entry 23 (`PayableResource::ManaGeneric`) established
+    /// and `chosen_tappers_pre_option_wire_shape_is_rejected` above pins for
+    /// the sibling `chosen_tappers` retype.
+    ///
+    /// Unlike `chosen_tappers` (an `Option`, which needs the
+    /// `deserialize_required_chosen_tappers` trick because `serde_derive`
+    /// otherwise decodes a MISSING `Option` field to `None` regardless of
+    /// `#[serde(default)]`), a bare `Vec` field already fails deserialization
+    /// on a missing key with no extra machinery — so simply never skipping it
+    /// on write is enough. This test proves that through the actual
+    /// production restore path (`PersistedGameState`): a pre-78 payload,
+    /// which can only carry the OLD scalar field under the old name and
+    /// therefore never populates this one, must be a loud parse failure
+    /// rather than silently defaulting to an empty choice list and reopening
+    /// an already-answered `PayAmountChoice` prompt.
+    #[test]
+    fn chosen_counter_counts_missing_field_wire_shape_is_rejected() {
+        let state_with = |chosen_counter_counts: Vec<u32>| {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::PayAmountChoice {
+                player: PlayerId(0),
+                resource: PayableResource::Counters,
+                min: 0,
+                max: 3,
+                accumulated: 0,
+                source_id: ObjectId(1),
+                pending_mana_ability: Some(Box::new(PendingManaAbility {
+                    player: PlayerId(0),
+                    source_id: ObjectId(1),
+                    ability_index: None,
+                    rules_execution_node: None,
+                    ability_snapshot: None,
+                    color_override: None,
+                    resume: ManaAbilityResume::Priority,
+                    cost_move_resume: None,
+                    chosen_tappers: None,
+                    chosen_discards: Vec::new(),
+                    chosen_mana_payment: None,
+                    chosen_counter_counts,
+                    chosen_x: None,
+                    collected_evidence: Vec::new(),
+                    chosen_exiled: Vec::new(),
+                    chosen_sacrificed_battlefield: Vec::new(),
+                    cost_paid_object: None,
+                    batch_siblings: Vec::new(),
+                })),
+            };
+            state
+        };
+
+        // A composite cost with two independently-answered leaves (the exact
+        // shape this retype exists to represent). New->new must round-trip
+        // both entries in order, not collapse or drop either one.
+        let two_leaves_answered = serde_json::to_value(state_with(vec![1, 3]))
+            .expect("two-leaf fixture state serializes");
+        let restored =
+            match serde_json::from_value::<PersistedGameState>(two_leaves_answered.clone())
+                .expect("a payload that carries `chosen_counter_counts` restores")
+            {
+                PersistedGameState::Raw(state) => state,
+                PersistedGameState::Trusted(_) => {
+                    panic!("raw fixture decoded as a trusted envelope")
+                }
+            };
+        match &restored.waiting_for {
+            WaitingFor::PayAmountChoice {
+                pending_mana_ability: Some(mana_ability),
+                ..
+            } => assert_eq!(
+                mana_ability.chosen_counter_counts,
+                vec![1, 3],
+                "two independently-announced leaf amounts must round-trip in order"
+            ),
+            other => panic!("expected a mana-ability PayAmountChoice wait, got {other:?}"),
+        }
+
+        // No `skip_serializing_if`, so the unanswered (empty) state is now
+        // STATED on the wire as `[]` rather than inferred from an absent key.
+        let unanswered = serde_json::to_value(state_with(Vec::new()))
+            .expect("unanswered fixture state serializes");
+        assert_eq!(
+            unanswered["waiting_for"]["data"]["pending_mana_ability"]
+                .as_object()
+                .expect("the pending mana ability payload is a JSON object")
+                .get("chosen_counter_counts"),
+            Some(&serde_json::Value::Array(Vec::new())),
+            "`chosen_counter_counts` must be serialized unconditionally, empty included: \
+             an omitted key here would be indistinguishable from the pre-77 wire shape \
+             this break exists to reject"
+        );
+
+        // The pre-77 wire shape: no `chosen_counter_counts` key at all (the
+        // old scalar lived under the different name `chosen_counter_count`).
+        let mut legacy_omitted = two_leaves_answered;
+        legacy_omitted["waiting_for"]["data"]["pending_mana_ability"]
+            .as_object_mut()
+            .expect("the pending mana ability payload is a JSON object")
+            .remove("chosen_counter_counts");
+        let omitted_error = serde_json::from_value::<PersistedGameState>(legacy_omitted)
+            .expect_err("pre-77 omitted-`chosen_counter_counts` payload must fail to deserialize");
+        assert!(
+            omitted_error.to_string().contains("chosen_counter_counts"),
+            "expected a missing-`chosen_counter_counts` deserialize error, got: {omitted_error}"
         );
     }
 
@@ -36852,7 +36998,7 @@ mod tests {
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
-                    chosen_counter_count: None,
+                    chosen_counter_counts: Vec::new(),
                     chosen_x: None,
                     collected_evidence: Vec::new(),
                     chosen_exiled: Vec::new(),

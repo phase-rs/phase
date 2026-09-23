@@ -12858,6 +12858,54 @@ pub fn is_chosen_remove_counter_cost_count(count: u32) -> bool {
     )
 }
 
+/// CR 118.3 + CR 601.2h: whether a cost's chosen-count self-`RemoveCounter`
+/// leaves (leaves whose count is [`is_chosen_remove_counter_cost_count`])
+/// combine an `Any`-type leaf with an `OfType` leaf. This is the one
+/// combination with no sound reservation model: reserving the `Any` leaf's
+/// full announced amount against a later `OfType` leaf's typed availability
+/// is overly conservative (an `Any` leaf can draw from ANY type, so its
+/// announced amount doesn't necessarily compete with a specific later type),
+/// but NOT reserving it risks the untyped removal (`remove_counters_for_mana_cost`'s
+/// `Any` arm, which has no player-directed type allocation and iterates the
+/// object's counter types in an unspecified order) silently consuming
+/// counters a later typed leaf needed. Two `OfType` leaves of the same type,
+/// or two `Any` leaves, have no such ambiguity: both members of either pair
+/// draw from literally the same pool, so an exact aggregate reservation is
+/// sound and remains supported.
+///
+/// Shared between the parser (which must not accept this shape as an
+/// ordinary supported cost — `demote_unsupported_composite_counter_choice_costs`
+/// in `oracle.rs`) and the mana-ability runtime (`advance_mana_ability_activation`
+/// in `mana_abilities.rs`, which must refuse to activate it), so the two
+/// layers can never disagree about which shape is unsupported.
+pub fn chosen_count_remove_counter_leaves_mix_any_with_typed(cost: &AbilityCost) -> bool {
+    fn collect<'a>(cost: &'a AbilityCost, leaves: &mut Vec<&'a CounterMatch>) {
+        match cost {
+            AbilityCost::Composite { costs } => {
+                for cost in costs {
+                    collect(cost, leaves);
+                }
+            }
+            AbilityCost::RemoveCounter {
+                count,
+                counter_type,
+                target: None,
+                ..
+            } if is_chosen_remove_counter_cost_count(*count) => {
+                leaves.push(counter_type);
+            }
+            _ => {}
+        }
+    }
+    let mut leaves = Vec::new();
+    collect(cost, &mut leaves);
+    leaves.len() > 1
+        && leaves.iter().any(|leaf| matches!(leaf, CounterMatch::Any))
+        && leaves
+            .iter()
+            .any(|leaf| matches!(leaf, CounterMatch::OfType(_)))
+}
+
 /// CR 606.5: Is this activation cost a planeswalker loyalty-ability cost?
 ///
 /// Two shapes qualify: the fixed `[+N]` / `[−N]` / `[0]` form (`Loyalty`), and

@@ -10,13 +10,14 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v75 carries producer-owned paid-offer cleanup authority; v76 carries CR
 // 601.2f caster-elected cost-reduction ordering (#8885). v77
 // is a pre-emptive bump moved ahead of new `GameFormat` variants,
-// carrying no wire-shape change of its own.
+// carrying no wire-shape change of its own; v78 retypes the required
+// PendingManaAbility chosen-counter field (#9207).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
-// +6: upstream's v76 CR 601.2f caster-elected cost-reduction ordering, plus
-// the v77 pre-emptive bump ahead of new format names.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 6;
+// +7: upstream's v76 CR 601.2f caster-elected cost-reduction ordering, the
+// v77 pre-emptive format bump, and v78's chosen-counter field retype (#9207).
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 7;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -44,7 +45,7 @@ const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
 const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 5;
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 6;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

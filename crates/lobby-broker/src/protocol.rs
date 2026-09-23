@@ -60,6 +60,13 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 78 — `PendingManaAbility::chosen_counter_count: Option<u32>` retyped to
+///      `chosen_counter_counts: Vec<u32>` (#9207), so each chosen-count
+///      `RemoveCounter` leaf of a composite mana ability retains its own
+///      announced amount. The new field is required and always serialized, so
+///      a v77 payload with the old scalar field fails to deserialize instead
+///      of reopening an answered choice prompt. P2P moves in lockstep to v60.
+///
 /// 77 — Prospective: no `GameState` or `GameAction` shape change lands in
 ///      this commit. Moved ahead of new `GameFormat` variants.
 ///      `GameFormat` serializes as its `Display`
@@ -599,7 +606,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 77;
+pub const PROTOCOL_VERSION: u32 = 78;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1803,12 +1810,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 77);
+        assert_eq!(PROTOCOL_VERSION, 78);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 76);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 77);
     }
 
     #[test]

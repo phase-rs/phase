@@ -3315,21 +3315,19 @@ mod tests {
         }
     }
 
-    /// Prospective: no `GameState` or `GameAction` shape changes land in
-    /// this bump. Moved ahead of new `GameFormat` variants — see `PROTOCOL_VERSION`'s own `/// 77` entry in
-    /// `crates/lobby-broker/src/protocol.rs`. A v76 peer is refused anyway:
-    /// full-game sessions are exact-match on both ends (see
-    /// `full_game_floor_is_current_only_not_a_rollout_window` below), so
-    /// admitting one is a rollout-window regression independent of whether
-    /// THIS particular bump changed any wire shape.
+    /// `PendingManaAbility::chosen_counter_count: Option<u32>` retyped to
+    /// `chosen_counter_counts: Vec<u32>` (#9207), so independently announced
+    /// counter-removal amounts survive composite mana-ability payment. The
+    /// changed required field name makes a v77 GameState payload fail to
+    /// deserialize and therefore requires v78 before state delivery.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_77_ahead_of_freeform_format_names() {
-        assert_eq!(PROTOCOL_VERSION, 77);
+    fn protocol_version_is_78_for_chosen_counter_counts_retype() {
+        assert_eq!(PROTOCOL_VERSION, 78);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3338,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_77_ahead_of_freeform_format_names` stays
+    /// `protocol_version_is_78_for_chosen_counter_counts_retype` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
