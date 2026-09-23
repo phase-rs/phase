@@ -605,6 +605,9 @@ fn permission_duration_expires_at(
         // CR 610.3: ended by the monarch zone-change duration in
         // `zone_pipeline`, not by a turn boundary.
         Duration::UntilOpponentBecomesMonarch => false,
+        // CR 611.2a + CR 601.2i: ended by the spell-cast expiry in
+        // `casting_costs`, not by a turn boundary.
+        Duration::UntilEvent { .. } => false,
         // CR 611.2a: no stated end.
         Duration::Permanent => false,
     }
@@ -675,6 +678,10 @@ pub(crate) fn casting_permission_duration_is_enforceable(
         // casting permissions — no pass revokes a permission when an opponent
         // becomes the monarch.
         Duration::UntilOpponentBecomesMonarch => false,
+        // CR 611.2a + CR 601.2i: the spell-cast expiry in `casting_costs` ends
+        // transient continuous effects only — no pass revokes a casting
+        // permission when a spell becomes cast.
+        Duration::UntilEvent { .. } => false,
     }
 }
 
@@ -1074,6 +1081,7 @@ pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState)
                 | Duration::ForAsLongAs { .. }
                 | Duration::UntilSourceExilesAnotherCard
                 | Duration::UntilOpponentBecomesMonarch
+                | Duration::UntilEvent { .. }
                 | Duration::Permanent => continue,
             };
             if !still_live {
@@ -1176,6 +1184,9 @@ pub(crate) fn prune_lapsed_host_bound_effects(state: &mut GameState) {
             | Duration::ForAsLongAs { .. }
             | Duration::UntilSourceExilesAnotherCard
             | Duration::UntilOpponentBecomesMonarch
+            // CR 611.2a + CR 601.2i: ended by the spell-cast expiry in
+            // `casting_costs`, not by a host lapse.
+            | Duration::UntilEvent { .. }
             | Duration::Permanent => false,
         })
         .map(|e| e.id)
@@ -18174,6 +18185,7 @@ mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                duration_event_source: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -18208,6 +18220,7 @@ mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                duration_event_source: None,
                 source_name: String::new(),
             });
         let mut effects = vec![];
@@ -18254,6 +18267,7 @@ mod tests {
                     condition: None,
                     duration_subject: None,
                     end_permission: None,
+                    duration_event_source: None,
                     source_name: String::new(),
                 });
         }

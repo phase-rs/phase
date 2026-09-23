@@ -619,7 +619,7 @@ pub fn activated_ability_definitions(
     abilities
 }
 
-fn activation_ability_definition(
+pub(crate) fn activation_ability_definition(
     state: &GameState,
     source_id: ObjectId,
     ability_index: usize,

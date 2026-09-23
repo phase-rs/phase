@@ -1675,6 +1675,10 @@
       "labelExile": "Exil",
       "labelBehold": "Erblicken"
     },
+    "empowerJace": {
+      "title": "Jace stärken",
+      "subtitle": "Wähle einen Jace-Spielstein, den du kontrollierst, für +{{count}} Loyalität"
+    },
     "collectEvidence": {
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"

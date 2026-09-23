@@ -79,6 +79,7 @@
     "draws_one": "（{{count}}引き分け）",
     "draws_other": "（{{count}}引き分け）",
     "main": "メイン（{{count}}、最低{{min}}）",
+    "mainNoMinimum": "メイン（{{count}}）",
     "sideboard": "サイドボード（{{count}}）",
     "sideboardCapped": "サイドボード（{{count}}/{{max}}）",
     "moveFromSideboard": "サイドボードからカードを移動します。",
@@ -95,6 +96,9 @@
     "title": "ロビーサーバーに接続できません",
     "message": "ゲームは公開リストに表示されません。P2Pでホストし、対戦相手にルームコードを直接共有できます。",
     "continueWithoutLobby": "ロビーなしで続行"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "このロビーサーバーは古いため、選択したフォーマットのゲームを掲載できません（ロビープロトコル{{needed}}が必要です）。"
   },
   "joinErrorDialog": {
     "dismiss": "閉じる"
@@ -276,7 +280,11 @@
     "noSavedCustomFormats": "保存済みカスタムフォーマットはまだありません。",
     "customFormatResolveFailed": "保存済みフォーマットを読み込めませんでした。",
     "customFormatHostingUnavailable": "カスタムフォーマットでのホストにはまだ対応していません — デッキ適性を確認できません。今は保存してプレビューしてください。",
-    "hostGame": "ルームを作成"
+    "hostGame": "ルームを作成",
+    "botGameNotice": "Discordゲーム {{code}} をホストしています。接続とプライバシーの設定はDiscordの投稿に従います。",
+    "botSeedIgnored": "Discordの投稿の一部の設定はここでは使用できません — フォーマットとプレイヤー数を確認してください。",
+    "botP2PNotice": "この端末がゲームを実行します。アプリを開いたまま接続を維持してください。",
+    "botServerNotice": "専用サーバーがゲームを実行します。遅くなったりオフラインになったりする場合があります。"
   },
   "page": {
     "deckRejected": "ホストにデッキを拒否されました。",
@@ -309,7 +317,17 @@
     "pickDeck": "デッキを選択",
     "anonymous": "匿名",
     "joining": "参加中",
-    "joinNeedsServer": "ゲームに参加する前にサーバーを選択してください。"
+    "joinNeedsServer": "ゲームに参加する前にサーバーを選択してください。",
+    "invalidGameLink": "このゲームリンクは無効か、不完全です。",
+    "waitingForHostTitle": "ホストを待っています…",
+    "waitingForHostMessage": "ホストがまだこのゲームを開いていないか、ゲームが終了しています。ホストがリンクを開いたら再試行してください。",
+    "botLinkBrokerUnreachable": "このDiscordゲームを開くためのロビーサーバーに接続できませんでした。接続を確認してから、ホスト用リンクをもう一度開いてください。",
+    "updatingTitle": "最新バージョンに更新しています…",
+    "updatingMessage": "phase.rsの新しいバージョンがあります。準備ができるとページが再読み込みされます。",
+    "refreshAfterGame": "現在のゲームを終えてから、更新してください。",
+    "updateFailedTitle": "自動で更新できませんでした",
+    "updateFailedMessage": "更新して最新バージョンを取得するか、このバージョンのまま続行してください。異なるバージョンのプレイヤーは同じゲームに参加できません。",
+    "continueAnyway": "このまま続行"
   },
   "draftLobbyPanel": {
     "draftPod": "ドラフトポッド",
@@ -325,5 +343,20 @@
     "checkingLegality": "デッキの適性を確認中…",
     "legal": "✓ {{format}}で使用可能",
     "notLegal": "{{format}}では使用不可"
+  },
+  "botLink": {
+    "codeUnsupported": "このサーバーはまだDiscordゲームに対応していません。",
+    "codeInUse": "このゲームのコードは、以前のルームがまだ使用しています。数分待ってから、Discordのホスト用リンクをもう一度開いてください。それでも解決しない場合は、新しく /lfg を始めてください。"
+  },
+  "openDesktop": {
+    "title": "phase.rs デスクトップアプリを開いています…",
+    "invalid": "このリンクはデスクトップアプリで開けません。",
+    "openApp": "デスクトップアプリを開く",
+    "continueInBrowser": "開きませんか？ブラウザで続ける",
+    "getDesktopApp": "デスクトップアプリを入手"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "ゲーム進行中",
+    "gameInProgressBody": "現在のゲームを終了するか退出してから、もう一度リンクを開いてください。"
   }
 }

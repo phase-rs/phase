@@ -51,8 +51,9 @@ use crate::types::ability::{
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
-    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner,
+    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
+    ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -6229,6 +6230,39 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         } => {
             let mut zones = zones.into_iter();
             let zone = zones.next().unwrap_or(Zone::Hand);
+            // CR 608.2c + CR 608.2d: this clause NAMES its own zone ("a creature
+            // card in your graveyard"), so its candidate pool is that zone — not
+            // whatever set an earlier instruction in the same chain happened to
+            // publish. `Legacy` prefers the chain's tracked set whenever one
+            // exists, which silently substituted the preceding clause's output
+            // for the named zone: Rejoin the Fight offered only the three cards
+            // it had just milled and never the rest of the graveyard.
+            //
+            // EXCEPT when the filter carries `TargetFilter::ExiledBySource` —
+            // the "exiled this way" anaphor. Those clauses name a zone AND
+            // refer back to the set an EARLIER INSTRUCTION OF THIS SAME ABILITY
+            // put there, which is still CR 608.2c (the instructions are
+            // followed in the order written, and the later one refers to the
+            // earlier one's result). Deliberately NOT CR 607.2a: that rule
+            // links two SEPARATE abilities printed on one object (CR 607.1),
+            // whereas Author of Shadows and Plargg and Nassari each carry a
+            // single triggered ability whose second sentence refers to its own
+            // first sentence.
+            //
+            // Keeping `Legacy` here preserves pool PROVENANCE: the printed pool
+            // is "what this instruction exiled", which is exactly the chain's
+            // tracked set. `ExiledBySource` would independently reject cards
+            // this source never exiled, so this is not the difference between
+            // offering unrelated exile and not — it is the difference between a
+            // pool defined by the instruction and one re-derived from the zone.
+            // The `FromTrackedSet` sibling arm above covers the anaphors that
+            // name no zone ("choose one of them"); `ExiledBySource` covers the
+            // ones that do.
+            let candidate_source = if super::lower::filter_mentions_exiled_by_source(&filter) {
+                crate::types::ability::ZoneChoiceCandidateSource::Legacy
+            } else {
+                crate::types::ability::ZoneChoiceCandidateSource::Direct
+            };
             Effect::ChooseFromZone {
                 count,
                 zone,
@@ -6236,7 +6270,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                 zone_owner,
                 filter: Some(filter),
                 chooser: chooser.into(),
-                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                candidate_source,
                 reciprocal_role: None,
                 up_to,
                 selection,
@@ -11198,6 +11232,27 @@ fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<Target
     (target.extract_in_zone() == Some(Zone::Graveyard)).then_some(target)
 }
 
+/// CR 701.71a: recognize the `empower Jace N` keyword action.
+///
+/// Anchored on `tag("empower jace ")` — the trailing space is the word
+/// boundary, and the walker word is part of the tag because CR 701.71a fixes
+/// the walker: a clause naming any other walker is not this keyword action.
+/// N goes through `parse_count_expr`: a number, or `X` together with its
+/// adjacent "where X is …" binder, which `parse_count_expr` binds in place when
+/// the description is a representable quantity. Any residue after N — including
+/// an unrepresentable binder — fails closed (`None`), so the clause stays an
+/// honest gap rather than an EmpowerJace carrying an unbound `X`.
+fn parse_empower_jace(lower: &str) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("empower jace ")
+        .parse(lower.trim())
+        .ok()?;
+    let (count, remainder) = parse_count_expr(rest)?;
+    all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(remainder.trim())
+        .ok()?;
+    Some(Effect::EmpowerJace { count })
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
@@ -11245,6 +11300,13 @@ pub(super) fn parse_imperative_family_ast(
     // forbids.
     if let Some(target) = parse_assimilate_target(lower, ctx) {
         return Some(ImperativeFamilyAst::Assimilate { target });
+    }
+
+    // CR 701.71a: `empower Jace N` is a standalone keyword action. Anchored nom
+    // production beside `recruit` / `assimilate` for the same family (B)
+    // reason: no new string-literal `match first_word` arm.
+    if let Some(effect) = parse_empower_jace(lower) {
+        return Some(ImperativeFamilyAst::GainKeyword(effect));
     }
 
     // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
@@ -12223,14 +12285,39 @@ pub(super) fn parse_imperative_family_ast(
                 .parse(lower)
                 .ok()?;
             let rest = rest.trim().trim_end_matches('.');
-            let count = nom_primitives::parse_number
+            // CR 107.3a: `support X` (Blitzball Stadium, The Crowd Goes Wild)
+            // carries the announced X forward as a `QuantityExpr`; a literal N
+            // becomes `Fixed`. A bare `parse_number` would silently answer 1 for
+            // the X form, since "x" is not a number.
+            let (_, count) = nom_quantity::parse_quantity_expr_number
                 .parse(rest)
-                .map(|(_, n)| n)
-                .unwrap_or(1);
-            // CR 701.41a: On a permanent, Support targets "other" creatures.
-            // On an instant/sorcery, it targets any creatures. When parsing within
-            // a trigger effect (subject is Some), the card is a permanent.
-            let is_other = ctx.subject.is_some();
+                .ok()?;
+            // CR 701.41a: the expansion says "other target creatures" on a
+            // PERMANENT and "target creatures" on an instant or sorcery spell.
+            // Read the card's printed types rather than inferring from the
+            // enclosing grammar: an ETB trigger on a permanent supplies a
+            // subject and an activated ability on the same permanent supplies
+            // none (Joraga Auxiliary, Sol Advocate Eternal), so a
+            // subject-presence proxy silently drops the "other" restriction from
+            // every activated support and lets the source support itself.
+            //
+            // CR 207.2a settles which text is authoritative where the two seem
+            // to disagree. The three non-creature permanents that print support
+            // (Blitzball Stadium, Captured by Lagacs, Together Forever) show
+            // reminder text with no "other" in it, but reminder text "summarizes
+            // a rule" and has no game function — and the summary is accurate,
+            // because "other" excludes only the source object and a
+            // non-creature permanent is never a legal "target creature" anyway.
+            // The clause it elides is vacuous, not absent. Keying on the
+            // permanent axis is therefore identical in behaviour on every
+            // printed card AND stays correct when such a permanent is animated,
+            // which a creature-typed axis would not be.
+            let is_other = !ctx.source_is_instant_or_sorcery();
+            // CR 115.10a: the printed shorthand omits the word "target" that its
+            // CR 701.41a expansion supplies, so state the announcement timing
+            // here rather than letting the text-scan ladder infer it from
+            // "support N". See `ParseContext::declared_target_choice_timing`.
+            ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Stack);
             Some(ImperativeFamilyAst::Support { count, is_other })
         }
         // CR 508.1d + CR 509.1c: "attacks or blocks this turn/combat if able" —
@@ -14176,8 +14263,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause
         }
         // CR 701.41a: Support N → PutCounter with multi-target "up to N".
-        // On permanents (is_other=true): "up to N other target creatures"
-        // On instants/sorceries (is_other=false): "up to N target creatures"
+        // On a permanent source (is_other=true): "up to N other target creatures"
+        // On an instant/sorcery spell (is_other=false): "up to N target creatures"
         ImperativeFamilyAst::Support { count, is_other } => {
             let properties = if is_other {
                 vec![crate::types::ability::FilterProp::Another]
@@ -14194,7 +14281,9 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 count: QuantityExpr::Fixed { value: 1 },
                 target,
             });
-            clause.multi_target = Some(MultiTargetSpec::fixed(0, count as usize));
+            // CR 701.41a: "each of UP TO N" — min 0, max N, where N may be the
+            // announced X (`QuantityExpr`), so `up_to` rather than `fixed`.
+            clause.multi_target = Some(MultiTargetSpec::up_to(count));
             clause
         }
         // CR 603.5 / CR 608.2d: "you may <effect>" and subject-stripped "each
@@ -15876,7 +15965,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ParitySource, TargetChoiceTiming, ZoneChoiceChooser};
+    use crate::types::ability::{ParitySource, ZoneChoiceChooser};
 
     /// Matrix row 18 — the mana ROLE must survive the cost-resource AST
     /// round-trip byte-for-byte.
@@ -20263,22 +20352,33 @@ mod tests {
         }
     }
 
+    /// CR 701.41a: `support N` on an INSTANT OR SORCERY expands to "up to N
+    /// target creatures" — no "other" (Nissa's Judgment, Lead by Example,
+    /// Unity of Purpose, The Crowd Goes Wild).
     #[test]
-    fn parse_support_on_spell() {
-        // CR 701.41a: Support N on an instant/sorcery — "up to N target creatures"
+    fn parse_support_on_spell_source() {
         let text = "support 2";
         let lower = text.to_lowercase();
-        let mut ctx = ParseContext::default(); // No subject = spell context
+        let mut ctx = ParseContext {
+            source_core_types: vec![crate::types::card_type::CoreType::Sorcery],
+            ..Default::default()
+        };
         let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
         assert!(
             matches!(
                 &ast,
                 Some(ImperativeFamilyAst::Support {
-                    count: 2,
+                    count: QuantityExpr::Fixed { value: 2 },
                     is_other: false
                 })
             ),
-            "Expected Support {{ count: 2, is_other: false }}, got {ast:?}"
+            "Expected Support {{ count: Fixed 2, is_other: false }}, got {ast:?}"
+        );
+        // CR 115.10a: the shorthand prints no "target", so the producer must
+        // declare the announcement timing or the slots are never surfaced.
+        assert_eq!(
+            ctx.declared_target_choice_timing,
+            Some(TargetChoiceTiming::Stack)
         );
         let clause = lower_imperative_family_ast(ast.unwrap());
         assert!(
@@ -20290,27 +20390,47 @@ mod tests {
             "Expected PutCounter P1P1, got {:?}",
             clause.effect
         );
-        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
-        // Spell support should NOT have Another property
-        if let Effect::PutCounter {
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+        );
+        // Reach guard for the negative below: the filter IS the creature filter
+        // the expansion names, so "no Another" is a real absence rather than a
+        // vacuous pass on some other shape.
+        let Effect::PutCounter {
             target: TargetFilter::Typed(tf),
             ..
         } = &clause.effect
-        {
-            assert!(
-                !tf.properties
-                    .contains(&crate::types::ability::FilterProp::Another),
-                "Spell support should not use 'other'"
+        else {
+            panic!(
+                "expected a Typed creature recipient, got {:?}",
+                clause.effect
             );
-        }
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![crate::types::ability::TypeFilter::Creature]
+        );
+        assert!(
+            !tf.properties
+                .contains(&crate::types::ability::FilterProp::Another),
+            "an instant/sorcery source's support must not use 'other'"
+        );
     }
 
+    /// CR 701.41a: `support N` on a PERMANENT expands to "up to N OTHER target
+    /// creatures". Staged as an Enchantment (Together Forever) precisely because
+    /// that is the case whose printed reminder text omits "other": CR 207.2a
+    /// makes that a vacuous summary, not a different rule — "other" excludes
+    /// only the source, and a non-creature permanent is never a legal "target
+    /// creature" anyway — and keeping `Another` is what stays correct when such
+    /// a permanent is animated.
     #[test]
-    fn parse_support_on_permanent() {
-        // CR 701.41a: Support N on a permanent — "up to N other target creatures"
-        let text = "support 3";
+    fn parse_support_on_non_creature_permanent_source() {
+        let text = "support 2";
         let lower = text.to_lowercase();
         let mut ctx = ParseContext {
+            source_core_types: vec![crate::types::card_type::CoreType::Enchantment],
             subject: Some(TargetFilter::SelfRef),
             ..Default::default()
         };
@@ -20319,26 +20439,106 @@ mod tests {
             matches!(
                 &ast,
                 Some(ImperativeFamilyAst::Support {
-                    count: 3,
+                    count: QuantityExpr::Fixed { value: 2 },
                     is_other: true
                 })
             ),
-            "Expected Support {{ count: 3, is_other: true }}, got {ast:?}"
+            "Expected Support {{ count: Fixed 2, is_other: true }}, got {ast:?}"
         );
         let clause = lower_imperative_family_ast(ast.unwrap());
-        // Permanent support should have Another property
-        if let Effect::PutCounter {
+        let Effect::PutCounter {
             target: TargetFilter::Typed(tf),
             ..
         } = &clause.effect
-        {
-            assert!(
-                tf.properties
-                    .contains(&crate::types::ability::FilterProp::Another),
-                "Permanent support should use 'other'"
+        else {
+            panic!(
+                "expected a Typed creature recipient, got {:?}",
+                clause.effect
             );
-        }
-        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+        };
+        assert!(
+            tf.properties
+                .contains(&crate::types::ability::FilterProp::Another),
+            "a permanent source's support must use 'other'"
+        );
+    }
+
+    /// CR 701.41a: the LIVE half of the source-type defect. An activated support
+    /// on a permanent (Joraga Auxiliary's "{4}{G}{W}: Support 2.", Sol, Advocate
+    /// Eternal's Teamwork trigger) carries no parse subject, so the previous
+    /// `ctx.subject.is_some()` derivation dropped "other" and let a creature
+    /// support itself. Unlike the non-creature-permanent direction, that one is
+    /// not vacuous: the source IS a legal "target creature" there.
+    #[test]
+    fn parse_support_on_subjectless_creature_ability_still_excludes_self() {
+        let text = "support 3";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            source_core_types: vec![crate::types::card_type::CoreType::Creature],
+            // No subject: an activated ability body has none.
+            ..Default::default()
+        };
+        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
+        assert!(
+            matches!(
+                &ast,
+                Some(ImperativeFamilyAst::Support {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    is_other: true
+                })
+            ),
+            "Expected Support {{ count: Fixed 3, is_other: true }}, got {ast:?}"
+        );
+        let clause = lower_imperative_family_ast(ast.unwrap());
+        let Effect::PutCounter {
+            target: TargetFilter::Typed(tf),
+            ..
+        } = &clause.effect
+        else {
+            panic!(
+                "expected a Typed creature recipient, got {:?}",
+                clause.effect
+            );
+        };
+        assert!(
+            tf.properties
+                .contains(&crate::types::ability::FilterProp::Another),
+            "a creature's activated support must still exclude itself"
+        );
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }))
+        );
+    }
+
+    /// CR 701.41a + CR 107.3a: `support X` (Blitzball Stadium `{X}{U}`, The
+    /// Crowd Goes Wild) carries the announced X, not a literal. A `parse_number`
+    /// read of "x" answers nothing and the previous `unwrap_or(1)` fallback
+    /// silently capped every such card at one target.
+    #[test]
+    fn parse_support_x_carries_the_announced_variable() {
+        let text = "support X";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            source_core_types: vec![crate::types::card_type::CoreType::Artifact],
+            ..Default::default()
+        };
+        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(
+            ast,
+            Some(ImperativeFamilyAst::Support {
+                count: x.clone(),
+                is_other: true,
+            }),
+            "Expected Support {{ count: Variable X, is_other: true }}"
+        );
+        let clause = lower_imperative_family_ast(ast.unwrap());
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::up_to(x)));
     }
 
     /// CR 115.1d + CR 708.2a: "turn any number of target … face down" (Illithid
@@ -25195,6 +25395,49 @@ mod tests {
             ),
             "reach-guard: the printed assimilate phrase must produce the Assimilate node"
         );
+    }
+
+    /// CR 701.71a: `empower Jace N` takes a number or `X` as N, with an optional
+    /// terminal period.
+    #[test]
+    fn parse_empower_jace_reads_n() {
+        assert_eq!(
+            parse_empower_jace("empower jace 2"),
+            Some(Effect::EmpowerJace {
+                count: QuantityExpr::Fixed { value: 2 }
+            })
+        );
+        assert_eq!(
+            parse_empower_jace("empower jace x"),
+            Some(Effect::EmpowerJace {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
+            })
+        );
+        assert_eq!(
+            parse_empower_jace("empower jace 6."),
+            Some(Effect::EmpowerJace {
+                count: QuantityExpr::Fixed { value: 6 }
+            })
+        );
+    }
+
+    /// CR 701.71a: the anchored grammar rejects a longer verb, another walker,
+    /// and any residue after N. The positive reach-guard is
+    /// `parse_empower_jace_reads_n` plus the `empower jace 2` line below.
+    #[test]
+    fn parse_empower_jace_rejects_adjacent_grammar() {
+        assert!(parse_empower_jace("empower jace 2").is_some());
+        for text in [
+            "empowered jace 2",
+            "empower bolas 2",
+            "empower jace 2 and draw",
+        ] {
+            assert_eq!(parse_empower_jace(text), None, "{text:?} must not parse");
+        }
     }
 
     /// SHAPE — CR 115.1d + CR 122.1: A fixed "each of two creatures" counter

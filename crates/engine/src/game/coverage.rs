@@ -1333,6 +1333,7 @@ fn fmt_duration(d: &Duration) -> String {
             )
         }
         Duration::ForAsLongAs { .. } => "for as long as condition".to_string(),
+        Duration::UntilEvent { event } => format!("until event ({:?})", event.mode),
         Duration::Permanent => "permanent".to_string(),
     }
 }
@@ -3925,6 +3926,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), fmt_quantity(count)));
             d.push(("player".into(), fmt_target(player)));
         }
+        Effect::EmpowerJace { count } => {
+            d.push(("count".into(), fmt_quantity(count)));
+        }
         Effect::Monstrosity { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
@@ -6423,6 +6427,7 @@ fn token_category_label(category: &crate::game::token_presets::TokenCategory) ->
         TokenCategory::Vehicle => "vehicle".to_string(),
         TokenCategory::Enchantment => "enchantment".to_string(),
         TokenCategory::Land => "land".to_string(),
+        TokenCategory::Planeswalker => "planeswalker".to_string(),
         TokenCategory::Artifact => "artifact".to_string(),
     }
 }
@@ -7591,6 +7596,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -14143,6 +14149,7 @@ mod tests {
                 display_name: "Test Token".to_string(),
                 power,
                 toughness,
+                loyalty: None,
                 core_types,
                 subtypes: Vec::new(),
                 supertypes: Vec::new(),

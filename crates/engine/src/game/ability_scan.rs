@@ -1929,6 +1929,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc
         }
+        Effect::EmpowerJace { count } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_quantity_expr(count, mode));
+            acc
+        }
         Effect::Monstrosity { count } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
@@ -4145,6 +4150,9 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes {
         Duration::WhileHostOnBattlefield => Axes::NONE,
         Duration::UntilSourceExilesAnotherCard => Axes::NONE,
         Duration::UntilOpponentBecomesMonarch => Axes::NONE,
+        // CR 611.2a: the event is a trigger description, scanned as the
+        // `WhenNextEvent` delayed-trigger payload is.
+        Duration::UntilEvent { event } => scan_trigger_definition(event, mode),
         Duration::UntilNextStepOf { player, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_scope(player));
@@ -6332,6 +6340,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -6707,6 +6716,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -6975,6 +6985,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }

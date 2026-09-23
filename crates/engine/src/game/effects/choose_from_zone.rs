@@ -1279,7 +1279,23 @@ fn resolve_zone_owner(
     zone_owner: ZoneOwner,
 ) -> Result<PlayerId, EffectError> {
     match zone_owner {
-        ZoneOwner::Controller => Ok(ability.controller),
+        // CR 109.5: "you"/"your" on an object refer to that object's CONTROLLER
+        // — the printed controller of the spell or ability — never the player a
+        // per-player fan-out happens to be iterating. The `player_scope` fan-out
+        // rebinds `ability.controller` to the iterated player and preserves the
+        // printed controller in `original_controller`
+        // (`effects/mod.rs:14389-14397` and `:13039-13041`, which also bind
+        // `scoped_player` to the same iterated player). Reading `controller`
+        // here made "a creature card in your graveyard" scan each ITERATED
+        // OPPONENT's graveyard.
+        //
+        // A clause that genuinely wants the iterated player's zone has a
+        // correct home in `ZoneOwner::ScopedPlayer`, which resolves the same
+        // binding the fan-out sets. Two cards will want it once their parses are
+        // repaired — Every Hope Shall Vanish ("a nonland card from each of those
+        // hands") and Tariff ("the creature they control") — both of which
+        // currently misparse to `zone: Exile` and so observe nothing here.
+        ZoneOwner::Controller => Ok(ability.original_controller.unwrap_or(ability.controller)),
         ZoneOwner::TargetedPlayer => ability
             .targets
             .iter()

@@ -671,6 +671,16 @@ fn apply_pending_counter_post_action(
         } => super::amass::continue_amass_after_token_creation(
             state, controller, &subtype, count, &ability, events,
         ),
+        // CR 701.71a: the token-creation replacement settled; choose a Jace
+        // token and put the counters on it. `false` = paused again, either on
+        // `EmpowerJaceChoice` or on a counter-placement replacement choice.
+        PendingCounterPostAction::ContinueEmpowerJaceAfterTokenCreation {
+            controller,
+            source_id,
+            count,
+        } => super::empower_jace::continue_after_creation(
+            state, controller, source_id, count, events,
+        ),
         PendingCounterPostAction::FinalizeAmass {
             object_id,
             subtype,

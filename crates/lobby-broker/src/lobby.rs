@@ -23,6 +23,17 @@ use crate::protocol::{DraftLobbyMetadata, LobbyGame};
 /// with a cross-reference so a future change touches both.
 pub const PUBLIC_SEAT_RESERVATION_MS: u64 = 120_000;
 
+/// Minimum advance (seconds) of a listing's liveness clock
+/// ([`LobbyManager::refresh_liveness`]).
+///
+/// The refresh is quantized so a shell that persists the lobby can write
+/// exactly when the clock advances: the in-memory clock then always equals
+/// the persisted one, at a cost of one write per waiting host per quantum
+/// instead of one per host frame. A host's listing is therefore at most one
+/// quantum plus one inter-frame gap stale, which must stay well below the
+/// shells' reap timeout (300 s).
+pub const LIVENESS_REFRESH_SECS: u64 = 60;
+
 /// Fields a caller supplies when registering a lobby entry. Using a struct
 /// here rather than a long positional argument list means adding a new field
 /// doesn't require touching every caller — just add it here with a `Default`
@@ -71,25 +82,32 @@ pub struct LobbyReservation {
     pub expires_at_ms: Option<u64>,
 }
 
-/// A lobby listing observed past its timeout by
-/// [`LobbyManager::check_expired`], carrying the identity of the exact
-/// registration that was observed rather than only its code.
+/// One specific registration under a game code: the code plus the
+/// registration's generation, rather than the code alone.
 ///
 /// A code names a slot the lobby reuses: [`LobbyManager::register_game`]
-/// overwrites whatever is registered under it. The report is deliberately
-/// non-destructive, so the lobby lock is released between an observation and
-/// the consumption that acts on it — that release is what lets a sweep decline
-/// a contended game — and a registration can land in that gap. Consuming by
-/// code alone would delete that replacement and broadcast its removal;
-/// [`LobbyManager::unregister_expired`] consumes only what was observed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpiredLobbyGame {
+/// overwrites whatever is registered under it, and an entry can be reaped by
+/// age while whoever registered it is still around. Anything that holds on to
+/// a registration across that gap — an expiry observation from
+/// [`LobbyManager::check_expired`], or a host socket's ownership stamp
+/// (`ConnState::host_game`) — must act on *this* registration, never on
+/// whatever now sits under the code. Acting by code alone would delete a
+/// replacement and broadcast its removal. [`LobbyManager::is_current`] is the
+/// single identity check; [`LobbyManager::unregister_registration`] and
+/// [`LobbyManager::unregister_expired`] consume through it.
+///
+/// Serialized because it rides in a host socket's `ConnState`, which the
+/// Durable Object shell persists in the WebSocket attachment. No old-format
+/// reader is needed: a code deploy disconnects every Durable Object WebSocket,
+/// so no attachment written by an earlier build is ever read by this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LobbyRegistration {
     game_code: String,
     generation: u64,
 }
 
-impl ExpiredLobbyGame {
-    /// The code the observed registration was listed under.
+impl LobbyRegistration {
+    /// The code this registration was listed under.
     pub fn game_code(&self) -> &str {
         &self.game_code
     }
@@ -119,8 +137,19 @@ pub enum ExpiryConsumption {
 struct LobbyGameMeta {
     host_name: String,
     created_at: u64,
+    /// When the listing last showed liveness (seconds, same clock as
+    /// `created_at`) — the clock [`LobbyManager::check_expired`] ages. Set to
+    /// `created_at` at registration and advanced only by
+    /// [`LobbyManager::refresh_liveness`]; `created_at` stays the advertised
+    /// listing time.
+    ///
+    /// `default` covers a snapshot written by a build that predates the field;
+    /// [`LobbyManagerSnapshot`] floors it at `created_at` so such a snapshot
+    /// does not read every entry as lapsed.
+    #[serde(default)]
+    last_seen: u64,
     /// Identity of this registration, distinguishing it from any other
-    /// registration listed under the same code. See [`ExpiredLobbyGame`].
+    /// registration listed under the same code. See [`LobbyRegistration`].
     ///
     /// `default` covers a snapshot written by a build that predates the field;
     /// [`LobbyManagerSnapshot`] is what keeps such a snapshot from colliding
@@ -155,6 +184,8 @@ struct LobbyGameMeta {
 /// registration the identity an outstanding observation still names. Seeding
 /// here makes [`LobbyManager::next_generation`] monotone for the manager's
 /// whole life, which no removal can undo.
+///
+/// It is also where each entry's `last_seen` is floored at its `created_at`.
 #[derive(Deserialize)]
 struct LobbyManagerSnapshot {
     games: HashMap<String, LobbyGameMeta>,
@@ -163,7 +194,14 @@ struct LobbyManagerSnapshot {
 }
 
 impl From<LobbyManagerSnapshot> for LobbyManager {
-    fn from(snapshot: LobbyManagerSnapshot) -> Self {
+    fn from(mut snapshot: LobbyManagerSnapshot) -> Self {
+        // A snapshot written before `last_seen` existed reads it as `0`, which
+        // would reap every restored entry on the first sweep. `last_seen >=
+        // created_at` holds by construction, so flooring at `created_at` is
+        // exact for such a snapshot and a no-op for any other.
+        for meta in snapshot.games.values_mut() {
+            meta.last_seen = meta.last_seen.max(meta.created_at);
+        }
         let seeded = snapshot
             .games
             .values()
@@ -199,12 +237,14 @@ impl LobbyManager {
         }
     }
 
+    /// Lists `req` under `game_code`, replacing any entry already there, and
+    /// returns the identity of the new registration.
     pub fn register_game(
         &mut self,
         game_code: &str,
         req: RegisterGameRequest,
         env: &impl BrokerEnv,
-    ) {
+    ) -> LobbyRegistration {
         let has_password = req.password.is_some();
         let created_at = env.now_ms() / 1000;
         // Monotone for the manager's whole life — see `next_generation`. A
@@ -226,6 +266,7 @@ impl LobbyManager {
             LobbyGameMeta {
                 host_name: req.host_name,
                 created_at,
+                last_seen: created_at,
                 generation,
                 password: req.password,
                 has_password,
@@ -244,6 +285,10 @@ impl LobbyManager {
                 reservations: HashMap::new(),
             },
         );
+        LobbyRegistration {
+            game_code: game_code.to_string(),
+            generation,
+        }
     }
 
     fn cleanup_expired_for(meta: &mut LobbyGameMeta, now_ms: u64) -> bool {
@@ -471,7 +516,9 @@ impl LobbyManager {
             .and_then(|meta| meta.timer_seconds)
     }
 
-    /// Reports the games older than `timeout_secs` **without removing them**.
+    /// Reports the games whose host has shown no liveness for longer than
+    /// `timeout_secs` **without removing them**. A listing's liveness clock
+    /// starts at registration and is advanced by [`Self::refresh_liveness`].
     ///
     /// **Reporting is not consuming.** The Full-mode sweep declines to act on a
     /// game whose session is contended (`SessionManager::try_session` never
@@ -486,19 +533,19 @@ impl LobbyManager {
     ///
     /// Each report carries the identity of the registration it observed, not
     /// just its code, because the lock released in between lets a replacement
-    /// take that code — see [`ExpiredLobbyGame`].
+    /// take that code — see [`LobbyRegistration`].
     ///
     /// [`crate::broker::Broker::reap_expired`] reports and consumes in one
     /// call, which is right for a shell that cannot decline — the Durable
     /// Object has no session registry to contend on.
     /// [`crate::broker::Broker::reap_expired_handled`] is the two-step form for
     /// a shell that can.
-    pub fn check_expired(&self, timeout_secs: u64, env: &impl BrokerEnv) -> Vec<ExpiredLobbyGame> {
+    pub fn check_expired(&self, timeout_secs: u64, env: &impl BrokerEnv) -> Vec<LobbyRegistration> {
         let now = env.now_ms() / 1000;
         self.games
             .iter()
-            .filter(|(_, meta)| now.saturating_sub(meta.created_at) > timeout_secs)
-            .map(|(code, meta)| ExpiredLobbyGame {
+            .filter(|(_, meta)| now.saturating_sub(meta.last_seen) > timeout_secs)
+            .map(|(code, meta)| LobbyRegistration {
                 game_code: code.clone(),
                 generation: meta.generation,
             })
@@ -519,21 +566,77 @@ impl LobbyManager {
     /// [`Self::unregister_game`] stays the unconditional form, for the paths
     /// that own the entry they remove (a host leaving, a game starting) and
     /// hold the lock across their own decision.
-    pub fn unregister_expired(&mut self, expired: &ExpiredLobbyGame) -> ExpiryConsumption {
-        match self.games.get(&expired.game_code) {
-            None => ExpiryConsumption::AlreadyGone,
-            Some(meta) if meta.generation == expired.generation => {
-                self.unregister_game(&expired.game_code);
-                ExpiryConsumption::Removed
-            }
-            Some(_) => {
-                debug!(
-                    game = %expired.game_code,
-                    "lobby expiry observation superseded — replacement listing kept"
-                );
-                ExpiryConsumption::Superseded
-            }
+    pub fn unregister_expired(&mut self, expired: &LobbyRegistration) -> ExpiryConsumption {
+        if self.unregister_registration(expired) {
+            ExpiryConsumption::Removed
+        } else if self.has_game(&expired.game_code) {
+            debug!(
+                game = %expired.game_code,
+                "lobby expiry observation superseded — replacement listing kept"
+            );
+            ExpiryConsumption::Superseded
+        } else {
+            ExpiryConsumption::AlreadyGone
         }
+    }
+
+    /// Whether `registration` is the one currently listed under its code — the
+    /// single identity check every registration-scoped path goes through. See
+    /// [`LobbyRegistration`].
+    pub fn is_current(&self, registration: &LobbyRegistration) -> bool {
+        self.games
+            .get(&registration.game_code)
+            .is_some_and(|meta| meta.generation == registration.generation)
+    }
+
+    /// Whether [`Self::refresh_liveness`] would advance `registration`'s
+    /// liveness clock now: the registration is current and at least
+    /// [`LIVENESS_REFRESH_SECS`] have passed since the clock last moved. The
+    /// single predicate, so a shell's persistence precheck and the write
+    /// cannot drift apart.
+    pub fn liveness_refresh_due(
+        &self,
+        registration: &LobbyRegistration,
+        env: &impl BrokerEnv,
+    ) -> bool {
+        let now = env.now_ms() / 1000;
+        self.is_current(registration)
+            && self
+                .games
+                .get(&registration.game_code)
+                .is_some_and(|meta| now.saturating_sub(meta.last_seen) >= LIVENESS_REFRESH_SECS)
+    }
+
+    /// Records that `registration`'s host is still alive, advancing its
+    /// listing's liveness clock to now when [`Self::liveness_refresh_due`],
+    /// and returns whether it wrote. Scoped by identity: a registration that
+    /// is no longer current (reaped, removed, or superseded) refreshes
+    /// nothing, so a stale stamp can never extend a replacement's listing.
+    /// `created_at` is never touched.
+    pub fn refresh_liveness(
+        &mut self,
+        registration: &LobbyRegistration,
+        env: &impl BrokerEnv,
+    ) -> bool {
+        if !self.liveness_refresh_due(registration, env) {
+            return false;
+        }
+        let now = env.now_ms() / 1000;
+        if let Some(meta) = self.games.get_mut(&registration.game_code) {
+            meta.last_seen = now;
+        }
+        true
+    }
+
+    /// Removes `registration`'s listing **only** if it is still the one under
+    /// its code, returning whether it removed anything. A replacement listed
+    /// under the same code since is left untouched.
+    pub fn unregister_registration(&mut self, registration: &LobbyRegistration) -> bool {
+        let current = self.is_current(registration);
+        if current {
+            self.unregister_game(&registration.game_code);
+        }
+        current
     }
 }
 
@@ -549,7 +652,7 @@ mod tests {
 
     /// The codes an expiry report named, for assertions about which listings
     /// were seen rather than which registration.
-    fn codes(observed: &[ExpiredLobbyGame]) -> Vec<String> {
+    fn codes(observed: &[LobbyRegistration]) -> Vec<String> {
         observed.iter().map(|e| e.game_code().to_string()).collect()
     }
 
@@ -562,6 +665,24 @@ mod tests {
             entry.as_object_mut().unwrap().remove("generation");
         }
         serde_json::from_value(raw).expect("an older snapshot still loads")
+    }
+
+    /// Round-trips a manager through the snapshot shape a build predating the
+    /// liveness clock wrote: no `last_seen` on any entry.
+    fn restore_without_last_seen(seed: &LobbyManager) -> LobbyManager {
+        let mut raw: serde_json::Value = serde_json::to_value(seed).expect("manager serializes");
+        for entry in raw["games"].as_object_mut().unwrap().values_mut() {
+            let removed = entry.as_object_mut().unwrap().remove("last_seen");
+            assert!(removed.is_some(), "reach guard: the field was serialized");
+        }
+        serde_json::from_value(raw).expect("an older snapshot still loads")
+    }
+
+    /// `FakeEnv::new`'s starting clock, in seconds.
+    const T0_SECS: u64 = 1_000;
+
+    fn at_secs(env: &FakeEnv, secs: u64) {
+        env.set_now_ms(secs * 1000);
     }
     use engine::types::format::{FormatConfig, GameFormat};
     use engine::types::match_config::MatchConfig;
@@ -612,7 +733,7 @@ mod tests {
         password: Option<String>,
         timer: Option<u32>,
         env: &impl BrokerEnv,
-    ) {
+    ) -> LobbyRegistration {
         lobby.register_game(
             code,
             RegisterGameRequest {
@@ -623,7 +744,38 @@ mod tests {
                 ..Default::default()
             },
             env,
+        )
+    }
+
+    /// A registration held across its own removal and a re-registration of the
+    /// same code — a host socket's stamp after an age reap — names only itself:
+    /// it is no longer current and cannot remove the replacement.
+    #[test]
+    fn a_superseded_registration_cannot_remove_the_replacement() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        let first = register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
+        assert!(
+            lobby.is_current(&first),
+            "reach guard: a fresh stamp is current"
         );
+
+        lobby.unregister_game("GAME01");
+        assert!(
+            !lobby.is_current(&first),
+            "a removed registration is not current"
+        );
+        let second = register_basic(&mut lobby, "GAME01", "Bob", true, None, None, &env);
+
+        assert!(!lobby.is_current(&first));
+        assert!(!lobby.unregister_registration(&first), "nothing removed");
+        assert!(lobby.is_current(&second), "the replacement stays listed");
+
+        assert!(
+            lobby.unregister_registration(&second),
+            "its own holder removes it"
+        );
+        assert!(!lobby.has_game("GAME01"));
     }
 
     #[test]
@@ -788,9 +940,7 @@ mod tests {
         let env = FakeEnv::new();
         let mut lobby = LobbyManager::new();
         register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
-
-        // Manually set created_at to the past.
-        lobby.games.get_mut("GAME01").unwrap().created_at = 0;
+        env.set_now_ms(1_000_000 + 301_000);
 
         let expired = lobby.check_expired(300, &env);
         assert_eq!(codes(&expired), vec!["GAME01".to_string()]);
@@ -827,7 +977,7 @@ mod tests {
         let env = FakeEnv::new();
         let mut lobby = LobbyManager::new();
         register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
-        lobby.games.get_mut("GAME01").unwrap().created_at = 0;
+        env.set_now_ms(1_000_000 + 301_000);
 
         let observed = lobby.check_expired(300, &env);
         assert_eq!(
@@ -864,7 +1014,7 @@ mod tests {
         let env = FakeEnv::new();
         let mut lobby = LobbyManager::new();
         register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
-        lobby.games.get_mut("GAME01").unwrap().created_at = 0;
+        env.set_now_ms(1_000_000 + 301_000);
 
         let observed = lobby.check_expired(300, &env);
         lobby.unregister_game("GAME01");
@@ -884,7 +1034,7 @@ mod tests {
         let env = FakeEnv::new();
         let mut seed = LobbyManager::new();
         register_basic(&mut seed, "GAME01", "Alice", true, None, None, &env);
-        seed.games.get_mut("GAME01").unwrap().created_at = 0;
+        env.set_now_ms(1_000_000 + 301_000);
         let mut lobby = restore_without_generations(&seed);
 
         let observed = lobby.check_expired(300, &env);
@@ -950,7 +1100,7 @@ mod tests {
         let env = FakeEnv::new();
         let mut seed = LobbyManager::new();
         register_basic(&mut seed, "GAME01", "Alice", true, None, None, &env);
-        seed.games.get_mut("GAME01").unwrap().created_at = 0;
+        env.set_now_ms(1_000_000 + 301_000);
 
         let mut lobby = restore_without_generations(&seed);
 
@@ -972,6 +1122,167 @@ mod tests {
             "Bob",
             "so the replacement survives a restore exactly as it does without one"
         );
+    }
+
+    /// A listing whose host showed liveness is aged from that refresh, not
+    /// from its creation — and the clock still expires once the host is quiet.
+    #[test]
+    fn a_refreshed_listing_outlives_its_creation_age() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        let live = register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
+        register_basic(&mut lobby, "GAME02", "Bob", true, None, None, &env);
+
+        at_secs(&env, T0_SECS + 250);
+        assert!(
+            lobby.refresh_liveness(&live, &env),
+            "reach: the refresh wrote"
+        );
+
+        at_secs(&env, T0_SECS + 350);
+        assert_eq!(
+            codes(&lobby.check_expired(300, &env)),
+            vec!["GAME02".to_string()],
+            "the refreshed listing is kept past its creation age; the never-refreshed control is reported"
+        );
+
+        at_secs(&env, T0_SECS + 250 + 301);
+        let mut reported = codes(&lobby.check_expired(300, &env));
+        reported.sort();
+        assert_eq!(
+            reported,
+            vec!["GAME01".to_string(), "GAME02".to_string()],
+            "a quiet host's listing still lapses, measured from its last refresh"
+        );
+    }
+
+    /// The refresh only writes once a full quantum has passed, and reports
+    /// exactly whether it wrote.
+    #[test]
+    fn a_refresh_inside_the_quantum_writes_nothing() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        let reg = register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
+
+        at_secs(&env, T0_SECS + 30);
+        assert!(!lobby.liveness_refresh_due(&reg, &env));
+        assert!(
+            !lobby.refresh_liveness(&reg, &env),
+            "inside the quantum nothing is written"
+        );
+        at_secs(&env, T0_SECS + 301);
+        assert_eq!(
+            codes(&lobby.check_expired(300, &env)),
+            vec!["GAME01".to_string()],
+            "the clock did not move, so the listing still lapses from its registration"
+        );
+
+        // Boundary: exactly one quantum after the clock last moved is due.
+        let other = register_basic(&mut lobby, "GAME02", "Bob", true, None, None, &env);
+        at_secs(&env, T0_SECS + 301 + LIVENESS_REFRESH_SECS - 1);
+        assert!(!lobby.refresh_liveness(&other, &env));
+        at_secs(&env, T0_SECS + 301 + LIVENESS_REFRESH_SECS);
+        assert!(lobby.liveness_refresh_due(&other, &env));
+        assert!(lobby.refresh_liveness(&other, &env));
+        assert!(
+            !lobby.liveness_refresh_due(&other, &env),
+            "a refresh restarts the quantum"
+        );
+    }
+
+    /// A registration held across its own removal and a re-registration of the
+    /// same code cannot keep the replacement alive.
+    #[test]
+    fn a_superseded_registration_cannot_refresh_the_replacement() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        let first = register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
+        lobby.unregister_game("GAME01");
+
+        let t1 = T0_SECS + 10;
+        at_secs(&env, t1);
+        let second = register_basic(&mut lobby, "GAME01", "Bob", true, None, None, &env);
+
+        at_secs(&env, t1 + 200);
+        assert!(
+            !lobby.refresh_liveness(&first, &env),
+            "a superseded stamp refreshes nothing"
+        );
+
+        at_secs(&env, t1 + 301);
+        let reported = lobby.check_expired(300, &env);
+        assert_eq!(
+            reported,
+            vec![second.clone()],
+            "the replacement ages from its own registration"
+        );
+        assert!(
+            lobby.refresh_liveness(&second, &env),
+            "reach: the current holder's refresh does fire"
+        );
+    }
+
+    /// The wire `created_at` is the advertised listing time the client sorts
+    /// and renders from; a liveness refresh must not move it.
+    #[test]
+    fn a_refresh_leaves_the_advertised_created_at_alone() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        let reg = register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
+
+        at_secs(&env, T0_SECS + 120);
+        assert!(
+            lobby.refresh_liveness(&reg, &env),
+            "reach: the refresh wrote"
+        );
+        assert_eq!(
+            lobby.public_game("GAME01").expect("listed").created_at,
+            T0_SECS
+        );
+    }
+
+    /// A snapshot from a build without `last_seen` restores with the clock at
+    /// the registration time, not `0` — otherwise the first sweep after a
+    /// deploy would reap every restored listing.
+    #[test]
+    fn a_snapshot_without_last_seen_ages_from_created_at() {
+        let env = FakeEnv::new();
+        let mut seed = LobbyManager::new();
+        register_basic(&mut seed, "GAME01", "Alice", true, None, None, &env);
+        let lobby = restore_without_last_seen(&seed);
+        assert!(lobby.has_game("GAME01"), "reach guard: the entry restored");
+
+        at_secs(&env, T0_SECS + 299);
+        assert!(lobby.check_expired(300, &env).is_empty());
+        at_secs(&env, T0_SECS + 301);
+        assert_eq!(
+            codes(&lobby.check_expired(300, &env)),
+            vec!["GAME01".to_string()]
+        );
+    }
+
+    /// The persisted field is the one consumed: a refreshed clock survives a
+    /// snapshot round-trip, which is the Durable Object restore path.
+    #[test]
+    fn a_snapshot_round_trip_keeps_a_refreshed_clock() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        let reg = register_basic(&mut lobby, "GAME01", "Alice", true, None, None, &env);
+        at_secs(&env, T0_SECS + 250);
+        assert!(
+            lobby.refresh_liveness(&reg, &env),
+            "reach: the refresh wrote"
+        );
+
+        let json = serde_json::to_string(&lobby).expect("manager serializes");
+        let restored: LobbyManager = serde_json::from_str(&json).expect("and deserializes");
+        assert!(
+            restored.has_game("GAME01"),
+            "reach guard: the entry restored"
+        );
+
+        at_secs(&env, T0_SECS + 350);
+        assert!(restored.check_expired(300, &env).is_empty());
     }
 
     #[test]

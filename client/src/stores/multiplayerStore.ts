@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import i18n from "i18next";
 
 import type { PlayerAvatarIdentity } from "../services/playerAvatars.ts";
 
@@ -37,6 +38,8 @@ import {
   saveWsSession,
 } from "../services/multiplayerSession";
 import {
+  BrokerRequestError,
+  LobbyCapabilityError,
   lookupJoinTargetOver,
   openBrokerClient,
   resolveGuestOver,
@@ -593,6 +596,17 @@ function closeChannel(set: MultiplayerSet, get: MultiplayerGet, url: string): vo
   subscriptionChannels.delete(url);
   const status = new Map(get().sourceStatus);
   if (status.delete(url)) set({ sourceStatus: status });
+}
+
+/** Show the shared toast for a `registerHost` refusal from
+ * {@link LobbyCapabilityError}. A no-op for any other rejection. */
+function toastLobbyCapabilityRefusal(get: MultiplayerGet, err: unknown): void {
+  if (!(err instanceof LobbyCapabilityError)) return;
+  get().showToast(
+    i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", {
+      needed: err.neededLobbyVersion,
+    }),
+  );
 }
 
 function setSourceStatus(
@@ -1495,6 +1509,9 @@ export interface HostingSettings {
   roomName: string | null;
   /** Enable ranked rating updates for the room. */
   ranked: boolean;
+  /** Pre-minted `[A-Z0-9]{6}` game code from a Discord link. Absent → the
+   *  broker/server mints one. */
+  requestedCode?: string;
 }
 
 /** Snapshot of the host's session config, captured at startHosting time.
@@ -2609,6 +2626,7 @@ function handleServerHostMessage(
   ws: PhaseSocketTransport,
   msg: { type: string; data?: unknown },
   serverUrl: string,
+  requestedCode?: string,
 ): void {
   if (msg.type === "GameCreated") {
     const data = msg.data as {
@@ -2616,6 +2634,13 @@ function handleServerHostMessage(
       player_token: string;
       full_key?: { game_code: string; generation: number };
     };
+    // A pre-10 server drops `requested_code` and mints its own code, which no
+    // Discord guest link names.
+    if (requestedCode !== undefined && data.game_code !== requestedCode) {
+      get().showToast(i18n.t("multiplayer:botLink.codeUnsupported"));
+      get().cancelHosting();
+      return;
+    }
     savePregameHostSession(get, data, serverUrl);
     // Reset reconnect counter on successful (re)connection.
     hostReconnectAttempt = 0;
@@ -2659,9 +2684,13 @@ function handleServerHostMessage(
       get().showToast(`${joiner.name} joined the game.`);
     }
   } else if (msg.type === "Error") {
-    const data = msg.data as { message: string };
+    const data = msg.data as { message: string; code?: string };
     console.error("Host error:", data.message);
-    get().showToast(data.message || "Failed to create game.");
+    get().showToast(
+      data.code === "code_in_use"
+        ? i18n.t("multiplayer:botLink.codeInUse")
+        : data.message || "Failed to create game.",
+    );
     if (get().hostingStatus !== "waiting") {
       get().cancelHosting();
     }
@@ -2674,6 +2703,7 @@ async function openServerHostSocket(
   setupFrame: () => unknown,
   onReopen: () => void,
   serverUrl: string,
+  requestedCode?: string,
 ): Promise<void> {
   // The dialed URL arrives as an argument rather than being read from store
   // state, and every caller supplies the one the session records: every frame
@@ -2717,7 +2747,7 @@ async function openServerHostSocket(
       type: string;
       data?: unknown;
     };
-    handleServerHostMessage(set, get, socket.ws, msg, url);
+    handleServerHostMessage(set, get, socket.ws, msg, url, requestedCode);
   };
   socket.ws.onerror = () => {
     if (!gameStartedFired) {
@@ -3086,10 +3116,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
               ranked: settings.ranked,
+              requested_code: settings.requestedCode ?? null,
             },
           }),
           () => attemptServerHostReconnect(set, get),
           serverUrl,
+          settings.requestedCode,
         );
       },
 
@@ -3174,14 +3206,20 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           console.error("[openBroker] no hosting server selected");
           return null;
         }
+        let broker: BrokerClient | null = null;
         try {
-          const broker = await openBrokerClient(url);
+          broker = await openBrokerClient(url);
           const registered = await broker.registerHost(req);
           activeBroker = broker;
           activeBrokerGameCode = registered.gameCode;
           return { broker, gameCode: registered.gameCode };
         } catch (err) {
+          // registerHost can reject after openBrokerClient already opened the
+          // socket; activeBroker is only assigned once both succeed, so
+          // closing here is what closeBroker() would otherwise never reach.
+          broker?.close();
           console.error("[openBroker] failed:", err);
+          toastLobbyCapabilityRefusal(get, err);
           return null;
         }
       },
@@ -3317,10 +3355,22 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               draftMetadata: null,
               startWhenFull: settings.startWhenFull,
               ranked: settings.ranked,
+              requestedCode: settings.requestedCode,
             });
             brokerGameCode = registered.gameCode;
             if (!isCurrentAttempt()) {
               releaseAttempt();
+              return false;
+            }
+            // A pre-10 broker drops `requested_code` and mints its own code,
+            // which no Discord guest link names: withdraw that listing.
+            if (
+              settings.requestedCode !== undefined
+              && registered.gameCode !== settings.requestedCode
+            ) {
+              get().showToast(i18n.t("multiplayer:botLink.codeUnsupported"));
+              releaseAttempt();
+              resetFailedHosting();
               return false;
             }
             activeBroker = broker;
@@ -3431,7 +3481,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             && err.code === AdapterErrorCode.NOT_INITIALIZED
           ) {
             get().showToast(err.message);
+          } else if (
+            err instanceof BrokerRequestError
+            && err.code === "code_in_use"
+          ) {
+            get().showToast(i18n.t("multiplayer:botLink.codeInUse"));
           }
+          toastLobbyCapabilityRefusal(get, err);
           resetFailedHosting();
           return false;
         }

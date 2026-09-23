@@ -430,6 +430,7 @@ fn resolve_predefined_token_display(
             display_name: token.name.clone(),
             power: token.power,
             toughness: token.toughness,
+            loyalty: None,
             core_types: token.card_types.core_types.clone(),
             subtypes: token.card_types.subtypes.clone(),
             supertypes: token.card_types.supertypes.clone(),

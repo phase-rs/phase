@@ -927,10 +927,19 @@ pub(crate) enum ImperativeFamilyAst {
         counter_kind: PlayerCounterKind,
         count: QuantityExpr,
     },
-    /// CR 701.41a: Support N — put a +1/+1 counter on each of up to N target creatures.
-    /// `is_other` is true on permanents (targets "other" creatures), false on spells.
+    /// CR 701.41a: Support N — put a +1/+1 counter on each of up to N target
+    /// creatures. `count` is a `QuantityExpr` because the printed N is not
+    /// always a literal: Blitzball Stadium and The Crowd Goes Wild print
+    /// `support X`, whose value is the X announced for the spell that produced
+    /// the source (CR 107.3a).
+    ///
+    /// `is_other` follows CR 701.41a's own axis: true on a PERMANENT source,
+    /// false on an instant or sorcery spell. It excludes exactly one object —
+    /// the source — so it is load-bearing only when the source can itself be a
+    /// legal "target creature", and inert (but harmless, and correct under
+    /// animation) on a permanent that currently is not one.
     Support {
-        count: u32,
+        count: QuantityExpr,
         is_other: bool,
     },
 }
@@ -3001,6 +3010,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }

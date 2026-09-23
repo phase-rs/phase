@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-21T00:00:00Z",
+  "updated": "2026-09-22T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -294,8 +294,8 @@
       "name": "Abzan Greasefang",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
         "G",
+        "W",
         "B"
       ],
       "tags": [
@@ -303,15 +303,15 @@
       ],
       "main": [
         {
-          "count": 3,
+          "count": 2,
           "name": "Bitter Triumph"
         },
         {
-          "count": 4,
-          "name": "Thoughtseize"
+          "count": 3,
+          "name": "Blooming Marsh"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Cache Grab"
         },
         {
@@ -319,16 +319,16 @@
           "name": "Collective Brutality"
         },
         {
+          "count": 3,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
           "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 1,
-          "name": "Darkbore Pathway"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
+          "name": "Thoughtseize"
         },
         {
           "count": 4,
@@ -336,15 +336,15 @@
         },
         {
           "count": 1,
-          "name": "Plains"
+          "name": "Forest"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Formidable Speaker"
         },
         {
           "count": 2,
-          "name": "Overgrown Tomb"
+          "name": "Godless Shrine"
         },
         {
           "count": 4,
@@ -360,14 +360,14 @@
         },
         {
           "count": 2,
-          "name": "Multiversal Passage"
+          "name": "Starting Town"
+        },
+        {
+          "count": 3,
+          "name": "Overgrown Tomb"
         },
         {
           "count": 2,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 1,
           "name": "Overlord of the Balemurk"
         },
         {
@@ -376,27 +376,31 @@
         },
         {
           "count": 1,
-          "name": "Forest"
+          "name": "Plains"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Professor of Symbology"
         },
         {
           "count": 1,
-          "name": "Emptiness"
+          "name": "Swamp"
         },
         {
           "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
+          "name": "Fatal Push"
         },
         {
           "count": 3,
-          "name": "Blooming Marsh"
+          "name": "Temple Garden"
+        },
+        {
+          "count": 1,
+          "name": "Brushland"
+        },
+        {
+          "count": 1,
+          "name": "Emptiness"
         },
         {
           "count": 2,
@@ -405,12 +409,16 @@
         {
           "count": 1,
           "name": "Yathan Roadwatcher"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Fatal Push"
+          "name": "Abrupt Decay"
         },
         {
           "count": 1,
@@ -422,7 +430,7 @@
         },
         {
           "count": 1,
-          "name": "Abrupt Decay"
+          "name": "Fatal Push"
         },
         {
           "count": 1,
@@ -434,19 +442,27 @@
         },
         {
           "count": 1,
-          "name": "Seismic Sense"
+          "name": "Culling Ritual"
         },
         {
           "count": 1,
-          "name": "True Ancestry"
+          "name": "Ashiok, Dream Render"
         },
         {
-          "count": 3,
-          "name": "Unlicensed Hearse"
+          "count": 1,
+          "name": "Vanishing Verse"
         },
         {
           "count": 2,
-          "name": "Vanishing Verse"
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 1,
+          "name": "Voice of Victory"
+        },
+        {
+          "count": 1,
+          "name": "Path of Peril"
         }
       ]
     },
@@ -1024,10 +1040,6 @@
         },
         {
           "count": 1,
-          "name": "Nowhere to Run"
-        },
-        {
-          "count": 1,
           "name": "Swamp"
         },
         {
@@ -1049,6 +1061,10 @@
         {
           "count": 4,
           "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Go for the Throat"
         }
       ],
       "sideboard": [
@@ -1059,10 +1075,6 @@
         {
           "count": 2,
           "name": "Languish"
-        },
-        {
-          "count": 4,
-          "name": "Leyline of the Void"
         },
         {
           "count": 2,
@@ -1079,6 +1091,14 @@
         {
           "count": 2,
           "name": "Graveyard Trespasser"
+        },
+        {
+          "count": 2,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 2,
+          "name": "Strategic Betrayal"
         }
       ]
     },
@@ -1212,93 +1232,105 @@
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Zack Fair"
-        },
-        {
-          "count": 2,
-          "name": "Basri, Tomorrow's Champion"
-        },
-        {
-          "count": 4,
-          "name": "Coppercoat Vanguard"
-        },
-        {
           "count": 4,
           "name": "Adeline, Resplendent Cathar"
         },
         {
           "count": 4,
-          "name": "Thalia, Guardian of Thraben"
+          "name": "Brave the Elements"
+        },
+        {
+          "count": 2,
+          "name": "Castle Ardenvale"
+        },
+        {
+          "count": 2,
+          "name": "Cavern of Souls"
         },
         {
           "count": 3,
+          "name": "Coppercoat Vanguard"
+        },
+        {
+          "count": 3,
+          "name": "Cosmogrand Zenith"
+        },
+        {
+          "count": 3,
+          "name": "Dauntless Bodyguard"
+        },
+        {
+          "count": 2,
           "name": "Eiganjo, Seat of the Empire"
         },
         {
           "count": 3,
-          "name": "Kytheon, Hero of Akros"
+          "name": "Hopeful Initiate"
         },
         {
           "count": 4,
-          "name": "Thalia's Lieutenant"
+          "name": "Mutavault"
         },
         {
           "count": 10,
           "name": "Plains"
         },
         {
-          "count": 2,
-          "name": "The Queen of Dale"
+          "count": 3,
+          "name": "Recruitment Officer"
         },
         {
           "count": 3,
-          "name": "Cavern of Souls"
+          "name": "Reluctant Role Model"
+        },
+        {
+          "count": 2,
+          "name": "Sheltered by Ghosts"
+        },
+        {
+          "count": 3,
+          "name": "Thalia, Guardian of Thraben"
         },
         {
           "count": 4,
-          "name": "Mox Amber"
-        },
-        {
-          "count": 4,
-          "name": "Dauntless Bodyguard"
-        },
-        {
-          "count": 2,
-          "name": "Erode"
+          "name": "Thalia's Lieutenant"
         },
         {
           "count": 3,
-          "name": "Extraction Specialist"
-        },
-        {
-          "count": 3,
-          "name": "Mutavault"
+          "name": "Veteran Survivor"
         },
         {
           "count": 2,
-          "name": "Arachne, Psionic Weaver"
+          "name": "Kytheon, Hero of Akros"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Scout for Survivors"
-        },
-        {
-          "count": 4,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 3,
-          "name": "Aven Interrupter"
+          "name": "Containment Priest"
         },
         {
           "count": 2,
-          "name": "Unlicensed Hearse"
+          "name": "Declaration in Stone"
         },
         {
-          "count": 4,
+          "count": 2,
+          "name": "Get Lost"
+        },
+        {
+          "count": 2,
+          "name": "Portable Hole"
+        },
+        {
+          "count": 2,
+          "name": "Requisition Raid"
+        },
+        {
+          "count": 2,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 3,
           "name": "Wedding Announcement"
         }
       ]

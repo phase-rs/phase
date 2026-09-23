@@ -323,7 +323,8 @@ const CATEGORY_LABELS: { key: string; label: string; sort: number }[] = [
   { key: "Vehicle", label: "Vehicle tokens", sort: 4 },
   { key: "Enchantment", label: "Enchantment tokens", sort: 5 },
   { key: "Land", label: "Land tokens", sort: 6 },
-  { key: "Artifact", label: "Other artifact tokens", sort: 7 },
+  { key: "Planeswalker", label: "Planeswalker tokens", sort: 7 },
+  { key: "Artifact", label: "Other artifact tokens", sort: 8 },
 ];
 
 function categoryKey(c: TokenCategory): string {

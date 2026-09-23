@@ -4790,6 +4790,13 @@ fn parse_normalized_oracle_ir(
 
     let mut ctx = ParseContext {
         card_name: Some(card_name.to_string()),
+        // CR 109.1 + CR 205.2: publish the card's printed core types once, here,
+        // so a keyword action whose CR expansion is conditioned on them
+        // (`support N`, CR 701.41a) can read the answer instead of inferring it.
+        source_core_types: types
+            .iter()
+            .filter_map(|t| t.parse::<crate::types::card_type::CoreType>().ok())
+            .collect(),
         ..Default::default()
     };
 
@@ -7630,7 +7637,12 @@ fn parse_normalized_oracle_ir(
 
         // Priority 14a: the dispatcher parses once and retains successful spell IR.
         // Priority 15: its exact unsupported payload reaches final lowering unchanged.
-        match dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone()) {
+        match dispatch_line_nom(
+            &line,
+            card_name,
+            ctx.host_self_reference.clone(),
+            ctx.source_core_types.clone(),
+        ) {
             NomDispatchIr::Spell(mut ir) => {
                 ir.shell.min_x_value = ir.shell.min_x_value.max(min_x_value);
                 emitter.ability_ir_at_route(item_line, ir, OuterRoute::NomDispatch);
@@ -8540,6 +8552,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -9321,6 +9334,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }

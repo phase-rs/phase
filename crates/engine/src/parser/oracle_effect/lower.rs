@@ -1841,7 +1841,7 @@ pub(super) fn ensure_remember_card_after_object_choice(def: &mut AbilityDefiniti
 
 /// Recursively detect a `TargetFilter::ExiledBySource` leaf (possibly nested under
 /// `And`/`Or`) — the "exiled with ~" linked-exile marker.
-fn filter_mentions_exiled_by_source(filter: &TargetFilter) -> bool {
+pub(super) fn filter_mentions_exiled_by_source(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::ExiledBySource => true,
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
@@ -1918,6 +1918,20 @@ pub(super) fn change_zone_target_choice_timing(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    // CR 115.10a + CR 701.41a: a producer that expanded a keyword-action
+    // SHORTHAND into a targeted effect already knows the answer the ladder below
+    // is trying to infer, so its declaration wins outright. The ladder decides by
+    // scanning this clause's PRINTED fragment for the literal word "target";
+    // that scan is correct for printed prose and structurally blind to a
+    // shorthand, whose printed fragment is not the ability's rules text
+    // ("support 2" has no "target"; CR 701.41a defines it to mean "… up to two
+    // other target creatures"). Checked FIRST rather than as a fallback: every
+    // arm below can return early, so a later check would be unreachable for
+    // exactly the shapes that need it — and ahead of the shared `lower` binding,
+    // which this path never reads.
+    if let Some(timing) = clause_ir.declared_target_choice_timing {
+        return timing;
+    }
     // CR 115.1d: the "is this a target?" decisions below read the clause's
     // printed text, so its lowercased fragment is computed once and shared.
     let lower = clause_ir
@@ -2735,6 +2749,7 @@ impl ReflexiveGateParent {
             | Effect::RuntimeHandled { .. }
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
+            | Effect::EmpowerJace { .. }
             | Effect::Monstrosity { .. }
             | Effect::Specialize
             | Effect::Renown { .. }
@@ -7434,7 +7449,8 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
 /// CR 115.1 + CR 601.2c: Extract the announced target-set spec from counter-placement text.
 /// Recovers "counter(s) on [each of ]any number of [other|another] target …" (`unlimited(0)`)
 /// and "counter(s) on [each of ]up to N [other|another] target …" (`up_to(N)`) through
-/// `strip_optional_target_prefix`, then falls back to the article-less
+/// `strip_optional_target_prefix`, and "counter(s) on each of <N|X> target …" (`exact(N)`),
+/// then falls back to the article-less
 /// "counter(s) on [each of ]up to N <noun>" markers (`up_to(N)`).
 /// Used as a post-parse fixup when the AST→Effect lowering loses multi_target info.
 pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
@@ -7443,7 +7459,7 @@ pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTarget
     // "counter(s) on [each of ]<quantifier> target …" through the single quantifier
     // authority; article-less "up to N <noun>" forms fall through to the markers below.
     if let Some(spec) = nom_primitives::scan_at_word_boundaries(lower.as_str(), |input| {
-        let (after_on, _) = (
+        let (after_on, (_, each_of)) = (
             alt((
                 tag::<_, _, OracleError<'_>>("counters on "),
                 tag("counter on "),
@@ -7453,6 +7469,16 @@ pub(super) fn extract_put_counter_multi_target(text: &str) -> Option<MultiTarget
             .parse(input)?;
         match strip_optional_target_prefix(after_on) {
             (rest, Some(spec)) => Ok((rest, spec)),
+            // CR 601.2c + CR 115.3: "each of <N|X> target …" announces exactly N different
+            // targets for the one instance of "target"; X comes from the cost (CR 107.3a).
+            (_, None) if each_of.is_some() => {
+                let (rest, count) = terminated(
+                    parse_multi_target_count_expr,
+                    (multispace1, peek(tag("target"))),
+                )
+                .parse(after_on)?;
+                Ok((rest, MultiTargetSpec::exact(count)))
+            }
             (_, None) => Err(oracle_err(input)),
         }
     }) {
@@ -12717,21 +12743,22 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        gate_other_revealed_card_on_multiplayer_reveal, match_create_of_those_tokens,
-        nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_enter_counters_clause_body,
-        parse_where_x_quantity_expression, patch_choose_from_zone_counter_continuation_target,
-        relink_gated_token_referent_consumers, strip_redundant_flip_win_quantifier,
-        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-        strip_trailing_duration, strip_trailing_where_x,
-        value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
+        extract_put_counter_multi_target, gate_other_revealed_card_on_multiplayer_reveal,
+        match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
+        parse_enter_counters_clause_body, parse_where_x_quantity_expression,
+        patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
+        strip_redundant_flip_win_quantifier, strip_return_destination_ext_with_remainder,
+        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
+        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
+        ControlClausePossessor,
     };
     use crate::parser::oracle_ir::diagnostic::ClauseGapKind;
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction,
         ContinuousModification, DelayedTriggerCondition, Duration, Effect, ModalChoice,
-        ObjectProperty, ObjectScope, PtValue, QuantityExpr, QuantityRef, SubAbilityLink,
-        TargetFilter, TriggerDefinition,
+        MultiTargetSpec, ObjectProperty, ObjectScope, PtValue, QuantityExpr, QuantityRef,
+        SubAbilityLink, TargetFilter, TriggerDefinition,
     };
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
@@ -13296,6 +13323,38 @@ mod tests {
             ),
             ref other => panic!("expected PutAtLibraryPosition(Bottom), got {other:?}"),
         }
+    }
+
+    /// CR 601.2c + CR 115.3: the counter-placement recovery stamps "each of <N|X>
+    /// target …" with an exact count, keeps the "up to" quantifier, and declines a
+    /// non-target recipient phrase.
+    #[test]
+    fn extract_put_counter_multi_target_recovers_each_of_exact_count() {
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(
+            extract_put_counter_multi_target("put a +1/+1 counter on each of x target creatures"),
+            Some(MultiTargetSpec::exact(x))
+        );
+        assert_eq!(
+            extract_put_counter_multi_target(
+                "put two -1/-1 counters on each of two target creatures"
+            ),
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
+        );
+        assert_eq!(
+            extract_put_counter_multi_target(
+                "put a +1/+1 counter on each of up to two target creatures"
+            ),
+            Some(MultiTargetSpec::fixed(0, 2))
+        );
+        assert_eq!(
+            extract_put_counter_multi_target("put a +1/+1 counter on each of those creatures"),
+            None
+        );
     }
 
     #[test]

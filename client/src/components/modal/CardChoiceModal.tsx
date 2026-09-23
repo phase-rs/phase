@@ -120,6 +120,7 @@ type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
+type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
 
 function effectZoneChoiceInteractionId(
   interaction: ViewerInteraction | null,
@@ -236,6 +237,9 @@ export function CardChoiceModal() {
     case "BeholdChoice":
       if (!canActForWaitingState) return null;
       return <BeholdChoiceModal data={waitingFor.data} />;
+    case "EmpowerJaceChoice":
+      if (!canActForWaitingState) return null;
+      return <EmpowerJaceChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -1075,6 +1079,58 @@ function BeholdChoiceModal({ data }: { data: BeholdChoice["data"] }) {
     <ChoiceOverlay
       title={t("cardChoice.behold.title")}
       subtitle={t("cardChoice.behold.subtitleChoose")}
+    >
+      <ScrollableCardStrip>
+        {data.choices.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          return (
+            <motion.button
+              key={id}
+              className="relative shrink-0 rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: 0.85, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6, opacity: 1 }}
+              onClick={() => handleChoose(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// CR 701.71a: Empower Jace N — the controller picks exactly ONE Jace
+// planeswalker token they control to receive N loyalty counters. Display-only:
+// the engine supplies `choices` and `count` and enforces legality; clicking a
+// token dispatches a single-object SelectCards.
+function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  const handleChoose = useCallback(
+    (id: ObjectId) => {
+      dispatch({ type: "SelectCards", data: { cards: [id] } });
+    },
+    [dispatch],
+  );
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.empowerJace.title")}
+      subtitle={t("cardChoice.empowerJace.subtitle", { count: data.count })}
     >
       <ScrollableCardStrip>
         {data.choices.map((id, index) => {

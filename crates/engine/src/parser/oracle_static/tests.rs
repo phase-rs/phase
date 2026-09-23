@@ -11635,10 +11635,46 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
         def.mode,
         StaticMode::ActivateAsInstant {
             cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
+}
+
+#[test]
+fn static_equip_abilities_activate_as_instant() {
+    let def =
+        parse_static_line("You may activate equip abilities any time you could cast an instant.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::ManaOnly,
+            keyword: Some(AbilityTag::Equip),
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
+    );
+    assert_eq!(def.condition, None);
+}
+
+#[test]
+fn static_boast_abilities_activate_as_instant() {
+    // Same composable grammar as equip — any taggable ability class parses
+    // through the same combinator, not a card-specific branch.
+    let def =
+        parse_static_line("You may activate boast abilities any time you could cast an instant.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::ManaOnly,
+            keyword: Some(AbilityTag::Boast),
+        }
+    );
 }
 
 // CR 400.7: Crew Captain — "This creature has indestructible as long as it

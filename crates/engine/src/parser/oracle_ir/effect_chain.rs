@@ -16,8 +16,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ControllerRef,
     CostReduction, DelayedTriggerCondition, Duration, MultiTargetSpec, OpponentMayScope,
-    PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetFilter, TargetSelectionMode,
-    UnlessPayModifier,
+    PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -892,6 +892,15 @@ pub(crate) struct ClauseIr {
     /// targeted "of their choice" controlled by the phase-trigger active player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target_chooser: Option<TargetFilter>,
+    /// CR 115.10a + CR 701.41a: producer-declared target-choice timing captured
+    /// from `ParseContext` after this chunk was parsed. When `Some`, it outranks
+    /// the text-scan ladder in `lower::target_choice_timing_for_clause`, which
+    /// cannot read a keyword-action shorthand correctly because the shorthand is
+    /// not the ability's rules text ("support 2" contains no "target"; CR 701.41a
+    /// defines it to mean "… up to two other target creatures"). `None` (the
+    /// default) leaves that ladder in charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) declared_target_choice_timing: Option<TargetChoiceTiming>,
     /// CR 105.4 + CR 608.2c: this clause's text printed its own colour choice
     /// ("of the color of your choice"), captured from `ParseContext` after this
     /// chunk was parsed. Declared per-clause provenance — assembly gates the
@@ -1099,6 +1108,7 @@ impl ClauseIrBuilder {
             unless_pay: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             target_chooser: None,
+            declared_target_choice_timing: None,
             printed_color_choice: None,
             placement: ClausePlacement::Sibling,
         }
@@ -1168,6 +1178,7 @@ impl ClauseIrBuilder {
         .unless_pay(c.unless_pay)
         .target_selection_mode(c.target_selection_mode)
         .target_chooser(c.target_chooser)
+        .declared_target_choice_timing(c.declared_target_choice_timing)
         .printed_color_choice(c.printed_color_choice)
         .push();
     }
@@ -1201,6 +1212,7 @@ pub(crate) struct ClauseDraft<'a> {
     unless_pay: Option<UnlessPayModifier>,
     target_selection_mode: TargetSelectionMode,
     target_chooser: Option<TargetFilter>,
+    declared_target_choice_timing: Option<TargetChoiceTiming>,
     printed_color_choice: Option<ChoiceType>,
     placement: ClausePlacement,
 }
@@ -1259,6 +1271,18 @@ impl ClauseDraft<'_> {
     }
     pub(crate) fn target_chooser(mut self, v: Option<TargetFilter>) -> Self {
         self.target_chooser = v;
+        self
+    }
+    /// CR 115.10a + CR 701.41a: declare THIS clause's target-choice timing
+    /// directly, for a producer that expanded a keyword-action shorthand into a
+    /// targeted effect. The only writer is the chain chunk loop, lifting
+    /// `ParseContext::declared_target_choice_timing` immediately after the chunk
+    /// parses. `lower::target_choice_timing_for_clause` honours it ahead of its
+    /// text-scan ladder, which would otherwise read "support 2", find no
+    /// "target", and classify a targeted announcement as a described
+    /// resolution-time pick — suppressing its target slots entirely.
+    pub(crate) fn declared_target_choice_timing(mut self, v: Option<TargetChoiceTiming>) -> Self {
+        self.declared_target_choice_timing = v;
         self
     }
     /// CR 105.4 + CR 608.2c: declare that THIS clause's text printed its own
@@ -1378,6 +1402,7 @@ impl ClauseDraft<'_> {
             unless_pay: self.unless_pay,
             target_selection_mode: self.target_selection_mode,
             target_chooser: self.target_chooser,
+            declared_target_choice_timing: self.declared_target_choice_timing,
             printed_color_choice: self.printed_color_choice,
             chosen_color_grant: crate::parser::oracle_nom::filter::classify_chosen_color_grant(
                 &self.source_text,
