@@ -15,7 +15,7 @@ export interface TurnEnv {
   TURN_TTL_SECONDS?: string;
   /** Comma-separated origin allowlist, or "*" (default) to allow any. */
   ALLOWED_ORIGINS?: string;
-  /** Optional per-IP throttle for the credential-mint endpoint. */
+  /** Per-IP throttle for the credential-mint endpoint. */
   TURN_LIMIT?: RateLimit;
 }
 
@@ -62,9 +62,14 @@ async function checkTurnRateLimit(
   env: TurnEnv,
   cors: Record<string, string>,
 ): Promise<Response | null> {
-  // Keep local development usable when the optional binding is absent. The
-  // official production and preview Wrangler environments both bind it.
-  if (!env.TURN_LIMIT) return null;
+  // A deployment without the binding must not mint unthrottled credentials.
+  if (!env.TURN_LIMIT) {
+    console.error({ event: "turn_rate_limit_missing" });
+    return Response.json(
+      { error: "TURN rate limiter unavailable" },
+      { status: 503, headers: cors },
+    );
+  }
 
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
   try {

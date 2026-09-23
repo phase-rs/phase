@@ -106,6 +106,22 @@ test("returns 503 and skips the TURN API when the limiter fails", async () => {
   assert.equal(upstreamCalls, 0);
 });
 
+test("returns 503 and skips the TURN API when the limiter binding is missing", async () => {
+  let upstreamCalls = 0;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    throw new Error("the upstream must not be reached");
+  };
+
+  const env = configuredEnv(undefined);
+  const response = await handleTurnCredentials(turnRequest(), env);
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://phase-rs.dev");
+  assert.deepEqual(await response.json(), { error: "TURN rate limiter unavailable" });
+  assert.equal(upstreamCalls, 0);
+});
+
 test("OPTIONS does not spend a limiter budget or call the TURN API", async () => {
   let limiterCalls = 0;
   let upstreamCalls = 0;
