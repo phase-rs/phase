@@ -37313,6 +37313,97 @@ fn word_boundary_guard_refuses_the_attackers_minimal_pair() {
 /// TWO-SIDED ON ONE PRODUCTION: the rules-bearing fixture reds if the check is
 /// removed, the punctuation-only fixture reds if the check is widened to any
 /// non-empty tail. Neither alone pins the boundary.
+/// CR 702.3b: the ATTACHED-SUBJECT production must not drop a rules-bearing
+/// remainder either.
+///
+/// The recognizer returns unconsumed input; base bound it as `_rest` and discarded
+/// it, so "Enchanted creature can attack as though it didn't have defender AND HAS
+/// FLYING." kept the permission and silently lost the flying grant while coverage
+/// reported the card as supported. The non-attached production was fixed first;
+/// this is the same defect on its sibling, which is why it needs its own row
+/// rather than inheriting the other's coverage.
+///
+/// FOUR-SIDED:
+///  * a modellable companion COMPOSES (both definitions, same `affected`);
+///  * an UNMODELLABLE companion DECLINES entirely — no partial prefix;
+///  * a punctuation-only tail is untouched (the plain attached form still parses);
+///  * the SINGLE-RETURN dispatch caller declines the composed pair rather than
+///    taking `.next()` and dropping the companion, which would reintroduce the
+///    defect one layer up.
+#[test]
+fn attached_subject_rules_bearing_remainder_composes_or_declines() {
+    let enchanted = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Creature],
+        controller: None,
+        properties: vec![FilterProp::EnchantedBy],
+    });
+
+    // (1) COMPOSES — the maintainer's verbatim example.
+    let composed = super::grammar::parse_enchanted_equipped_predicate(
+        "can attack as though it didn't have defender and has flying.",
+        enchanted.clone(),
+        "Enchanted creature can attack as though it didn't have defender and has flying.",
+    );
+    assert_eq!(
+        composed.len(),
+        2,
+        "both the permission and the flying grant must survive; got {composed:?}"
+    );
+    let modes: Vec<StaticMode> = composed.iter().map(|d| d.mode.clone()).collect();
+    assert!(
+        modes.contains(&StaticMode::CanAttackWithDefender),
+        "the permission half; got {modes:?}"
+    );
+    assert!(
+        composed.iter().any(|d| d
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Flying))),
+        "the companion must carry the printed flying grant; got {composed:?}"
+    );
+    for def in &composed {
+        assert_eq!(
+            def.affected,
+            Some(enchanted.clone()),
+            "both halves affect the enchanted creature"
+        );
+    }
+
+    // (2) DECLINES — a companion this parser cannot model. Emitting the permission
+    // alone here is exactly the defect; an empty vec lets callers fall back and the
+    // line shows as a gap.
+    let undeclinable = super::grammar::parse_enchanted_equipped_predicate(
+        "can attack as though it didn't have defender and wins the game at the next beginning of the end step.",
+        enchanted.clone(),
+        "probe",
+    );
+    assert!(
+        undeclinable.is_empty(),
+        "an unmodellable companion must decline the WHOLE clause; got {undeclinable:?}"
+    );
+
+    // (3) PUNCTUATION-ONLY tail is untouched — without this, widening the check to
+    // any non-empty remainder would still pass (1) and (2) while deleting every
+    // plain attached-subject card.
+    let plain = super::grammar::parse_enchanted_equipped_predicate(
+        "can attack as though it didn't have defender.",
+        enchanted.clone(),
+        "Enchanted creature can attack as though it didn't have defender.",
+    );
+    assert_eq!(plain.len(), 1, "the plain form still parses; got {plain:?}");
+    assert_eq!(plain[0].mode, StaticMode::CanAttackWithDefender);
+
+    // (4) The SINGLE-RETURN dispatch path declines the composed pair instead of
+    // returning half of it.
+    assert_eq!(
+        parse_static_line(
+            "Enchanted creature can attack as though it didn't have defender and has flying.",
+        ),
+        None,
+        "the single-return caller must decline a composed pair, not drop the companion"
+    );
+}
+
 #[test]
 fn defender_exception_rules_bearing_remainder_composes_both_halves() {
     // (1) RULES-BEARING tail — declines. Expedition Lookout's verbatim line.

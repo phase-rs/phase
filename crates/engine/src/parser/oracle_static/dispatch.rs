@@ -1416,10 +1416,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1428,10 +1433,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted permanent ") {
         let filter =
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1480,10 +1490,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted land ") {
         let filter =
             TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1492,10 +1507,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "equipped creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }

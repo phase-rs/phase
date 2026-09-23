@@ -902,7 +902,7 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // ".", takes the no-rider path and is unmoved; guarded by
     // `attached_subject_production_still_fires_with_a_trailing_rider` and
     // `attached_subject_defender_exception_keeps_its_trailing_condition`.
-    if let Some((segment, _rest)) =
+    if let Some((segment, rest)) =
         defender_exception::parse_defender_exception_predicate(body_lower)
     {
         // CR 702.3b: DECLINE the duration form outright rather than falling
@@ -942,6 +942,43 @@ pub(crate) fn parse_enchanted_equipped_predicate(
                     // an empty gap text and lose the clause it names.
                     def = def.condition(condition);
                 }
+            }
+
+            // CR 702.3b: a RULES-BEARING remainder must not be dropped. The
+            // recognizer returns unconsumed input, and base bound it as `_rest`
+            // and discarded it — so "Enchanted creature can attack as though it
+            // didn't have defender AND HAS FLYING." kept the permission and lost
+            // the flying grant, while coverage reported the card as supported.
+            // This is the same defect the non-attached production composes around;
+            // fixing it there and not here fixed the instance rather than the class.
+            //
+            // The companion is parsed by RE-ENTERING this production on the peeled
+            // remainder with the SAME `affected` — it is the authority for attached
+            // predicates, so "has flying" is already its job. The recursion is on a
+            // strictly shorter input that no longer contains the defender clause,
+            // so it cannot re-enter this arm forever.
+            //
+            // If the conjunction or the companion cannot be modelled, DECLINE the
+            // whole clause (empty vec) rather than emit a partial: callers fall
+            // back and the line shows as an unimplemented gap. A partial prefix
+            // must not be green. Guarded by
+            // `attached_subject_rules_bearing_remainder_composes_or_declines`.
+            let tail = rest.trim().trim_end_matches('.').trim();
+            if !tail.is_empty() {
+                let Some(companion_pred) = nom_tag_lower(tail, tail, "and ") else {
+                    return Vec::new();
+                };
+                let companions = parse_enchanted_equipped_predicate(
+                    companion_pred,
+                    affected.clone(),
+                    description,
+                );
+                if companions.is_empty() {
+                    return Vec::new();
+                }
+                let mut composed = vec![def];
+                composed.extend(companions);
+                return composed;
             }
             return vec![def];
         }
