@@ -59,6 +59,8 @@ const deps: LfgDeps = {
   servers,
   now: () => (clock += 1000),
   followup: async (_appId, _token, body) => void pings.push(body),
+  editOriginal: async () => {},
+  threads: null,
 };
 
 const base = (userId: string) => ({

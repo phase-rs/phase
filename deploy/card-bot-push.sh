@@ -7,12 +7,14 @@ set -euo pipefail
 # setup-vps.sh box grants passwordless `sudo docker`; this box puts the deploy
 # user in the docker group instead.)
 #
-# The long-lived container needs NO secrets: the public key is baked into
-# config.ts and signature follow-ups use the per-interaction webhook token. The
-# bot token is only needed to (re)register the slash command — a one-off
-# `docker run` reading an env file on the host (app id / guild id / public key
-# are all baked-in defaults, so the token is all that's required):
+# Both the long-lived container and the one-off command registration read the
+# host's env file (app id / guild id / public key are baked-in defaults, so the
+# token is all it needs):
 #   /etc/phase-card-bot.env  →  CARD_BOT_TOKEN   (secret, from the Discord portal)
+# The server uses the token only for /lfg game threads; without it the bot still
+# serves /card and /lfg and pings players under the post instead. Threads need
+# the bot's role to have Create Private Threads, Send Messages in Threads and
+# Manage Threads in the /lfg channel.
 #
 # /lfg state persists across redeploys in the named volume phase-card-bot-data,
 # mounted at /data (the image's CARD_BOT_DB_PATH is /data/lfg.sqlite).
@@ -59,6 +61,7 @@ ssh "${HOST}" "${detect} \
   && \$D run -d \
     --name phase-card-bot \
     --restart unless-stopped \
+    --env-file ${ENV_FILE} \
     -p 127.0.0.1:9375:9375 \
     -v phase-card-bot-data:/data \
     ${IMAGE} \

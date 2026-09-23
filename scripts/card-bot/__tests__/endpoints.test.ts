@@ -68,6 +68,7 @@ describe("desktop link matches the desktop shell", () => {
       code: "AB12CD",
       touchedMs: 0,
       seated: ["111", "222"],
+      thread: null,
     };
     const to = new URL(new URL(desktopLink(lfg, hostLink(lfg))).searchParams.get("to")!);
     expect(schemes).toEqual([to.protocol.slice(0, -1)]);

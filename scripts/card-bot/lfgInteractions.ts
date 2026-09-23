@@ -1,5 +1,5 @@
-// /lfg interaction handlers: the slash command, its `server` autocomplete, and the
-// post's buttons. Every input is in memory (the ServerCache snapshot) or
+// /lfg interaction handlers: the slash command, its `server` autocomplete, the
+// post's buttons, and the game thread's buttons and closing timer. Every input is in memory (the ServerCache snapshot) or
 // synchronous (bun:sqlite), so each handler answers within Discord's 3 s window
 // without deferring — which lets refusals be ephemeral and the post public.
 
@@ -13,9 +13,10 @@ import {
   MessageFlags,
   ResponseType,
   stringOption,
+  type ThreadApi,
 } from "./discord";
 import { defaultSeats, findFormat, type LfgMode, seatCap } from "./formats";
-import type { LfgStore, Outcome } from "./lfg";
+import type { Lfg, LfgStore, Outcome } from "./lfg";
 import {
   type LfgAction,
   linkReply,
@@ -23,6 +24,10 @@ import {
   refusalText,
   renderEnded,
   renderLfg,
+  threadEnded,
+  threadName,
+  threadTimedOut,
+  threadWelcome,
 } from "./lfgView";
 import { brokerSupportsBotGames, eligibleServers, type ServerCache } from "./servers";
 
@@ -32,7 +37,15 @@ export interface LfgDeps {
   now: () => number;
   /** Posts a follow-up message on an interaction (createFollowupMessage in production). */
   followup: (appId: string, token: string, body: unknown) => Promise<void>;
+  /** Edits the message a button was on (editOriginalResponse in production). */
+  editOriginal: (appId: string, token: string, body: unknown) => Promise<void>;
+  /** Game threads, or null when the bot runs without its token (no threads). */
+  threads: ThreadApi | null;
 }
+
+/** Wait before closing a thread whose End game click is being answered, so the
+ *  button's message update lands before the thread is archived and locked. */
+const THREAD_CLOSE_DELAY_MS = 1000;
 
 /** Discord caps autocomplete at 25 choices, each name at 100 chars. */
 const MAX_AUTOCOMPLETE_CHOICES = 25;
@@ -125,7 +138,7 @@ export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
 
 function dispatch(
   store: LfgStore,
-  action: LfgAction,
+  action: Exclude<LfgAction, "end">,
   id: string,
   guildId: string,
   userId: string,
@@ -158,6 +171,7 @@ export function lfgComponent(
   if (guildId === undefined || userId === undefined) {
     return ephemeral("This button only works in a server channel.");
   }
+  if (parsed.action === "end") return endGame(parsed.id, guildId, userId, deps);
   const outcome = dispatch(deps.store, parsed.action, parsed.id, guildId, userId, deps.now());
   console.log(`[lfg] ${parsed.action} id=${parsed.id} state=${outcome.lfg?.state ?? "gone"}`);
 
@@ -165,9 +179,9 @@ export function lfgComponent(
     case "changed": {
       const response = jsonResponse({ type: ResponseType.UPDATE_MESSAGE, data: renderLfg(outcome.lfg) });
       if (outcome.becameReady) {
-        void deps
-          .followup(i.application_id, i.token, readyPing(outcome.lfg))
-          .catch((err) => console.error(`[lfg] ready ping for ${parsed.id} failed:`, err));
+        void announceReady(i, outcome.lfg, deps).catch((err) =>
+          console.error(`[lfg] ready announcement for ${parsed.id} failed:`, err),
+        );
       }
       return response;
     }
@@ -183,6 +197,87 @@ export function lfgComponent(
     default: {
       const unreachable: never = outcome;
       throw new Error(`unknown outcome ${JSON.stringify(unreachable)}`);
+    }
+  }
+}
+
+/**
+ * Tells the players their game is ready: in a new private thread when the bot
+ * can open one, otherwise with a ping under the post.
+ */
+async function announceReady(i: ComponentInteraction, lfg: Lfg, deps: LfgDeps): Promise<void> {
+  const threadId = await openGameThread(i.channel_id, lfg, deps).catch((err) => {
+    console.error(`[lfg] game thread for ${lfg.id} failed:`, err);
+    return null;
+  });
+  if (threadId === null) {
+    await deps.followup(i.application_id, i.token, readyPing(lfg));
+    return;
+  }
+  await deps.editOriginal(i.application_id, i.token, renderLfg({ ...lfg, thread: { id: threadId, closed: false } }));
+}
+
+/** Opens the game's private thread with the seated players in it, or returns
+ *  null when threads are off or the interaction has no channel. The thread is
+ *  recorded as soon as it exists, so the timer closes it even if a later step
+ *  fails. */
+async function openGameThread(channelId: string | undefined, lfg: Lfg, deps: LfgDeps): Promise<string | null> {
+  if (deps.threads === null || channelId === undefined) return null;
+  const threadId = await deps.threads.create(channelId, threadName(lfg));
+  if (!deps.store.attachThread(lfg.id, threadId)) {
+    await deps.threads.close(threadId);
+    return null;
+  }
+  for (const userId of lfg.seated) await deps.threads.addMember(threadId, userId);
+  await deps.threads.post(threadId, threadWelcome(lfg));
+  console.log(`[lfg] thread id=${lfg.id} players=${lfg.seated.length}`);
+  return threadId;
+}
+
+/** The game thread's End game button: any seated player closes the thread. */
+function endGame(id: string, guildId: string, userId: string, deps: LfgDeps): Response {
+  const result = deps.store.endGame(id, guildId, userId, deps.now());
+  console.log(`[lfg] end id=${id} result=${result.kind}`);
+  switch (result.kind) {
+    case "closed": {
+      const threads = deps.threads;
+      if (threads !== null) {
+        void Bun.sleep(THREAD_CLOSE_DELAY_MS)
+          .then(() => threads.close(result.threadId))
+          .catch((err) => console.error(`[lfg] closing thread for ${id} failed:`, err));
+      }
+      return jsonResponse({ type: ResponseType.UPDATE_MESSAGE, data: threadEnded(userId) });
+    }
+    case "refused":
+      return ephemeral(refusalText(result.reason, result.lfg.format));
+    case "ended":
+      return jsonResponse({
+        type: ResponseType.UPDATE_MESSAGE,
+        data: { content: "This game chat is closed.", components: [], allowed_mentions: { parse: [] } },
+      });
+    default: {
+      const unreachable: never = result;
+      throw new Error(`unknown end result ${JSON.stringify(unreachable)}`);
+    }
+  }
+}
+
+/** The timer's pass: closes every game thread past GAME_THREAD_MAX_MS. A thread
+ *  that fails to close stays open in the store and is retried on the next pass. */
+export async function closeStaleThreads(
+  store: LfgStore,
+  threads: ThreadApi,
+  now: number,
+): Promise<void> {
+  for (const { id, threadId } of store.staleThreads(now)) {
+    try {
+      // Best effort: a thread someone deleted cannot take the notice, and close() treats it as closed.
+      await threads.post(threadId, threadTimedOut()).catch(() => {});
+      await threads.close(threadId);
+      store.markThreadClosed(id, now);
+      console.log(`[lfg] thread timed out id=${id}`);
+    } catch (err) {
+      console.error(`[lfg] closing stale thread for ${id} failed:`, err);
     }
   }
 }

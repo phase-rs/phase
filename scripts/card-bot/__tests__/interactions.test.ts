@@ -12,10 +12,12 @@ import {
   OptionType,
   registerGuildCommands,
   ResponseType,
+  botThreadApi,
+  type ThreadApi,
 } from "../discord";
 import { handleInteraction } from "../index";
-import { type CreateResult, LfgStore } from "../lfg";
-import { type LfgDeps, lfgAutocomplete, lfgCommand, lfgComponent } from "../lfgInteractions";
+import { type CreateResult, GAME_THREAD_MAX_MS, LfgStore } from "../lfg";
+import { closeStaleThreads, type LfgDeps, lfgAutocomplete, lfgCommand, lfgComponent } from "../lfgInteractions";
 import { customId, type LfgAction } from "../lfgView";
 import { DIRECTORY_VERSION, type DirectoryServer, type FetchFn, ServerCache } from "../servers";
 
@@ -49,16 +51,44 @@ async function cache(lobbyProtocol = 10, rows: DirectoryServer[] = [row()]): Pro
 
 type Recorded = { appId: string; token: string; body: unknown };
 
-function deps(servers: ServerCache): LfgDeps & { pings: Recorded[] } {
+/** A ThreadApi that records every call; `fail` makes the named operation throw. */
+function fakeThreads(fail: Partial<Record<keyof ThreadApi, boolean>> = {}) {
+  const calls: { op: keyof ThreadApi; args: unknown[] }[] = [];
+  const record = (op: keyof ThreadApi, args: unknown[]) => {
+    calls.push({ op, args });
+    if (fail[op]) throw new Error(`${op} failed`);
+  };
+  const api: ThreadApi = {
+    create: async (...args) => (record("create", args), "thread-1"),
+    addMember: async (...args) => record("addMember", args),
+    post: async (...args) => record("post", args),
+    close: async (...args) => record("close", args),
+  };
+  return { api, calls, ops: () => calls.map((c) => c.op) };
+}
+
+function deps(
+  servers: ServerCache,
+  threads: ThreadApi | null = null,
+): LfgDeps & { pings: Recorded[]; edits: Recorded[] } {
   const pings: Recorded[] = [];
+  const edits: Recorded[] = [];
   let clock = T0;
   return {
     store: new LfgStore(":memory:"),
     servers,
     now: () => (clock += 1000),
     followup: async (appId, token, body) => void pings.push({ appId, token, body }),
+    editOriginal: async (appId, token, body) => void edits.push({ appId, token, body }),
+    threads,
     pings,
+    edits,
   };
+}
+
+/** Lets the fire-and-forget ready announcement finish. */
+async function settle(): Promise<void> {
+  for (let n = 0; n < 10; n++) await new Promise((resolve) => setImmediate(resolve));
 }
 
 const member = (userId: string) => ({ user: { id: userId, username: `u${userId}` } });
@@ -81,12 +111,15 @@ const opt = (name: string, value: string | number, focused?: boolean): Interacti
   ...(focused ? { focused } : {}),
 });
 
+const CHANNEL = "channel-1";
+
 function component(action: LfgAction, id: string, userId: string): ComponentInteraction {
   return {
     type: InteractionType.MESSAGE_COMPONENT,
     application_id: "app",
     token: `tok-${userId}`,
     guild_id: GUILD,
+    channel_id: CHANNEL,
     member: member(userId),
     data: { custom_id: customId(action, id), component_type: 2 },
   };
@@ -310,6 +343,114 @@ describe("LFG buttons (T-comp)", () => {
   });
 });
 
+describe("game threads", () => {
+  async function readyGame(d: LfgDeps): Promise<string> {
+    const res = await body(lfgCommand(command([opt("format", "Commander"), opt("seats", 3)]), d));
+    const id = res.data.components![0].components[0].custom_id!.split(":")[2];
+    click(d, "join", id, "222");
+    await body(click(d, "join", id, "333"));
+    await settle();
+    return id;
+  }
+
+  test("ready opens a private thread with every seated player, then points the post at it", async () => {
+    const t = fakeThreads();
+    const d = deps(await cache(), t.api);
+    await readyGame(d);
+
+    expect(t.calls[0]).toEqual({ op: "create", args: [CHANNEL, "Commander game"] });
+    expect(t.calls.filter((c) => c.op === "addMember").map((c) => c.args)).toEqual([
+      ["thread-1", CREATOR],
+      ["thread-1", "222"],
+      ["thread-1", "333"],
+    ]);
+    const welcome = t.calls.find((c) => c.op === "post")!.args[1] as {
+      allowed_mentions: unknown;
+      components: { components: { label: string }[] }[];
+    };
+    expect(welcome.allowed_mentions).toEqual({ users: [CREATOR, "222", "333"] });
+    expect(welcome.components[0].components.map((b) => b.label)).toEqual(["Get my link", "End game"]);
+    // The thread replaces the ping, and the post links to it.
+    expect(d.pings).toHaveLength(0);
+    expect(d.edits).toHaveLength(1);
+    const post = d.edits[0].body as { embeds: { description: string }[] };
+    expect(post.embeds[0].description).toContain("Game chat: <#thread-1>");
+  });
+
+  test("a failed thread falls back to the ping, and a created thread is still recorded for the timer", async () => {
+    const t = fakeThreads({ post: true });
+    const d = deps(await cache(), t.api);
+    const id = await readyGame(d);
+    expect(d.pings).toHaveLength(1);
+    expect(d.edits).toHaveLength(0);
+    expect(d.store.staleThreads(T0 + GAME_THREAD_MAX_MS * 2)).toEqual([{ id, threadId: "thread-1" }]);
+  });
+
+  test("without a thread API the ready ping is unchanged", async () => {
+    const d = deps(await cache(), null);
+    await readyGame(d);
+    expect(d.pings).toHaveLength(1);
+    expect(d.edits).toHaveLength(0);
+  });
+
+  describe("End game", () => {
+    let sleep: ReturnType<typeof spyOn>;
+    beforeEach(() => {
+      sleep = spyOn(Bun, "sleep").mockImplementation(async () => {});
+    });
+    afterEach(() => sleep.mockRestore());
+
+    test("a seated player ends the game: the message updates, then the thread closes", async () => {
+      const t = fakeThreads();
+      const d = deps(await cache(), t.api);
+      const id = await readyGame(d);
+
+      const ended = await body(click(d, "end", id, "222"));
+      expect(ended.type).toBe(ResponseType.UPDATE_MESSAGE);
+      expect(ended.data.content).toContain("Game ended by <@222>");
+      expect(ended.data.components).toEqual([]);
+      await settle();
+      expect(t.calls.at(-1)).toEqual({ op: "close", args: ["thread-1"] });
+      expect(d.store.staleThreads(T0 + GAME_THREAD_MAX_MS * 2)).toEqual([]);
+
+      const again = await body(click(d, "end", id, CREATOR));
+      expect(again.data.content).toBe("This game chat is closed.");
+      await settle();
+      expect(t.ops().filter((op) => op === "close")).toHaveLength(1);
+    });
+
+    test("someone who is not seated is refused ephemerally", async () => {
+      const t = fakeThreads();
+      const d = deps(await cache(), t.api);
+      const id = await readyGame(d);
+      const refused = await body(click(d, "end", id, "999"));
+      expect(refused).toMatchObject({ type: ResponseType.CHANNEL_MESSAGE_WITH_SOURCE, data: { flags: MessageFlags.EPHEMERAL } });
+      expect(t.ops()).not.toContain("close");
+    });
+  });
+
+  test("the timer closes threads past GAME_THREAD_MAX_MS and retries one that failed", async () => {
+    const t = fakeThreads({ close: true });
+    const d = deps(await cache(), t.api);
+    const id = await readyGame(d);
+    const ready = d.store.staleThreads(Number.MAX_SAFE_INTEGER);
+    expect(ready).toEqual([{ id, threadId: "thread-1" }]);
+
+    await closeStaleThreads(d.store, t.api, T0);
+    expect(t.ops()).not.toContain("close");
+
+    const late = T0 + 60_000 + GAME_THREAD_MAX_MS;
+    await closeStaleThreads(d.store, t.api, late);
+    expect(t.ops().slice(-2)).toEqual(["post", "close"]);
+    expect(d.store.staleThreads(late)).toHaveLength(1);
+
+    const ok = fakeThreads();
+    await closeStaleThreads(d.store, ok.api, late);
+    expect(ok.ops()).toEqual(["post", "close"]);
+    expect(d.store.staleThreads(late)).toEqual([]);
+  });
+});
+
 describe("/lfg server autocomplete", () => {
   test("offers eligible servers only, filtered by the typed text, value = row url", async () => {
     const d = deps(
@@ -503,6 +644,46 @@ describe("Discord REST helpers", () => {
       await expect(editOriginalResponse("app", "tok", {})).rejects.toThrow("404");
       expect(f.calls).toHaveLength(1);
       expect(f.calls[0].init.method).toBe("PATCH");
+    } finally {
+      f.restore();
+    }
+  });
+
+  test("botThreadApi creates a private, non-invitable thread with bot auth and returns its id", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const spy = stubGlobalFetch(async (input, init) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      return Response.json({ id: "t-9" });
+    });
+    try {
+      expect(await botThreadApi("secret").create("c-1", "Commander game")).toBe("t-9");
+      expect(calls[0].url).toBe("https://discord.com/api/v10/channels/c-1/threads");
+      expect(new Headers(calls[0].init.headers).get("Authorization")).toBe("Bot secret");
+      expect(JSON.parse(String(calls[0].init.body))).toMatchObject({ name: "Commander game", type: 12, invitable: false });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("botThreadApi.close archives and locks, and treats a deleted thread (404) as closed", async () => {
+    const f = stubFetch([404]);
+    try {
+      await botThreadApi("secret").close("t-9");
+      expect(f.calls).toHaveLength(1);
+      expect(f.calls[0].init.method).toBe("PATCH");
+      expect(JSON.parse(String(f.calls[0].init.body))).toEqual({ archived: true, locked: true });
+    } finally {
+      f.restore();
+    }
+  });
+
+  test("botThreadApi.addMember sends a bodiless PUT", async () => {
+    const f = stubFetch([204]);
+    try {
+      await botThreadApi("secret").addMember("t-9", "222");
+      expect(f.calls[0].url).toBe("https://discord.com/api/v10/channels/t-9/thread-members/222");
+      expect(f.calls[0].init.method).toBe("PUT");
+      expect(f.calls[0].init.body).toBeUndefined();
     } finally {
       f.restore();
     }

@@ -12,16 +12,20 @@
 import { BUILD_ENDPOINTS } from "./config";
 import { ButtonStyle, ComponentType, MessageFlags, ResponseType } from "./discord";
 import type { LfgFormat } from "./formats";
-import { LFG_IDLE_MS, type Lfg, type Refusal } from "./lfg";
+import { GAME_THREAD_MAX_MS, LFG_IDLE_MS, type Lfg, type Refusal } from "./lfg";
 import type { Embed } from "./render";
 
-export type LfgAction = "join" | "leave" | "start" | "link";
+export type LfgAction = "join" | "leave" | "start" | "link" | "end";
 
-const LFG_ACTIONS: readonly LfgAction[] = ["join", "leave", "start", "link"];
+const LFG_ACTIONS: readonly LfgAction[] = ["join", "leave", "start", "link", "end"];
 
 interface ActionButton {
   type: typeof ComponentType.BUTTON;
-  style: typeof ButtonStyle.PRIMARY | typeof ButtonStyle.SECONDARY | typeof ButtonStyle.SUCCESS;
+  style:
+    | typeof ButtonStyle.PRIMARY
+    | typeof ButtonStyle.SECONDARY
+    | typeof ButtonStyle.SUCCESS
+    | typeof ButtonStyle.DANGER;
   label: string;
   custom_id: string;
 }
@@ -130,6 +134,7 @@ export function renderLfg(lfg: Lfg): {
         "",
         "Ready! Press **Get my link**. Host: open your link first. Links stay available for 24 hours.",
       );
+      if (lfg.thread !== null) lines.push(`Game chat: <#${lfg.thread.id}>`);
       components = [
         {
           type: ComponentType.ACTION_ROW,
@@ -221,6 +226,48 @@ export function readyPing(lfg: Lfg): { content: string; allowed_mentions: { user
     content: `Game ready: ${mentions} — press **Get my link** on the post above.`,
     allowed_mentions: { users: [...lfg.seated] },
   };
+}
+
+/** The game thread's name. No user text reaches it (as with `roomName`). */
+export function threadName(lfg: Lfg): string {
+  return `${lfg.format.label} game`;
+}
+
+/** The first message in a game thread: mentions the players (which notifies
+ *  them), with the link and End game buttons. */
+export function threadWelcome(lfg: Lfg): {
+  content: string;
+  components: ActionRow[];
+  allowed_mentions: { users: string[] };
+} {
+  const mentions = lfg.seated.map((id) => `<@${id}>`).join(" ");
+  const hours = GAME_THREAD_MAX_MS / (60 * 60_000);
+  return {
+    content:
+      `Game ready: ${mentions}\nThis private chat is for your game. Press **Get my link** to play, ` +
+      `and **End game** when you're done. It closes by itself after ${hours} hours.`,
+    components: [
+      {
+        type: ComponentType.ACTION_ROW,
+        components: [
+          actionButton(ButtonStyle.PRIMARY, "Get my link", "link", lfg.id),
+          actionButton(ButtonStyle.DANGER, "End game", "end", lfg.id),
+        ],
+      },
+    ],
+    allowed_mentions: { users: [...lfg.seated] },
+  };
+}
+
+/** The welcome message once a player has pressed End game. */
+export function threadEnded(userId: string): { content: string; components: []; allowed_mentions: { parse: [] } } {
+  return { content: `Game ended by <@${userId}>. This chat is now closed.`, components: [], allowed_mentions: { parse: [] } };
+}
+
+/** Posted before the timer closes a game thread. */
+export function threadTimedOut(): { content: string; allowed_mentions: { parse: [] } } {
+  const hours = GAME_THREAD_MAX_MS / (60 * 60_000);
+  return { content: `This game chat closed after ${hours} hours.`, allowed_mentions: { parse: [] } };
 }
 
 /** One sentence per refusal, for an ephemeral reply. */

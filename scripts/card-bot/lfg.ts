@@ -17,6 +17,10 @@ export const LFG_IDLE_MS = 30 * 60_000;
 /** Any row untouched for this long is deleted (bounded growth, no timer). */
 const SWEEP_AFTER_MS = 24 * 60 * 60_000;
 
+/** A game thread still open this long after its LFG became ready is closed by
+ *  the bot's timer. Well inside SWEEP_AFTER_MS, so the row still exists then. */
+export const GAME_THREAD_MAX_MS = 6 * 60 * 60_000;
+
 const CODE_LENGTH = 6;
 const CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 /** Largest multiple of 36 that fits a byte (7 · 36); bytes at or above it are
@@ -39,6 +43,8 @@ export interface Lfg {
   touchedMs: number;
   /** Seated user ids in join order; the creator is first. */
   seated: string[];
+  /** The ready game's private thread, once the bot has opened one. */
+  thread: { id: string; closed: boolean } | null;
 }
 
 export interface NewLfg {
@@ -69,6 +75,14 @@ export type Outcome =
   | { kind: "refused"; reason: Refusal; lfg: Lfg }
   /** `linkFor` only: a seated user of a ready LFG (→ ephemeral link reply). */
   | { kind: "ready"; lfg: Lfg };
+
+/** `endGame`'s result (the thread's End game button). */
+export type EndResult =
+  /** The thread is now marked closed (→ close it in Discord). */
+  | { kind: "closed"; lfg: Lfg; threadId: string }
+  | { kind: "refused"; reason: "not_seated"; lfg: Lfg }
+  /** Already closed, or the LFG is gone (`null`). */
+  | { kind: "ended"; lfg: Lfg | null };
 
 export type CreateResult =
   | { kind: "created"; lfg: Lfg }
@@ -113,7 +127,16 @@ interface LfgRow {
   state: LfgState;
   code: string | null;
   touched_ms: number;
+  thread_id: string | null;
+  thread_closed_ms: number | null;
 }
+
+/** Columns added after the first release, so an existing database gains them in
+ *  place (CREATE TABLE IF NOT EXISTS never alters a table that exists). */
+const ADDED_COLUMNS: readonly { name: string; type: string }[] = [
+  { name: "thread_id", type: "TEXT" },
+  { name: "thread_closed_ms", type: "INTEGER" },
+];
 
 /**
  * A 6-symbol `[A-Z0-9]` room code. Bytes ≥ 252 are rejected (rejection sampling)
@@ -149,6 +172,12 @@ export class LfgStore {
     this.db.run("PRAGMA journal_mode = WAL");
     this.db.run("PRAGMA foreign_keys = ON");
     this.db.run(SCHEMA);
+    const existing = new Set(
+      (this.db.query("PRAGMA table_info(lfg)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const column of ADDED_COLUMNS) {
+      if (!existing.has(column.name)) this.db.run(`ALTER TABLE lfg ADD COLUMN ${column.name} ${column.type}`);
+    }
   }
 
   create(input: NewLfg, now: number): CreateResult {
@@ -242,6 +271,45 @@ export class LfgStore {
     });
   }
 
+  /** Records the private thread opened for a ready LFG. False when the LFG is
+   *  gone, not ready, or already has a thread. */
+  attachThread(id: string, threadId: string): boolean {
+    const result = this.db
+      .query("UPDATE lfg SET thread_id = $threadId WHERE id = $id AND state = 'ready' AND thread_id IS NULL")
+      .run({ id, threadId });
+    return result.changes === 1;
+  }
+
+  /** A seated player's End game click in the game thread. */
+  endGame(id: string, guildId: string, userId: string, now: number): EndResult {
+    return this.db.transaction((): EndResult => {
+      this.sweep(now);
+      const lfg = this.load(id);
+      if (lfg === null || lfg.guildId !== guildId) return { kind: "ended", lfg: null };
+      if (lfg.thread === null || lfg.thread.closed) return { kind: "ended", lfg };
+      if (!lfg.seated.includes(userId)) return { kind: "refused", reason: "not_seated", lfg };
+      this.markThreadClosed(id, now);
+      return { kind: "closed", lfg: this.mustLoad(id), threadId: lfg.thread.id };
+    })();
+  }
+
+  /** Open game threads whose LFG became ready at least GAME_THREAD_MAX_MS ago. A
+   *  ready row's `touched_ms` is its ready time: nothing touches it afterwards. */
+  staleThreads(now: number): { id: string; threadId: string }[] {
+    return (
+      this.db
+        .query(
+          `SELECT id, thread_id FROM lfg
+           WHERE thread_id IS NOT NULL AND thread_closed_ms IS NULL AND touched_ms <= $cutoff`,
+        )
+        .all({ cutoff: now - GAME_THREAD_MAX_MS }) as { id: string; thread_id: string }[]
+    ).map((row) => ({ id: row.id, threadId: row.thread_id }));
+  }
+
+  markThreadClosed(id: string, now: number): void {
+    this.db.query("UPDATE lfg SET thread_closed_ms = $now WHERE id = $id").run({ id, now });
+  }
+
   /** Shared prologue of every click: sweep, load (guild-scoped), lazy expiry of
    *  an idle open post, closed posts → `ended`; then the action, all in one
    *  transaction. */
@@ -318,6 +386,7 @@ export class LfgStore {
       code: row.code,
       touchedMs: row.touched_ms,
       seated,
+      thread: row.thread_id === null ? null : { id: row.thread_id, closed: row.thread_closed_ms !== null },
     };
   }
 

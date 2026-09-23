@@ -69,8 +69,11 @@ const DEFAULT_GUILD_ID = "1485498006781427802";
 
 /** Discord application credentials (the dedicated card-bot app, not the bug bot). */
 export const discord = {
-  /** Bot token (secret) — only needed to register slash commands (register.ts). */
+  /** Bot token (secret). register.ts requires it; the server uses it for /lfg
+   *  game threads when set (see `tokenIfSet`). */
   token: () => required("CARD_BOT_TOKEN"),
+  /** The bot token, or undefined when unset (the server then runs without game threads). */
+  tokenIfSet: () => Bun.env.CARD_BOT_TOKEN || undefined,
   /** Ed25519 public key — verifies inbound interaction signatures. */
   publicKey: () => Bun.env.CARD_BOT_PUBLIC_KEY || DEFAULT_PUBLIC_KEY,
   /** Application (client) id. */

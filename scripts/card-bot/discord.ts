@@ -45,6 +45,7 @@ export const ButtonStyle = {
   PRIMARY: 1,
   SECONDARY: 2,
   SUCCESS: 3,
+  DANGER: 4,
   LINK: 5,
 } as const;
 
@@ -65,6 +66,8 @@ interface InteractionBase {
   application_id: string;
   token: string;
   guild_id?: string;
+  /** The channel the interaction was invoked in. */
+  channel_id?: string;
   /** Sent when the interaction is invoked in a guild. */
   member?: { user: DiscordUser };
   /** Sent when the interaction is invoked in a DM. */
@@ -202,23 +205,36 @@ export async function registerGuildCommands(
 /** Pause between retries of a status listed in `retryOn`. */
 const RETRY_DELAY_MS = 1000;
 
+interface RequestOptions {
+  /** Statuses retried after RETRY_DELAY_MS. */
+  retryOn?: readonly number[];
+  /** Statuses treated as done (the request returns null). */
+  allow?: readonly number[];
+  /** Bot token; interaction webhooks authenticate with their URL token instead. */
+  botToken?: string;
+}
+
 /**
- * One interaction-webhook request, up to 3 attempts: a 429 waits Discord's
- * `retry_after`; a status in `retryOn` waits RETRY_DELAY_MS; any other non-2xx
- * throws.
+ * One Discord REST request, up to 3 attempts: a 429 waits Discord's
+ * `retry_after`; a status in `retryOn` waits RETRY_DELAY_MS; a status in `allow`
+ * returns null; any other non-2xx throws. Returns the parsed JSON body, or null
+ * for an empty one.
  */
-async function webhookRequest(
-  method: "PATCH" | "POST",
+async function discordRequest(
+  method: "PATCH" | "POST" | "PUT",
   url: string,
   body: unknown,
   label: string,
-  retryOn: readonly number[],
-): Promise<void> {
+  { retryOn = [], allow = [], botToken }: RequestOptions = {},
+): Promise<unknown> {
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (botToken !== undefined) headers.Authorization = `Bot ${botToken}`;
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(url, {
       method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(10000),
     });
     if (res.status === 429) {
@@ -230,10 +246,12 @@ async function webhookRequest(
       await Bun.sleep(RETRY_DELAY_MS);
       continue;
     }
+    if (allow.includes(res.status)) return null;
     if (!res.ok) {
       throw new Error(`${label} → ${res.status}: ${await res.text()}`);
     }
-    return;
+    const text = await res.text();
+    return text === "" ? null : JSON.parse(text);
   }
   throw new Error(`${label} → exhausted retries`);
 }
@@ -244,12 +262,11 @@ export async function editOriginalResponse(
   interactionToken: string,
   body: unknown,
 ): Promise<void> {
-  await webhookRequest(
+  await discordRequest(
     "PATCH",
     `${API}/webhooks/${appId}/${interactionToken}/messages/@original`,
     body,
     "editOriginalResponse",
-    [],
   );
 }
 
@@ -268,11 +285,64 @@ export async function createFollowupMessage(
   body: unknown,
 ): Promise<void> {
   await Bun.sleep(FOLLOWUP_DELAY_MS);
-  await webhookRequest(
+  await discordRequest(
     "POST",
     `${API}/webhooks/${appId}/${interactionToken}`,
     body,
     "createFollowupMessage",
-    [404],
+    { retryOn: [404] },
   );
+}
+
+/** Discord `ChannelType.PRIVATE_THREAD`. */
+const PRIVATE_THREAD = 12;
+/** Minutes of inactivity before Discord auto-archives a thread (one of 60, 1440,
+ *  4320, 10080). The bot closes game threads sooner (lfg.ts GAME_THREAD_MAX_MS). */
+const THREAD_AUTO_ARCHIVE_MINUTES = 1440;
+
+/** The private-thread operations the bot needs, authenticated with the bot token. */
+export interface ThreadApi {
+  /** Creates a private thread in `channelId` that only moderators can add
+   *  people to; returns its id. */
+  create(channelId: string, name: string): Promise<string>;
+  addMember(threadId: string, userId: string): Promise<void>;
+  post(threadId: string, body: unknown): Promise<void>;
+  /** Archives and locks the thread. A thread that no longer exists counts as closed. */
+  close(threadId: string): Promise<void>;
+}
+
+export function botThreadApi(botToken: string): ThreadApi {
+  return {
+    async create(channelId, name) {
+      const thread = (await discordRequest(
+        "POST",
+        `${API}/channels/${channelId}/threads`,
+        { name, type: PRIVATE_THREAD, invitable: false, auto_archive_duration: THREAD_AUTO_ARCHIVE_MINUTES },
+        "createThread",
+        { botToken },
+      )) as { id: string };
+      return thread.id;
+    },
+    async addMember(threadId, userId) {
+      await discordRequest(
+        "PUT",
+        `${API}/channels/${threadId}/thread-members/${userId}`,
+        undefined,
+        "addThreadMember",
+        { botToken },
+      );
+    },
+    async post(threadId, body) {
+      await discordRequest("POST", `${API}/channels/${threadId}/messages`, body, "createMessage", { botToken });
+    },
+    async close(threadId) {
+      await discordRequest(
+        "PATCH",
+        `${API}/channels/${threadId}`,
+        { archived: true, locked: true },
+        "closeThread",
+        { botToken, allow: [404] },
+      );
+    },
+  };
 }

@@ -38,6 +38,7 @@ function lfg(overrides: Partial<Lfg> = {}): Lfg {
     code: CODE,
     touchedMs: 0,
     seated: ["111", "222"],
+    thread: null,
     ...overrides,
   };
 }

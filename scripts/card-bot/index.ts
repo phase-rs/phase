@@ -7,7 +7,8 @@
 //   • /lfg            → post the LFG publicly (or refuse ephemerally), synchronously
 //   • autocomplete    → /lfg: eligible dedicated servers; otherwise card names
 //                       from the (warm) default build
-//   • button          → /lfg Join / Leave / Start / Get my link (lfgInteractions.ts)
+//   • button          → /lfg Join / Leave / Start / Get my link, and the game
+//                       thread's End game (lfgInteractions.ts)
 //
 // Deferring /card guarantees we never hit Discord's 3s response window, even on
 // a cold preview load or a slow Scryfall call. /lfg needs only in-memory and
@@ -33,6 +34,7 @@ import {
   type Interaction,
   InteractionType,
   ResponseType,
+  botThreadApi,
   createFollowupMessage,
   editOriginalResponse,
   jsonResponse,
@@ -40,7 +42,13 @@ import {
   verifyRequest,
 } from "./discord";
 import { LfgStore } from "./lfg";
-import { type LfgDeps, lfgAutocomplete, lfgCommand, lfgComponent } from "./lfgInteractions";
+import {
+  closeStaleThreads,
+  type LfgDeps,
+  lfgAutocomplete,
+  lfgCommand,
+  lfgComponent,
+} from "./lfgInteractions";
 import { parseCustomId } from "./lfgView";
 import type { Embed } from "./render";
 import {
@@ -149,6 +157,9 @@ const MIN_AUTOCOMPLETE_CHARS = 2;
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 const MAX_TOKEN_CHOICES = 5;
 
+/** How often the timer looks for game threads to close (lfg.ts GAME_THREAD_MAX_MS). */
+const THREAD_SWEEP_INTERVAL_MS = 10 * 60_000;
+
 /** Synchronous autocomplete: suggest names from the warm default build. */
 async function autocomplete(interaction: CommandInteraction): Promise<Response> {
   const focused = interaction.data.options?.find((o) => o.focused);
@@ -228,10 +239,27 @@ if (import.meta.main) {
 
   const servers = new ServerCache();
   servers.start();
+  const botToken = discord.tokenIfSet();
+  const threads = botToken === undefined ? null : botThreadApi(botToken);
+  const store = new LfgStore(LFG_DB_PATH);
   const deps: InteractionDeps = {
     publicKey: discord.publicKey(),
-    lfg: { store: new LfgStore(LFG_DB_PATH), servers, now: Date.now, followup: createFollowupMessage },
+    lfg: {
+      store,
+      servers,
+      now: Date.now,
+      followup: createFollowupMessage,
+      editOriginal: editOriginalResponse,
+      threads,
+    },
   };
+  if (threads !== null) {
+    setInterval(() => {
+      void closeStaleThreads(store, threads, Date.now()).catch((err) =>
+        console.error("[lfg] thread sweep failed:", err),
+      );
+    }, THREAD_SWEEP_INTERVAL_MS);
+  }
 
   Bun.serve({
     port: PORT,
@@ -247,5 +275,7 @@ if (import.meta.main) {
     },
   });
 
-  console.log(`card-bot listening on :${PORT} (default build: ${DEFAULT_BUILD})`);
+  console.log(
+    `card-bot listening on :${PORT} (default build: ${DEFAULT_BUILD}, game threads: ${threads === null ? "off, no CARD_BOT_TOKEN" : "on"})`,
+  );
 }

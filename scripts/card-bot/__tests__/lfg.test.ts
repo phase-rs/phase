@@ -288,3 +288,44 @@ test("a server-mode LFG round-trips its server", () => {
   const lfg = created(store, { mode: "server", server, format: format("CommanderDraft"), seats: 8 });
   expect(lfg).toMatchObject({ mode: "server", server, build: "release", seats: 8 });
 });
+
+describe("game threads", () => {
+  test("a thread attaches once, and only to a ready LFG", () => {
+    const store = new LfgStore(":memory:");
+    const lfg = created(store, { seats: 2 });
+    expect(store.attachThread(lfg.id, "t-1")).toBe(false);
+    store.join(lfg.id, GUILD, "b", T0 + 1);
+    expect(store.attachThread(lfg.id, "t-1")).toBe(true);
+    expect(store.attachThread(lfg.id, "t-2")).toBe(false);
+    expect(lfgOf(store.linkFor(lfg.id, GUILD, "b", T0 + 2)).thread).toEqual({ id: "t-1", closed: false });
+  });
+
+  test("End game is guild-scoped", () => {
+    const store = new LfgStore(":memory:");
+    const lfg = created(store, { seats: 2 });
+    store.join(lfg.id, GUILD, "b", T0 + 1);
+    store.attachThread(lfg.id, "t-1");
+    expect(store.endGame(lfg.id, "other-guild", "b", T0 + 2)).toEqual({ kind: "ended", lfg: null });
+    expect(store.endGame(lfg.id, GUILD, "b", T0 + 2)).toMatchObject({ kind: "closed", threadId: "t-1" });
+  });
+
+  test("a database from before game threads gains the thread columns on open", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lfg-migrate-"));
+    try {
+      const path = join(dir, "lfg.sqlite");
+      const first = new LfgStore(path);
+      const lfg = created(first, { seats: 2 });
+      first.join(lfg.id, GUILD, "b", T0 + 1);
+      const raw = new Database(path);
+      raw.run("ALTER TABLE lfg DROP COLUMN thread_id");
+      raw.run("ALTER TABLE lfg DROP COLUMN thread_closed_ms");
+      raw.close();
+
+      const reopened = new LfgStore(path);
+      expect(lfgOf(reopened.linkFor(lfg.id, GUILD, "b", T0 + 2)).thread).toBeNull();
+      expect(reopened.attachThread(lfg.id, "t-1")).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
