@@ -397,6 +397,10 @@ pub(crate) enum ContinuationAst {
     /// library-to-hand search continuation are already represented by the intrinsic
     /// SearchDestination + reveal flag and should be absorbed.
     SearchResultClauseHandled,
+    /// "Exile it face down" after a SearchLibrary. The preceding search
+    /// definition carries a typed delivery intent rather than a battlefield
+    /// face-down profile marker.
+    ExileSearchResultFaceDown,
     /// "reveal it" immediately after a SearchLibrary whose destination is handled
     /// by a later conditional branch. Patches SearchLibrary.reveal without adding
     /// a default ChangeZone.

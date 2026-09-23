@@ -549,11 +549,21 @@ pub(crate) fn anticipated_zone_change_delivery(
     object_id: ObjectId,
     destination: Zone,
     source_id: ObjectId,
+    face_down_in_exile: bool,
 ) -> Option<PendingZoneChangeDelivery> {
     let object = state.objects.get(&object_id)?;
+    let mut expected_event =
+        ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id));
+    if let ProposedEvent::ZoneChange {
+        face_down_in_exile: conceal,
+        ..
+    } = &mut expected_event
+    {
+        *conceal = face_down_in_exile;
+    }
     Some(PendingZoneChangeDelivery::new(
         ObjectIncarnationRef::from_object(object),
-        ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id)),
+        expected_event,
     ))
 }
 
@@ -1260,6 +1270,7 @@ pub fn resolve(
         conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
         duration: ability.duration.clone(),
         track_exiled_by_source,
+        face_down_in_exile: ability.context.face_down_in_exile,
         face_down_profile: face_down_profile.clone(),
         library_placement: None,
         enters_modified_if: effect_enters_modified_if,
@@ -1340,6 +1351,7 @@ pub fn resolve(
             *obj_id,
             per_obj_ctx.destination,
             per_obj_ctx.source_id,
+            per_obj_ctx.face_down_in_exile,
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
@@ -1385,6 +1397,7 @@ pub fn resolve(
                             .clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
+                        face_down_in_exile: ctx.face_down_in_exile,
                         // CR 608.2c: carry the running count so the drain stamps
                         // `last_effect_count` with the full targeted-move total
                         // when the resumed iteration completes.
@@ -1444,6 +1457,7 @@ pub fn resolve(
                             .clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
+                        face_down_in_exile: ctx.face_down_in_exile,
                         // CR 608.2c: carry the running count so the drain stamps
                         // `last_effect_count` with the full targeted-move total
                         // when the resumed iteration completes.
@@ -1617,6 +1631,8 @@ pub(crate) struct ChangeZoneIterationCtx {
     pub conditional_enter_with_counters: Vec<(TargetFilter, CounterType, QuantityExpr)>,
     pub duration: Option<Duration>,
     pub track_exiled_by_source: bool,
+    /// Typed SearchLibrary intent carried through multi-object and pause/resume paths.
+    pub face_down_in_exile: bool,
     /// CR 708.2a + CR 708.3: `Some` turns the object face down before it enters
     /// the battlefield with these characteristics ("return it face down ... It's
     /// a Forest land" — Yedora). `None` = normal face-up entry.
@@ -1754,6 +1770,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enters_under_player,
         &ctx.enter_with_counters,
         ctx.face_down_profile.as_ref(),
+        ctx.face_down_in_exile,
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
         ctx.enter_attached_to,
@@ -2236,8 +2253,13 @@ pub fn resolve_all(
         // control" effects.
         // CR 122.1 + CR 122.1h: each object enters with the resolved counters
         // (e.g. a finality counter on Shilgengar's mass return).
-        let anticipated_pause =
-            anticipated_zone_change_delivery(state, obj_id, dest_zone, ability.source_id);
+        let anticipated_pause = anticipated_zone_change_delivery(
+            state,
+            obj_id,
+            dest_zone,
+            ability.source_id,
+            ability.context.face_down_in_exile,
+        );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
@@ -2253,6 +2275,7 @@ pub fn resolve_all(
             enters_under_player,
             &enter_with_counters,
             face_down_profile.as_ref(),
+            ability.context.face_down_in_exile,
             track_exiled_by_source,
             member_library_placement.clone(),
             None,
@@ -2330,6 +2353,7 @@ pub fn resolve_all(
                         conditional_enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
+                        face_down_in_exile: ability.context.face_down_in_exile,
                         moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
                         library_placement: member_library_placement.clone(),
@@ -2386,6 +2410,7 @@ pub fn resolve_all(
                         conditional_enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
+                        face_down_in_exile: ability.context.face_down_in_exile,
                         moved_count: Some(moved_count + 1),
                         // CR 708.2a + CR 708.3: preserve the face-down profile so
                         // resumed members of a paused face-down mass return enter
@@ -6928,6 +6953,7 @@ mod tests {
             conditional_enter_with_counters: conditional,
             duration: None,
             track_exiled_by_source: false,
+            face_down_in_exile: false,
             moved_count: None,
             face_down_profile: None,
             library_placement: None,

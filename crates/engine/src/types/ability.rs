@@ -24919,6 +24919,10 @@ pub struct AbilityDefinition {
     pub sibling_condition: SiblingCondition,
     /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
     pub unlowered_guard: Option<UnloweredGuard>,
+    /// Typed intent for SearchLibrary clauses that exile the found card face down.
+    /// This is deliberately separate from `FaceDownProfile`, which describes
+    /// battlefield characteristics only.
+    pub face_down_in_exile: bool,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -25002,6 +25006,8 @@ struct AbilityDefinitionRepr<'a> {
     sibling_condition: SiblingCondition,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlowered_guard: &'a Option<UnloweredGuard>,
+    #[serde(skip_serializing_if = "is_false")]
+    face_down_in_exile: bool,
 }
 
 impl Serialize for AbilityDefinition {
@@ -25050,6 +25056,7 @@ impl Serialize for AbilityDefinition {
             iteration_kind_binding,
             sibling_condition,
             unlowered_guard,
+            face_down_in_exile,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -25093,6 +25100,7 @@ impl Serialize for AbilityDefinition {
             iteration_kind_binding,
             sibling_condition: *sibling_condition,
             unlowered_guard,
+            face_down_in_exile: *face_down_in_exile,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -25209,6 +25217,8 @@ struct AbilityDefinitionDe {
     sibling_condition: SiblingCondition,
     #[serde(default)]
     unlowered_guard: Option<UnloweredGuard>,
+    #[serde(default)]
+    face_down_in_exile: bool,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -25262,6 +25272,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             iteration_kind_binding: de.iteration_kind_binding,
             sibling_condition: de.sibling_condition,
             unlowered_guard: de.unlowered_guard,
+            face_down_in_exile: de.face_down_in_exile,
         })
     }
 }
@@ -25521,6 +25532,7 @@ impl AbilityDefinition {
             iteration_kind_binding: None,
             sibling_condition: SiblingCondition::Dependent,
             unlowered_guard: None,
+            face_down_in_exile: false,
         }
     }
 
@@ -26877,6 +26889,11 @@ impl ForwardedResultContext {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// Typed SearchLibrary intent for a face-down Exile destination.
+    /// This is carried in the existing resolution context so it survives
+    /// ordinary ability-chain handoffs without widening every ability literal.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub face_down_in_exile: bool,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered
     /// result. `None` means no producer has run in this resolution; `Some([])`
     /// is a completed producer that moved no objects and intentionally blocks

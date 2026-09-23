@@ -806,6 +806,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        face_down_in_exile: _,
     } = definition;
 
     activation_mana_payment_restriction.is_none()
@@ -930,6 +931,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         // field: `parse_effect_chain` outside the pipeline leaves marks intact, and
         // no runtime path reaches such a tree. See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        face_down_in_exile: _,
     } = definition
     else {
         return false;

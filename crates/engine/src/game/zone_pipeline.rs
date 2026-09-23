@@ -855,12 +855,14 @@ pub(crate) fn move_object_with_terminal(
                 ProposedEvent::zone_change(req.object_id, from_zone, Zone::Library, source_id);
             if let ProposedEvent::ZoneChange {
                 applied,
+                face_down_in_exile: conceal_in_exile,
                 chain_referent,
                 ..
             } = &mut proposed
             {
                 *chain_referent = req.mods.chain_referent;
                 *applied = req.replacement_applied.clone();
+                *conceal_in_exile = req.face_down_in_exile;
             }
             return match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
@@ -935,6 +937,7 @@ pub(crate) fn move_object_with_terminal(
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
         if let ProposedEvent::ZoneChange {
             applied,
+            face_down_in_exile: conceal_in_exile,
             chain_referent,
             ..
         } = &mut proposed
@@ -942,6 +945,7 @@ pub(crate) fn move_object_with_terminal(
             *chain_referent = req.mods.chain_referent;
             *applied = req.replacement_applied;
             applied.extend(seed_applied);
+            *conceal_in_exile = req.face_down_in_exile;
         }
         return match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
@@ -1011,6 +1015,9 @@ pub(crate) fn move_object_with_terminal(
         if matches!(req.cause, ZoneChangeCause::DebugCommand) {
             let delivery_start = events.len();
             zones::move_to_zone(state, req.object_id, req.to, events);
+            if req.face_down_in_exile && req.to == Zone::Exile {
+                zones::mark_face_down_in_exile(state, &mut events[delivery_start..], req.object_id);
+            }
             // pod-lab loop-3 Q5: debug-staged board setup (GameScenario, the
             // shared seam nearly every engine integration test builds boards
             // through) stays maximally conservative and out of scope for the
@@ -1033,6 +1040,7 @@ pub(crate) fn move_object_with_terminal(
             controller_override,
             enter_with_counters,
             face_down_profile,
+            face_down_in_exile: conceal_in_exile,
             chain_referent,
             applied,
             ..
@@ -1046,6 +1054,7 @@ pub(crate) fn move_object_with_terminal(
             *controller_override = req.mods.controller_override;
             enter_with_counters.extend(req.mods.enter_with_counters.iter().cloned());
             *face_down_profile = req.mods.face_down_profile.clone().map(Box::new);
+            *conceal_in_exile = req.face_down_in_exile;
             *chain_referent = req.mods.chain_referent;
             *applied = req.replacement_applied;
         }
@@ -1088,6 +1097,7 @@ pub(crate) fn move_object_with_terminal(
         req.mods.controller_override,
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
+        req.face_down_in_exile,
         req.mods.chain_referent,
         track_exiled_by_source,
         None,
@@ -1302,7 +1312,7 @@ fn deliver_batch(
         match move_object_with_terminal(state, req, events) {
             ZoneMoveTerminalResult::Completed(completion) => {
                 if face_down_in_exile {
-                    mark_face_down_if_exiled(state, object_id);
+                    zones::mark_face_down_in_exile(state, &mut events[delivery_start..], object_id);
                 }
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
@@ -1386,16 +1396,6 @@ fn deliver_batch(
     BatchDeliveryResult::Done(Box::new(logical_zone_change_group))
 }
 
-fn mark_face_down_if_exiled(state: &mut GameState, object_id: ObjectId) {
-    if let Some(object) = state
-        .objects
-        .get_mut(&object_id)
-        .filter(|object| object.zone == Zone::Exile)
-    {
-        object.face_down = true;
-    }
-}
-
 /// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
 /// can finish it. New saves serialize every request's complete heterogeneous
 /// context. The legacy uniform projection remains populated for old-save wire
@@ -1473,6 +1473,7 @@ fn anticipated_zone_change_delivery(
         controller_override,
         enter_with_counters,
         face_down_profile,
+        face_down_in_exile,
         chain_referent,
         attach_to,
         applied,
@@ -1485,6 +1486,7 @@ fn anticipated_zone_change_delivery(
         *controller_override = request.mods.controller_override;
         *enter_with_counters = request.mods.enter_with_counters.clone();
         *face_down_profile = request.mods.face_down_profile.clone().map(Box::new);
+        *face_down_in_exile = request.face_down_in_exile;
         *chain_referent = request.mods.chain_referent;
         *attach_to = request.mods.attach_to;
         *applied = request.replacement_applied.clone();
@@ -3374,6 +3376,7 @@ pub(crate) fn deliver_replaced_zone_change(
         enter_with_counters,
         controller_override: ctrl_override,
         face_down_profile,
+        face_down_in_exile,
         chain_referent,
         enter_as_copy,
         discard_frame,
@@ -3612,6 +3615,9 @@ pub(crate) fn deliver_replaced_zone_change(
                     );
                 }
             }
+        }
+        if face_down_in_exile && to == Zone::Exile {
+            zones::mark_face_down_in_exile(state, events, object_id);
         }
         // CR 730.3e: the survivor split (inside `move_to_zone` above) has consumed
         // any clause-2 routing override; clear it so it never leaks into a later
@@ -4084,6 +4090,7 @@ pub(crate) fn execute_zone_move_with_controller(
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
+        false,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4125,6 +4132,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
+        false,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4147,6 +4155,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    face_down_in_exile: bool,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4166,6 +4175,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
+        face_down_in_exile,
         crate::types::zones::ChainReferentIntent::Silent,
         track_exiled_by_source,
         library_placement,
@@ -4190,6 +4200,7 @@ fn execute_zone_move_with_applied_terminal(
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    face_down_in_exile: bool,
     // CR 608.2c: whether this entry is the producer a following demonstrative
     // anaphor binds to. Only `move_object_with_terminal` forwards a request's
     // intent; the four public `execute_zone_move*` wrappers are raw movers with
@@ -4224,11 +4235,13 @@ fn execute_zone_move_with_applied_terminal(
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,
+        face_down_in_exile: ref mut conceal_in_exile,
         chain_referent: ref mut intent,
         ..
     } = &mut proposed
     {
         *applied = replacement_applied;
+        *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
     }
 

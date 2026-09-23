@@ -909,6 +909,7 @@ fn enter_battlefield_with_etb(
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        face_down_in_exile: false,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         discard_frame: None,

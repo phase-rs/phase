@@ -3790,13 +3790,20 @@ pub struct PendingZoneChangeDelivery {
 
 impl PendingZoneChangeDelivery {
     pub fn new(member: ObjectIncarnationRef, expected_event: ProposedEvent) -> Self {
+        let face_down_in_exile = matches!(
+            &expected_event,
+            ProposedEvent::ZoneChange {
+                face_down_in_exile: true,
+                ..
+            }
+        );
         Self {
             member,
             expected_event,
             delivery_events: Vec::new(),
             terminal_completion: None,
             count: PausedZoneChangeDeliveryCount::NeedsCount,
-            face_down_in_exile: false,
+            face_down_in_exile,
         }
     }
 
@@ -3947,6 +3954,9 @@ pub struct PendingChangeZoneIteration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
+    /// Typed SearchLibrary intent carried across a replacement pause.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub face_down_in_exile: bool,
     /// CR 608.2c: Optional mass-move count carried by `ChangeZoneAll` resume
     /// paths so a paused Aura host choice still leaves "that many" chained
     /// effects with the same count the uninterrupted mass path records.
@@ -23977,41 +23987,104 @@ impl GameState {
                 } if *object_id == member.object_id
             )
         });
-        if let Some(paused) = self
+        let mut conceal = false;
+        let matched = if let Some(paused) = self
             .active_change_zone_frame_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            let conceal = paused.face_down_in_exile && settled_in_exile;
+            conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
             if conceal {
+                if let Some(GameEvent::ZoneChanged { record, .. }) =
+                    paused.delivery_events.iter_mut().rev().find(|event| {
+                        matches!(
+                            event,
+                            GameEvent::ZoneChanged {
+                                object_id,
+                                to: Zone::Exile,
+                                ..
+                            } if *object_id == member.object_id
+                        )
+                    })
+                {
+                    if let Some(context) = record.trigger_source_context.as_mut() {
+                        context.face_down = true;
+                    }
+                }
+            }
+            true
+        } else {
+            false
+        };
+        if matched {
+            if conceal {
                 self.objects
                     .get_mut(&member.object_id)
                     .expect("settled paused pile member exists")
                     .face_down = true;
+                if let Some(record) = self.zone_changes_this_turn.iter_mut().rev().find(|record| {
+                    record.object_id == member.object_id && record.to_zone == Zone::Exile
+                }) {
+                    if let Some(context) = record.trigger_source_context.as_mut() {
+                        context.face_down = true;
+                    }
+                }
             }
             return true;
         }
-        if let Some(paused) = self
+
+        conceal = false;
+        let matched = if let Some(paused) = self
             .resolution_stack
             .active_batch_delivery_or_post_replacement_child_mut()
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            let conceal = paused.face_down_in_exile && settled_in_exile;
+            conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
             if conceal {
+                if let Some(GameEvent::ZoneChanged { record, .. }) =
+                    paused.delivery_events.iter_mut().rev().find(|event| {
+                        matches!(
+                            event,
+                            GameEvent::ZoneChanged {
+                                object_id,
+                                to: Zone::Exile,
+                                ..
+                            } if *object_id == member.object_id
+                        )
+                    })
+                {
+                    if let Some(context) = record.trigger_source_context.as_mut() {
+                        context.face_down = true;
+                    }
+                }
+            }
+            true
+        } else {
+            false
+        };
+        if matched {
+            if conceal {
                 self.objects
                     .get_mut(&member.object_id)
                     .expect("settled paused pile member exists")
                     .face_down = true;
+                if let Some(record) = self.zone_changes_this_turn.iter_mut().rev().find(|record| {
+                    record.object_id == member.object_id && record.to_zone == Zone::Exile
+                }) {
+                    if let Some(context) = record.trigger_source_context.as_mut() {
+                        context.face_down = true;
+                    }
+                }
             }
             return true;
         }
@@ -37254,6 +37327,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             duration: None,
             track_exiled_by_source: false,
+            face_down_in_exile: false,
             moved_count: None,
             // CR 708.2a + CR 708.3: the face-down profile must survive the
             // pause/resume serde round-trip so a paused face-down return

@@ -1567,6 +1567,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             conditional_enter_with_counters,
             duration,
             track_exiled_by_source,
+            face_down_in_exile,
             mut moved_count,
             face_down_profile,
             library_placement,
@@ -1646,6 +1647,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 conditional_enter_with_counters: vec![],
                 duration: duration.clone(),
                 track_exiled_by_source,
+                face_down_in_exile,
                 // CR 708.2a + CR 708.3: thread the preserved face-down profile back
                 // into the resume ctx so a face-down move that parked on a
                 // per-permanent replacement-ordering / as-enters choice resumes
@@ -1662,14 +1664,22 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             let anticipated_pause = state.objects.get(obj_id).map(|object| {
+                let mut expected_event = crate::types::proposed_event::ProposedEvent::zone_change(
+                    *obj_id,
+                    object.zone,
+                    ctx.destination,
+                    Some(ctx.source_id),
+                );
+                if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                    face_down_in_exile: conceal,
+                    ..
+                } = &mut expected_event
+                {
+                    *conceal = ctx.face_down_in_exile;
+                }
                 crate::types::game_state::PendingZoneChangeDelivery::new(
                     crate::types::identifiers::ObjectIncarnationRef::from_object(object),
-                    crate::types::proposed_event::ProposedEvent::zone_change(
-                        *obj_id,
-                        object.zone,
-                        ctx.destination,
-                        Some(ctx.source_id),
-                    ),
+                    expected_event,
                 )
             });
             let delivery_start = events.len();
@@ -1736,6 +1746,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                                 .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            face_down_in_exile: ctx.face_down_in_exile,
                             moved_count,
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
@@ -1795,6 +1806,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                                 .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            face_down_in_exile: ctx.face_down_in_exile,
                             moved_count: moved_count
                                 .map(|count| count + i32::from(entry_target_choice)),
                             // CR 708.2a + CR 708.3: preserve the face-down profile
@@ -3354,7 +3366,13 @@ fn apply_parent_chain_context(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
     state: &mut GameState,
 ) {
+    // The face-down Exile marker is authored on the exact ChangeZone node by
+    // the parser.  Ordinary chain context handoff replaces the child's
+    // context wholesale, so preserve the node-local intent while inheriting
+    // the remaining casting-time facts from its parent.
+    let child_face_down_in_exile = child.context.face_down_in_exile;
     child.context = parent.context.clone();
+    child.context.face_down_in_exile |= child_face_down_in_exile;
     // CR 120.1 + CR 608.2b: The damage-subject binding names the object THIS
     // hand-off supplies (or fails to supply) to the immediate child's damage
     // clause. It is one-hop by construction — a grandchild's subject slot is a

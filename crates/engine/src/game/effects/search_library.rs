@@ -1979,17 +1979,25 @@ mod tests {
             AbilityKind::Spell,
         );
         let resolved = build_resolved_from_def(&ability, ObjectId(100), PlayerId(0));
+        assert!(
+            resolved
+                .sub_ability
+                .as_ref()
+                .is_some_and(|sub| sub.context.face_down_in_exile),
+            "the resolved exile continuation must retain typed concealment"
+        );
 
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
         assert!(matches!(state.waiting_for, WaitingFor::SearchChoice { .. }));
 
-        apply(
+        let selection_result = apply(
             &mut state,
             PlayerId(0),
             GameAction::SelectCards { cards: vec![found] },
         )
         .unwrap();
+        events.extend(selection_result.events);
 
         assert!(
             !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
@@ -1997,6 +2005,56 @@ mod tests {
         );
         assert_eq!(state.objects[&found].zone, Zone::Hand);
         assert!(state.players[0].hand.contains(&found));
+
+        let concealed_exile = events.iter().find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found => Some(record),
+            _ => None,
+        });
+        assert!(
+            concealed_exile.is_some_and(|record| record
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|context| context.face_down)),
+            "Beseech's library-to-exile record must retain event-time concealment"
+        );
+        assert!(state
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|record| record.object_id == found && record.to_zone == Zone::Exile)
+            .and_then(|record| record.trigger_source_context.as_ref())
+            .is_some_and(|context| context.face_down));
+        let owner_events =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let opponent_events =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(owner_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found
+                && record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.face_down)
+        )));
+        assert!(!opponent_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
     }
 
     #[test]

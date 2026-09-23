@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::types::action_rejection::ActionRejection;
@@ -2337,9 +2337,28 @@ pub fn filter_events_for_viewer(
     viewer: PlayerId,
 ) -> Vec<GameEvent> {
     let spectator = !state.players.iter().any(|player| player.id == viewer);
+    // A hidden-library search is the one event-time authority that may grant a
+    // non-owner knowledge of a card's identity.  Keep the audience latched to
+    // this event slice; do not infer it from the object's current owner or
+    // zone after a replacement/continuation has moved the card again.
+    let mut hidden_search_viewers: HashMap<ObjectId, HashSet<PlayerId>> = HashMap::new();
+    for event in events {
+        let GameEvent::HiddenSearchViewed {
+            cards, audience, ..
+        } = event
+        else {
+            continue;
+        };
+        for card in cards {
+            hidden_search_viewers
+                .entry(card.identity.object_id)
+                .or_default()
+                .extend(audience.iter().copied());
+        }
+    }
     events
         .iter()
-        .filter(|event| event_visible_to_viewer(event, state, viewer))
+        .filter(|event| event_visible_to_viewer(event, state, viewer, &hidden_search_viewers))
         .map(|event| match event {
             // `CardId` is assigned from the pre-shuffle object sequence when a
             // deck loads. An opponent can use it to recover hidden deck order,
@@ -2368,7 +2387,12 @@ pub fn filter_events_for_viewer(
         .collect()
 }
 
-fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerId) -> bool {
+fn event_visible_to_viewer(
+    event: &GameEvent,
+    state: &GameState,
+    viewer: PlayerId,
+    hidden_search_viewers: &HashMap<ObjectId, HashSet<PlayerId>>,
+) -> bool {
     let can_view_private_for_player =
         |player: PlayerId| viewer_has_private_access_to_player(state, viewer, player);
 
@@ -2389,6 +2413,11 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
             *object_id,
             *to,
             record.owner,
+            record
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|context| context.face_down),
+            hidden_search_viewers,
             &can_view_private_for_player,
         ),
         // CR 701.17c + CR 400.2: a milled card can be found "as long as that
@@ -2410,6 +2439,8 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
                 .objects
                 .get(object_id)
                 .map_or(*player_id, |obj| obj.owner),
+            false,
+            hidden_search_viewers,
             &can_view_private_for_player,
         ),
         // CR 400.2: A mulligan moves cards from one hidden zone to another.
@@ -2438,6 +2469,33 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
                     &can_view_private_for_player,
                 )
         }),
+        // A hidden search can move its selected card out of Exile again while
+        // the same resolution is still producing events.  The record's
+        // event-time source context is the only durable marker; the live object
+        // has already cleared its exile face-down designation on zone exit.
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Exile),
+            record,
+            ..
+        } if record
+            .trigger_source_context
+            .as_ref()
+            .is_some_and(|context| context.face_down) =>
+        {
+            hidden_search_viewers
+                .get(object_id)
+                .is_some_and(|audience| audience.contains(&viewer))
+                || state.objects.get(object_id).is_some_and(|obj| {
+                    obj.face_down
+                        && face_down_exile_visible_to_viewer(
+                            state,
+                            *object_id,
+                            obj,
+                            &can_view_private_for_player,
+                        )
+                })
+        }
         _ => true,
     }
 }
@@ -2448,16 +2506,41 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
 /// face-down manifest/cloak moves and face-down exiles must be gated the same
 /// way `filter_state_for_viewer` gates the post-move object — not by a fixed
 /// destination-zone allowlist.
+#[allow(clippy::too_many_arguments)]
 fn library_zone_change_visible_to_viewer(
     state: &GameState,
     viewer: PlayerId,
     object_id: ObjectId,
     to: Zone,
     owner: PlayerId,
+    event_face_down: bool,
+    hidden_search_viewers: &HashMap<ObjectId, HashSet<PlayerId>>,
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
     if matches!(to, Zone::Hand | Zone::Library) {
         return viewer_has_private_access_to_player(state, viewer, owner);
+    }
+
+    // The card was looked at in a hidden library and the event-time move was
+    // explicitly concealed in Exile.  This permission is audience-scoped; card
+    // ownership alone is intentionally insufficient for a cross-owner search.
+    // Keep the event-time marker authoritative even after a later continuation
+    // moves the card out of Exile, rather than falling through to the live
+    // object (whose face-down flag is cleared on zone exit).
+    if event_face_down {
+        return hidden_search_viewers
+            .get(&object_id)
+            .is_some_and(|audience| audience.contains(&viewer))
+            || state.objects.get(&object_id).is_some_and(|obj| {
+                obj.zone == Zone::Exile
+                    && obj.face_down
+                    && face_down_exile_visible_to_viewer(
+                        state,
+                        object_id,
+                        obj,
+                        can_view_private_for_player,
+                    )
+            });
     }
 
     let Some(obj) = state.objects.get(&object_id) else {
@@ -7440,6 +7523,84 @@ mod tests {
         state.objects.get_mut(&looked).unwrap().incarnation += 1;
         let reincarnated_view = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(reincarnated_view.objects[&looked].name, HIDDEN_CARD_NAME);
+    }
+
+    #[test]
+    fn hidden_search_event_visibility_is_scoped_per_card() {
+        let mut state = GameState::new_two_player(7);
+        let first = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "First Hidden Card".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(1),
+            "Second Hidden Card".to_string(),
+            Zone::Library,
+        );
+        let mut first_record =
+            state.objects[&first].snapshot_for_zone_change(first, Some(Zone::Library), Zone::Exile);
+        first_record
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        let mut second_record = state.objects[&second].snapshot_for_zone_change(
+            second,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        second_record
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        let events = vec![
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                cards: vec![capture_library_search_card_view(&state.objects[&first])],
+                audience: vec![PlayerId(0)],
+            },
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(1),
+                cards: vec![capture_library_search_card_view(&state.objects[&second])],
+                audience: vec![PlayerId(1)],
+            },
+            GameEvent::ZoneChanged {
+                object_id: first,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record: Box::new(first_record),
+            },
+            GameEvent::ZoneChanged {
+                object_id: second,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record: Box::new(second_record),
+            },
+        ];
+        let first_view = filter_events_for_viewer(&events, &state, PlayerId(0));
+        let second_view = filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(first_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, .. } if *object_id == first
+        )));
+        assert!(!first_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, .. } if *object_id == second
+        )));
+        assert!(second_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, .. } if *object_id == second
+        )));
+        assert!(!second_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, .. } if *object_id == first
+        )));
     }
 
     #[test]

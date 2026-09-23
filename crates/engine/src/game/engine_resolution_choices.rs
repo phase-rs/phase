@@ -6063,6 +6063,7 @@ pub(super) fn handle_resolution_choice(
                             // single-candidate shortcut (issue #4235 review).
                             duration: duration.clone(),
                             track_exiled_by_source,
+                            face_down_in_exile: false,
                             // CR 708.2a + CR 708.3: thread the face-down profile that
                             // was carried across the `EffectZoneChoice` round-trip into
                             // the move ctx, so a selected face-down `ChangeZone` card
@@ -6083,6 +6084,7 @@ pub(super) fn handle_resolution_choice(
                                 *card_id,
                                 ctx.destination,
                                 ctx.source_id,
+                                ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
@@ -6146,6 +6148,7 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: tracks_player_action_completion.then(|| {
                                                 i32::try_from(
                                                     effects::change_zone::count_selected_zone_arrivals(
@@ -6228,6 +6231,7 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: tracks_player_action_completion.then(|| {
                                                 i32::try_from(
                                                     effects::change_zone::count_selected_zone_arrivals(
@@ -6557,6 +6561,7 @@ pub(super) fn handle_resolution_choice(
                         // producers) is deliberately not threaded here.
                         duration: None,
                         track_exiled_by_source,
+                        face_down_in_exile: false,
                         face_down_profile: face_down_profile.clone(),
                         library_placement: None,
                         // CR 614.12: cost-payment exile carries no enter-modifier
@@ -6579,6 +6584,7 @@ pub(super) fn handle_resolution_choice(
                                 *card_id,
                                 ctx.destination,
                                 ctx.source_id,
+                                ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
@@ -6625,6 +6631,7 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
@@ -6681,6 +6688,7 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),

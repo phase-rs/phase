@@ -5304,6 +5304,11 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::SearchResultClauseHandled => {}
+        ContinuationAst::ExileSearchResultFaceDown => {
+            if let Some(previous) = defs.last_mut() {
+                previous.face_down_in_exile = true;
+            }
+        }
         ContinuationAst::PutChoiceRemainderOnBottom => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -6068,6 +6073,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
         ContinuationAst::SearchResultClauseHandled => true,
+        ContinuationAst::ExileSearchResultFaceDown => true,
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
@@ -8163,20 +8169,24 @@ pub(super) fn parse_followup_continuation_ast(
             ..
         } if matches!(
             lower.trim(),
-            "exile it"
-                | "exile it face down"
-                | "exile that card"
+            "exile it face down"
                 | "exile that card face down"
-                | "exile the card"
                 | "exile the card face down"
-                | "exile them"
                 | "exile them face down"
-                | "exile those cards"
                 | "exile those cards face down"
-        ) =>
-        {
-            Some(ContinuationAst::SearchResultClauseHandled)
-        }
+        ) => Some(ContinuationAst::ExileSearchResultFaceDown),
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Exile,
+            ..
+        } if matches!(
+            lower.trim(),
+            "exile it"
+                | "exile that card"
+                | "exile the card"
+                | "exile them"
+                | "exile those cards"
+        ) => Some(ContinuationAst::SearchResultClauseHandled),
         Effect::ChangeZone {
             origin: Some(Zone::Library),
             destination: Zone::Hand,

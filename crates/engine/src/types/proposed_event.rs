@@ -552,6 +552,10 @@ pub enum ProposedEvent {
         /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<Box<FaceDownProfile>>,
+        /// Typed SearchLibrary intent. This is delivery metadata, not a
+        /// battlefield `FaceDownProfile`, and survives replacement pauses.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        face_down_in_exile: bool,
         /// CR 608.2c: whether this entry is the producer a following
         /// demonstrative anaphor binds to. Rides the event so a CR 616.1
         /// pause/resume delivers the same answer the effect asked for.
@@ -945,6 +949,7 @@ impl ProposedEvent {
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            face_down_in_exile: false,
             chain_referent: ChainReferentIntent::default(),
             enter_as_copy: None,
             discard_frame: None,

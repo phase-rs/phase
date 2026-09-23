@@ -1875,6 +1875,53 @@ pub fn mark_simultaneous_departure_records(
     }
 }
 
+/// Marks a settled SearchLibrary move into Exile as face down at event time.
+///
+/// The move's physical destination is already authoritative when this helper
+/// runs. Updating the object, emitted record, and per-turn ledger together
+/// keeps state and event projections on the same event-time privacy fact.
+pub(crate) fn mark_face_down_in_exile(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    object_id: ObjectId,
+) {
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        if let Some(object) = state.objects.get_mut(&object_id) {
+            object.face_down = true;
+        }
+    }
+
+    if let Some(GameEvent::ZoneChanged { record, .. }) = events.iter_mut().rev().find(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id: id,
+                to: Zone::Exile,
+                ..
+            } if *id == object_id
+        )
+    }) {
+        if let Some(context) = record.trigger_source_context.as_mut() {
+            context.face_down = true;
+        }
+    }
+
+    if let Some(record) = state
+        .zone_changes_this_turn
+        .iter_mut()
+        .rev()
+        .find(|record| record.object_id == object_id && record.to_zone == Zone::Exile)
+    {
+        if let Some(context) = record.trigger_source_context.as_mut() {
+            context.face_down = true;
+        }
+    }
+}
+
 /// CR 603.10a + CR 704.5d/e: where an object stands relative to the battlefield,
 /// for producers and observers that must decide whether it *left*.
 ///
