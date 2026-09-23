@@ -1,12 +1,14 @@
 // /lfg interaction handlers: the slash command, its `server` autocomplete, the
-// post's buttons, and the game thread's buttons and closing timer. Every input is in memory (the ServerCache snapshot) or
-// synchronous (bun:sqlite), so each handler answers within Discord's 3 s window
-// without deferring — which lets refusals be ephemeral and the post public.
+// post's buttons, and the game thread's End game button and closing timer. Every
+// input is in memory (the ServerCache snapshot) or synchronous (bun:sqlite), so
+// each handler answers within Discord's 3 s window without deferring — which
+// lets refusals be ephemeral and the post public.
 
 import { isBuild, LFG_DEFAULT_BUILD, type Build } from "./config";
 import {
   type CommandInteraction,
   type ComponentInteraction,
+  DiscordHttpError,
   integerOption,
   invokerId,
   jsonResponse,
@@ -24,6 +26,7 @@ import {
   refusalText,
   renderEnded,
   renderLfg,
+  threadClosed,
   threadEnded,
   threadName,
   threadTimedOut,
@@ -214,36 +217,62 @@ async function announceReady(i: ComponentInteraction, lfg: Lfg, deps: LfgDeps): 
     await deps.followup(i.application_id, i.token, readyPing(lfg));
     return;
   }
-  await deps.editOriginal(i.application_id, i.token, renderLfg({ ...lfg, thread: { id: threadId, closed: false } }));
+  await deps.editOriginal(i.application_id, i.token, renderLfg({ ...lfg, thread: { id: threadId, ended: false } }));
 }
 
 /** Opens the game's private thread with the seated players in it, or returns
- *  null when threads are off or the interaction has no channel. The thread is
- *  recorded as soon as it exists, so the timer closes it even if a later step
- *  fails. */
+ *  null when threads are off or the interaction has no channel. A thread whose
+ *  setup fails after it exists is ended and closed before the error propagates,
+ *  so the caller's ping replaces it (and the timer retries a failed close). */
 async function openGameThread(channelId: string | undefined, lfg: Lfg, deps: LfgDeps): Promise<string | null> {
-  if (deps.threads === null || channelId === undefined) return null;
-  const threadId = await deps.threads.create(channelId, threadName(lfg));
-  if (!deps.store.attachThread(lfg.id, threadId)) {
-    await deps.threads.close(threadId);
-    return null;
+  const threads = deps.threads;
+  if (threads === null || channelId === undefined) return null;
+  const threadId = await threads.create(channelId, threadName(lfg));
+  deps.store.attachThread(lfg.id, threadId);
+  try {
+    for (const userId of lfg.seated) await threads.addMember(threadId, userId);
+    await threads.post(threadId, threadWelcome(lfg));
+  } catch (err) {
+    deps.store.endThread(lfg.id, deps.now());
+    await closeThread(deps.store, threads, lfg.id, threadId, deps.now());
+    throw err;
   }
-  for (const userId of lfg.seated) await deps.threads.addMember(threadId, userId);
-  await deps.threads.post(threadId, threadWelcome(lfg));
   console.log(`[lfg] thread id=${lfg.id} players=${lfg.seated.length}`);
   return threadId;
 }
 
-/** The game thread's End game button: any seated player closes the thread. */
+/** Closes an ended game's thread in Discord and records it. A 4xx refusal (e.g.
+ *  the bot's role lacks Manage Threads) is logged and recorded as closed, since
+ *  retrying cannot fix it; any other failure is left for the timer's next pass. */
+async function closeThread(
+  store: LfgStore,
+  threads: ThreadApi,
+  id: string,
+  threadId: string,
+  now: number,
+): Promise<void> {
+  try {
+    await threads.close(threadId);
+  } catch (err) {
+    if (!(err instanceof DiscordHttpError && err.status >= 400 && err.status < 500)) {
+      console.error(`[lfg] closing thread for ${id} failed; retrying on the next pass:`, err);
+      return;
+    }
+    console.error(`[lfg] closing thread for ${id} was refused; not retrying:`, err);
+  }
+  store.markThreadClosed(id, now);
+}
+
+/** The game thread's End game button: any seated player ends the game. */
 function endGame(id: string, guildId: string, userId: string, deps: LfgDeps): Response {
   const result = deps.store.endGame(id, guildId, userId, deps.now());
   console.log(`[lfg] end id=${id} result=${result.kind}`);
   switch (result.kind) {
-    case "closed": {
+    case "ending": {
       const threads = deps.threads;
       if (threads !== null) {
         void Bun.sleep(THREAD_CLOSE_DELAY_MS)
-          .then(() => threads.close(result.threadId))
+          .then(() => closeThread(deps.store, threads, id, result.threadId, deps.now()))
           .catch((err) => console.error(`[lfg] closing thread for ${id} failed:`, err));
       }
       return jsonResponse({ type: ResponseType.UPDATE_MESSAGE, data: threadEnded(userId) });
@@ -251,10 +280,7 @@ function endGame(id: string, guildId: string, userId: string, deps: LfgDeps): Re
     case "refused":
       return ephemeral(refusalText(result.reason, result.lfg.format));
     case "ended":
-      return jsonResponse({
-        type: ResponseType.UPDATE_MESSAGE,
-        data: { content: "This game chat is closed.", components: [], allowed_mentions: { parse: [] } },
-      });
+      return jsonResponse({ type: ResponseType.UPDATE_MESSAGE, data: threadClosed() });
     default: {
       const unreachable: never = result;
       throw new Error(`unknown end result ${JSON.stringify(unreachable)}`);
@@ -262,23 +288,19 @@ function endGame(id: string, guildId: string, userId: string, deps: LfgDeps): Re
   }
 }
 
-/** The timer's pass: closes every game thread past GAME_THREAD_MAX_MS. A thread
- *  that fails to close stays open in the store and is retried on the next pass. */
-export async function closeStaleThreads(
-  store: LfgStore,
-  threads: ThreadApi,
-  now: number,
-): Promise<void> {
-  for (const { id, threadId } of store.staleThreads(now)) {
-    try {
-      // Best effort: a thread someone deleted cannot take the notice, and close() treats it as closed.
-      await threads.post(threadId, threadTimedOut()).catch(() => {});
-      await threads.close(threadId);
-      store.markThreadClosed(id, now);
+/** The timer's pass: ends each thread past GAME_THREAD_MAX_MS, posting its
+ *  notice once, then closes every ended thread Discord has not closed yet. */
+export async function closeThreads(store: LfgStore, threads: ThreadApi, now: number): Promise<void> {
+  for (const { id, threadId, timedOut } of store.threadsToClose(now)) {
+    if (timedOut) {
+      // Ended before the notice, so a failed notice is never re-posted.
+      store.endThread(id, now);
+      await threads
+        .post(threadId, threadTimedOut())
+        .catch((err) => console.error(`[lfg] timeout notice for ${id} failed:`, err));
       console.log(`[lfg] thread timed out id=${id}`);
-    } catch (err) {
-      console.error(`[lfg] closing stale thread for ${id} failed:`, err);
     }
+    await closeThread(store, threads, id, threadId, now);
   }
 }
 

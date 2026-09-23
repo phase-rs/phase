@@ -202,6 +202,16 @@ export async function registerGuildCommands(
   }
 }
 
+/** A non-2xx Discord response that was not retried. */
+export class DiscordHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 /** Pause between retries of a status listed in `retryOn`. */
 const RETRY_DELAY_MS = 1000;
 
@@ -248,7 +258,7 @@ async function discordRequest(
     }
     if (allow.includes(res.status)) return null;
     if (!res.ok) {
-      throw new Error(`${label} → ${res.status}: ${await res.text()}`);
+      throw new DiscordHttpError(res.status, `${label} → ${res.status}: ${await res.text()}`);
     }
     const text = await res.text();
     return text === "" ? null : JSON.parse(text);
@@ -307,7 +317,8 @@ export interface ThreadApi {
   create(channelId: string, name: string): Promise<string>;
   addMember(threadId: string, userId: string): Promise<void>;
   post(threadId: string, body: unknown): Promise<void>;
-  /** Archives and locks the thread. A thread that no longer exists counts as closed. */
+  /** Archives and locks the thread (locking needs Manage Threads). A thread
+   *  that no longer exists counts as closed. */
   close(threadId: string): Promise<void>;
 }
 

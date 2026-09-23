@@ -11,10 +11,11 @@ set -euo pipefail
 # host's env file (app id / guild id / public key are baked-in defaults, so the
 # token is all it needs):
 #   /etc/phase-card-bot.env  →  CARD_BOT_TOKEN   (secret, from the Discord portal)
-# The server uses the token only for /lfg game threads; without it the bot still
-# serves /card and /lfg and pings players under the post instead. Threads need
-# the bot's role to have Create Private Threads, Send Messages in Threads and
-# Manage Threads in the /lfg channel.
+# The deploy refuses to start without a readable env file, before touching the
+# running container. The server uses the token only for /lfg game threads (a
+# file without CARD_BOT_TOKEN runs the bot with threads off, pinging players
+# under the post instead). Threads need the bot's role to have Create Private
+# Threads, Send Messages in Threads and Manage Threads in the /lfg channel.
 #
 # /lfg state persists across redeploys in the named volume phase-card-bot-data,
 # mounted at /data (the image's CARD_BOT_DB_PATH is /data/lfg.sqlite).
@@ -43,6 +44,13 @@ cd "$(dirname "$0")/.."
 # ships; a failure aborts before anything is built (set -e).
 echo "Testing card-bot..."
 bun test scripts/card-bot
+
+# `docker run --env-file` reads the file as the SSH user, after the old
+# container is already removed, so check it first.
+if ! ssh "${HOST}" "test -r ${ENV_FILE}"; then
+  echo "error: ${ENV_FILE} is missing or unreadable on ${HOST}; not deploying" >&2
+  exit 1
+fi
 
 echo "Building ${IMAGE}..."
 # --platform linux/amd64: the VPS is x86_64 even when building from Apple Silicon.

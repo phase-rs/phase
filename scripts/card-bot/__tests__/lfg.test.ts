@@ -290,23 +290,27 @@ test("a server-mode LFG round-trips its server", () => {
 });
 
 describe("game threads", () => {
-  test("a thread attaches once, and only to a ready LFG", () => {
-    const store = new LfgStore(":memory:");
+  function readyWithThread(store: LfgStore): Lfg {
     const lfg = created(store, { seats: 2 });
-    expect(store.attachThread(lfg.id, "t-1")).toBe(false);
     store.join(lfg.id, GUILD, "b", T0 + 1);
-    expect(store.attachThread(lfg.id, "t-1")).toBe(true);
-    expect(store.attachThread(lfg.id, "t-2")).toBe(false);
-    expect(lfgOf(store.linkFor(lfg.id, GUILD, "b", T0 + 2)).thread).toEqual({ id: "t-1", closed: false });
+    store.attachThread(lfg.id, "t-1");
+    return lfg;
+  }
+
+  test("an attached thread is carried on the LFG until the game ends", () => {
+    const store = new LfgStore(":memory:");
+    const lfg = readyWithThread(store);
+    expect(lfgOf(store.linkFor(lfg.id, GUILD, "b", T0 + 2)).thread).toEqual({ id: "t-1", ended: false });
+    expect(store.endGame(lfg.id, GUILD, "b", T0 + 3)).toEqual({ kind: "ending", threadId: "t-1" });
+    expect(lfgOf(store.linkFor(lfg.id, GUILD, "b", T0 + 4)).thread).toEqual({ id: "t-1", ended: true });
+    expect(store.endGame(lfg.id, GUILD, "creator", T0 + 5)).toEqual({ kind: "ended" });
   });
 
   test("End game is guild-scoped", () => {
     const store = new LfgStore(":memory:");
-    const lfg = created(store, { seats: 2 });
-    store.join(lfg.id, GUILD, "b", T0 + 1);
-    store.attachThread(lfg.id, "t-1");
-    expect(store.endGame(lfg.id, "other-guild", "b", T0 + 2)).toEqual({ kind: "ended", lfg: null });
-    expect(store.endGame(lfg.id, GUILD, "b", T0 + 2)).toMatchObject({ kind: "closed", threadId: "t-1" });
+    const lfg = readyWithThread(store);
+    expect(store.endGame(lfg.id, "other-guild", "b", T0 + 2)).toEqual({ kind: "ended" });
+    expect(store.endGame(lfg.id, GUILD, "b", T0 + 2)).toMatchObject({ kind: "ending" });
   });
 
   test("a database from before game threads gains the thread columns on open", () => {
@@ -317,13 +321,17 @@ describe("game threads", () => {
       const lfg = created(first, { seats: 2 });
       first.join(lfg.id, GUILD, "b", T0 + 1);
       const raw = new Database(path);
-      raw.run("ALTER TABLE lfg DROP COLUMN thread_id");
-      raw.run("ALTER TABLE lfg DROP COLUMN thread_closed_ms");
+      for (const column of ["thread_id", "thread_end_ms", "thread_closed_ms"]) {
+        raw.run(`ALTER TABLE lfg DROP COLUMN ${column}`);
+      }
       raw.close();
 
       const reopened = new LfgStore(path);
       expect(lfgOf(reopened.linkFor(lfg.id, GUILD, "b", T0 + 2)).thread).toBeNull();
-      expect(reopened.attachThread(lfg.id, "t-1")).toBe(true);
+      reopened.attachThread(lfg.id, "t-1");
+      expect(reopened.endGame(lfg.id, GUILD, "b", T0 + 3)).toEqual({ kind: "ending", threadId: "t-1" });
+      reopened.markThreadClosed(lfg.id, T0 + 4);
+      expect(reopened.threadsToClose(T0 + DAY_MS / 2)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

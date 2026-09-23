@@ -264,10 +264,15 @@ export function threadEnded(userId: string): { content: string; components: []; 
   return { content: `Game ended by <@${userId}>. This chat is now closed.`, components: [], allowed_mentions: { parse: [] } };
 }
 
-/** Posted before the timer closes a game thread. */
+/** The welcome message when End game is pressed on a game already ended. */
+export function threadClosed(): { content: string; components: []; allowed_mentions: { parse: [] } } {
+  return { content: "This game chat is closed.", components: [], allowed_mentions: { parse: [] } };
+}
+
+/** Posted once, when the timer ends a game thread. */
 export function threadTimedOut(): { content: string; allowed_mentions: { parse: [] } } {
   const hours = GAME_THREAD_MAX_MS / (60 * 60_000);
-  return { content: `This game chat closed after ${hours} hours.`, allowed_mentions: { parse: [] } };
+  return { content: `This game chat is closing after ${hours} hours.`, allowed_mentions: { parse: [] } };
 }
 
 /** One sentence per refusal, for an ephemeral reply. */

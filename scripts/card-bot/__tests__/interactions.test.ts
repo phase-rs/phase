@@ -13,11 +13,12 @@ import {
   registerGuildCommands,
   ResponseType,
   botThreadApi,
+  DiscordHttpError,
   type ThreadApi,
 } from "../discord";
 import { handleInteraction } from "../index";
 import { type CreateResult, GAME_THREAD_MAX_MS, LfgStore } from "../lfg";
-import { closeStaleThreads, type LfgDeps, lfgAutocomplete, lfgCommand, lfgComponent } from "../lfgInteractions";
+import { closeThreads, type LfgDeps, lfgAutocomplete, lfgCommand, lfgComponent } from "../lfgInteractions";
 import { customId, type LfgAction } from "../lfgView";
 import { DIRECTORY_VERSION, type DirectoryServer, type FetchFn, ServerCache } from "../servers";
 
@@ -51,12 +52,13 @@ async function cache(lobbyProtocol = 10, rows: DirectoryServer[] = [row()]): Pro
 
 type Recorded = { appId: string; token: string; body: unknown };
 
-/** A ThreadApi that records every call; `fail` makes the named operation throw. */
-function fakeThreads(fail: Partial<Record<keyof ThreadApi, boolean>> = {}) {
+/** A ThreadApi that records every call; `fail` makes the named operation throw that error. */
+function fakeThreads(fail: Partial<Record<keyof ThreadApi, Error>> = {}) {
   const calls: { op: keyof ThreadApi; args: unknown[] }[] = [];
   const record = (op: keyof ThreadApi, args: unknown[]) => {
     calls.push({ op, args });
-    if (fail[op]) throw new Error(`${op} failed`);
+    const error = fail[op];
+    if (error !== undefined) throw error;
   };
   const api: ThreadApi = {
     create: async (...args) => (record("create", args), "thread-1"),
@@ -344,6 +346,11 @@ describe("LFG buttons (T-comp)", () => {
 });
 
 describe("game threads", () => {
+  const transient = () => new Error("network down");
+  const refusedByDiscord = () => new DiscordHttpError(403, "closeThread → 403: Missing Permissions");
+  /** Far enough past the ready clicks that every thread has timed out. */
+  const LATE = T0 + 60_000 + GAME_THREAD_MAX_MS;
+
   async function readyGame(d: LfgDeps): Promise<string> {
     const res = await body(lfgCommand(command([opt("format", "Commander"), opt("seats", 3)]), d));
     const id = res.data.components![0].components[0].custom_id!.split(":")[2];
@@ -375,15 +382,24 @@ describe("game threads", () => {
     expect(d.edits).toHaveLength(1);
     const post = d.edits[0].body as { embeds: { description: string }[] };
     expect(post.embeds[0].description).toContain("Game chat: <#thread-1>");
+    expect(d.store.threadsToClose(T0)).toEqual([]);
   });
 
-  test("a failed thread falls back to the ping, and a created thread is still recorded for the timer", async () => {
-    const t = fakeThreads({ post: true });
+  test("a thread whose setup fails is closed at once, and the ping replaces it", async () => {
+    const t = fakeThreads({ post: transient() });
     const d = deps(await cache(), t.api);
-    const id = await readyGame(d);
+    await readyGame(d);
+    expect(t.ops().at(-1)).toBe("close");
     expect(d.pings).toHaveLength(1);
     expect(d.edits).toHaveLength(0);
-    expect(d.store.staleThreads(T0 + GAME_THREAD_MAX_MS * 2)).toEqual([{ id, threadId: "thread-1" }]);
+    expect(d.store.threadsToClose(LATE)).toEqual([]);
+  });
+
+  test("if that close fails too, the timer retries it without waiting for the time-out", async () => {
+    const t = fakeThreads({ post: transient(), close: transient() });
+    const d = deps(await cache(), t.api);
+    const id = await readyGame(d);
+    expect(d.store.threadsToClose(T0 + 60_000)).toEqual([{ id, threadId: "thread-1", timedOut: false }]);
   });
 
   test("without a thread API the ready ping is unchanged", async () => {
@@ -400,7 +416,7 @@ describe("game threads", () => {
     });
     afterEach(() => sleep.mockRestore());
 
-    test("a seated player ends the game: the message updates, then the thread closes", async () => {
+    test("a seated player ends the game: the message updates, then the thread closes once", async () => {
       const t = fakeThreads();
       const d = deps(await cache(), t.api);
       const id = await readyGame(d);
@@ -411,12 +427,26 @@ describe("game threads", () => {
       expect(ended.data.components).toEqual([]);
       await settle();
       expect(t.calls.at(-1)).toEqual({ op: "close", args: ["thread-1"] });
-      expect(d.store.staleThreads(T0 + GAME_THREAD_MAX_MS * 2)).toEqual([]);
+      expect(d.store.threadsToClose(LATE)).toEqual([]);
 
       const again = await body(click(d, "end", id, CREATOR));
       expect(again.data.content).toBe("This game chat is closed.");
       await settle();
       expect(t.ops().filter((op) => op === "close")).toHaveLength(1);
+    });
+
+    test("a close that fails after End game is retried by the timer", async () => {
+      const t = fakeThreads({ close: transient() });
+      const d = deps(await cache(), t.api);
+      const id = await readyGame(d);
+      await body(click(d, "end", id, "222"));
+      await settle();
+      expect(d.store.threadsToClose(T0 + 60_000)).toEqual([{ id, threadId: "thread-1", timedOut: false }]);
+
+      const ok = fakeThreads();
+      await closeThreads(d.store, ok.api, T0 + 60_000);
+      expect(ok.ops()).toEqual(["close"]);
+      expect(d.store.threadsToClose(LATE)).toEqual([]);
     });
 
     test("someone who is not seated is refused ephemerally", async () => {
@@ -429,25 +459,40 @@ describe("game threads", () => {
     });
   });
 
-  test("the timer closes threads past GAME_THREAD_MAX_MS and retries one that failed", async () => {
-    const t = fakeThreads({ close: true });
-    const d = deps(await cache(), t.api);
-    const id = await readyGame(d);
-    const ready = d.store.staleThreads(Number.MAX_SAFE_INTEGER);
-    expect(ready).toEqual([{ id, threadId: "thread-1" }]);
+  describe("the timer", () => {
+    test("leaves a thread alone before GAME_THREAD_MAX_MS", async () => {
+      const t = fakeThreads();
+      const d = deps(await cache(), t.api);
+      await readyGame(d);
+      const before = t.calls.length;
+      await closeThreads(d.store, t.api, T0 + GAME_THREAD_MAX_MS - 60_000);
+      expect(t.calls).toHaveLength(before);
+    });
 
-    await closeStaleThreads(d.store, t.api, T0);
-    expect(t.ops()).not.toContain("close");
+    test("posts the time-out notice once, however many passes a failing close takes", async () => {
+      const failing = fakeThreads({ close: transient() });
+      const d = deps(await cache(), failing.api);
+      const id = await readyGame(d);
+      const before = failing.calls.length;
 
-    const late = T0 + 60_000 + GAME_THREAD_MAX_MS;
-    await closeStaleThreads(d.store, t.api, late);
-    expect(t.ops().slice(-2)).toEqual(["post", "close"]);
-    expect(d.store.staleThreads(late)).toHaveLength(1);
+      await closeThreads(d.store, failing.api, LATE);
+      await closeThreads(d.store, failing.api, LATE + 600_000);
+      expect(failing.ops().slice(before)).toEqual(["post", "close", "close"]);
+      expect(d.store.threadsToClose(LATE)).toEqual([{ id, threadId: "thread-1", timedOut: false }]);
 
-    const ok = fakeThreads();
-    await closeStaleThreads(d.store, ok.api, late);
-    expect(ok.ops()).toEqual(["post", "close"]);
-    expect(d.store.staleThreads(late)).toEqual([]);
+      const ok = fakeThreads();
+      await closeThreads(d.store, ok.api, LATE + 1_200_000);
+      expect(ok.ops()).toEqual(["close"]);
+      expect(d.store.threadsToClose(LATE + 1_200_000)).toEqual([]);
+    });
+
+    test("a close Discord refuses (4xx) is recorded and not retried", async () => {
+      const t = fakeThreads({ close: refusedByDiscord() });
+      const d = deps(await cache(), t.api);
+      await readyGame(d);
+      await closeThreads(d.store, t.api, LATE);
+      expect(d.store.threadsToClose(LATE)).toEqual([]);
+    });
   });
 });
 

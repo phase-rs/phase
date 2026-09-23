@@ -43,7 +43,7 @@ import {
 } from "./discord";
 import { LfgStore } from "./lfg";
 import {
-  closeStaleThreads,
+  closeThreads,
   type LfgDeps,
   lfgAutocomplete,
   lfgCommand,
@@ -255,7 +255,7 @@ if (import.meta.main) {
   };
   if (threads !== null) {
     setInterval(() => {
-      void closeStaleThreads(store, threads, Date.now()).catch((err) =>
+      void closeThreads(store, threads, Date.now()).catch((err) =>
         console.error("[lfg] thread sweep failed:", err),
       );
     }, THREAD_SWEEP_INTERVAL_MS);
