@@ -93,9 +93,7 @@ pub(crate) fn bind_fresh_interaction_session(state: &mut GameState, game_code: &
 }
 
 fn is_takeback_interaction_session(session: &InteractionSessionId) -> bool {
-    session
-        .0
-        .starts_with(TAKEBACK_INTERACTION_SESSION_PREFIX)
+    session.0.starts_with(TAKEBACK_INTERACTION_SESSION_PREFIX)
 }
 
 fn bind_interaction_session_id(
@@ -4558,8 +4556,7 @@ mod tests {
             Ok(TakebackOutcome::Approved)
         );
         assert_ne!(
-            session.state.interaction_session_id,
-            original_session,
+            session.state.interaction_session_id, original_session,
             "approved takeback must leave the abandoned interaction namespace"
         );
         drop(session);
