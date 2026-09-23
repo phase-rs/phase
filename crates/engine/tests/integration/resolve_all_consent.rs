@@ -319,7 +319,10 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
     let mut runner = scenario.build();
     runner.advance_to_end_step();
     assert_eq!(runner.state().phase, Phase::End);
-    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { .. }));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
     assert!(!runner.state().stack.is_empty());
 
     let starting_turn = runner.state().turn_number;
@@ -410,8 +413,14 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
         events.extend(result.events);
     }
 
-    assert!(saw_land_choice, "the fixture must exercise a nested land choice");
-    assert!(crossed_turn_boundary, "the settled chain must reach the next turn");
+    assert!(
+        saw_land_choice,
+        "the fixture must exercise a nested land choice"
+    );
+    assert!(
+        crossed_turn_boundary,
+        "the settled chain must reach the next turn"
+    );
     assert_eq!(runner.state().turn_number, starting_turn + 1);
     assert_eq!(runner.state().active_player, P1);
     assert!(

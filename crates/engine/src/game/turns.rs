@@ -278,6 +278,7 @@ pub(crate) fn phase_transition_requires_settlement(state: &GameState) -> bool {
         || state.pending_cast.is_some()
         || state.pending_liminal_entry_resume.is_some()
         || state.pending_token_battlefield_entry.is_some()
+        || !super::triggers::resolution_completion_can_settle(state)
 }
 
 /// CR 724.1d: End the current turn by skipping straight to the cleanup step.
