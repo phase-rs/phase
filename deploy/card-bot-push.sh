@@ -11,8 +11,8 @@ set -euo pipefail
 # host's env file (app id / guild id / public key are baked-in defaults, so the
 # token is all it needs):
 #   /etc/phase-card-bot.env  →  CARD_BOT_TOKEN   (secret, from the Discord portal)
-# The deploy refuses to start without a readable env file, before touching the
-# running container. The server uses the token only for /lfg game threads (a
+# The deploy refuses to replace the running container without a readable env
+# file. The server uses the token only for /lfg game threads (a
 # file without CARD_BOT_TOKEN runs the bot with threads off, pinging players
 # under the post instead). Threads need the bot's role to have Create Private
 # Threads, Send Messages in Threads and Manage Threads in the /lfg channel.
@@ -45,14 +45,6 @@ cd "$(dirname "$0")/.."
 echo "Testing card-bot..."
 bun test scripts/card-bot
 
-# `docker run --env-file` reads the file as whoever runs the docker CLI (the SSH
-# user, or root under `sudo docker`), after the old container is removed, so
-# check it first as that same user (`${D%docker}` is "" or "sudo ").
-if ! ssh "${HOST}" "${detect} \${D%docker}test -r ${ENV_FILE}"; then
-  echo "error: ${ENV_FILE} is missing or unreadable on ${HOST}; not deploying" >&2
-  exit 1
-fi
-
 echo "Building ${IMAGE}..."
 # --platform linux/amd64: the VPS is x86_64 even when building from Apple Silicon.
 # --provenance=false keeps the image in the classic format the host's older
@@ -64,8 +56,13 @@ echo "Uploading image to ${HOST}..."
 docker save "$IMAGE" | ssh "${HOST}" "${detect} \$D load"
 
 echo "Deploying..."
+# The first `run` is a dry run of the env file: the docker CLI reads --env-file
+# itself (as the SSH user, or root under sudo docker), so this fails exactly
+# when the real run would, but before the old container is stopped.
 ssh "${HOST}" "${detect} \
-  (\$D stop phase-card-bot || true) \
+  (\$D run --rm --env-file ${ENV_FILE} --entrypoint true ${IMAGE} \
+    || { echo 'error: ${ENV_FILE} is missing or unreadable; the running bot is untouched' >&2; exit 1; }) \
+  && (\$D stop phase-card-bot || true) \
   && (\$D rm phase-card-bot || true) \
   && \$D run -d \
     --name phase-card-bot \
