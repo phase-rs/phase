@@ -18977,10 +18977,22 @@ fn resolve_unless_payer(
         }
         // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
         // the payer is the player_scope iteration's scoped player, not a chosen
-        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player
-        // (bound per-iteration by the fan-out at effects/mod.rs:3015-3069).
+        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player,
+        // bound per-iteration by `split_player_scope_chain` /
+        // `set_scoped_player_recursive` in `resolve_chain_body`. Unlike every other
+        // payer here, `None` means that per-iteration binding was missed rather than
+        // that an event or a chosen target was absent, so it gets its own warn.
         TargetFilter::ScopedPlayer => {
-            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+            let resolved = crate::game::targeting::resolve_effect_player_ref(state, ability, payer);
+            if resolved.is_none() {
+                tracing::warn!(
+                    ?payer,
+                    source_id = ?ability.source_id,
+                    "scope-bound unless-payer resolved outside a player_scope iteration; \
+                     the payment is skipped and the unless-effect applies unconditionally"
+                );
+            }
+            resolved
         }
         // CR 115.1 + CR 118.12a: a payer DECLARED as a target inside the unless
         // clause ("unless target opponent/target player pays") resolves to the

@@ -15598,6 +15598,21 @@ fn trigger_unless_they_pay_binds_to_that_player_damage_target() {
     );
 }
 
+/// Walk an `execute` chain and return the first node carrying `scope`, for
+/// asserting which clause a declined unless-hoist landed on.
+fn scoped_execute_node(def: &TriggerDefinition, scope: PlayerFilter) -> &AbilityDefinition {
+    let mut node = def.execute.as_deref().expect("should have execute");
+    loop {
+        if node.player_scope.as_ref() == Some(&scope) {
+            return node;
+        }
+        node = node
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("no execute node carries player_scope {scope:?}"));
+    }
+}
+
 #[test]
 fn trigger_unless_they_pay_binds_each_opponent_to_scoped_player() {
     let def = parse_trigger_line(
@@ -15605,13 +15620,28 @@ fn trigger_unless_they_pay_binds_each_opponent_to_scoped_player() {
             "Rishadan Footpad",
         );
 
-    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
     // CR 608.2f: the per-iteration scoped opponent pays, resolved via
     // `ability.scoped_player` (not `state.active_player` as `Controller`
-    // would yield on a non-active opponent's behalf).
-    assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+    // would yield on a non-active opponent's behalf). Because that identity is
+    // bound by the fan-out, the payer travels with the scoped clause instead of
+    // being hoisted onto the trigger definition, where nothing rebinds it.
+    assert!(
+        def.unless_pay.is_none(),
+        "a scope-bound payer must not be hoisted onto the trigger, got {:?}",
+        def.unless_pay
+    );
     let execute = def.execute.as_ref().expect("should have execute");
     assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+    let unless_pay = execute
+        .unless_pay
+        .as_ref()
+        .expect("scoped clause should carry the unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+    assert!(
+        matches!(unless_pay.cost, AbilityCost::Mana { .. }),
+        "cost should be Fixed mana, got {:?}",
+        unless_pay.cost
+    );
 }
 
 // CR 118.12a: Trigger-side delegation to `parse_unless_they_alt_cost_chain`
@@ -15748,8 +15778,18 @@ fn trigger_unless_each_opponent_sacrifice_binds_scoped_player() {
         "When this creature enters, each opponent loses 3 life unless they sacrifice a creature.",
         "Test Scoped Punisher",
     );
-    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
-    // CR 608.2f: scoped opponent pays via per-iteration `scoped_player`.
+    // CR 608.2f: scoped opponent pays via per-iteration `scoped_player`, so the
+    // payment stays on the clause the fan-out iterates rather than hoisting.
+    assert!(
+        def.unless_pay.is_none(),
+        "a scope-bound payer must not be hoisted onto the trigger, got {:?}",
+        def.unless_pay
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let unless_pay = execute
+        .unless_pay
+        .as_ref()
+        .expect("scoped clause should carry the unless_pay");
     assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
     assert!(
         matches!(
@@ -15767,8 +15807,205 @@ fn trigger_unless_each_opponent_sacrifice_binds_scoped_player() {
         panic!("sacrifice target should be typed, got {:?}", cost.target);
     };
     assert_eq!(tf.controller, Some(ControllerRef::You));
-    let execute = def.execute.as_ref().expect("should have execute");
     assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+}
+
+/// CR 608.2f + CR 118.12a: Rottenmouth Viper's scoped clause is two links below
+/// the chain root, so a hoisted payer resolves against whatever stamped the
+/// root's `scoped_player` rather than against the fan-out's per-opponent seat.
+#[test]
+fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_parent() {
+    let def = parse_trigger_line(
+            "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.",
+            "Rottenmouth Viper",
+        );
+
+    assert!(
+        def.unless_pay.is_none(),
+        "a scope-bound payer must not be hoisted onto the trigger, got {:?}",
+        def.unless_pay
+    );
+    let scoped = scoped_execute_node(&def, PlayerFilter::Opponent);
+    assert!(
+        matches!(scoped.effect.as_ref(), Effect::LoseLife { .. }),
+        "the scoped clause should be the life loss, got {:?}",
+        scoped.effect
+    );
+    let unless_pay = scoped
+        .unless_pay
+        .as_ref()
+        .expect("scoped clause should carry the unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+    let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+        panic!("cost should be OneOf, got {:?}", unless_pay.cost);
+    };
+    assert_eq!(costs.len(), 2, "OneOf should have two branches: {costs:?}");
+    assert!(
+        matches!(costs[0], AbilityCost::Sacrifice(_)),
+        "first branch should be Sacrifice, got {:?}",
+        costs[0]
+    );
+    assert!(
+        matches!(costs[1], AbilityCost::Discard { .. }),
+        "second branch should be Discard, got {:?}",
+        costs[1]
+    );
+}
+
+/// CR 608.2f: Bellowing Mauler's `each player` subject is scope-bearing exactly
+/// as `each opponent` is, so its payer is the fan-out's per-seat player rather
+/// than the single triggering player who would answer for the whole table.
+#[test]
+fn trigger_unless_each_player_binds_scoped_player() {
+    let def = parse_trigger_line(
+        "At the beginning of your end step, each player loses 4 life unless they sacrifice a nontoken creature of their choice.",
+        "Bellowing Mauler",
+    );
+
+    assert!(
+        def.unless_pay.is_none(),
+        "a scope-bound payer must not be hoisted onto the trigger, got {:?}",
+        def.unless_pay
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert_eq!(execute.player_scope, Some(PlayerFilter::All));
+    let unless_pay = execute
+        .unless_pay
+        .as_ref()
+        .expect("scoped clause should carry the unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+    let AbilityCost::Sacrifice(cost) = &unless_pay.cost else {
+        panic!("cost should be Sacrifice, got {:?}", unless_pay.cost);
+    };
+    assert_eq!(cost.requirement, SacrificeRequirement::count(1));
+    let TargetFilter::Typed(tf) = &cost.target else {
+        panic!("sacrifice target should be typed, got {:?}", cost.target);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "filter should include Creature, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::NonToken),
+        "filter should include NonToken, got {:?}",
+        tf.properties
+    );
+}
+
+/// CR 608.2f: sAnS mERcY repeats Rottenmouth Viper's shape under a different
+/// unrecognized root, so the guard is keyed on the payer rather than on any
+/// root effect. Its runtime is not claimed here — it is a Plane card and
+/// whether the engine reaches its chaos trigger is unestablished.
+#[test]
+fn trigger_scoped_unless_stays_on_the_scoped_clause_under_a_different_unimplemented_root() {
+    let def = parse_trigger_line(
+            "wHeNEveR cHoAS EnSUEs, pERfoRm tHe foLLowiNG pROceSs X tiMEs, wHErE X iS tHe nUmBEr oF tImeS yOU'vE roLLeD tHe PlaNAr diE tHIs tuRN. eAcH oPPonENt LOseS 3 LiFE uNLeSs tHAt pLAyEr sAcRiFicEs A nOnLaND pErManENt OR diSCaRds a cArD.",
+            "sAnS mERcY",
+        );
+
+    assert!(
+        def.unless_pay.is_none(),
+        "a scope-bound payer must not be hoisted onto the trigger, got {:?}",
+        def.unless_pay
+    );
+    let scoped = scoped_execute_node(&def, PlayerFilter::Opponent);
+    assert!(
+        matches!(scoped.effect.as_ref(), Effect::LoseLife { .. }),
+        "the scoped clause should be the life loss, got {:?}",
+        scoped.effect
+    );
+    let unless_pay = scoped
+        .unless_pay
+        .as_ref()
+        .expect("scoped clause should carry the unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+    let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+        panic!("cost should be OneOf, got {:?}", unless_pay.cost);
+    };
+    assert_eq!(costs.len(), 2, "OneOf should have two branches: {costs:?}");
+}
+
+/// NEGATIVE, CR 118.12a: Acererak's subject is prepositional — "for each
+/// opponent," with a comma where the scope-subject combinator requires a
+/// trailing space — so the payer is not scope-bound and the hoist stands.
+/// Widening the combinator to swallow the comma form would redirect this card
+/// away from its own `begin_player_scope_token_unless_sacrifice` coordinator.
+#[test]
+fn trigger_prepositional_for_each_opponent_unless_still_hoists() {
+    let def = parse_trigger_line(
+            "Whenever Acererak attacks, for each opponent, you create a 2/2 black Zombie creature token unless that player sacrifices a creature of their choice.",
+            "Acererak the Archlich",
+        );
+
+    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+    let AbilityCost::Sacrifice(cost) = &unless_pay.cost else {
+        panic!("cost should be Sacrifice, got {:?}", unless_pay.cost);
+    };
+    let TargetFilter::Typed(tf) = &cost.target else {
+        panic!("sacrifice target should be typed, got {:?}", cost.target);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Token { .. }),
+        "the token creation should still be the effect, got {:?}",
+        execute.effect
+    );
+}
+
+/// NEGATIVE, CR 118.12a: Lim-Dûl's Hex is refused one arm EARLIER than the
+/// scope-subject scan — `effect_references_that_player` matches "to that
+/// player" in "deals 1 damage to that player" and returns `TriggeringPlayer`.
+/// This pins that arm ordering. It does not assert the resulting payer is the
+/// right one for this card: `TriggeringPlayer` is unresolvable on a phase
+/// trigger, so the payment is skipped — a known residual; no follow-up issue filed yet.
+#[test]
+fn trigger_that_player_anaphor_unless_still_hoists_triggering_player() {
+    let def = parse_trigger_line(
+            "At the beginning of your upkeep, for each player, this enchantment deals 1 damage to that player unless they pay {B} or {3}.",
+            "Lim-Dûl's Hex",
+        );
+
+    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+    let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+        panic!("cost should be OneOf, got {:?}", unless_pay.cost);
+    };
+    assert_eq!(costs.len(), 2, "OneOf should have two branches: {costs:?}");
+    assert!(
+        costs.iter().all(|c| matches!(c, AbilityCost::Mana { .. })),
+        "both branches should be mana, got {costs:?}"
+    );
+}
+
+/// NEGATIVE, CR 603.2b: Mogis's phase-scoped "that player" is
+/// answered by the `condition_introduces_scoped_phase_player` arm, which
+/// precedes the scope-subject scan and must keep winning.
+#[test]
+fn trigger_scoped_phase_player_unless_keeps_controller_payer() {
+    let def = parse_trigger_line(
+            "At the beginning of each opponent's upkeep, Mogis deals 2 damage to that player unless they sacrifice a creature of their choice.",
+            "Mogis, God of Slaughter",
+        );
+
+    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Controller);
+    let AbilityCost::Sacrifice(cost) = &unless_pay.cost else {
+        panic!("cost should be Sacrifice, got {:?}", unless_pay.cost);
+    };
+    let TargetFilter::Typed(tf) = &cost.target else {
+        panic!("sacrifice target should be typed, got {:?}", cost.target);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::DealDamage { .. }),
+        "the damage should still be the effect, got {:?}",
+        execute.effect
+    );
 }
 
 // NEGATIVE: bare "mill N" without "cards" suffix is NOT recognized as an

@@ -3711,6 +3711,33 @@ fn parse_unless_mana_payment(cost_str: &str) -> Option<AbilityCost> {
     Some(AbilityCost::Mana { cost: mana_cost })
 }
 
+/// CR 608.2f + CR 118.12a: true for a payer whose identity the `player_scope`
+/// fan-out binds per iteration, rather than the trigger event or a chosen target.
+fn payer_is_scope_bound(payer: &TargetFilter) -> bool {
+    matches!(payer, TargetFilter::ScopedPlayer)
+}
+
+/// CR 118.12: Extract a trigger-level "unless [player] pays {cost}" modifier,
+/// declining the hoist when the payer is scope-bound (the three text-shape
+/// deferrals live in [`hoist_unless_pay_modifier`]).
+fn extract_unless_pay_modifier(
+    text: &str,
+    condition_lower: &str,
+) -> (String, Option<UnlessPayModifier>) {
+    match hoist_unless_pay_modifier(text, condition_lower) {
+        // CR 608.2f + CR 101.4: an "each opponent / each player … unless they …"
+        // payment is one payment per affected player, offered in APNAP order, so
+        // its payer is bound only by the per-iteration fan-out. Hoisting it to the
+        // trigger root detaches it from the clause that fan-out iterates: the root
+        // resolves `ScopedPlayer` against whatever event-context machinery stamped
+        // `scoped_player` (or against nothing), taxing the controller or nobody.
+        // Decline; the per-clause path (`extract_resolution_unless_pay_modifier`)
+        // attaches it to the scoped node, where the fan-out rebinds the payer.
+        (_, Some(modifier)) if payer_is_scope_bound(&modifier.payer) => (text.to_string(), None),
+        result => result,
+    }
+}
+
 /// CR 118.12: Detect "unless [player] pays {cost}" in trigger effect text.
 /// Returns (cleaned effect text without the unless clause, optional UnlessPayModifier).
 ///
@@ -3721,7 +3748,7 @@ fn parse_unless_mana_payment(cost_str: &str) -> Option<AbilityCost> {
 /// - "destroy it unless you sacrifice a creature"        (UnlessCost::Sacrifice)
 /// - "draw a card unless you pay 2 life"                 (CR 119.4 — UnlessCost::PayLife)
 /// - "sacrifice it unless you pay {E}{E}"                (CR 107.14 — UnlessCost::PayEnergy)
-fn extract_unless_pay_modifier(
+fn hoist_unless_pay_modifier(
     text: &str,
     condition_lower: &str,
 ) -> (String, Option<UnlessPayModifier>) {
@@ -3997,6 +4024,17 @@ fn effect_references_that_player(effect_before_unless: &str) -> bool {
         || scan_contains(effect_before_unless, "to that opponent")
 }
 
+/// CR 608.2f + CR 118.12a: the scope-bearing subjects whose per-iteration player
+/// the `player_scope` fan-out binds as `scoped_player`, and which an
+/// unless-clause pronoun therefore refers to.
+fn parse_scoped_player_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::ScopedPlayer,
+        preceded(tag("each "), alt((tag("opponent "), tag("player ")))),
+    )
+    .parse(input)
+}
+
 fn infer_pronoun_unless_payer(
     effect_before_unless: &str,
     condition_lower: &str,
@@ -4013,15 +4051,18 @@ fn infer_pronoun_unless_payer(
     if effect_references_that_player(effect_before_unless) {
         return Some(TargetFilter::TriggeringPlayer);
     }
-    // CR 608.2c + CR 608.2f: in "each opponent [does X] unless they pay", the
-    // lowered ability has `player_scope = Opponent`; the runtime fan-out binds
-    // `ability.scoped_player` to each scoped opponent per iteration. The payer
+    // CR 608.2c + CR 608.2f: in "each opponent [does X] unless they pay" and in
+    // "each player [does X] unless they pay", the lowered ability has
+    // `player_scope = Opponent` / `All`; the runtime fan-out binds
+    // `ability.scoped_player` to each scoped player per iteration. The payer
     // must read that per-iteration binding via `ScopedPlayer` —
     // `resolve_effect_player_ref` maps `ScopedPlayer -> ability.scoped_player`
     // (targeting.rs). `Controller` would wrongly resolve to `state.active_player`
     // (effects/mod.rs), which is not the scoped opponent on a non-active turn.
-    if scan_contains(effect_before_unless, "each opponent ") {
-        return Some(TargetFilter::ScopedPlayer);
+    if let Some(payer) =
+        nom_primitives::scan_at_word_boundaries(effect_before_unless, parse_scoped_player_subject)
+    {
+        return Some(payer);
     }
     // CR 608.2b + CR 115.4: "... deals damage to target opponent/player
     // unless that player/they sacrifice ..." — the chosen player target pays
