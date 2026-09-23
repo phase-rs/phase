@@ -1983,7 +1983,7 @@ mod tests {
             resolved
                 .sub_ability
                 .as_ref()
-                .is_some_and(|sub| sub.context.face_down_in_exile),
+                .is_some_and(|sub| sub.context.face_down_in_exile.is_face_down()),
             "the resolved exile continuation must retain typed concealment"
         );
 
@@ -2099,7 +2099,7 @@ mod tests {
             ObjectId(105),
             PlayerId(0),
         );
-        exile_step.context.face_down_in_exile = true;
+        exile_step.context.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         let search = ResolvedAbility::new(
             Effect::SearchLibrary {
                 filter: TargetFilter::Any,
@@ -2194,6 +2194,88 @@ mod tests {
                 } if *object_id == found
             )));
         }
+    }
+
+    /// CR 701.23a + CR 406.3: the search-result continuation keeps its
+    /// face-down exile intent when the selected card comes from a non-library
+    /// source zone. The searcher may identify the card; other viewers must not.
+    #[test]
+    fn multizone_search_face_down_exile_is_visible_only_to_searcher() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let found = create_object(
+            &mut state,
+            CardId(106),
+            PlayerId(0),
+            "Hidden Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let ability = parse_effect_chain(
+            "search your graveyard, hand, and/or library for a card, then exile it face down",
+            AbilityKind::Spell,
+        );
+        let resolved = build_resolved_from_def(&ability, ObjectId(107), PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                ref cards,
+                ..
+            } if cards.as_slice() == [found]
+        ));
+
+        let selection = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .unwrap();
+        events.extend(selection.events);
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(state.objects[&found].face_down);
+
+        let searcher_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let opponent_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                audience,
+                ..
+            } if audience == &[PlayerId(0)]
+        )));
+        let opponent_state = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        assert_ne!(opponent_state.objects[&found].name, "Hidden Hand Card");
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed { cards, .. }
+                if cards.iter().any(|card| card.current_face.name == "Hidden Hand Card")
+        )));
+        assert!(!opponent_view
+            .iter()
+            .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+        assert!(!opponent_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Hand),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
     }
 
     #[test]

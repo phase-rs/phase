@@ -40344,11 +40344,28 @@ pub(crate) fn parse_effect_chain_ir(
             .rev()
             .filter(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
             .collect();
+        let effective_prev_is_search_destination_exile = absorbed_choice_prev.is_none()
+            && non_absorbed.first().is_some_and(|previous| {
+                matches!(
+                    previous.disposition.intrinsic(),
+                    Some(ContinuationAst::SearchDestination {
+                        destination: Zone::Exile,
+                        ..
+                    })
+                )
+            });
         let effective_prev_effect =
             absorbed_choice_prev.or_else(|| non_absorbed.first().map(|c| effective_effect_of(c)));
         let followup_continuation = effective_prev_effect
             .as_ref()
-            .and_then(|eff| parse_followup_continuation_ast(normalized_text, eff, ctx))
+            .and_then(|eff| {
+                sequence::parse_followup_continuation_ast_with_search_destination(
+                    normalized_text,
+                    eff,
+                    ctx,
+                    effective_prev_is_search_destination_exile,
+                )
+            })
             .or_else(|| {
                 // CR 608.2c: when the nearest non-absorbed clause is
                 // lookback-transparent (e.g. `Sacrifice` — Birthing Ritual),

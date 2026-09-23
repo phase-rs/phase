@@ -94,7 +94,7 @@ fn continuation_search_exile_then_shuffle() {
         panic!("search should chain into the exile destination");
     };
     assert!(
-        change_zone.face_down_in_exile,
+        change_zone.face_down_in_exile.is_face_down(),
         "face-down SearchLibrary exile must use the typed intent carrier"
     );
     match &*change_zone.effect {

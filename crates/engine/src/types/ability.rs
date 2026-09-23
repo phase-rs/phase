@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::ops::ControlFlow;
+use std::ops::{BitOrAssign, ControlFlow};
 use std::sync::Arc;
 
 use serde::de;
@@ -38,6 +38,68 @@ use crate::types::events::{ClashResult, PlayerActionKind};
 // ---------------------------------------------------------------------------
 // Supporting types
 // ---------------------------------------------------------------------------
+
+/// CR 406.3 + CR 701.23a: delivery visibility for a searched card that is
+/// moved to exile. This is intentionally distinct from [`FaceDownProfile`],
+/// which describes a battlefield object's characteristics rather than hidden
+/// exile information.
+///
+/// The serde representation remains the legacy boolean (`false` omitted by
+/// the surrounding fields, `true` when concealed), so existing ability and
+/// resolution payloads remain wire-compatible while the semantic state is no
+/// longer duplicated as an untyped bool in the parser/runtime hand-off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ExileConcealment {
+    #[default]
+    Public,
+    FaceDown,
+}
+
+impl ExileConcealment {
+    pub fn is_face_down(&self) -> bool {
+        matches!(self, Self::FaceDown)
+    }
+
+    pub fn is_public(&self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
+impl From<bool> for ExileConcealment {
+    fn from(face_down: bool) -> Self {
+        if face_down {
+            Self::FaceDown
+        } else {
+            Self::Public
+        }
+    }
+}
+
+impl From<ExileConcealment> for bool {
+    fn from(concealment: ExileConcealment) -> Self {
+        concealment.is_face_down()
+    }
+}
+
+impl BitOrAssign for ExileConcealment {
+    fn bitor_assign(&mut self, rhs: Self) {
+        if rhs.is_face_down() {
+            *self = Self::FaceDown;
+        }
+    }
+}
+
+impl Serialize for ExileConcealment {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(self.is_face_down())
+    }
+}
+
+impl<'de> Deserialize<'de> for ExileConcealment {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer).map(Self::from)
+    }
+}
 
 /// CR 608.2c-e: Who makes a choice during an effect's resolution (controller by
 /// default per CR 608.2c; opponent/APNAP ordering per CR 608.2e). Not CR 700.2 —
@@ -25188,7 +25250,7 @@ pub struct AbilityDefinition {
     /// Typed intent for SearchLibrary clauses that exile the found card face down.
     /// This is deliberately separate from `FaceDownProfile`, which describes
     /// battlefield characteristics only.
-    pub face_down_in_exile: bool,
+    pub face_down_in_exile: ExileConcealment,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -25272,8 +25334,8 @@ struct AbilityDefinitionRepr<'a> {
     sibling_condition: SiblingCondition,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlowered_guard: &'a Option<UnloweredGuard>,
-    #[serde(skip_serializing_if = "is_false")]
-    face_down_in_exile: bool,
+    #[serde(skip_serializing_if = "ExileConcealment::is_public")]
+    face_down_in_exile: ExileConcealment,
 }
 
 impl Serialize for AbilityDefinition {
@@ -25484,7 +25546,7 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     unlowered_guard: Option<UnloweredGuard>,
     #[serde(default)]
-    face_down_in_exile: bool,
+    face_down_in_exile: ExileConcealment,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -25798,7 +25860,7 @@ impl AbilityDefinition {
             iteration_kind_binding: None,
             sibling_condition: SiblingCondition::Dependent,
             unlowered_guard: None,
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -27158,8 +27220,8 @@ pub struct SpellContext {
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub face_down_in_exile: bool,
+    #[serde(default, skip_serializing_if = "ExileConcealment::is_public")]
+    pub face_down_in_exile: ExileConcealment,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered
     /// result. `None` means no producer has run in this resolution; `Some([])`
     /// is a completed producer that moved no objects and intentionally blocks
@@ -36604,6 +36666,42 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn exile_concealment_keeps_legacy_boolean_wire_shape() {
+        assert_eq!(
+            serde_json::to_string(&ExileConcealment::Public).unwrap(),
+            "false"
+        );
+        assert_eq!(
+            serde_json::to_string(&ExileConcealment::FaceDown).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            serde_json::from_str::<ExileConcealment>("false").unwrap(),
+            ExileConcealment::Public
+        );
+        assert_eq!(
+            serde_json::from_str::<ExileConcealment>("true").unwrap(),
+            ExileConcealment::FaceDown
+        );
+
+        let mut public = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Unimplemented {
+                name: "compatibility probe".to_string(),
+                description: None,
+            },
+        );
+        let public_json = serde_json::to_value(&public).unwrap();
+        assert!(public_json.get("face_down_in_exile").is_none());
+
+        public.face_down_in_exile = ExileConcealment::FaceDown;
+        let concealed_json = serde_json::to_value(&public).unwrap();
+        assert_eq!(concealed_json["face_down_in_exile"], true);
+        let round_trip: AbilityDefinition = serde_json::from_value(concealed_json).unwrap();
+        assert_eq!(round_trip.face_down_in_exile, ExileConcealment::FaceDown);
     }
 
     #[test]

@@ -1274,7 +1274,7 @@ pub fn resolve(
         conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
         duration: ability.duration.clone(),
         track_exiled_by_source,
-        face_down_in_exile: ability.context.face_down_in_exile,
+        face_down_in_exile: ability.context.face_down_in_exile.is_face_down(),
         face_down_profile: face_down_profile.clone(),
         library_placement: None,
         enters_modified_if: effect_enters_modified_if,
@@ -2264,7 +2264,7 @@ pub fn resolve_all(
             obj_id,
             dest_zone,
             ability.source_id,
-            ability.context.face_down_in_exile,
+            ability.context.face_down_in_exile.is_face_down(),
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
@@ -2281,7 +2281,7 @@ pub fn resolve_all(
             enters_under_player,
             &enter_with_counters,
             face_down_profile.as_ref(),
-            ability.context.face_down_in_exile,
+            ability.context.face_down_in_exile.is_face_down(),
             track_exiled_by_source,
             member_library_placement.clone(),
             None,
@@ -2361,7 +2361,7 @@ pub fn resolve_all(
                         conditional_enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
-                        face_down_in_exile: ability.context.face_down_in_exile,
+                        face_down_in_exile: ability.context.face_down_in_exile.is_face_down(),
                         moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
                         library_placement: member_library_placement.clone(),
@@ -2418,7 +2418,7 @@ pub fn resolve_all(
                         conditional_enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
-                        face_down_in_exile: ability.context.face_down_in_exile,
+                        face_down_in_exile: ability.context.face_down_in_exile.is_face_down(),
                         moved_count: Some(moved_count + 1),
                         // CR 708.2a + CR 708.3: preserve the face-down profile so
                         // resumed members of a paused face-down mass return enter

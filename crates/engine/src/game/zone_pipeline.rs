@@ -4842,7 +4842,7 @@ mod w3_library_placement_tests {
             source,
             controller,
         );
-        exile_step.context.face_down_in_exile = true;
+        exile_step.context.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         ResolvedAbility::new(
             Effect::SearchLibrary {
                 filter: TargetFilter::Any,
