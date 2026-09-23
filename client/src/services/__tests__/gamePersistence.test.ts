@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  CustomFormatRules,
   EngineAdapter,
   FormatConfig,
   GameState,
@@ -20,6 +21,7 @@ vi.mock("idb-keyval", () => ({
 import { del as idbDel, get as idbGet, set as idbSet } from "idb-keyval";
 import {
   loadGame,
+  loadCheckpoints,
   loadP2PHostSession,
   migratePersistedGameState,
   saveAuthoritativeGame,
@@ -33,6 +35,40 @@ function fixtureState(): GameState {
     rng_seed: 42,
     waiting_for: buildPriorityWaitingFor(),
   });
+}
+
+function customCommandZoneMinimumRules(): CustomFormatRules {
+  return {
+    id: 7,
+    structural: {
+      starting_life: 20,
+      min_players: 2,
+      max_players: 4,
+      deck_size: { type: "Minimum", data: 60 },
+      singleton: false,
+      command_zone_mode: {
+        Enabled: {
+          commander_damage_threshold: null,
+          eligibility_rule: "FreeformAnyCastableCard",
+        },
+      },
+      range_of_influence: null,
+      team_based: false,
+      sideboard_policy: { type: "Unlimited" },
+      default_deck_copy_limit: { type: "Unlimited" },
+    },
+    legality: {
+      legal_sets: null,
+      banned: [],
+      restricted: [],
+      legacy: {
+        mana_burn: "Modern",
+        damage_timing: "Modern",
+        wish_scope: "PostM10SideboardOnly",
+        legend_rule_scope: "Modern",
+      },
+    },
+  };
 }
 
 describe("game persistence", () => {
@@ -92,6 +128,52 @@ describe("game persistence", () => {
     await expect(loadGame("legacy-commander-draft-deck-size")).resolves.toMatchObject({
       format_config: { deck_size: { type: "Minimum", data: 60 } },
     });
+  });
+
+  it("uses engine-authored custom rules instead of command-zone inference", async () => {
+    const state = fixtureState();
+    state.format_config = {
+      ...state.format_config,
+      format: "Custom:7",
+      command_zone: true,
+      deck_size: 60 as never,
+      custom_rules: customCommandZoneMinimumRules(),
+    } as FormatConfig;
+    vi.mocked(idbGet).mockResolvedValueOnce(state);
+
+    await expect(loadGame("legacy-custom-minimum-deck-size")).resolves.toMatchObject({
+      format_config: { deck_size: { type: "Minimum", data: 60 } },
+    });
+  });
+
+  it("fails closed when no format authority can recover a legacy rule", async () => {
+    const state = fixtureState();
+    state.format_config = {
+      ...state.format_config,
+      format: "Custom:99",
+      command_zone: true,
+      deck_size: 60 as never,
+      custom_rules: null,
+    } as FormatConfig;
+    vi.mocked(idbGet).mockResolvedValueOnce(state);
+
+    await expect(loadGame("legacy-unknown-deck-size")).resolves.toBe(state);
+    expect((state.format_config as unknown as { deck_size: unknown }).deck_size).toBe(60);
+  });
+
+  it("migrates legacy deck sizes when checkpoints are loaded", async () => {
+    const checkpoint = fixtureState();
+    checkpoint.format_config = {
+      ...checkpoint.format_config,
+      format: "CommanderDraft",
+      command_zone: true,
+      deck_size: 60 as never,
+    } as FormatConfig;
+    vi.mocked(idbGet).mockResolvedValueOnce([checkpoint]);
+
+    await expect(loadCheckpoints("legacy-checkpoints")).resolves.toMatchObject([
+      { format_config: { deck_size: { type: "Minimum", data: 60 } } },
+    ]);
   });
 
   it("migrates the state inside a trusted envelope without dropping private fields", () => {
