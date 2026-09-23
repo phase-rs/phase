@@ -8739,10 +8739,9 @@ struct PriorityPassPipelineOutcome {
     consumed_stack_entries: u32,
 }
 
-// Test-only reach signal for the production Cleanup-deferral seam. The
-// `test-support` feature is enabled by the integration test crate and is not
+// Test-only reach signal for the production Cleanup-deferral seam. It is not
 // part of release consumers or serialized game state.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 mod cleanup_deferred_probe {
     use std::cell::Cell;
 
@@ -8761,7 +8760,7 @@ mod cleanup_deferred_probe {
 
 /// Consume the test-only signal that the production priority pipeline observed
 /// `cleanup_deferred`. This does not alter game state or release behavior.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub fn take_cleanup_deferred_probe_for_test() -> bool {
     cleanup_deferred_probe::take()
 }
@@ -8805,7 +8804,7 @@ fn pass_priority_once_with_pipeline(
         stack_resolution_limit,
     );
     let cleanup_deferred = priority_outcome.cleanup_deferred;
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     if cleanup_deferred {
         cleanup_deferred_probe::record();
     }
