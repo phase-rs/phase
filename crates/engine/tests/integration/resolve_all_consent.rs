@@ -17,6 +17,7 @@ use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
 use engine::game::scenario::GameScenario;
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::types::ability::{
@@ -43,6 +44,8 @@ use engine::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedRulesCommand,
 };
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -297,15 +300,18 @@ fn browser_partial_priority_equip_uses_the_shared_session_instead_of_a_prefix_pr
 /// with the popped carrier still live.
 #[test]
 fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let face = db
+        .get_face_by_name("Kynaios and Tiro of Meletis")
+        .expect("integration card fixture must include Kynaios and Tiro of Meletis");
+    assert_eq!(
+        face.oracle_text, KYNAIOS_STYLE_NESTED_LAND_ORACLE,
+        "the regression must exercise the printed Kynaios-and-Tiro Oracle text"
+    );
+
     let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 4, 0x9200);
     scenario.at_phase(Phase::PostCombatMain);
-    scenario.add_creature_from_oracle(
-        P0,
-        "Kynaios and Tiro of Meletis",
-        2,
-        8,
-        KYNAIOS_STYLE_NESTED_LAND_ORACLE,
-    );
+    scenario.add_real_card(P0, "Kynaios and Tiro of Meletis", Zone::Battlefield, db);
     let mut land_ids = BTreeMap::new();
     for (player, library_name) in [
         (P0, "P0 draw"),
