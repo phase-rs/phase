@@ -8180,10 +8180,10 @@ mod tests {
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
             AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, MeldSelection,
-            PendingLiminalEntryResume, PendingResolutionCompletion,
-            PendingTokenBattlefieldEntry, StackEntry, StackEntryKind, StackPaidSnapshot,
-            StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-            StackResolutionPolicy, StackResolutionSession,
+            PendingLiminalEntryResume, PendingResolutionCompletion, PendingTokenBattlefieldEntry,
+            StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
+            StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+            StackResolutionSession,
         };
         use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
         use crate::types::mana::ManaColor;

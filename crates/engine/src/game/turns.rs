@@ -133,13 +133,11 @@ pub(in crate::game) fn advance_phase_once(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> AdvancePhaseOnce {
-    // Snapshot before consuming an extra phase, running end-combat teardown,
-    // or mutating the outgoing turn.  A nested resolution continuation can
-    // leave the stack empty while its popped carrier is still live; that is
-    // not a legal Cleanup -> Untap boundary.  Return an inert result and let
-    // the owner pipeline settle the continuation before retrying.
-    let boundary_snapshot = state.clone();
-    let event_start = events.len();
+    // Check before consuming an extra phase, running end-combat teardown, or
+    // mutating the outgoing turn. A nested resolution continuation can leave
+    // the stack empty while its popped carrier is still live; that is not a
+    // legal Cleanup -> Untap boundary. Return an inert result and let the
+    // owner pipeline settle the continuation before retrying.
     let cleanup_wraps_to_untap = state.phase == Phase::Cleanup
         && state
             .extra_phases
@@ -148,9 +146,7 @@ pub(in crate::game) fn advance_phase_once(
             .and_then(|index| state.extra_phases.get(index).map(|extra| extra.phase))
             .unwrap_or(Phase::Untap)
             == Phase::Untap;
-    if cleanup_wraps_to_untap && phase_transition_requires_settlement(&boundary_snapshot) {
-        *state = boundary_snapshot;
-        events.truncate(event_start);
+    if cleanup_wraps_to_untap && phase_transition_requires_settlement(state) {
         return AdvancePhaseOnce::Deferred;
     }
     // CR 500.8: Extra phases are inserted *directly after* their anchor phase
@@ -3956,13 +3952,19 @@ mod tests {
         let expected_waiting = auto_advance(&mut production, &mut production_events);
 
         let mut one_unit_events = Vec::new();
-        assert!(matches!(
-            auto_advance_once(&mut one_unit, &mut one_unit_events),
-            AutoAdvanceStep::Continue
-        ));
+        match auto_advance_once(&mut one_unit, &mut one_unit_events) {
+            AutoAdvanceStep::Continue => {}
+            AutoAdvanceStep::Waiting(_) => {
+                panic!("untap must advance before surfacing its Priority window")
+            }
+            AutoAdvanceStep::Deferred => {
+                panic!("an uncontended untap boundary must not defer")
+            }
+        }
         let actual_waiting = match auto_advance_once(&mut one_unit, &mut one_unit_events) {
             AutoAdvanceStep::Continue => panic!("upkeep must surface a Priority window"),
             AutoAdvanceStep::Waiting(waiting_for) => *waiting_for,
+            AutoAdvanceStep::Deferred => panic!("an uncontended upkeep boundary must not defer"),
         };
 
         assert_eq!(actual_waiting, expected_waiting);

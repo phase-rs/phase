@@ -12,11 +12,11 @@ use engine::game::engine::{
     resolve_all_ready_prefix_with, resume_restored_stack_automation, ResolveAllContinuation,
     ResolveAllReadyAccess, RestoredStackAutomation, RestoredStackAutomationOutcome,
 };
-use engine::game::scenario::GameScenario;
 use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
+use engine::game::scenario::GameScenario;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::types::ability::{
@@ -306,7 +306,12 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
         8,
         KYNAIOS_STYLE_NESTED_LAND_ORACLE,
     );
-    for (player, library_name) in [(P0, "P0 draw"), (P1, "P1 draw"), (P2, "P2 draw"), (P3, "P3 draw")] {
+    for (player, library_name) in [
+        (P0, "P0 draw"),
+        (P1, "P1 draw"),
+        (P2, "P2 draw"),
+        (P3, "P3 draw"),
+    ] {
         scenario.with_library_top(player, &[library_name]);
         scenario.add_land_to_hand(player, "Plains");
     }

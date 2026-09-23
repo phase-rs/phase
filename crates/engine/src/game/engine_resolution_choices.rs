@@ -5266,8 +5266,7 @@ pub(super) fn handle_resolution_choice(
             {
                 match turns::advance_phase_once(state, events) {
                     turns::AdvancePhaseOnce::Deferred => {}
-                    turns::AdvancePhaseOnce::Entry(_)
-                    | turns::AdvancePhaseOnce::Skipped => {
+                    turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {
                         let advanced = turns::auto_advance(state, events);
                         public_state::sync_waiting_for(state, &advanced);
                     }

@@ -125,8 +125,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                 // CR 117.4: Empty stack — advance to next phase.
                 match turns::advance_phase_once(state, events) {
                     turns::AdvancePhaseOnce::Deferred => {}
-                    turns::AdvancePhaseOnce::Entry(_)
-                    | turns::AdvancePhaseOnce::Skipped => {}
+                    turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {}
                 }
                 PriorityPassOutcome {
                     waiting_for: turns::auto_advance(state, events),

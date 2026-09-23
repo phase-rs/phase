@@ -8752,12 +8752,6 @@ fn pass_priority_once_with_pipeline(
             });
         }
     }
-    // A priority pass can resolve a nested object while leaving its popped
-    // resolution carrier behind.  Keep the whole pass transactional until
-    // the continuation/post-action pipeline has either settled that carrier
-    // or reported a real interactive/error boundary.
-    let boundary_snapshot = state.clone();
-    let event_start = events.len();
     state.cancelled_casts.clear();
     // CR 117.4 + 608.1: When all players pass in succession the stack begins
     // resolving; at that moment the AI guard against re-activating pending
@@ -8792,29 +8786,18 @@ fn pass_priority_once_with_pipeline(
     // this drain, a continuation queued after a no-choice effect would sit
     // until an unrelated action, by which point referenced stack objects may
     // have left the stack.
-    if let Err(error) = resume_pending_continuation_if_priority(state, events) {
-        *state = boundary_snapshot;
-        events.truncate(event_start);
-        return Err(error);
-    }
+    resume_pending_continuation_if_priority(state, events)?;
 
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let mut wf = match engine_priority::run_post_action_pipeline(
+    let mut wf = engine_priority::run_post_action_pipeline(
         state,
         events,
         &state.waiting_for.clone(),
         skip_triggers,
         false,
-    ) {
-        Ok(waiting_for) => waiting_for,
-        Err(error) => {
-            *state = boundary_snapshot;
-            events.truncate(event_start);
-            return Err(error);
-        }
-    };
+    )?;
     sync_waiting_for(state, &wf);
 
     // The priority reducer deliberately returned the still-live Priority
@@ -8823,8 +8806,6 @@ fn pass_priority_once_with_pipeline(
     // turn-interpreter unit exactly once.  Do not re-run cleanup while the
     // carrier is still live or while the pipeline opened new stack work.
     if cleanup_deferred
-        && boundary_snapshot.phase == Phase::Cleanup
-        && turns::phase_transition_requires_settlement(&boundary_snapshot)
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.stack.is_empty()
         && !turns::phase_transition_requires_settlement(state)
@@ -9237,6 +9218,36 @@ fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
 #[path = "engine_auto_pass_decision_tests.rs"]
 mod auto_pass_decision_tests;
 
+/// Whether the next automatic pass can enter a fallible continuation,
+/// resolution, post-action, or trigger-target boundary. Ordinary passes do not
+/// clone the state; only a beat that can cross one of these boundaries gets a
+/// local checkpoint so an error cannot be swallowed as a successful boundary.
+fn priority_pass_needs_checkpoint(state: &GameState) -> bool {
+    !state.stack.is_empty()
+        || !super::stack::priority_checkpoint_is_settled(state)
+        || turns::phase_transition_requires_settlement(state)
+        || !state.deferred_triggers.is_empty()
+        || state.pending_trigger.is_some()
+        || state.pending_trigger_order.is_some()
+        || state.pending_replacement.is_some()
+        || state.pending_deferred_life_cost_resume.is_some()
+        || state.pending_cost_move_resume.is_some()
+        || state.pending_triggered_mana_resume.is_some()
+        || state.pending_phase_transition_progress.is_some()
+        || triggers::is_pending_trigger_construction_active(state)
+        || priority_pass_will_close_window(state)
+}
+
+fn priority_pass_will_close_window(state: &GameState) -> bool {
+    let participants = super::topology::priority_pass_participants(state);
+    !participants.is_empty()
+        && state
+            .priority_passes
+            .len()
+            .saturating_add(1)
+            >= participants.len()
+}
+
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool {
@@ -9333,6 +9344,11 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 };
 
                 let mut events = Vec::new();
+                let checkpoint = if priority_pass_needs_checkpoint(state) {
+                    Some((state.clone(), events.len()))
+                } else {
+                    None
+                };
                 match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
                     Ok(outcome) => {
                         advanced = true;
@@ -9421,7 +9437,13 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        if let Some((checkpoint, event_start)) = checkpoint {
+                            *state = checkpoint;
+                            events.truncate(event_start);
+                        }
+                        break;
+                    }
                 }
             }
 
