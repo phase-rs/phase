@@ -4,7 +4,7 @@
 // Guild-scoped → instant propagation on the single community server. The PUT
 // replaces the whole guild command set, so both commands go in one call.
 
-import { BUILDS, discord } from "./config";
+import { BUILDS, discord, LFG_DEFAULT_BUILD } from "./config";
 import { OptionType, registerGuildCommands } from "./discord";
 import { FORMATS, MAX_SEATS } from "./formats";
 
@@ -47,7 +47,7 @@ const lfgCommand = {
     {
       type: OptionType.INTEGER,
       name: "seats",
-      description: "Players including you (default: format maximum)",
+      description: "Players including you (default: 4 for Commander, else format maximum)",
       required: false,
       min_value: 2,
       max_value: MAX_SEATS,
@@ -65,7 +65,7 @@ const lfgCommand = {
     {
       type: OptionType.STRING,
       name: "build",
-      description: "Which site everyone plays on (default: release)",
+      description: `Which site everyone plays on (default: ${LFG_DEFAULT_BUILD})`,
       required: false,
       choices: BUILDS.map((b) => ({ name: b, value: b })),
     },

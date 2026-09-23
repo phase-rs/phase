@@ -14,7 +14,7 @@ import {
   ResponseType,
   stringOption,
 } from "./discord";
-import { findFormat, type LfgMode, seatCap } from "./formats";
+import { defaultSeats, findFormat, type LfgMode, seatCap } from "./formats";
 import type { LfgStore, Outcome } from "./lfg";
 import {
   type LfgAction,
@@ -84,7 +84,7 @@ export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
   if (format === undefined) return ephemeral("Unknown format.");
 
   const cap = seatCap(format, mode);
-  const seats = integerOption(options, "seats") ?? cap;
+  const seats = integerOption(options, "seats") ?? defaultSeats(format, mode);
   if (seats < format.min_players || seats > cap) {
     const range = format.min_players === cap ? `${cap}` : `${format.min_players}–${cap}`;
     return ephemeral(`${format.label} ${mode === "p2p" ? "peer-to-peer " : ""}games take ${range} players.`);

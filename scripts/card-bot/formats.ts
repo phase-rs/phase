@@ -57,3 +57,14 @@ export const MAX_SEATS = Math.max(...FORMATS.map((f) => f.max_players));
 export function seatCap(f: LfgFormat, mode: LfgMode): number {
   return mode === "p2p" ? Math.min(f.max_players, P2P_MAX_PEERS) : f.max_players;
 }
+
+/** Formats whose usual table is smaller than their cap. Kept apart from FORMATS,
+ *  which mirrors the client registry and has no such field. */
+const PREFERRED_SEATS: Readonly<Record<string, number>> = { Commander: 4 };
+
+/** Seats an /lfg game gets when the `seats` option is omitted. */
+export function defaultSeats(f: LfgFormat, mode: LfgMode): number {
+  const cap = seatCap(f, mode);
+  const preferred = PREFERRED_SEATS[f.format];
+  return preferred === undefined ? cap : Math.min(preferred, cap);
+}

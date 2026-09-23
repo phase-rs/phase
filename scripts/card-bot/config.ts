@@ -106,8 +106,8 @@ export const BUILD_ENDPOINTS: Record<Build, { site: string; lobbyWs: string; lob
   },
 };
 
-/** Default /lfg build: players play on the stable site (DEFAULT_BUILD stays preview for /card). */
-export const LFG_DEFAULT_BUILD: Build = "release";
+/** Default /lfg build. Separate from DEFAULT_BUILD (/card) so the two can differ. */
+export const LFG_DEFAULT_BUILD: Build = "preview";
 
 /** SQLite file for LFG state (a Docker volume in production). */
 export const LFG_DB_PATH = Bun.env.CARD_BOT_DB_PATH ?? "/data/lfg.sqlite";

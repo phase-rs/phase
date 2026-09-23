@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import { FORMAT_REGISTRY } from "../../../client/src/data/formatRegistry";
-import { findFormat, FORMATS, MAX_SEATS, P2P_MAX_PEERS, seatCap } from "../formats";
+import { defaultSeats, findFormat, FORMATS, MAX_SEATS, P2P_MAX_PEERS, seatCap } from "../formats";
 import { roomName } from "../lfgView";
 
 describe("FORMATS mirrors the client format registry", () => {
@@ -43,5 +43,15 @@ describe("FORMATS mirrors the client format registry", () => {
     expect(seatCap(findFormat("Standard")!, "p2p")).toBe(2);
     expect(MAX_SEATS).toBe(8);
     expect(findFormat("NotAFormat")).toBeUndefined();
+  });
+
+  test("default seats: Commander prefers 4 in either mode; other formats take their cap", () => {
+    const commander = findFormat("Commander")!;
+    expect(seatCap(commander, "server")).toBe(6);
+    expect(defaultSeats(commander, "p2p")).toBe(4);
+    expect(defaultSeats(commander, "server")).toBe(4);
+    const draft = findFormat("CommanderDraft")!;
+    expect(defaultSeats(draft, "p2p")).toBe(seatCap(draft, "p2p"));
+    expect(defaultSeats(draft, "server")).toBe(8);
   });
 });

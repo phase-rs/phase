@@ -142,8 +142,8 @@ describe("/lfg command (T-cmd)", () => {
     expect(res.data.flags).toBeUndefined();
     expect(buttonLabels(res)).toEqual(["Join", "Leave", "Start"]);
     expect(created()).toHaveLength(1);
-    // Default seats: min(Commander max 6, P2P cap 6); default build release.
-    expect(created()[0]).toMatchObject({ kind: "created", lfg: { seats: 6, mode: "p2p", build: "release", server: null } });
+    // Default seats: Commander's preferred 4; default build preview.
+    expect(created()[0]).toMatchObject({ kind: "created", lfg: { seats: 4, mode: "p2p", build: "preview", server: null } });
   });
 
   // [name, cache, options, the refusal's own text]
@@ -218,7 +218,7 @@ describe("/lfg command (T-cmd)", () => {
     const created = spyCreates(d);
     const res = await body(lfgCommand(command([opt("format", "Commander"), opt("server", pick.url)]), d));
     expect(res.data.flags).toBeUndefined();
-    expect(created()[0]).toMatchObject({ lfg: { mode: "server", server: { url: pick.url, name: "Bravo" }, seats: 6 } });
+    expect(created()[0]).toMatchObject({ lfg: { mode: "server", server: { url: pick.url, name: "Bravo" }, seats: 4 } });
   });
 
   test("mode:server without `server` picks the top-scored eligible row", async () => {
