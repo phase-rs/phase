@@ -458,6 +458,7 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
     assert!(runner.state().stack.is_empty());
     assert!(runner.state().resolution_stack.is_empty());
     assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().pending_liminal_entry_resume.is_none());
     assert_eq!(
         events
             .iter()

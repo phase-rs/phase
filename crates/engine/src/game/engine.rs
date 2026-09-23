@@ -8739,6 +8739,33 @@ struct PriorityPassPipelineOutcome {
     consumed_stack_entries: u32,
 }
 
+// Test-only reach signal for the production Cleanup-deferral seam. The
+// `test-support` feature is enabled by the integration test crate and is not
+// part of release consumers or serialized game state.
+#[cfg(any(test, feature = "test-support"))]
+mod cleanup_deferred_probe {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static REACHED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn record() {
+        REACHED.with(|reached| reached.set(true));
+    }
+
+    pub(super) fn take() -> bool {
+        REACHED.with(|reached| reached.replace(false))
+    }
+}
+
+/// Consume the test-only signal that the production priority pipeline observed
+/// `cleanup_deferred`. This does not alter game state or release behavior.
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_cleanup_deferred_probe_for_test() -> bool {
+    cleanup_deferred_probe::take()
+}
+
 fn pass_priority_once_with_pipeline(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -8778,6 +8805,10 @@ fn pass_priority_once_with_pipeline(
         stack_resolution_limit,
     );
     let cleanup_deferred = priority_outcome.cleanup_deferred;
+    #[cfg(any(test, feature = "test-support"))]
+    if cleanup_deferred {
+        cleanup_deferred_probe::record();
+    }
     sync_waiting_for(state, &priority_outcome.waiting_for);
 
     // The continuation and post-action drains are fallible. Keep a rollback
@@ -25243,6 +25274,7 @@ mod resolving_carrier_settle_tests {
     use super::{
         apply, resolving_carrier_parity_is_coherent, resolving_stack_entry_can_settle,
         settle_resolving_stack_entry_after_continuation_resume,
+        take_cleanup_deferred_probe_for_test,
     };
     use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::actions::GameAction;
@@ -25457,9 +25489,14 @@ mod resolving_carrier_settle_tests {
 
         let starting_turn = state.turn_number;
         let starting_life = state.players[0].life;
+        let _ = take_cleanup_deferred_probe_for_test();
         let result = apply(&mut state, PlayerId(0), GameAction::PassPriority)
             .expect("the final Cleanup pass must settle the continuation");
 
+        assert!(
+            take_cleanup_deferred_probe_for_test(),
+            "the production priority pipeline must observe Cleanup deferral before retrying the boundary"
+        );
         assert_eq!(state.turn_number, starting_turn + 1);
         assert_eq!(state.active_player, PlayerId(1));
         assert!(matches!(state.phase, Phase::Untap | Phase::Upkeep));
