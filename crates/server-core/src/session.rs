@@ -71,9 +71,31 @@ use crate::takeback::PendingTakeback;
 /// Always re-bind on restore rather than trusting an id carried in a persisted blob,
 /// matching how this module re-stamps `hosting` and revokes unentitled debug capability.
 fn bind_interaction_session(state: &mut GameState, game_code: &str) {
-    if let Err(error) =
-        bind_interaction_authority(state, InteractionSessionId(game_code.to_string()))
-    {
+    bind_interaction_session_id(
+        state,
+        InteractionSessionId(game_code.to_string()),
+        game_code,
+    );
+}
+
+/// Rotate the interaction namespace after an approved takeback. The target
+/// snapshot belongs to the abandoned timeline and may carry a rewound serial;
+/// preserving its session id could therefore reissue a capability previously
+/// handed to a client on that discarded branch.
+pub(crate) fn bind_fresh_interaction_session(state: &mut GameState, game_code: &str) {
+    let session = InteractionSessionId(format!(
+        "rewind-{:016x}",
+        rand::rng().random::<u64>()
+    ));
+    bind_interaction_session_id(state, session, game_code);
+}
+
+fn bind_interaction_session_id(
+    state: &mut GameState,
+    session: InteractionSessionId,
+    game_code: &str,
+) {
+    if let Err(error) = bind_interaction_authority(state, session) {
         // Reachable only on decimal-serial exhaustion, so failing the game would be
         // disproportionate — but degrading silently is the very defect this fixes.
         warn!(
@@ -4479,6 +4501,88 @@ mod tests {
             },
         )
         .is_err());
+    }
+
+    /// An approved rollback must rotate the interaction namespace as well as
+    /// the precast epoch. Replaying the same action after rollback must mint a
+    /// fresh successor id, so a response captured from the abandoned branch is
+    /// rejected instead of being accepted on the new timeline.
+    #[test]
+    fn approved_takeback_rekeys_all_interaction_capabilities() {
+        let (mgr, code, token0, token1) = started_two_seat_game();
+        let (first_player, first_token, _, first_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        let original_session = mgr
+            .try_session(&code)
+            .unwrap()
+            .state
+            .interaction_session_id
+            .clone();
+
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(first_token, first_submission)
+            .expect("the first live capability must be accepted");
+        let (second_player, second_token, _, stale_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        let stale_id = stale_submission.interaction_id.clone();
+        let approving_player = if first_player == P0 { P1 } else { P0 };
+
+        let mut session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.request_takeback(first_player, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(approving_player, true),
+            Ok(TakebackOutcome::Approved)
+        );
+        assert_ne!(
+            session.state.interaction_session_id,
+            original_session,
+            "approved takeback must leave the abandoned interaction namespace"
+        );
+        drop(session);
+
+        let (fresh_first_player, fresh_first_token, _, fresh_first_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        assert_eq!(
+            fresh_first_player, first_player,
+            "rollback must restore the same semantic first decision"
+        );
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(fresh_first_token, fresh_first_submission)
+            .expect("the replayed decision must accept its fresh capability");
+
+        let (fresh_second_player, _, _, fresh_second_submission) =
+            live_witness(&mgr, &code, &token0, &token1);
+        assert_eq!(
+            fresh_second_player, second_player,
+            "replaying the decision must reach the same semantic successor"
+        );
+        assert_ne!(
+            fresh_second_submission.interaction_id, stale_id,
+            "the replayed successor must not reuse an abandoned capability id"
+        );
+
+        let stale_error = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_interaction(second_token, stale_submission)
+            .expect_err("an abandoned-branch capability must be rejected");
+        assert_eq!(stale_error, "That interaction has already changed.");
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_interaction(
+                if fresh_second_player == P0 {
+                    &token0
+                } else {
+                    &token1
+                },
+                fresh_second_submission,
+            )
+            .expect("the fresh successor capability must remain usable");
     }
 
     /// Existing server snapshots wrote a raw `GameState` at `state`. That
