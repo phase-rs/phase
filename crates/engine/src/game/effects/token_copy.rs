@@ -430,6 +430,7 @@ fn resolve_predefined_token_display(
             display_name: token.name.clone(),
             power: token.power,
             toughness: token.toughness,
+            loyalty: None,
             core_types: token.card_types.core_types.clone(),
             subtypes: token.card_types.subtypes.clone(),
             supertypes: token.card_types.supertypes.clone(),
@@ -846,6 +847,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                         crate::types::ability::Effect::Attach {
                             attachment: crate::types::ability::TargetFilter::SelfRef,
                             target: crate::types::ability::TargetFilter::Any,
+                            // Aura-attachment delivery: the attachment is the
+                            // entering Aura; only its host is chosen here.
+                            selection: crate::types::ability::AttachSelection::AtResolution {
+                                count: crate::types::ability::AttachCardinality::One,
+                            },
                         },
                         Vec::new(),
                         source_id,

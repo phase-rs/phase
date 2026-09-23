@@ -17,6 +17,7 @@ import type {
   TournamentView,
 } from "../adapter/types";
 import {
+  lobbyProtocolRequiredForFormat,
   MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING,
   MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
 } from "../adapter/ws-adapter";
@@ -639,6 +640,10 @@ export function defaultScoringForArity(arity: MatchArity): ScoringPolicy {
  * omitted policy is a hard parse error there, so the client substitutes the
  * explicit {@link defaultScoringForArity}. An explicit `req.scoring` is always
  * sent verbatim regardless of version.
+ *
+ * Below {@link lobbyProtocolRequiredForFormat} for `req.format`, the display-only
+ * `format` label is sent as `null`, since a broker that predates the name would
+ * reject the whole frame.
  */
 export function createTournamentOver(
   socket: PhaseSocket,
@@ -651,6 +656,10 @@ export function createTournamentOver(
     lobbyProtocolVersion >= MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING;
   const scoring =
     req.scoring ?? (brokerOwnsDefault ? null : defaultScoringForArity(req.arity));
+  const formatNeeds = req.format == null ? null : lobbyProtocolRequiredForFormat(req.format);
+  const formatSendable =
+    formatNeeds === null ||
+    (lobbyProtocolVersion !== undefined && lobbyProtocolVersion >= formatNeeds);
 
   return requestOver<TournamentCreatedReply>(
     socket,
@@ -663,7 +672,7 @@ export function createTournamentOver(
         bracket: req.bracket,
         total_rounds: req.totalRounds ?? null,
         plus_rounds: req.plusRounds ?? null,
-        format: req.format ?? null,
+        format: formatSendable ? (req.format ?? null) : null,
         match_type: req.matchType ?? null,
       },
     },

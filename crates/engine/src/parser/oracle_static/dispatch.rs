@@ -909,6 +909,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    if let Some(def) = parse_tagged_ability_activation_timing_permission(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 510.1c: Attached-object conditional variants must precede the generic
     // inverted "As long as ..." rewrite so the condition binds to the
     // enchanted/equipped creature rather than becoming an unrecognized SelfRef

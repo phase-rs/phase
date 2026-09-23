@@ -48,23 +48,50 @@ pub fn resolve(
     };
 
     let mode = match named_attacker {
-        // CR 400.7 + CR 509.1c: Only a still-live exact incarnation that is
-        // currently attacking is a legal named attacker. A departed/re-entered
-        // object cannot be rediscovered from its raw id.
-        Some(attacker)
-            if state.combat.as_ref().is_some_and(|combat| {
-                combat
-                    .attackers
-                    .iter()
-                    .any(|info| info.object_id == attacker.object_id && attacker.is_current(state))
-            }) =>
-        {
-            StaticMode::MustBlockAttacker { attacker }
+        // CR 611.2a + CR 400.7: record the requirement now, for the effect's
+        // stated duration, against the exact incarnation the ability named. A
+        // departed/re-entered object became a new object and cannot be
+        // rediscovered from its raw id, so `is_current` is the whole
+        // resolution-time question.
+        //
+        // CR 509.1c: whether that attacker is attacking is a DECLARE-BLOCKERS
+        // question, asked again at each declare blockers step in the turn —
+        // deliberately not asked here. `combat::BlockDeclarationConstraints::build`
+        // re-checks `combat.attackers` membership, the defending player, and this
+        // same incarnation pin before emitting a `BlockDeclarationRequirement::Exact`,
+        // so a requirement recorded outside combat is inert until it applies.
+        // Mirrors `force_attack::resolve` (CR 508.1d), which likewise never reads
+        // `state.combat`.
+        Some(attacker) if attacker.is_current(state) => StaticMode::MustBlockAttacker { attacker },
+        // CR 400.7: a stale or absent referent names no object, so there is
+        // nothing to require a block against. It must NOT degrade into a generic
+        // `StaticMode::MustBlock` — that would force the target to block any
+        // attacker, the bug issue #1836 closed.
+        //
+        // The ability still resolved, so the game log must say so. Same shape as
+        // `remove_from_combat::resolve`'s stale-referent arm; distinct from the
+        // `Effect` variant-mismatch guard at the top of this function, which stays
+        // silent because no ForceBlock ever reached it.
+        Some(_) => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::ForceBlock,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
         }
-        // An unavailable named referent cannot become a generic requirement.
-        // The instruction has no attacker it can require a block against.
-        Some(_) => return Ok(()),
-        None if has_named_attacker => return Ok(()),
+        // The effect names an attacker but no referent resolved at all — an
+        // unbound `EventSource`, or a missing `source_incarnation`. Nothing to
+        // record, and the same #1836 reason as above forbids falling through to
+        // generic `MustBlock`.
+        None if has_named_attacker => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::ForceBlock,
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
         None => StaticMode::MustBlock,
     };
 
@@ -214,6 +241,207 @@ mod tests {
                 })
             }),
             "source-referential force block should bind to the active attacker"
+        );
+    }
+
+    #[test]
+    fn force_block_named_attacker_not_yet_attacking_records_the_requirement() {
+        // CR 611.2a + CR 400.7: a named attacker that is alive and current but
+        // not yet declared as an attacker still gets its requirement recorded
+        // at resolution. CR 509.1c's "is it attacking" question is asked later,
+        // at declare blockers, by `combat::BlockDeclarationConstraints::build`
+        // — not here, and `state.combat` is `None` in this fixture to prove it.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tangle Angler".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut ability = make_force_block_ability(source, target);
+        ability.effect = Effect::ForceBlock {
+            target: TargetFilter::Any,
+            attacker: Some(ForceBlockAttackerRef::Source),
+            duration: crate::types::ability::Duration::UntilEndOfTurn,
+        };
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        ability.force_block_attacker = Some(pin);
+        assert!(
+            pin.is_current(&state),
+            "reach guard: the named referent must be live and current to reach arm 1's alive branch"
+        );
+        assert!(state.combat.is_none(), "reach guard: no combat exists yet");
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.transient_continuous_effects.iter().any(|ce| {
+                ce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::MustBlockAttacker { attacker },
+                        } if attacker.object_id == source
+                    )
+                })
+            }),
+            "a live, current named attacker must record MustBlockAttacker even with no active combat"
+        );
+    }
+
+    #[test]
+    fn force_block_stale_named_attacker_records_nothing_but_logs() {
+        // CR 400.7: a stale referent (same ObjectId, bumped incarnation) names
+        // no live object, so nothing is recorded. Must not degrade to generic
+        // MustBlock — the bug issue #1836 closed.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tangle Angler".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut ability = make_force_block_ability(source, target);
+        ability.effect = Effect::ForceBlock {
+            target: TargetFilter::Any,
+            attacker: Some(ForceBlockAttackerRef::Source),
+            duration: crate::types::ability::Duration::UntilEndOfTurn,
+        };
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        ability.force_block_attacker = Some(pin);
+        state.objects.get_mut(&source).unwrap().incarnation += 1;
+        assert!(
+            !pin.is_current(&state),
+            "reach guard: the pinned referent must be stale relative to the bumped incarnation"
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "a stale named attacker must record no requirement at all"
+        );
+        assert!(
+            !state.transient_continuous_effects.iter().any(|ce| {
+                ce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::MustBlock,
+                        }
+                    )
+                })
+            }),
+            "issue #1836: a stale named attacker must NOT degrade to generic MustBlock"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ForceBlock,
+                    ..
+                }
+            )),
+            "the ability still resolved and must log EffectResolved even though it affected nothing"
+        );
+    }
+
+    #[test]
+    fn force_block_unresolved_named_attacker_records_nothing_but_logs() {
+        // The effect names an attacker (EventSource) but nothing ever bound
+        // `force_block_attacker` — an unresolved event-source referent. CR
+        // 400.7: nothing to record, and the #1836 reason forbids falling
+        // through to generic MustBlock.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Tolsimir, Midnight's Light".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ForceBlock {
+                target: TargetFilter::Any,
+                attacker: Some(ForceBlockAttackerRef::EventSource),
+                duration: crate::types::ability::Duration::UntilEndOfTurn,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        assert!(
+            ability.force_block_attacker.is_none(),
+            "reach guard: no binding was ever attached to this ability"
+        );
+        assert!(
+            matches!(
+                &ability.effect,
+                Effect::ForceBlock {
+                    attacker: Some(_),
+                    ..
+                }
+            ),
+            "reach guard: the effect itself names an attacker"
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "an unresolved named attacker must record no requirement at all"
+        );
+        assert!(
+            !state.transient_continuous_effects.iter().any(|ce| {
+                ce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::MustBlock,
+                        }
+                    )
+                })
+            }),
+            "issue #1836: an unresolved named attacker must NOT degrade to generic MustBlock"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ForceBlock,
+                    ..
+                }
+            )),
+            "the ability still resolved and must log EffectResolved even though it affected nothing"
         );
     }
 

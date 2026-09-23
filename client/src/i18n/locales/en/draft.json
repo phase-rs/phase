@@ -183,6 +183,7 @@
     "packProgress": "Pack {{current}} of {{total}}",
     "openPack": "Open pack",
     "openPackArt": "Open pack artwork",
+    "openAllPacks": "Open all packs",
     "pulls": "Your pulls",
     "nextPack": "Next pack",
     "viewPool": "View your pool",

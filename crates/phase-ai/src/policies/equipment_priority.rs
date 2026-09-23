@@ -245,6 +245,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
+                selection: engine::types::ability::AttachSelection::Targeted,
             },
         ));
         id
@@ -379,6 +380,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
+                selection: engine::types::ability::AttachSelection::Targeted,
             },
             vec![],
             equip,
@@ -500,6 +502,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
+                selection: engine::types::ability::AttachSelection::Targeted,
             },
             vec![],
             equip,

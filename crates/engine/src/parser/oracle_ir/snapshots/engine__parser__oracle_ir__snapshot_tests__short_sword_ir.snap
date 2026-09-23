@@ -114,6 +114,9 @@ expression: "&ir"
                       ],
                       "controller": "You",
                       "properties": []
+                    },
+                    "selection": {
+                      "at_resolution": {}
                     }
                   },
                   "duration": null,

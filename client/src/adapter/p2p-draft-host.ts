@@ -9,9 +9,6 @@
  * Requirements: P2P-01, P2P-03, P2P-05, P2P-06, P2P-07.
  */
 
-import type Peer from "peerjs";
-import type { DataConnection } from "peerjs";
-
 import { DraftAdapter, EMPTY_DRAFT_POOL_GROUPS, isSharedStackDistribution } from "./draft-adapter";
 import type { DraftCardInstance, DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView, SharedStackPileDecision } from "./draft-adapter";
 import type { DraftKind, DraftProcedure, PackDistribution, PodPolicy, TournamentFormat } from "./draft-adapter";
@@ -20,6 +17,7 @@ import {
   type DraftPeerSession,
 } from "../network/draftPeerSession";
 import { parseRoomCode } from "../network/connection";
+import type { TransportConnection, TransportPeer } from "../network/transport";
 import {
   deckSubmissionFingerprint,
   DRAFT_PROTOCOL_VERSION,
@@ -587,9 +585,9 @@ export class P2PDraftHost {
   private static readonly BACKUP_INTERVAL_PICKS = 5;
 
   constructor(
-    private readonly hostPeer: Peer,
+    private readonly hostPeer: TransportPeer,
     private readonly onGuestConnected: (
-      handler: (conn: DataConnection) => void,
+      handler: (conn: TransportConnection) => void,
     ) => () => void,
     private readonly poolInput: PoolInput,
     private readonly kind: Exclude<DraftKind, "Quick">,
@@ -751,7 +749,7 @@ export class P2PDraftHost {
 
   // ── Connection handling ────────────────────────────────────────────
 
-  private handleNewConnection(conn: DataConnection): void {
+  private handleNewConnection(conn: TransportConnection): void {
     const session = createDraftPeerSession(conn, {
       onSessionEnd: () => {
         for (const [seat, s] of this.guestSessions.entries()) {

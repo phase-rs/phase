@@ -102,12 +102,13 @@
 
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, CardTypeSetSource, ContinuousModification, ControllerRef,
-    Duration, Effect, GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
-    RepeatContinuation, ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneRef,
+    AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, CardTypeSetSource,
+    ContinuousModification, ControllerRef, Duration, Effect, GuessSubject, KeeperConstraint,
+    ModalChoice, MultiTargetSpec, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementDefinition,
+    ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
+    ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -3174,6 +3175,7 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::Amass { count, player, .. } => {
             legacy_target_filter(player) || legacy_quantity_expr(count)
         }
+        Effect::EmpowerJace { count } => legacy_quantity_expr(count),
         // Deferred continuous-modification carrier — no `count`; descend the mods
         // for a nested frozen tag (AddType/AddSubtype return `false`).
         Effect::AddPendingEntersModifications { modifications } => {
@@ -3252,7 +3254,21 @@ fn legacy_effect(x: &Effect) -> bool {
         // and recurses through the nested `ControlsCount` / `PlayerAttribute` /
         // `AllExcept` forms, any of which a future reveal could name.
         Effect::RevealChosenNumbers { players } => legacy_player_filter(players),
-        Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } => {
+        Effect::Attach {
+            attachment,
+            target,
+            selection,
+        } => {
+            legacy_target_filter(attachment)
+                || legacy_target_filter(target)
+                || matches!(
+                    selection,
+                    AttachSelection::AtResolution {
+                        count: AttachCardinality::UpTo(quantity)
+                    } if legacy_quantity_expr(quantity)
+                )
+        }
+        Effect::UnattachAll { attachment, target } => {
             legacy_target_filter(attachment) || legacy_target_filter(target)
         }
         Effect::ExchangeControl { target_a, target_b }
@@ -3797,10 +3813,15 @@ fn member_bound_read() -> RwProfile {
 /// this resolution, while `Legacy` may take either that chain set or its
 /// direct-zone fallback; both are member-bound and include the conservative
 /// zone-membership read for their fallback/producer population.
+/// `CostPaidObjects` (CR 400.7j + CR 601.2h) reads the ids this SAME ability's
+/// cost recorded — a member-bound read — and live zone membership to keep only
+/// the ones still in the declared zone(s), so it carries both channels too.
 fn zone_choice_candidate_source_read(source: ZoneChoiceCandidateSource) -> RwProfile {
     match source {
         ZoneChoiceCandidateSource::Direct => reads_zone_membership(),
-        ZoneChoiceCandidateSource::Tracked | ZoneChoiceCandidateSource::Legacy => {
+        ZoneChoiceCandidateSource::Tracked
+        | ZoneChoiceCandidateSource::Legacy
+        | ZoneChoiceCandidateSource::CostPaidObjects => {
             let mut p = reads_zone_membership();
             p.merge(member_bound_read());
             p
@@ -4173,7 +4194,7 @@ fn walk_ability(
         chosen_x: _,
         cost_paid_object: _,
         noted_mana_payment: _, // concrete captured payment snapshot, no read/write effect
-        cost_paid_object_ids: _,
+        cost_paid_objects: _,  // concrete cost-paid membership records
         effect_context_object: _,
         amassed_army_object: _,
         ability_index: _,
@@ -4923,6 +4944,17 @@ fn rw_effect(
             subtype: _,
             player: _,
         } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::ObjectCounters);
+            p.writes_external_counter_census.merge(Census::Any);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_quantity_expr(count));
+            (p, Some(WriteScope::External))
+        }
+        // CR 701.71a: may create a Jace token (membership) and puts loyalty
+        // counters on a Jace token the controller controls — the Amass profile.
+        Effect::EmpowerJace { count } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_external.set(StateKind::ObjectCounters);
             p.writes_external_counter_census.merge(Census::Any);
@@ -5862,6 +5894,7 @@ fn rw_effect(
         | Effect::Attach {
             attachment: _,
             target,
+            ..
         } => {
             let mut p = RwProfile::empty();
             flag_legacy_write_target(&mut p, target);

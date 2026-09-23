@@ -10291,7 +10291,10 @@ fn bound_by_moonsilver_sacrifice_another_attach_activated() {
         tf.properties
     );
 
-    let Effect::Attach { attachment, target } = ability.effect.as_ref() else {
+    let Effect::Attach {
+        attachment, target, ..
+    } = ability.effect.as_ref()
+    else {
         panic!("expected Attach effect, got {:?}", ability.effect);
     };
     assert_eq!(*attachment, TargetFilter::SelfRef);
@@ -29117,7 +29120,7 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 233;
+    const EFFECT_VARIANT_PIN: usize = 234;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),

@@ -577,6 +577,26 @@ fn apply_human_pick_and_resolve_bots_with_action(
     draft_session: &mut DraftSession,
     human_action: DraftAction,
 ) -> Result<(), JsValue> {
+    apply_human_pick_and_resolve_bots_with_overrides(
+        draft_session,
+        human_action,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Resolve the bot seats, letting `overrides` supply the pick for any seat an
+/// LLM drafter already chose for.
+///
+/// An override is a list of `instance_id`s, never indices: the ids were resolved
+/// against the same pack this loop reads, and `session::apply` re-validates them
+/// against the live pack regardless. A seat with no override — or whose override
+/// the reducer refuses — falls through to the heuristic bot in the same pass, so
+/// a failed LLM call costs a seat its flavour, never its pick.
+fn apply_human_pick_and_resolve_bots_with_overrides(
+    draft_session: &mut DraftSession,
+    human_action: DraftAction,
+    overrides: &std::collections::BTreeMap<u8, Vec<String>>,
+) -> Result<(), JsValue> {
     if !matches!(draft_session.config.kind, DraftKind::Quick) {
         return Err(JsValue::from_str(
             "apply_human_pick_and_resolve_bots is only valid for Quick Draft",
@@ -609,20 +629,33 @@ fn apply_human_pick_and_resolve_bots_with_action(
             // rather than by coincidence.
             let cards_per_pick =
                 usize::from(draft_session.config.kind.procedure().cards_per_pick).min(pack.0.len());
-            let pick_indices = bot_ai::bot_picks(
-                &pack.0,
-                cards_per_pick,
-                difficulty,
-                &draft_session.pools[seat as usize],
-                card_db,
-                &mut rng,
-            );
-            // Map indices to ids BEFORE applying — the apply mutates the pack
-            // the indices refer to.
-            let card_instance_ids: Vec<String> = pick_indices
-                .into_iter()
-                .map(|index| pack.0[index].instance_id.clone())
-                .collect();
+            let chosen = overrides
+                .get(&seat)
+                .filter(|ids| {
+                    // Only honour an override that names the exact step and
+                    // cards this pack still holds; anything else is stale.
+                    ids.len() == cards_per_pick
+                        && ids
+                            .iter()
+                            .all(|id| pack.0.iter().any(|card| &card.instance_id == id))
+                })
+                .cloned();
+            let card_instance_ids = chosen.unwrap_or_else(|| {
+                let pick_indices = bot_ai::bot_picks(
+                    &pack.0,
+                    cards_per_pick,
+                    difficulty,
+                    &draft_session.pools[seat as usize],
+                    card_db,
+                    &mut rng,
+                );
+                // Map indices to ids BEFORE applying — the apply mutates the pack
+                // the indices refer to.
+                pick_indices
+                    .into_iter()
+                    .map(|index| pack.0[index].instance_id.clone())
+                    .collect()
+            });
 
             session::apply(
                 draft_session,
@@ -713,6 +746,212 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         apply_human_pick_and_resolve_bots(draft_session, card_id)?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
+}
+
+// ── LLM-driven draft seats ───────────────────────────────────────────────────
+//
+// Strictly opt-in, exactly as in `engine-wasm`: with no configured endpoint the
+// heuristic bot in `bot_ai` drives every seat, unchanged.
+//
+// The two calls bracket the network round trip. `buildLlmDraftPickRequests`
+// renders each LLM seat's own `DraftPlayerView` — the same per-seat projection
+// the heuristic bot is handed, which is what keeps an LLM drafter blind to other
+// seats' pools — and stamps the pack with a fingerprint.
+// `submitPickWithLlmBotPicks` applies the human's pick and then hands each
+// resolved pick to the bot loop as an override, falling back per seat.
+
+/// The per-seat inputs a caller supplies to resolve LLM picks: which seat, the
+/// pack fingerprint the prompt was built over, which provider answered, and the
+/// raw response body.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftResponse {
+    seat: u8,
+    fingerprint: String,
+    provider: String,
+    /// HTTP status of the provider response. Carried so the engine can refuse a
+    /// non-2xx reply whatever its body looks like.
+    status: u16,
+    body: String,
+}
+
+/// What happened to one seat's LLM pick, so the UI can report a misconfigured
+/// endpoint instead of silently drafting like a bot forever.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftOutcome {
+    seat: u8,
+    used: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// The seats an LLM drafter may act for: the BOT seats of this pod, and nothing
+/// else.
+///
+/// Derived from the session's own roster rather than filtering a caller's list,
+/// so there is exactly one answer to "which seats may an LLM draft for" and no
+/// way to ask for a different one. `DraftSeat::Human` is legal at ANY index — an
+/// 8-player Premier or Traditional pod seats humans at 1..7 — so a seat number
+/// carries no permission on its own. Rendering a seat's `filter_for_player`
+/// view builds a prompt out of that seat's private pool and unpassed pack and
+/// ships it to a third-party provider; for a human seat that would disclose
+/// another player's hidden information to an outside service.
+fn llm_eligible_bot_seats(draft_session: &DraftSession) -> Vec<u8> {
+    draft_session
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(_, seat)| matches!(seat, DraftSeat::Bot { .. }))
+        .filter_map(|(index, _)| u8::try_from(index).ok())
+        .collect()
+}
+
+/// Build one LLM pick request per eligible bot seat.
+///
+/// Takes NO seat list. Which seats an LLM may draft for is an authority
+/// question this crate already owns ([`llm_eligible_bot_seats`]), and accepting
+/// a caller's list made the display layer a second classifier of the same
+/// thing -- one free to drift toward naming a human seat, whose private pool
+/// and unpassed pack would then be rendered into a third-party prompt.
+///
+/// `set_names_json` is an optional set-code -> name map so the format brief
+/// reads "Triple Mirrodin" rather than "Triple MRD"; codes are used verbatim
+/// when it is absent.
+#[wasm_bindgen(js_name = buildLlmDraftPickRequests)]
+pub fn build_llm_draft_pick_requests(
+    endpoint_json: &str,
+    set_names_json: &str,
+) -> Result<JsValue, JsValue> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid LLM endpoint config: {e}")))?;
+    // A missing or unparsable name map degrades the brief to set codes; it is
+    // never a reason to refuse a pick.
+    let set_names: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(set_names_json).unwrap_or_default();
+    let set_names = phase_llm::draft_decision::set_names_from_pairs(set_names);
+    let difficulty = DIFFICULTY.with(|cell| cell.get());
+
+    with_draft(|draft_session| {
+        let requests: Vec<serde_json::Value> = CARD_DB.with(|cell| {
+            let db_borrow = cell.borrow();
+            let card_db = db_borrow.as_ref();
+            llm_eligible_bot_seats(draft_session)
+                .into_iter()
+                .filter_map(|seat| {
+                    let seat = &seat;
+                    let view = filter_for_player(draft_session, *seat);
+                    let request = phase_llm::build_draft_pick_prompt(
+                        *seat, &view, difficulty, card_db, &set_names,
+                    )
+                    .ok()?;
+                    let http = phase_llm::build_chat_request(&endpoint, &request.prompt).ok()?;
+                    Some(serde_json::json!({
+                        "seat": seat,
+                        "fingerprint": request.fingerprint,
+                        "optionCount": request.option_count,
+                        "requiredPickCount": request.required_pick_count,
+                        "request": http,
+                    }))
+                })
+                .collect()
+        });
+        to_js(&requests)
+    })
+}
+
+/// Submit the human's pick, resolving any LLM seat's pick from its response.
+///
+/// Returns `{ view, llmOutcomes }`: the same `DraftPlayerView` `submit_pick`
+/// returns, plus a per-seat record of whether the LLM pick was used.
+#[wasm_bindgen(js_name = submitPickWithLlmBotPicks)]
+pub fn submit_pick_with_llm_bot_picks(
+    card_instance_id: &str,
+    responses_json: &str,
+) -> Result<JsValue, JsValue> {
+    let responses: Vec<LlmDraftResponse> = serde_json::from_str(responses_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid LLM draft responses: {e}")))?;
+    let card_id = card_instance_id.to_string();
+
+    with_draft_mut(|draft_session| {
+        let mut overrides: std::collections::BTreeMap<u8, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut outcomes: Vec<LlmDraftOutcome> = Vec::with_capacity(responses.len());
+
+        for response in &responses {
+            match resolve_llm_draft_pick(draft_session, response) {
+                Ok(selection) => {
+                    overrides.insert(response.seat, selection.card_instance_ids);
+                    outcomes.push(LlmDraftOutcome {
+                        seat: response.seat,
+                        used: true,
+                        reasoning: selection.reasoning,
+                        error: None,
+                    });
+                }
+                Err(error) => outcomes.push(LlmDraftOutcome {
+                    seat: response.seat,
+                    used: false,
+                    reasoning: None,
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+
+        apply_human_pick_and_resolve_bots_with_overrides(
+            draft_session,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_ids: vec![card_id],
+            },
+            &overrides,
+        )?;
+
+        Ok(to_js(&serde_json::json!({
+            "view": filter_for_player(draft_session, 0),
+            "llmOutcomes": outcomes,
+        })))
+    })
+}
+
+/// Decode one seat's LLM response against the pack it is actually holding.
+fn resolve_llm_draft_pick(
+    draft_session: &DraftSession,
+    response: &LlmDraftResponse,
+) -> Result<phase_llm::LlmPickSelection, phase_llm::LlmError> {
+    // Same authority as the request side. A response naming a human seat cannot
+    // have come from a request this bridge issued, so it is refused rather than
+    // used to pick for that player.
+    if !matches!(
+        draft_session.seats.get(usize::from(response.seat)),
+        Some(DraftSeat::Bot { .. })
+    ) {
+        return Err(phase_llm::LlmError::StaleDecision);
+    }
+    let Some(Some(pack)) = draft_session.current_pack.get(usize::from(response.seat)) else {
+        return Err(phase_llm::LlmError::StaleDecision);
+    };
+    let provider = phase_llm::LlmProvider::from_label(&response.provider);
+    let completion =
+        phase_llm::completion_from_response(provider, response.status, &response.body)?;
+    // CR 903.13b: the step's card count is the procedure's, not the model's.
+    let required = usize::from(draft_session.config.kind.procedure().cards_per_pick);
+    phase_llm::select_picks(
+        response.seat,
+        &pack.0,
+        required,
+        &response.fingerprint,
+        &completion,
+    )
+}
+
+/// The engine-owned LLM provider catalog, mirrored here so a draft-only client
+/// surface does not have to load the game engine to render the settings UI.
+#[wasm_bindgen(js_name = llmProviderCatalog)]
+pub fn llm_provider_catalog() -> JsValue {
+    to_js(phase_llm::catalog::provider_catalog())
 }
 
 /// Get the current DraftPlayerView without mutation.
@@ -4599,5 +4838,77 @@ mod create_multiplayer_draft_tests {
         assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
 
         clear_state();
+    }
+}
+
+#[cfg(test)]
+mod llm_seat_authority_tests {
+    use super::*;
+
+    /// A pod whose seat roster is explicit about which indices are bots, so the
+    /// test never leans on the "seat 0 is the human" convention that the
+    /// authority check exists to stop trusting.
+    fn pod(bot_seats: &[u8], pod_size: u8) -> DraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 7,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..pod_size)
+            .map(|index| {
+                if bot_seats.contains(&index) {
+                    DraftSeat::Bot {
+                        name: format!("Bot {index}"),
+                    }
+                } else {
+                    DraftSeat::Human {
+                        player_id: engine::types::player::PlayerId(index),
+                        display_name: format!("Player {index}"),
+                    }
+                }
+            })
+            .collect();
+        DraftSession::new(config, seats, "LLM-AUTH".to_string())
+    }
+
+    /// The motivating case: an 8-human Premier pod. Every index is in range, so
+    /// a bounds check would admit all of them, but none may have its private
+    /// pool and pack rendered into a third-party prompt.
+    #[test]
+    fn a_pod_of_humans_yields_no_llm_seat() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[], 8)), Vec::<u8>::new());
+    }
+
+    /// A human at a NONZERO index is excluded while its bot neighbours are
+    /// admitted. This is the disclosure the seat-number convention allowed:
+    /// seat 3 is in range and is not seat 0.
+    #[test]
+    fn only_bot_seats_are_eligible_whatever_their_index() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[1, 2, 4], 5)), vec![1, 2, 4]);
+    }
+
+    /// Seat 0 carries no special status in either direction: eligible when it
+    /// is a bot, excluded when it is not.
+    #[test]
+    fn seat_zero_is_governed_by_its_role_not_its_number() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[0], 2)), vec![0]);
+        assert_eq!(llm_eligible_bot_seats(&pod(&[1], 2)), vec![1]);
+        assert!(!llm_eligible_bot_seats(&pod(&[1], 2)).contains(&0));
+    }
+
+    /// There is no caller-supplied list to disagree with, so the roster is the
+    /// only answer: a pod of all bots yields exactly its seats, in order.
+    #[test]
+    fn the_roster_is_the_only_source_of_eligibility() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[0, 1, 2], 3)), vec![0, 1, 2]);
     }
 }

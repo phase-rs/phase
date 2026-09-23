@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::env::BrokerEnv;
-use crate::lobby::{LobbyManager, RegisterGameRequest};
+use crate::lobby::{ExpiryConsumption, LobbyManager, LobbyRegistration, RegisterGameRequest};
 use crate::protocol::{
-    LobbyClientMessage, LobbyServerMessage, ServerMode, TournamentRequestId, TournamentView,
+    code_in_use_message, LobbyClientMessage, LobbyServerMessage, ServerErrorCode, ServerMode,
+    TournamentRequestId, TournamentView,
 };
 use crate::reservation_auth::{
     consume_owned_reservation, release_owned_reservation, ReservationConsume, ReservationRelease,
@@ -65,7 +66,7 @@ pub const MAX_TOURNAMENT_ENTRIES: usize = 200;
 /// a client can join and re-join across many events on one long-lived socket.
 ///
 /// 50 is far past any real "your events" list for a single connection while
-/// keeping the worst case per socket trivial. See [`push_conn_tournament`] for
+/// keeping the worst case per socket trivial. See `push_conn_tournament` for
 /// why reaching the cap evicts rather than refuses.
 pub const MAX_CONN_TOURNAMENT_ENTRIES: usize = 50;
 
@@ -90,9 +91,19 @@ pub struct ConnState {
     pub client_hello: Option<ClientHelloInfo>,
     /// Whether this connection is subscribed to the lobby feed.
     pub subscribed: bool,
-    /// The game code this connection registered as host, if any (ownership
-    /// stamp). Disconnect / re-registration teardown keys off this.
-    pub host_game: Option<String>,
+    /// The registration this connection created as host, if any (ownership
+    /// stamp). Disconnect / re-registration teardown and every host-only check
+    /// key off this — and act only while it is still the registration listed
+    /// under its code ([`LobbyManager::is_current`]): the listing is reaped
+    /// once the timeout passes since its liveness clock last advanced. This
+    /// socket's frames advance that clock at most once per
+    /// [`LIVENESS_REFRESH_SECS`](crate::lobby::LIVENESS_REFRESH_SECS) (see
+    /// [`LobbyManager::refresh_liveness`]), so the listing can be reaped up to
+    /// that interval sooner than the timeout after its last frame. A half-open
+    /// or throttled socket that stays open is reaped this way too, and the
+    /// code can then be claimed by another host, whose listing this stamp must
+    /// never touch.
+    pub host_game: Option<LobbyRegistration>,
     /// `(game_code, token)` reservations this connection holds, released on
     /// disconnect or explicit release/consume.
     pub reservations: Vec<(String, String)>,
@@ -108,7 +119,7 @@ pub struct ConnState {
     /// `reservations`, which are socket-bound by design.
     ///
     /// Never pruned, but bounded: appends go through
-    /// [`push_conn_tournament`], which holds the list at
+    /// `push_conn_tournament`, which holds the list at
     /// [`MAX_CONN_TOURNAMENT_ENTRIES`] most-recent codes.
     #[serde(default)]
     pub organized_tournaments: Vec<String>,
@@ -224,6 +235,47 @@ pub struct Broker {
     /// [`WasmBroker::from_snapshot`]'s reset behavior in `broker-wasm`).
     #[serde(default)]
     tournaments: TournamentManager,
+}
+
+/// What one sweep did, reported in the pieces a caller actually needs rather
+/// than as one vector it has to take apart again.
+///
+/// The halves are separate because a caller that recovered them by arithmetic
+/// got it wrong: consumption is identity-conditional, so a superseded
+/// observation is consumed without an outbound, and deriving the lobby count by
+/// subtracting what was handed in underflowed on exactly the tick the identity
+/// check fires. Nothing here has to be subtracted.
+///
+/// `lobby_removed` is also what a caller's own cleanup must key off. A
+/// superseded code names a live replacement, so pruning its connections or
+/// spectators would reach into a game this sweep did not retire.
+#[derive(Debug)]
+pub struct ReapOutcome {
+    /// Codes whose removal was announced — every handled observation but a
+    /// superseded one, in the order handed in. One `LobbyGameRemoved` was
+    /// emitted per element.
+    pub lobby_removed: Vec<String>,
+    /// Handled observations left alone because a replacement holds the code.
+    pub superseded: usize,
+    /// The tournament half, which no caller can decline and which is swept
+    /// here rather than reported (see [`TournamentManager::check_expired`]).
+    pub tournament: Vec<Outbound>,
+}
+
+impl ReapOutcome {
+    /// Every outbound this sweep produced, in the wire order the lobby
+    /// protocol has always used: one `LobbyGameRemoved` per removed code,
+    /// then the tournament lifecycle events, then at most one trailing
+    /// `TournamentListUpdate`.
+    pub fn into_outbounds(self) -> Vec<Outbound> {
+        self.lobby_removed
+            .into_iter()
+            .map(|game_code| {
+                Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code })
+            })
+            .chain(self.tournament)
+            .collect()
+    }
 }
 
 impl Broker {
@@ -379,6 +431,15 @@ impl Broker {
         msg: LobbyClientMessage,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        // Any frame from the socket that owns the current listing is proof its
+        // host is alive, so it refreshes the listing's liveness clock. Scoped
+        // by identity, so a stale stamp cannot extend a reclaimer's listing;
+        // quantized, see `LIVENESS_REFRESH_SECS`. Ahead of the guard so a shell
+        // that persists on `host_liveness_refresh_due` sees exactly the frames
+        // that write — a guard-rejected frame from the host still proves life.
+        if let Some(registration) = &conn.host_game {
+            self.lobby.refresh_liveness(registration, env);
+        }
         // The correlator is read BEFORE the guard, so a gated frame refused at
         // the bounds check is refused *to that request* rather than by a bare
         // `Error` a correlated caller is designed to ignore — which would be a
@@ -451,6 +512,7 @@ impl Broker {
                 draft_metadata,
                 start_when_full: _,
                 ranked,
+                requested_code,
             } => self.handle_create_game(
                 conn,
                 display_name,
@@ -464,6 +526,7 @@ impl Broker {
                 host_peer_id,
                 draft_metadata,
                 ranked,
+                requested_code,
                 env,
             ),
 
@@ -619,10 +682,9 @@ impl Broker {
             }
         }
 
-        if let Some(game_code) = conn.host_game.take() {
-            let existed = self.lobby.has_game(&game_code);
-            self.lobby.unregister_game(&game_code);
-            if existed {
+        if let Some(registration) = conn.host_game.take() {
+            if self.lobby.unregister_registration(&registration) {
+                let game_code = registration.game_code().to_string();
                 info!(game = %game_code, "lobby host disconnected — lobby entry removed");
                 out.push(Outbound::ToSubscribers(
                     LobbyServerMessage::LobbyGameRemoved { game_code },
@@ -646,8 +708,24 @@ impl Broker {
     /// events, then at most one trailing `TournamentListUpdate`.
     ///
     /// The Full-mode session/db deletion stays in the shell — it pulls the
-    /// expired codes from [`Broker::lobby_mut`]`.check_expired` directly, and
+    /// expired codes from [`Broker::lobby`]`.check_expired` directly, and
     /// tournaments have no equivalent server-run session to clean up.
+    ///
+    /// A lobby entry expires once its liveness clock — advanced by its host's
+    /// frames through [`Broker::handle`] — is older than `timeout_secs`, so a
+    /// host that keeps its socket talking is never reaped.
+    ///
+    /// Consumes **every** expired lobby entry, which is right for a shell whose
+    /// sweep cannot decline: a Durable Object has no session registry to
+    /// contend on, so reporting an entry and disposing of it are the same act.
+    /// Nothing can replace an entry between the two halves here — they run
+    /// under one `&mut self` — so every observation this path makes is still
+    /// good when it is consumed.
+    /// A shell that *can* decline — the Full-mode server, whose `try_session`
+    /// defers a game mid-transition — reports with
+    /// [`Broker::lobby`]`.check_expired` and consumes with
+    /// [`Broker::reap_expired_handled`] instead, so an entry it skipped
+    /// survives to be reported again.
     ///
     /// `timeout_secs` applies to lobby entries only. Tournament expiry runs on
     /// the three fixed lifecycle clocks
@@ -657,14 +735,47 @@ impl Broker {
     /// 30-day retention are not the same duration as a lobby listing's, and
     /// threading one number through both would imply they are.
     pub fn reap_expired(&mut self, timeout_secs: u64, env: &impl BrokerEnv) -> Vec<Outbound> {
-        let mut out: Vec<Outbound> = self
-            .lobby
-            .check_expired(timeout_secs, env)
-            .into_iter()
-            .map(|game_code| {
-                Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code })
-            })
-            .collect();
+        let expired = self.lobby.check_expired(timeout_secs, env);
+        self.reap_expired_handled(&expired, env).into_outbounds()
+    }
+
+    /// [`Broker::reap_expired`]'s sweep for a caller that already reported the
+    /// expired lobby codes itself and acted on them: it consumes exactly
+    /// `handled` and leaves every other entry registered.
+    ///
+    /// Reports one removed code per element of `handled` whose observation is
+    /// still good, in order, alongside the tournament half unchanged — the
+    /// tournament registry is swept here rather than by the caller because no
+    /// consumer of it can decline (see [`TournamentManager::check_expired`]),
+    /// so there is nothing to report separately. Call it on every tick for that
+    /// reason, not only on the ticks a lobby entry lapsed.
+    /// [`ReapOutcome::into_outbounds`] renders both halves in wire order.
+    ///
+    /// Consumption is identity-conditional. The lobby lock is released between
+    /// the caller's report and this call, so what sits under a reported code
+    /// may no longer be what was reported, and the two ways that can happen are
+    /// not the same act (see [`ExpiryConsumption`]). A code another path
+    /// already unregistered still emits its removal — a client that over-prunes
+    /// recovers where one that never hears of the removal does not. A code a
+    /// `register_game` has since *replaced* emits nothing and keeps its entry:
+    /// that listing is live and unexpired, and removing it here would delist a
+    /// game nobody retired.
+    pub fn reap_expired_handled(
+        &mut self,
+        handled: &[LobbyRegistration],
+        env: &impl BrokerEnv,
+    ) -> ReapOutcome {
+        let mut lobby_removed: Vec<String> = Vec::new();
+        let mut superseded = 0usize;
+        for expired in handled {
+            match self.lobby.unregister_expired(expired) {
+                ExpiryConsumption::Removed | ExpiryConsumption::AlreadyGone => {
+                    lobby_removed.push(expired.game_code().to_string())
+                }
+                ExpiryConsumption::Superseded => superseded += 1,
+            }
+        }
+        let mut out: Vec<Outbound> = Vec::new();
 
         let events = self.tournaments.check_expired(env);
         let list_changed = !events.is_empty();
@@ -709,7 +820,11 @@ impl Broker {
             out.push(self.tournament_list_update());
         }
 
-        out
+        ReapOutcome {
+            lobby_removed,
+            superseded,
+            tournament: out,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -727,6 +842,7 @@ impl Broker {
         host_peer_id: Option<String>,
         draft_metadata: Option<crate::protocol::DraftLobbyMetadata>,
         ranked: bool,
+        requested_code: Option<String>,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
         let peer_id = match host_peer_id
@@ -751,14 +867,11 @@ impl Broker {
         // double CreateGameWithSettings doesn't orphan the first. Emits
         // LobbyGameRemoved BEFORE the new LobbyGameAdded (order-significant).
         if let Some(previous) = conn.host_game.take() {
-            let existed = self.lobby.has_game(&previous);
-            self.lobby.unregister_game(&previous);
-            if existed {
-                info!(game = %previous, "replacing previous lobby entry from same socket");
+            if self.lobby.unregister_registration(&previous) {
+                let game_code = previous.game_code().to_string();
+                info!(game = %game_code, "replacing previous lobby entry from same socket");
                 out.push(Outbound::ToSubscribers(
-                    LobbyServerMessage::LobbyGameRemoved {
-                        game_code: previous,
-                    },
+                    LobbyServerMessage::LobbyGameRemoved { game_code },
                 ));
             }
         }
@@ -773,7 +886,18 @@ impl Broker {
             return out;
         }
 
-        let game_code = env.new_game_code();
+        let game_code = match requested_code {
+            Some(code) if self.lobby.has_game(&code) => {
+                warn!(game = %code, "requested game code already registered");
+                out.push(Outbound::ToSelf(LobbyServerMessage::error_with_code(
+                    ServerErrorCode::CodeInUse,
+                    code_in_use_message(&code),
+                )));
+                return out;
+            }
+            Some(code) => code,
+            None => env.new_game_code(),
+        };
         let player_token = env.new_token();
         let pc = requested_player_count.clamp(2, 6);
         let (host_version, host_build_commit) = conn
@@ -782,7 +906,7 @@ impl Broker {
             .map(|h| (h.client_version.clone(), h.build_commit.clone()))
             .unwrap_or_default();
 
-        self.lobby.register_game(
+        let registration = self.lobby.register_game(
             &game_code,
             RegisterGameRequest {
                 host_name: display_name.clone(),
@@ -807,7 +931,7 @@ impl Broker {
             env,
         );
 
-        conn.host_game = Some(game_code.clone());
+        conn.host_game = Some(registration);
 
         out.push(Outbound::ToSelf(LobbyServerMessage::GameCreated {
             game_code: game_code.clone(),
@@ -826,6 +950,25 @@ impl Broker {
         out
     }
 
+    /// Whether [`Broker::handle`] would advance the liveness clock of the
+    /// listing `conn` hosts if it handled a frame from `conn` now. The
+    /// persistence query for a shell that snapshots: evaluate it **before**
+    /// `handle`, since the refresh it predicts happens there.
+    pub fn host_liveness_refresh_due(&self, conn: &ConnState, env: &impl BrokerEnv) -> bool {
+        conn.host_game
+            .as_ref()
+            .is_some_and(|r| self.lobby.liveness_refresh_due(r, env))
+    }
+
+    /// Whether `conn` hosts the listing currently under `game_code`. A stamp
+    /// whose listing was reaped (and possibly re-claimed by another host) does
+    /// not count — see [`ConnState::host_game`].
+    fn hosts_current(&self, conn: &ConnState, game_code: &str) -> bool {
+        conn.host_game
+            .as_ref()
+            .is_some_and(|r| r.game_code() == game_code && self.lobby.is_current(r))
+    }
+
     fn handle_join(
         &mut self,
         conn: &mut ConnState,
@@ -834,11 +977,7 @@ impl Broker {
         password: Option<String>,
         reservation_token: Option<String>,
     ) -> Vec<Outbound> {
-        if conn
-            .host_game
-            .as_deref()
-            .is_some_and(|owned| owned == game_code)
-        {
+        if self.hosts_current(conn, &game_code) {
             return vec![error("You are already hosting this game")];
         }
 
@@ -857,6 +996,15 @@ impl Broker {
             ))];
         }
 
+        // Existence first: `verify_password` reports a missing game as untyped
+        // prose, and a caller waiting on a pre-minted code keys on the typed code.
+        let Some(info) = self.lobby.join_target_info(&game_code) else {
+            return vec![Outbound::ToSelf(LobbyServerMessage::error_with_code(
+                ServerErrorCode::GameNotFound,
+                format!("Game not found in lobby: {game_code}"),
+            ))];
+        };
+
         match self.lobby.verify_password(&game_code, password.as_deref()) {
             Ok(()) => {}
             Err(e) if e == "password_required" => {
@@ -870,10 +1018,6 @@ impl Broker {
             }
         }
 
-        let info = match self.lobby.join_target_info(&game_code) {
-            Some(info) => info,
-            None => return vec![error(&format!("Game not found in lobby: {game_code}"))],
-        };
         if !info.is_p2p {
             return vec![error(&format!(
                 "Game {game_code} is hosted on a Full-mode server and cannot be brokered"
@@ -934,11 +1078,7 @@ impl Broker {
         let mut reservation_expires_at_ms = None;
         let mut reservation_counted_in_info = false;
 
-        if conn
-            .host_game
-            .as_deref()
-            .is_some_and(|owned| owned == game_code)
-        {
+        if self.hosts_current(conn, &game_code) {
             return vec![error("You are already hosting this game")];
         }
 
@@ -958,11 +1098,16 @@ impl Broker {
             ))];
         }
 
-        let mut info = match self.lobby.verify_password(&game_code, password.as_deref()) {
-            Ok(()) => match self.lobby.join_target_info(&game_code) {
-                Some(info) => info,
-                None => return vec![error(&format!("Game not found in lobby: {game_code}"))],
-            },
+        // Existence first: `verify_password` reports a missing game as untyped
+        // prose, and a caller waiting on a pre-minted code keys on the typed code.
+        let Some(mut info) = self.lobby.join_target_info(&game_code) else {
+            return vec![Outbound::ToSelf(LobbyServerMessage::error_with_code(
+                ServerErrorCode::GameNotFound,
+                format!("Game not found in lobby: {game_code}"),
+            ))];
+        };
+        match self.lobby.verify_password(&game_code, password.as_deref()) {
+            Ok(()) => {}
             Err(e) if e == "password_required" => {
                 return vec![Outbound::ToSelf(LobbyServerMessage::PasswordRequired {
                     game_code,
@@ -972,7 +1117,7 @@ impl Broker {
                 warn!(game = %game_code, error = %e, "lookup password verification failed");
                 return vec![error(&e)];
             }
-        };
+        }
 
         // --- optional reservation release ---
         if let Some(token) = release_reservation_token.as_deref() {
@@ -1070,9 +1215,17 @@ impl Broker {
         consumed_reservation_tokens: Vec<String>,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
-        let is_owner = conn.host_game.as_deref().is_some_and(|g| g == game_code);
-        if !is_owner {
+        let Some(registration) = conn
+            .host_game
+            .as_ref()
+            .filter(|r| r.game_code() == game_code)
+        else {
             return vec![error("Only the lobby host can update metadata")];
+        };
+        // This socket's listing was reaped; the code may now name another
+        // host's listing, which only that host may update.
+        if !self.lobby.is_current(registration) {
+            return vec![];
         }
 
         let mut consumed_reservation = false;
@@ -1098,19 +1251,16 @@ impl Broker {
     }
 
     fn handle_unregister(&mut self, conn: &mut ConnState, game_code: String) -> Vec<Outbound> {
-        let is_owner = conn.host_game.as_deref().is_some_and(|g| g == game_code);
-        if !is_owner {
+        // Take (clearing it so disconnect cleanup doesn't try again) only the
+        // stamp for this code; a request naming any other code leaves it held.
+        let Some(registration) = conn.host_game.take_if(|r| r.game_code() == game_code) else {
             warn!(game = %game_code, "UnregisterLobby rejected — socket is not the registered host");
             return vec![error(
                 "UnregisterLobby only allowed for the host that registered the game",
             )];
-        }
+        };
 
-        let existed = self.lobby.has_game(&game_code);
-        self.lobby.unregister_game(&game_code);
-        // Clear so disconnect cleanup doesn't try to unregister again.
-        conn.host_game = None;
-        if existed {
+        if self.lobby.unregister_registration(&registration) {
             info!(game = %game_code, "lobby entry removed by host (UnregisterLobby)");
             vec![Outbound::ToSubscribers(
                 LobbyServerMessage::LobbyGameRemoved { game_code },
@@ -1712,6 +1862,15 @@ mod tests {
     }
 
     fn create(conn: &mut ConnState, broker: &mut Broker, env: &FakeEnv) -> Vec<Outbound> {
+        create_requesting(conn, broker, env, None)
+    }
+
+    fn create_requesting(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        requested: Option<&str>,
+    ) -> Vec<Outbound> {
         broker.handle(
             conn,
             LobbyClientMessage::CreateGameWithSettings {
@@ -1728,9 +1887,505 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: requested.map(str::to_string),
             },
             env,
         )
+    }
+
+    /// The single `Error` reply in `out`, as `(message, code)`.
+    fn only_error(out: &[Outbound]) -> (String, Option<ServerErrorCode>) {
+        match out {
+            [Outbound::ToSelf(LobbyServerMessage::Error { message, code })] => {
+                (message.clone(), *code)
+            }
+            other => panic!("expected exactly one Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_honors_a_requested_code() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+
+        let out = create_requesting(&mut conn, &mut broker, &env, Some("BOTAB1"));
+
+        // `FakeEnv` would have minted `CODE00`.
+        assert_eq!(game_code_of(&out), "BOTAB1");
+        assert_eq!(
+            conn.host_game.as_ref().map(LobbyRegistration::game_code),
+            Some("BOTAB1")
+        );
+        assert!(broker.lobby().has_game("BOTAB1"));
+    }
+
+    #[test]
+    fn a_requested_code_held_by_another_socket_is_code_in_use() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut a = ConnState::default();
+        let mut b = ConnState::default();
+        hello(&mut a, &mut broker, &env);
+        hello(&mut b, &mut broker, &env);
+        assert_eq!(
+            game_code_of(&create_requesting(
+                &mut a,
+                &mut broker,
+                &env,
+                Some("BOTAB1")
+            )),
+            "BOTAB1"
+        );
+
+        let out = create_requesting(&mut b, &mut broker, &env, Some("BOTAB1"));
+
+        let (message, code) = only_error(&out);
+        assert_eq!(code, Some(ServerErrorCode::CodeInUse));
+        let lower = message.to_lowercase();
+        for legacy in ["not found", "full", "password", "build mismatch"] {
+            assert!(
+                !lower.contains(legacy),
+                "legacy classifiers must not match {legacy:?}: {message}"
+            );
+        }
+        assert_eq!(b.host_game, None);
+        assert!(
+            broker.lobby().public_game("BOTAB1").is_some(),
+            "the holder's listing survives the refused claim"
+        );
+    }
+
+    /// Socket A registers `BOTAB1`, the listing is reaped by age while A's
+    /// socket stays open, and socket B claims the freed code. A still holds
+    /// its (now stale) host stamp for `BOTAB1`.
+    fn reaped_then_reclaimed() -> (FakeEnv, Broker, ConnState, ConnState) {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut a = ConnState::default();
+        let mut b = ConnState::default();
+        hello(&mut a, &mut broker, &env);
+        hello(&mut b, &mut broker, &env);
+        create_requesting(&mut a, &mut broker, &env, Some("BOTAB1"));
+
+        env.advance_secs(301);
+        let reaped = broker.reap_expired(300, &env);
+        assert!(
+            removes(&reaped, "BOTAB1"),
+            "reach guard: the expiry path reaped A's listing"
+        );
+        assert!(a.host_game.is_some(), "A's socket still carries its stamp");
+
+        let claimed = create_requesting(&mut b, &mut broker, &env, Some("BOTAB1"));
+        assert_eq!(game_code_of(&claimed), "BOTAB1", "B claimed the freed code");
+        (env, broker, a, b)
+    }
+
+    fn removes(out: &[Outbound], code: &str) -> bool {
+        out.iter().any(|o| {
+            matches!(
+                o,
+                Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code })
+                    if game_code == code
+            )
+        })
+    }
+
+    /// B's listing is still the one under `BOTAB1`, unmodified.
+    fn assert_new_holder_untouched(broker: &Broker, b: &ConnState) {
+        let registration = b.host_game.as_ref().expect("B holds BOTAB1");
+        assert!(
+            broker.lobby().is_current(registration),
+            "B's registration is still the one listed under BOTAB1"
+        );
+        let game = broker.lobby().public_game("BOTAB1").expect("B's listing");
+        assert_eq!(game.current_players, 1, "B's listing was not updated by A");
+    }
+
+    #[test]
+    fn a_reaped_hosts_disconnect_leaves_the_code_reclaimer_listed() {
+        let (_env, mut broker, mut a, b) = reaped_then_reclaimed();
+
+        let out = broker.on_disconnect(&mut a);
+
+        assert!(
+            !removes(&out, "BOTAB1"),
+            "no removal broadcast for B's code"
+        );
+        assert_new_holder_untouched(&broker, &b);
+    }
+
+    #[test]
+    fn a_reaped_hosts_re_create_leaves_the_code_reclaimer_listed() {
+        let (env, mut broker, mut a, b) = reaped_then_reclaimed();
+
+        let out = create_requesting(&mut a, &mut broker, &env, None);
+
+        assert_eq!(game_code_of(&out), "CODE00", "reach guard: A re-created");
+        assert!(
+            !removes(&out, "BOTAB1"),
+            "no removal broadcast for B's code"
+        );
+        assert_new_holder_untouched(&broker, &b);
+    }
+
+    #[test]
+    fn a_reaped_hosts_unregister_leaves_the_code_reclaimer_listed() {
+        let (env, mut broker, mut a, b) = reaped_then_reclaimed();
+
+        let out = broker.handle(
+            &mut a,
+            LobbyClientMessage::UnregisterLobby {
+                game_code: "BOTAB1".into(),
+            },
+            &env,
+        );
+
+        assert!(out.is_empty(), "nothing to remove or report: {out:?}");
+        assert_eq!(a.host_game, None, "A's stale stamp is released");
+        assert_new_holder_untouched(&broker, &b);
+    }
+
+    #[test]
+    fn a_reaped_hosts_metadata_update_leaves_the_code_reclaimer_untouched() {
+        let (env, mut broker, mut a, b) = reaped_then_reclaimed();
+
+        let out = broker.handle(
+            &mut a,
+            LobbyClientMessage::UpdateLobbyMetadata {
+                game_code: "BOTAB1".into(),
+                current_players: 3,
+                max_players: 3,
+                consumed_reservation_tokens: vec![],
+            },
+            &env,
+        );
+
+        assert!(
+            out.is_empty(),
+            "no update broadcast for B's listing: {out:?}"
+        );
+        assert_new_holder_untouched(&broker, &b);
+        assert_eq!(
+            broker.lobby().public_game("BOTAB1").map(|g| g.max_players),
+            Some(4),
+            "B's seat count was not rewritten by A"
+        );
+    }
+
+    /// A's stale stamp no longer makes `BOTAB1` "the game A is hosting", so A
+    /// may look up B's game like any other guest.
+    #[test]
+    fn a_reaped_host_may_look_up_the_code_reclaimers_game() {
+        let (env, mut broker, mut a, _b) = reaped_then_reclaimed();
+
+        let out = broker.handle(
+            &mut a,
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: "BOTAB1".into(),
+                password: None,
+                reserve: false,
+                display_name: None,
+                release_reservation_token: None,
+            },
+            &env,
+        );
+
+        assert!(
+            out.iter().any(|o| matches!(
+                o,
+                Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. })
+            )),
+            "A is answered as a guest of B's game: {out:?}"
+        );
+    }
+
+    fn ping(conn: &mut ConnState, broker: &mut Broker, env: &FakeEnv) -> Vec<Outbound> {
+        broker.handle(conn, LobbyClientMessage::Ping { timestamp: 0 }, env)
+    }
+
+    /// A connected host that keeps pinging is never reaped, while a silent
+    /// host's listing still is — and a guest's pings refresh nothing.
+    #[test]
+    fn a_pinging_hosts_listing_outlives_the_reap_timeout() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut a = ConnState::default();
+        let mut c = ConnState::default();
+        let mut g = ConnState::default();
+        hello(&mut a, &mut broker, &env);
+        hello(&mut c, &mut broker, &env);
+        hello(&mut g, &mut broker, &env);
+        assert_eq!(
+            game_code_of(&create_requesting(
+                &mut a,
+                &mut broker,
+                &env,
+                Some("LFGA01")
+            )),
+            "LFGA01"
+        );
+        assert_eq!(
+            game_code_of(&create_requesting(
+                &mut c,
+                &mut broker,
+                &env,
+                Some("LFGC01")
+            )),
+            "LFGC01"
+        );
+
+        let mut silent_reaped_after = None;
+        for minute in 1..=10u64 {
+            env.advance_secs(60);
+            ping(&mut a, &mut broker, &env);
+            assert!(
+                !broker.host_liveness_refresh_due(&g, &env),
+                "a guest holds no stamp, so its frames are never a liveness write"
+            );
+            ping(&mut g, &mut broker, &env);
+            let swept = broker.reap_expired(300, &env);
+            assert!(
+                !removes(&swept, "LFGA01"),
+                "the pinging host's listing was reaped after {minute} min"
+            );
+            if removes(&swept, "LFGC01") {
+                silent_reaped_after.get_or_insert(minute * 60);
+            }
+        }
+        assert_eq!(
+            silent_reaped_after,
+            Some(360),
+            "reach guard: the silent host's listing lapsed on the first sweep past 300 s"
+        );
+        assert!(
+            lookup(&mut g, &mut broker, &env, "LFGA01", None)
+                .iter()
+                .any(|o| matches!(
+                    o,
+                    Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. })
+                )),
+            "the pinging host's room is still joinable after 10 minutes"
+        );
+
+        // Abandonment is still reaped: once A falls silent, its listing lapses
+        // 300 s after its last refresh.
+        env.advance_secs(300);
+        assert!(!removes(&broker.reap_expired(300, &env), "LFGA01"));
+        env.advance_secs(1);
+        assert!(removes(&broker.reap_expired(300, &env), "LFGA01"));
+    }
+
+    /// A's stamp outlived its listing and B reclaimed the code: A's pings must
+    /// not keep B's listing alive.
+    #[test]
+    fn a_reaped_hosts_ping_does_not_refresh_the_code_reclaimer() {
+        let (env, mut broker, mut a, b) = reaped_then_reclaimed();
+
+        for _ in 0..5 {
+            env.advance_secs(60);
+            ping(&mut a, &mut broker, &env);
+        }
+        env.advance_secs(1);
+        assert!(
+            !broker.host_liveness_refresh_due(&a, &env),
+            "A's stale stamp names no current listing"
+        );
+        assert!(
+            broker.host_liveness_refresh_due(&b, &env),
+            "reach: B's listing is due a refresh it never received"
+        );
+        assert!(
+            removes(&broker.reap_expired(300, &env), "BOTAB1"),
+            "B's silent listing lapses 301 s after its registration"
+        );
+    }
+
+    /// Positive arm: while A's own registration is still listed, disconnect and
+    /// `UnregisterLobby` remove it and announce the removal.
+    #[test]
+    fn a_live_hosts_disconnect_and_unregister_remove_its_own_listing() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        let mut a = ConnState::default();
+        hello(&mut a, &mut broker, &env);
+        create_requesting(&mut a, &mut broker, &env, Some("BOTAB1"));
+        let out = broker.on_disconnect(&mut a);
+        assert!(removes(&out, "BOTAB1"));
+        assert!(!broker.lobby().has_game("BOTAB1"));
+
+        let mut c = ConnState::default();
+        hello(&mut c, &mut broker, &env);
+        create_requesting(&mut c, &mut broker, &env, Some("BOTAB2"));
+        let out = broker.handle(
+            &mut c,
+            LobbyClientMessage::UnregisterLobby {
+                game_code: "BOTAB2".into(),
+            },
+            &env,
+        );
+        assert!(removes(&out, "BOTAB2"));
+        assert!(!broker.lobby().has_game("BOTAB2"));
+        assert_eq!(c.host_game, None);
+    }
+
+    #[test]
+    fn the_same_socket_can_re_create_its_own_requested_code() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+        create_requesting(&mut conn, &mut broker, &env, Some("BOTAB1"));
+
+        let out = create_requesting(&mut conn, &mut broker, &env, Some("BOTAB1"));
+
+        // The claim runs after the same-socket cleanup, so the socket's own
+        // listing does not hold the code against it.
+        assert!(
+            matches!(
+                out.as_slice(),
+                [
+                    Outbound::ToSubscribers(LobbyServerMessage::LobbyGameRemoved { game_code: removed }),
+                    Outbound::ToSelf(LobbyServerMessage::GameCreated { game_code: created, .. }),
+                    Outbound::ToSubscribers(LobbyServerMessage::LobbyGameAdded { .. }),
+                ] if removed == "BOTAB1" && created == "BOTAB1"
+            ),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_requested_code_is_rejected_before_the_handler() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+
+        let out = create_requesting(&mut conn, &mut broker, &env, Some("bad"));
+
+        let (message, code) = only_error(&out);
+        assert_eq!(code, None);
+        assert!(message.contains("requested_code"), "{message}");
+        assert_eq!(broker.lobby().len(), 0);
+    }
+
+    fn lookup(
+        conn: &mut ConnState,
+        broker: &mut Broker,
+        env: &FakeEnv,
+        code: &str,
+        password: Option<&str>,
+    ) -> Vec<Outbound> {
+        broker.handle(
+            conn,
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: code.into(),
+                password: password.map(str::to_string),
+                reserve: false,
+                display_name: None,
+                release_reservation_token: None,
+            },
+            env,
+        )
+    }
+
+    fn join(conn: &mut ConnState, broker: &mut Broker, env: &FakeEnv, code: &str) -> Vec<Outbound> {
+        broker.handle(
+            conn,
+            LobbyClientMessage::JoinGameWithPassword {
+                game_code: code.into(),
+                deck: test_deck(),
+                display_name: "Guest".into(),
+                password: None,
+                reservation_token: None,
+            },
+            env,
+        )
+    }
+
+    #[test]
+    fn lookup_of_an_unknown_code_is_game_not_found() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        let mut guest = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        hello(&mut guest, &mut broker, &env);
+        let code = game_code_of(&create(&mut host, &mut broker, &env));
+
+        let (message, error_code) =
+            only_error(&lookup(&mut guest, &mut broker, &env, "NOPE01", None));
+        assert_eq!(error_code, Some(ServerErrorCode::GameNotFound));
+        assert!(message.contains("not found"), "{message}");
+
+        // Positive: a listed code resolves.
+        assert!(
+            lookup(&mut guest, &mut broker, &env, &code, None)
+                .iter()
+                .any(|o| matches!(
+                    o,
+                    Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. })
+                )),
+            "a created game resolves"
+        );
+
+        // Sibling: a wrong password on a listed game stays uncoded.
+        let mut locked_host = ConnState::default();
+        hello(&mut locked_host, &mut broker, &env);
+        let locked = game_code_of(&broker.handle(
+            &mut locked_host,
+            LobbyClientMessage::CreateGameWithSettings {
+                deck: test_deck(),
+                display_name: "Host".into(),
+                public: true,
+                password: Some("secret".into()),
+                timer_seconds: None,
+                player_count: 4,
+                match_config: Default::default(),
+                format_config: None,
+                room_name: None,
+                host_peer_id: Some("peer-2".into()),
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+                requested_code: None,
+            },
+            &env,
+        ));
+        let (_, wrong_password_code) = only_error(&lookup(
+            &mut guest,
+            &mut broker,
+            &env,
+            &locked,
+            Some("wrong"),
+        ));
+        assert_eq!(wrong_password_code, None);
+    }
+
+    #[test]
+    fn join_of_an_unknown_code_is_game_not_found() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        let mut guest = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        hello(&mut guest, &mut broker, &env);
+        let code = game_code_of(&create(&mut host, &mut broker, &env));
+
+        let (message, error_code) = only_error(&join(&mut guest, &mut broker, &env, "NOPE01"));
+        assert_eq!(error_code, Some(ServerErrorCode::GameNotFound));
+        assert!(message.contains("not found"), "{message}");
+
+        // Positive: joining a listed P2P game reaches PeerInfo.
+        assert!(
+            matches!(
+                join(&mut guest, &mut broker, &env, &code).as_slice(),
+                [Outbound::ToSelf(LobbyServerMessage::PeerInfo { .. })]
+            ),
+            "a created P2P game is joinable"
+        );
     }
 
     fn game_code_of(out: &[Outbound]) -> String {
@@ -1761,7 +2416,10 @@ mod tests {
             Outbound::ToSubscribers(LobbyServerMessage::LobbyGameAdded { .. })
         ));
         assert_eq!(out.len(), 2);
-        assert_eq!(conn.host_game.as_deref(), Some("CODE00"));
+        assert_eq!(
+            conn.host_game.as_ref().map(LobbyRegistration::game_code),
+            Some("CODE00")
+        );
     }
 
     #[test]
@@ -1800,7 +2458,10 @@ mod tests {
             "LobbyGameAdded is last"
         );
         // The new entry replaced the old ownership stamp.
-        assert_ne!(conn.host_game.as_deref(), Some(first_code.as_str()));
+        assert_ne!(
+            conn.host_game.as_ref().map(LobbyRegistration::game_code),
+            Some(first_code.as_str())
+        );
     }
 
     #[test]
@@ -1834,6 +2495,7 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
             },
             &env,
         );
@@ -1842,7 +2504,10 @@ mod tests {
             out.as_slice(),
             [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
         ));
-        assert_eq!(conn.host_game.as_deref(), Some(first_code.as_str()));
+        assert_eq!(
+            conn.host_game.as_ref().map(LobbyRegistration::game_code),
+            Some(first_code.as_str())
+        );
         assert!(broker.lobby_mut().public_game(&first_code).is_some());
     }
 
@@ -2211,6 +2876,7 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
             },
             &env,
         );
@@ -2246,6 +2912,7 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
             },
             &env,
         );
@@ -2279,6 +2946,7 @@ mod tests {
                 draft_metadata: None,
                 start_when_full: true,
                 ranked: false,
+                requested_code: None,
             },
             &env,
         );
@@ -3910,6 +4578,253 @@ mod tests {
     }
 
     // -- Rows 6 & 7: the widened reaper -------------------------------------
+
+    /// The broker half of the non-destructive sweep: a shell that can decline
+    /// reports with `lobby().check_expired` and hands back only the codes it
+    /// dispositioned, so an entry it skipped stays listed and is reported
+    /// again. While the report consumed, that skip was permanent — the listing
+    /// was already gone and no later tick could see it.
+    #[test]
+    fn reap_expired_handled_consumes_only_what_the_shell_handled() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        let mut host_a = ConnState::default();
+        hello(&mut host_a, &mut broker, &env);
+        let acted = game_code_of(&create(&mut host_a, &mut broker, &env));
+        let mut host_b = ConnState::default();
+        hello(&mut host_b, &mut broker, &env);
+        let deferred = game_code_of(&create(&mut host_b, &mut broker, &env));
+
+        env.advance_secs(301);
+
+        // Reach guard: both listings really lapsed, so a one-entry fixture
+        // cannot make "consumes only what it was handed" pass by coincidence.
+        let reported = broker.lobby().check_expired(300, &env);
+        let mut reported_codes: Vec<String> =
+            reported.iter().map(|e| e.game_code().to_string()).collect();
+        reported_codes.sort();
+        let mut both = vec![acted.clone(), deferred.clone()];
+        both.sort();
+        assert_eq!(reported_codes, both);
+
+        let acted_observation = reported
+            .iter()
+            .find(|e| e.game_code() == acted)
+            .expect("the handled entry was reported")
+            .clone();
+        let first = broker.reap_expired_handled(std::slice::from_ref(&acted_observation), &env);
+        assert_eq!(
+            first.lobby_removed,
+            vec![acted.clone()],
+            "the handled entry is reported as removed"
+        );
+        assert_eq!(first.superseded, 0);
+        let out = first.into_outbounds();
+        assert_eq!(
+            out,
+            [Outbound::ToSubscribers(
+                LobbyServerMessage::LobbyGameRemoved {
+                    game_code: acted.clone()
+                }
+            )],
+            "only the handled entry is announced"
+        );
+        assert!(!broker.lobby().has_game(&acted), "and only it is consumed");
+        assert!(
+            broker.lobby().has_game(&deferred),
+            "the deferred entry keeps its listing"
+        );
+
+        // The next tick reports the deferred entry again — that is the retry.
+        let retried = broker.lobby().check_expired(300, &env);
+        assert_eq!(
+            retried
+                .iter()
+                .map(|e| e.game_code().to_string())
+                .collect::<Vec<_>>(),
+            vec![deferred.clone()],
+            "a deferred entry must be reported again"
+        );
+        let second = broker.reap_expired_handled(&retried, &env).into_outbounds();
+        assert_eq!(
+            second,
+            [Outbound::ToSubscribers(
+                LobbyServerMessage::LobbyGameRemoved {
+                    game_code: deferred
+                }
+            )]
+        );
+        assert!(
+            broker.lobby().is_empty(),
+            "a deferred entry is consumed by the tick that can act on it"
+        );
+    }
+
+    /// The shell releases the lobby lock between reporting an expiry and
+    /// handing it back here, and `register_game` overwrites whatever is
+    /// registered under a code. A consume keyed on the code alone therefore
+    /// removed the *replacement* and told every subscriber to delist it — a
+    /// live, unexpired listing silently deleted. The consume is keyed on the
+    /// registration that was observed instead.
+    #[test]
+    fn a_replacement_listing_survives_the_consume_of_the_entry_it_replaced() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        let mut host_a = ConnState::default();
+        hello(&mut host_a, &mut broker, &env);
+        let code = game_code_of(&create(&mut host_a, &mut broker, &env));
+
+        env.advance_secs(301);
+
+        let reported = broker.lobby().check_expired(300, &env);
+        assert_eq!(
+            reported
+                .iter()
+                .map(|e| e.game_code().to_string())
+                .collect::<Vec<_>>(),
+            vec![code.clone()],
+            "reach guard: the lapsed listing really was observed"
+        );
+
+        // The gap: the shell has dropped the lobby lock to do its session work,
+        // and the freed code is registered again before the consume lands.
+        broker.lobby_mut().register_game(
+            &code,
+            RegisterGameRequest {
+                host_name: "replacement".to_string(),
+                public: true,
+                ..Default::default()
+            },
+            &env,
+        );
+
+        let outcome = broker.reap_expired_handled(&reported, &env);
+        assert!(
+            outcome.lobby_removed.is_empty(),
+            "a superseded observation must not be reported as removed, or the \
+             shell prunes a live game's connections"
+        );
+        assert_eq!(outcome.superseded, 1, "and is counted as superseded");
+        let out = outcome.into_outbounds();
+        assert!(out.is_empty(), "nor may it announce anything: {out:?}");
+        assert!(
+            broker.lobby().has_game(&code),
+            "and the replacement keeps its listing"
+        );
+        assert_eq!(
+            broker
+                .lobby()
+                .public_games()
+                .iter()
+                .map(|g| g.host_name.clone())
+                .collect::<Vec<_>>(),
+            vec!["replacement".to_string()],
+            "the entry standing is the replacement, not the one that lapsed"
+        );
+    }
+
+    /// The split a one-entry fixture cannot see. Consumption stopped being one
+    /// outbound per handled code the moment it became conditional, so a mixed
+    /// tick is the shape that shows each half of [`ReapOutcome`] tracking what
+    /// the sweep did rather than what it was handed.
+    #[test]
+    fn a_mixed_tick_announces_only_the_entries_it_removed() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        let mut host_a = ConnState::default();
+        hello(&mut host_a, &mut broker, &env);
+        let kept = game_code_of(&create(&mut host_a, &mut broker, &env));
+        let mut host_b = ConnState::default();
+        hello(&mut host_b, &mut broker, &env);
+        let replaced = game_code_of(&create(&mut host_b, &mut broker, &env));
+
+        env.advance_secs(301);
+        let reported = broker.lobby().check_expired(300, &env);
+        assert_eq!(reported.len(), 2, "reach guard: both listings lapsed");
+
+        // One of the two codes is taken by a replacement in the released-lock gap.
+        broker.lobby_mut().register_game(
+            &replaced,
+            RegisterGameRequest {
+                host_name: "replacement".to_string(),
+                public: true,
+                ..Default::default()
+            },
+            &env,
+        );
+
+        let outcome = broker.reap_expired_handled(&reported, &env);
+        assert_eq!(
+            outcome.lobby_removed,
+            vec![kept.clone()],
+            "only the entry actually removed is reported removed"
+        );
+        assert_eq!(
+            outcome.superseded, 1,
+            "and the other is counted, not silently dropped — this is the only \
+             witness a tick that superseded everything did any work at all"
+        );
+        assert!(
+            outcome.tournament.is_empty(),
+            "reach guard: no tournament expiry is muddying the counts"
+        );
+        assert_eq!(
+            outcome.into_outbounds().len(),
+            1,
+            "one outbound, fewer than the two observations handed in"
+        );
+        assert!(
+            broker.lobby().has_game(&replaced),
+            "the replacement survives the tick that consumed its predecessor"
+        );
+        assert!(!broker.lobby().has_game(&kept));
+    }
+
+    /// `AlreadyGone` must still broadcast. Base announced a removal for every
+    /// handled code, including one another path had already unregistered — a
+    /// client that over-prunes recovers where one that never hears of the
+    /// removal keeps a dead entry. Only `Superseded` suppresses the broadcast,
+    /// and nothing else asserts that at the broker, where the decision lives.
+    #[test]
+    fn an_entry_another_path_removed_is_still_announced() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        let code = game_code_of(&create(&mut host, &mut broker, &env));
+
+        env.advance_secs(301);
+        let reported = broker.lobby().check_expired(300, &env);
+        assert_eq!(reported.len(), 1, "reach guard: the listing lapsed");
+
+        // Another path disposes of the entry while the lobby lock is down.
+        broker.lobby_mut().unregister_game(&code);
+        assert!(
+            !broker.lobby().has_game(&code),
+            "reach guard: nothing is listed, so this is the AlreadyGone branch \
+             and not the Removed one"
+        );
+
+        let outcome = broker.reap_expired_handled(&reported, &env);
+        assert_eq!(
+            outcome.lobby_removed,
+            vec![code.clone()],
+            "an entry another path removed is still reported removed, so the \
+             shell still prunes it"
+        );
+        assert_eq!(outcome.superseded, 0);
+        assert_eq!(
+            outcome.into_outbounds(),
+            [Outbound::ToSubscribers(
+                LobbyServerMessage::LobbyGameRemoved { game_code: code }
+            )],
+            "and its removal is still announced"
+        );
+    }
 
     #[test]
     fn reap_expired_recovers_lobby_and_tournament_events_together() {

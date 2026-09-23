@@ -183,6 +183,7 @@
     "packProgress": "パック {{current}} / {{total}}",
     "openPack": "パックを開封",
     "openPackArt": "パック開封の画像",
+    "openAllPacks": "すべてのパックを開封",
     "pulls": "開封したカード",
     "nextPack": "次のパック",
     "viewPool": "カードプールを表示",

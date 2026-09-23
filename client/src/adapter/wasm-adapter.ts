@@ -5,6 +5,7 @@ import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
   AiDecisionDiagnosticsCapability,
+  AiLlmProposalResult,
   AiProposalSubmission,
   EngineAdapter,
   EngineSnapshot,
@@ -12,6 +13,7 @@ import type {
   GameAction,
   GameState,
   LegalActionsResult,
+  LlmDecisionRequestResult,
   MatchConfig,
   ObjectId,
   PersistedGameState,
@@ -157,6 +159,47 @@ async function classifyEngineErrorAsync(
  * The card database and AI worker pool are also preserved.
  */
 let sharedAdapter: WasmAdapter | null = null;
+
+/** Opaque caller-held identity for a main-thread multiplayer host lease. */
+export type HostSessionOwner = symbol;
+
+export function createHostSessionOwner(): HostSessionOwner {
+  return Symbol("wasm-host-session-owner");
+}
+
+type MainThreadRuntime = {
+  wasm: typeof import("@wasm/engine");
+  cardData: typeof import("../services/cardData");
+  queue: Promise<void>;
+  nextHostGeneration: number;
+  hostGeneration: number | null;
+  hostOwner: HostSessionOwner | null;
+};
+
+// Main-thread fallback adapters share one @wasm/engine module instance. Keep
+// their calls on one queue and fence host teardown with a caller-held owner
+// plus a runtime generation; an adapter object is not a runtime ownership
+// boundary.
+let mainThreadRuntimePromise: Promise<MainThreadRuntime> | null = null;
+
+function getMainThreadRuntime(): Promise<MainThreadRuntime> {
+  if (!mainThreadRuntimePromise) {
+    mainThreadRuntimePromise = (async () => {
+      const wasm = await import("@wasm/engine");
+      const cardData = await import("../services/cardData");
+      await cardData.ensureWasmInit();
+      return {
+        wasm,
+        cardData,
+        queue: Promise.resolve(),
+        nextHostGeneration: 0,
+        hostGeneration: null,
+        hostOwner: null,
+      };
+    })();
+  }
+  return mainThreadRuntimePromise;
+}
 
 /** Get or create the shared WasmAdapter singleton for AI/local games. */
 export function getSharedAdapter(): WasmAdapter {
@@ -675,6 +718,76 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     }
   }
 
+  /**
+   * Engine-authored LLM request for this seat's current decision.
+   *
+   * Returns `null` on any engine error rather than throwing: an LLM seat that
+   * cannot build a request falls back to the heuristic AI, and a network-shaped
+   * failure must never take the game down with it.
+   */
+  async buildLlmDecisionRequest(
+    difficulty: string,
+    playerId: number,
+    endpointJson: string,
+    historyJson: string,
+  ): Promise<LlmDecisionRequestResult | null> {
+    this.assertInitialized("buildLlmDecisionRequest");
+    try {
+      if (this.engine) {
+        return await this.engine.buildLlmDecisionRequest(
+          difficulty,
+          playerId,
+          endpointJson,
+          historyJson,
+        );
+      }
+      return await this.fallback!.buildLlmDecisionRequest(
+        difficulty,
+        playerId,
+        endpointJson,
+        historyJson,
+      );
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async getAiActionProposalFromLlmResponse(
+    playerId: number,
+    fingerprint: string,
+    provider: string,
+    status: number,
+    responseBody: string,
+  ): Promise<AiLlmProposalResult | null> {
+    this.assertInitialized("getAiActionProposalFromLlmResponse");
+    try {
+      if (this.engine) {
+        return await this.engine.getAiActionProposalFromLlmResponse(
+          playerId,
+          fingerprint,
+          provider,
+          status,
+          responseBody,
+        );
+      }
+      return await this.fallback!.getAiActionProposalFromLlmResponse(
+        playerId,
+        fingerprint,
+        provider,
+        status,
+        responseBody,
+      );
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async llmProviderCatalog(): Promise<unknown> {
+    this.assertInitialized("llmProviderCatalog");
+    if (this.engine) return await this.engine.llmProviderCatalog();
+    return this.fallback!.llmProviderCatalog();
+  }
+
   async submitAiActionProposal(
     proposal: AiActionProposal,
   ): Promise<AiProposalSubmission> {
@@ -896,7 +1009,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     if (this.engine) {
       await this.engine.setMultiplayerMode(enabled);
     } else {
-      this.fallback!.setMultiplayerMode(enabled);
+      await this.fallback!.setMultiplayerMode(enabled);
     }
     this.invalidateAiDecisionDiagnostics();
   }
@@ -940,7 +1053,10 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    * Distinct from `restoreState` (undo semantics, deterministic re-seed).
    * Mirrors `server-core::GameSession::from_persisted`.
    */
-  async resumeMultiplayerHostState(state: PersistedGameState): Promise<RestoredGameStateResult> {
+  async resumeMultiplayerHostState(
+    state: PersistedGameState,
+    owner?: HostSessionOwner,
+  ): Promise<RestoredGameStateResult> {
     this.assertInitialized("resumeMultiplayerHostState");
     // Same CARD_DB requirement as restoreState — resume rehydrates abilities
     // only when the DB is loaded (engine-wasm resume_multiplayer_host_state).
@@ -948,7 +1064,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     const json = JSON.stringify(state);
     const resumed = this.engine
       ? await this.engine.resumeMultiplayerHostState(json)
-      : await this.fallback!.resumeMultiplayerHostState(json);
+      : await this.fallback!.resumeMultiplayerHostState(json, owner);
     this.invalidateAiDecisionDiagnostics();
     return {
       presentation: resumed.presentation,
@@ -969,6 +1085,8 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     if (this.aiCardDataMode !== "full") this.aiPool?.invalidateCardDb();
     if (this.engine) {
       await this.engine.resetGame();
+    } else {
+      await this.fallback!.resetGameState();
     }
     this.invalidateAiDecisionDiagnostics();
   }
@@ -1095,15 +1213,32 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    * `dispose()` below.
    *
    * `claimed` answers "did this host ever install engine state?", which only
-   * the caller knows. An unclaimed host must leave the shared engine
-   * completely untouched: a live local game may be running on it.
+   * the caller knows. Main-thread fallback callers also pass the opaque owner
+   * handle they created before the install; a stale handle cannot release a
+   * later host that reused the same shared runtime. An unclaimed host must
+   * leave the shared engine completely untouched: a live local game may be
+   * running on it.
    */
-  async releaseHostSession(claimed: boolean): Promise<void> {
+  async releaseHostSession(claimed: boolean, owner?: HostSessionOwner): Promise<void> {
     if (sharedAdapter !== this) {
+      if (claimed && this.fallback) {
+        if (!owner) throw new Error("Main-thread host release requires its owner handle");
+        try {
+          await this.fallback.releaseHostSession(owner);
+        } finally {
+          this.dispose();
+        }
+        return;
+      }
       this.dispose();
       return;
     }
     if (!claimed) return;
+    if (this.fallback) {
+      if (!owner) throw new Error("Main-thread host release requires its owner handle");
+      await this.fallback.releaseHostSession(owner);
+      return;
+    }
     // No await between the two posts. `EngineWorkerClient.request` posts
     // inside a synchronously-executed promise executor, and neither method
     // awaits before reaching it, so the worker sees them back to back — an
@@ -1196,6 +1331,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     playerCount?: number,
     matchConfig?: MatchConfig,
     firstPlayer?: number,
+    owner?: HostSessionOwner,
   ): Promise<SubmitResult> {
     this.assertInitialized("initializeMultiplayerHostGame");
     if (deckData) {
@@ -1221,9 +1357,10 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
       matchConfig ?? null,
       playerCount,
       firstPlayer,
+      owner,
     );
     this.invalidateAiDecisionDiagnostics();
-    return result;
+    return { events: result.events, log_entries: result.log_entries };
   }
 
   /** Expose the worker client for AI pool state export (Phase 4). */
@@ -1275,11 +1412,30 @@ interface MainThreadFallback {
     playerId: number,
   ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null>;
   submitAiActionProposal(proposal: AiActionProposal): Promise<AiProposalSubmission>;
+  buildLlmDecisionRequest(
+    difficulty: string,
+    playerId: number,
+    endpointJson: string,
+    historyJson: string,
+  ): Promise<LlmDecisionRequestResult | null>;
+  getAiActionProposalFromLlmResponse(
+    playerId: number,
+    fingerprint: string,
+    provider: string,
+    status: number,
+    responseBody: string,
+  ): Promise<AiLlmProposalResult | null>;
+  llmProviderCatalog(): Promise<unknown>;
   exportState(): Promise<string>;
   restoreState(stateJson: string): Promise<void>;
   resumeRestoredGameState(): Promise<RestoredFallbackResult>;
-  resumeMultiplayerHostState(stateJson: string): Promise<RestoredFallbackResult>;
-  setMultiplayerMode(enabled: boolean): void;
+  resumeMultiplayerHostState(
+    stateJson: string,
+    owner?: HostSessionOwner,
+  ): Promise<RestoredFallbackResult>;
+  setMultiplayerMode(enabled: boolean): Promise<void>;
+  resetGameState(): Promise<void>;
+  releaseHostSession(owner: HostSessionOwner): Promise<void>;
   applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown>;
   projectSeatView(stateJson: string): Promise<unknown>;
   ping(): string;
@@ -1298,6 +1454,7 @@ interface MainThreadFallback {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    owner?: HostSessionOwner,
   ): Promise<SubmitResult>;
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
@@ -1339,15 +1496,12 @@ function throwInitFailure(result: unknown): void {
 }
 
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
-  const wasm = await import("@wasm/engine");
-  const cardData = await import("../services/cardData");
-  await cardData.ensureWasmInit();
-
-  let queue: Promise<void> = Promise.resolve();
+  const runtime = await getMainThreadRuntime();
+  const { wasm, cardData } = runtime;
 
   function enqueue<T>(operation: () => T): Promise<T> {
-    const p = queue.then(() => operation());
-    queue = p.then(
+    const p = runtime.queue.then(() => operation());
+    runtime.queue = p.then(
       () => undefined,
       () => undefined,
     );
@@ -1445,6 +1599,38 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     getAiTacticalActionProposal: (difficulty: string, playerId: number) =>
       enqueue(() => (wasm.get_ai_tactical_action_proposal(difficulty, playerId) ?? null) as AiActionProposal | null),
 
+    buildLlmDecisionRequest: (
+      difficulty: string,
+      playerId: number,
+      endpointJson: string,
+      historyJson: string,
+    ) =>
+      enqueue(
+        () =>
+          (wasm.buildLlmDecisionRequest(difficulty, playerId, endpointJson, historyJson) ??
+            null) as LlmDecisionRequestResult | null,
+      ),
+
+    getAiActionProposalFromLlmResponse: (
+      playerId: number,
+      fingerprint: string,
+      provider: string,
+      status: number,
+      responseBody: string,
+    ) =>
+      enqueue(
+        () =>
+          (wasm.getAiActionProposalFromLlmResponse(
+            playerId,
+            fingerprint,
+            provider,
+            status,
+            responseBody,
+          ) ?? null) as AiLlmProposalResult | null,
+      ),
+
+    llmProviderCatalog: () => enqueue(() => wasm.llmProviderCatalog() as unknown),
+
     getAiActionProposalWithDiagnostics: (difficulty: string, playerId: number) =>
       enqueue(() => (wasm.get_ai_action_proposal_with_diagnostics(difficulty, playerId) ?? null) as {
         proposal: AiActionProposal;
@@ -1472,18 +1658,43 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         },
       })),
 
-    resumeMultiplayerHostState: (stateJson: string) =>
-      enqueue(() => ({
-        presentation: wasm.resume_multiplayer_host_state(stateJson) as RestoredStackAutomationPresentation,
-        snapshot: {
-          state: wasm.get_game_state() as GameState,
-          legalResult: wasm.get_legal_actions_js() as LegalActionsResult,
-        },
-      })),
+    resumeMultiplayerHostState: (stateJson: string, owner?: HostSessionOwner) =>
+      enqueue(() => {
+        const presentation = wasm.resume_multiplayer_host_state(stateJson) as RestoredStackAutomationPresentation;
+        if (owner) {
+          runtime.hostGeneration = ++runtime.nextHostGeneration;
+          runtime.hostOwner = owner;
+        }
+        return {
+          presentation,
+          snapshot: {
+            state: wasm.get_game_state() as GameState,
+            legalResult: wasm.get_legal_actions_js() as LegalActionsResult,
+          },
+        };
+      }),
 
-    setMultiplayerMode: (enabled: boolean) => {
-      enqueue(() => wasm.set_multiplayer_mode(enabled));
-    },
+    setMultiplayerMode: (enabled: boolean) =>
+      enqueue(() => {
+        wasm.set_multiplayer_mode(enabled);
+      }),
+
+    resetGameState: () => enqueue(() => {
+      // A host release owns the only path that may clear a live multiplayer
+      // game. An unowned local reset must not erase a host that reused the
+      // shared main-thread runtime.
+      if (runtime.hostOwner !== null) return;
+      wasm.clear_game_state();
+    }),
+
+    releaseHostSession: (owner: HostSessionOwner) =>
+      enqueue(() => {
+        if (runtime.hostOwner !== owner) return;
+        wasm.set_multiplayer_mode(false);
+        wasm.clear_game_state();
+        runtime.hostOwner = null;
+        runtime.hostGeneration = null;
+      }),
 
     applySeatMutation: (stateJson: string, mutationJson: string) =>
       enqueue(() => wasm.apply_seat_mutation(stateJson, mutationJson)),
@@ -1521,6 +1732,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       matchConfig: MatchConfig | null,
       playerCount?: number,
       firstPlayer?: number,
+      owner?: HostSessionOwner,
     ) =>
       enqueue(() => {
         const r = wasm.initialize_multiplayer_host_game(
@@ -1532,7 +1744,14 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           firstPlayer ?? undefined,
         );
         throwInitFailure(r);
-        return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
+        if (owner) {
+          runtime.hostGeneration = ++runtime.nextHostGeneration;
+          runtime.hostOwner = owner;
+        }
+        return {
+          events: r.events ?? [],
+          log_entries: r.log_entries ?? [],
+        };
       }),
 
     estimateBracketForDeck: (deck: BracketDeckRequest) =>

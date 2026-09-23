@@ -183,6 +183,7 @@
     "packProgress": "Busta {{current}} di {{total}}",
     "openPack": "Apri busta",
     "openPackArt": "Apri l’illustrazione della busta",
+    "openAllPacks": "Apri tutte le buste",
     "pulls": "Le tue carte",
     "nextPack": "Busta successiva",
     "viewPool": "Vedi il tuo pool",

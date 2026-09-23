@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router";
 
@@ -23,8 +23,23 @@ import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/s
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import { expandParsedDeck } from "../services/deckParser";
-import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
-import { classifyCompatResult } from "./multiplayerPageState";
+import type { ActionableBotLink, BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
+import {
+  classifyCompatResult,
+  clearStashedBotLink,
+  hasContinuedOnStaleBuild,
+  hostLinkSearch,
+  markContinuedOnStaleBuild,
+  parseBotLink,
+  readStashedBotLinkOnce,
+  stashBotLink,
+} from "./multiplayerPageState";
+import {
+  checkDeployedBuild,
+  isBuildUpdateInFlight,
+  reloadIfNoLiveGame,
+  updateToLatestBuild,
+} from "../pwa/registerServiceWorker";
 import { clearWsSession } from "../services/multiplayerSession";
 import { installServerMetricsLifecycle } from "../services/serverMetrics";
 import {
@@ -44,6 +59,14 @@ import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
+
+/** How long a Discord-link arrival waits for the service worker to move the
+ * tab onto the deployed build before offering Refresh / Continue anyway. */
+const BUILD_UPDATE_DEADLINE_MS = 15_000;
+
+type BuildUpdateDialog =
+  | { status: "updating" }
+  | { status: "manual"; link: ActionableBotLink; arrival: number };
 
 function parseViewParam(value: string | null): MultiplayerView {
   if (value === "host-setup" || value === "deck-select" || value === "draft-lobby") return value;
@@ -145,6 +168,8 @@ function MultiplayerPageContent({
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  // Host settings from a Discord host link, applied to HostSetup at mount.
+  const [hostSeed, setHostSeed] = useState<HostSeed | null>(null);
   // Shown when `LobbyView` detects the server is unreachable. The user picks
   // between staying in server mode (LobbyView remounts via `lobbyRetryKey` and
   // retries) or flipping to P2P for direct-code play. Tracked on this page,
@@ -166,6 +191,16 @@ function MultiplayerPageContent({
       primaryAction?: { label: string; onClick: () => void };
     } | null
   >(null);
+  // The Discord-link version gate's dialog: "updating" while the tab waits to
+  // reload onto the deployed build, "manual" when it did not.
+  const [buildUpdate, setBuildUpdateState] = useState<BuildUpdateDialog | null>(null);
+  // Written with the state, so an awaiting refresh can tell whether a bot-link
+  // gate has since replaced its dialog.
+  const buildUpdateRef = useRef<BuildUpdateDialog | null>(null);
+  const setBuildUpdate = useCallback((dialog: BuildUpdateDialog | null) => {
+    buildUpdateRef.current = dialog;
+    setBuildUpdateState(dialog);
+  }, []);
   // Where to return when the user enters deck-select *without* a pending
   // host/join action (i.e. clicked the "Change" affordance on the active-
   // deck banner). Before this, back/confirm both assumed pendingAction
@@ -325,14 +360,28 @@ function MultiplayerPageContent({
   };
 
   const handleEditDeck = useCallback((name: string) => {
-    const returnParams = new URLSearchParams(location.search);
-    if (view === "lobby") {
-      returnParams.delete("view");
+    // A Discord host flow must come back through the bot-link arrival: `view`
+    // and `hostSeed` are component state, and the deck-builder route unmounts
+    // this page.
+    const seededReturn =
+      hostSeed !== null
+      && (view === "host-setup"
+        || (pendingAction?.type === "host" && pendingAction.settings.requestedCode === hostSeed.code)
+        // Change / Pick deck on the seeded host-setup screen open deck-select with no action.
+        || (view === "deck-select" && pendingAction === null && deckSelectReturn === "host-setup"));
+    let returnTo: string;
+    if (seededReturn) {
+      returnTo = `${location.pathname}?${hostLinkSearch(hostSeed)}`;
     } else {
-      returnParams.set("view", view);
+      const returnParams = new URLSearchParams(location.search);
+      if (view === "lobby") {
+        returnParams.delete("view");
+      } else {
+        returnParams.set("view", view);
+      }
+      const returnSearch = returnParams.toString();
+      returnTo = `${location.pathname}${returnSearch ? `?${returnSearch}` : ""}`;
     }
-    const returnSearch = returnParams.toString();
-    const returnTo = `${location.pathname}${returnSearch ? `?${returnSearch}` : ""}`;
     const fmt = pendingAction?.type === "host"
       ? pendingAction.settings.formatConfig.format
       : pendingAction?.type === "join"
@@ -342,7 +391,16 @@ function MultiplayerPageContent({
     navigate(
       `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
     );
-  }, [location.pathname, location.search, navigate, pendingAction, storeFormatConfig, view]);
+  }, [
+    deckSelectReturn,
+    hostSeed,
+    location.pathname,
+    location.search,
+    navigate,
+    pendingAction,
+    storeFormatConfig,
+    view,
+  ]);
 
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
@@ -352,6 +410,29 @@ function MultiplayerPageContent({
 
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);
   const lookupJoinTargetFromStore = useMultiplayerStore((s) => s.lookupJoinTarget);
+
+  // The single user-driven reload site; never reloads a live game (a draft-pod
+  // lobby renders on this page).
+  const reloadOrToast = useCallback(() => {
+    if (!reloadIfNoLiveGame()) showToast(t("page.refreshAfterGame"));
+  }, [showToast, t]);
+
+  // "Client out of date" Refresh. A current (or unknown) client reloads at
+  // once: the host is the stale party, and a reload is all this ever offered.
+  // A stale client waits for the updater first.
+  const refreshToLatestBuild = useCallback(async () => {
+    setJoinErrorDialog(null);
+    if ((await checkDeployedBuild()) === "stale") {
+      const updating: BuildUpdateDialog = { status: "updating" };
+      setBuildUpdate(updating);
+      if ((await updateToLatestBuild({ deadlineMs: BUILD_UPDATE_DEADLINE_MS })) === "reloading") return;
+      // A bot-link gate that replaced this refresh's dialog overtook it: a
+      // reload now would lose the link that gate applied or is gating.
+      if (buildUpdateRef.current !== updating) return;
+      setBuildUpdate(null);
+    }
+    reloadOrToast();
+  }, [reloadOrToast, setBuildUpdate]);
 
   /**
    * Guest-path P2P resolve loop. Tries `resolveGuest` over the shared
@@ -393,7 +474,7 @@ function MultiplayerPageContent({
             message: result.message,
             primaryAction: {
               label: t("page.joinErrorRefresh"),
-              onClick: () => window.location.reload(),
+              onClick: () => void refreshToLatestBuild(),
             },
           });
           return false;
@@ -412,7 +493,7 @@ function MultiplayerPageContent({
         return false;
       }
     },
-    [navigate, resolveGuestFromStore, showToast, t],
+    [navigate, refreshToLatestBuild, resolveGuestFromStore, showToast, t],
   );
 
   // Execute a pending action (host or join) with the currently active deck.
@@ -511,11 +592,16 @@ function MultiplayerPageContent({
         // A dedicated game server and the lobby broker can both be connected.
         // Preserve a custom broker anchor, but never use a Full server for
         // P2P registration. Unknown custom endpoints are probed before deciding.
+        // A Discord host (`requestedCode`) registers on the build's official
+        // broker regardless of the browsing anchor: that is the broker its
+        // guest links name.
         const anchor = store.hostingServer;
         let target = action.connectionMode === "p2p"
-          ? anchor !== null && store.sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
-            ? anchor
-            : OFFICIAL_MULTIPLAYER_SERVER_URL
+          ? action.settings.requestedCode !== undefined
+            ? OFFICIAL_MULTIPLAYER_SERVER_URL
+            : anchor !== null && store.sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
+              ? anchor
+              : OFFICIAL_MULTIPLAYER_SERVER_URL
           : action.serverUrl;
         let socket = target === null
           ? null
@@ -527,6 +613,12 @@ function MultiplayerPageContent({
 
         if (action.connectionMode === "p2p") {
           if (socket?.serverInfo.mode !== "LobbyOnly") {
+            // "Continue without lobby" would host an unregistered room that no
+            // Discord link can find, so a Discord host gets no such offer.
+            if (action.settings.requestedCode !== undefined) {
+              showToast(t("page.botLinkBrokerUnreachable"));
+              return false;
+            }
             setBrokerOfflinePrompt({ action, serverAddress: target });
             return false;
           }
@@ -678,6 +770,7 @@ function MultiplayerPageContent({
       password?: string,
       format?: GameFormat,
       context?: LobbyGame,
+      onNotFound?: () => void,
     ) => {
       // Draft entries bypass the normal join-with-deck flow entirely — draft
       // pods handle their own deck building after the draft completes.
@@ -733,6 +826,9 @@ function MultiplayerPageContent({
           showToast(retry.message);
           return;
         }
+      } else if (result.reason === "not_found" && onNotFound) {
+        onNotFound();
+        return;
       } else {
         showToast(result.message);
         return;
@@ -751,6 +847,135 @@ function MultiplayerPageContent({
     },
     [lookupJoinTargetFromStore, handleJoinDraftFromLobby, showToast, t],
   );
+
+  // Guest join from a Discord link. A room the host has not opened yet (or has
+  // closed) is a wait, not an error, so "not found" offers Retry. The origin
+  // is the link's, latched here and in the resulting pending join.
+  const joinFromBotLink = (code: string, origin: LobbySource) => {
+    setJoinErrorDialog(null);
+    void handleJoinGame(code, origin, undefined, undefined, undefined, () =>
+      setJoinErrorDialog({
+        title: t("page.waitingForHostTitle"),
+        message: t("page.waitingForHostMessage"),
+        primaryAction: {
+          label: t("connectionToast.retry"),
+          onClick: () => joinFromBotLink(code, origin),
+        },
+      }),
+    );
+  };
+
+  const applyBotLink = (link: BotLink) => {
+    switch (link.kind) {
+      case "invalid":
+        showToast(t("page.invalidGameLink"));
+        return;
+      case "host":
+        setJoinErrorDialog(null);
+        setPendingAction(null);
+        setHostSeed(link.seed);
+        setView("host-setup");
+        return;
+      case "join": {
+        const origin = adHocLobbySource(link.serverUrl);
+        if (origin === null) {
+          showToast(t("page.invalidGameLink"));
+          return;
+        }
+        joinFromBotLink(link.code, origin);
+        return;
+      }
+    }
+  };
+
+  // Bumped by every gated arrival. A gate that a newer arrival overtook while
+  // it awaited neither applies its link nor touches the stash.
+  const latestArrival = useRef(0);
+
+  const proceedWithBotLink = (link: ActionableBotLink) => {
+    clearStashedBotLink();
+    setBuildUpdate(null);
+    applyBotLink(link);
+  };
+
+  // "Continue anyway" on this build. While an update is in flight the stash
+  // stays, so the reload that update causes re-applies (and re-gates) the
+  // link. The decision holds for the rest of this document.
+  const continueOnThisBuild = (link: ActionableBotLink) => {
+    markContinuedOnStaleBuild();
+    if (!isBuildUpdateInFlight()) {
+      proceedWithBotLink(link);
+      return;
+    }
+    setBuildUpdate(null);
+    applyBotLink(link);
+  };
+
+  // Same-version gate: players on different builds cannot share a game, so a
+  // stale tab first tries to reload onto the deployed build.
+  const gateBotLink = async (link: ActionableBotLink) => {
+    const arrival = ++latestArrival.current;
+    const superseded = () => arrival !== latestArrival.current;
+    const build = await checkDeployedBuild();
+    if (superseded()) return;
+    if (build !== "stale") {
+      proceedWithBotLink(link);
+      return;
+    }
+    if (hasContinuedOnStaleBuild()) {
+      continueOnThisBuild(link);
+      return;
+    }
+    setJoinErrorDialog(null);
+    setBuildUpdate({ status: "updating" });
+    const outcome = await updateToLatestBuild({ deadlineMs: BUILD_UPDATE_DEADLINE_MS });
+    if (superseded()) return;
+    if (outcome === "manual") setBuildUpdate({ status: "manual", link, arrival });
+  };
+
+  // A manual dialog's actions do nothing once a newer arrival overtook it; that
+  // arrival's gate replaces the dialog when its check returns.
+  const unlessSuperseded = (arrival: number, action: () => void) => () => {
+    if (arrival === latestArrival.current) action();
+  };
+
+  // Discord bot links (`?code=…` host, `?join=…` guest). One arrival = one
+  // history entry: StrictMode (DevStrict wraps /multiplayer) re-runs this
+  // effect with the same location in dev, and refs survive that re-run. The
+  // strip is a new entry with an empty search, so its run is a no-op; the same
+  // link opened again is a new entry and is handled again.
+  //
+  // A link is stashed before the strip so a reload onto a newer build still
+  // finds it. Three read-frequency rules hold: the stash is read at most once
+  // per document (on its first run here), the URL's params once per entry,
+  // and each arrival is gated at most once.
+  const handledArrival = useRef<string | null>(null);
+  useEffect(() => {
+    if (handledArrival.current === location.key) return;
+    handledArrival.current = location.key;
+    // Consulted on the document's first run even when this entry carries a
+    // link, so the strip entry (and every later entry) never reads it as a new
+    // arrival.
+    const stashed = readStashedBotLinkOnce();
+    const fromUrl = parseBotLink(location.search);
+    if (fromUrl !== null) {
+      // Stash before strip: an autoUpdate reload after the strip must still
+      // find the link.
+      if (fromUrl.kind !== "invalid") stashBotLink(location.search);
+      navigate(location.pathname, { replace: true });
+      if (fromUrl.kind === "invalid") {
+        // The newest arrival is unusable, so a stash read by this run is
+        // stale. Only a stash read by this run is deleted: on a later run
+        // `stashed` is null, and the stash belongs either to a pending gate or
+        // to an update in flight after "Continue anyway".
+        if (stashed !== null) clearStashedBotLink();
+        applyBotLink(fromUrl);
+        return;
+      }
+    }
+    const link = fromUrl ?? stashed;
+    if (link !== null) void gateBotLink(link);
+  }, [location.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleBack = () => {
     if (view === "deck-select") {
@@ -909,7 +1134,11 @@ function MultiplayerPageContent({
             // Deliberately does NOT set a mode: the transport is chosen on
             // Host Game itself, so arriving there keeps whatever the player
             // last chose rather than silently overriding it.
-            onHostGame={() => setView("host-setup")}
+            onHostGame={() => {
+              // The lobby's own Host Game never inherits a Discord seed.
+              setHostSeed(null);
+              setView("host-setup");
+            }}
             onHostDraft={handleHostDraft}
             onJoinGame={handleJoinGame}
             onSpectate={handleSpectate}
@@ -919,6 +1148,10 @@ function MultiplayerPageContent({
 
         {view === "host-setup" && (
           <HostSetup
+            // Remounts the form when a new Discord link arrives while it is
+            // mounted, so the seed is applied once, at mount.
+            key={hostSeed?.code ?? "manual"}
+            seed={hostSeed ?? undefined}
             onHost={handleHostSetupComplete}
             onBack={() => setView("lobby")}
             connectionMode={connectionMode}
@@ -1032,6 +1265,22 @@ function MultiplayerPageContent({
           message={joinErrorDialog.message}
           primaryAction={joinErrorDialog.primaryAction}
           onDismiss={() => setJoinErrorDialog(null)}
+        />
+      )}
+      {buildUpdate?.status === "updating" && (
+        <JoinErrorDialog title={t("page.updatingTitle")} message={t("page.updatingMessage")} />
+      )}
+      {buildUpdate?.status === "manual" && (
+        <JoinErrorDialog
+          title={t("page.updateFailedTitle")}
+          message={t("page.updateFailedMessage")}
+          primaryAction={{
+            label: t("page.joinErrorRefresh"),
+            onClick: unlessSuperseded(buildUpdate.arrival, reloadOrToast),
+          }}
+          dismissLabel={t("page.continueAnyway")}
+          onDismiss={unlessSuperseded(buildUpdate.arrival, () => continueOnThisBuild(buildUpdate.link))}
+          dismissOnBackdrop={false}
         />
       )}
     </div>

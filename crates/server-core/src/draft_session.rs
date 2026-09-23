@@ -730,20 +730,21 @@ impl DraftSessionManager {
                 match_config,
                 Some(format_config.clone()),
             )?;
-            let (_token1, _) = game_mgr.join_game_with_name_and_reservation(
-                &game_code,
-                decks[1].clone(),
-                Some(choice1),
-                name1,
-                None,
-            )?;
-
-            game_mgr
-                .sessions
-                .get_mut(&game_code)
-                .ok_or_else(|| format!("spawned game missing: {game_code}"))?
-                .start_game(db)
-                .map_err(|e| format!("start_game failed for {game_code}: {e:?}"))?;
+            // The manager created this game two statements ago and nothing has
+            // handed out a handle, so the synchronous exclusive accessor is the
+            // right one — `server-core` stays free of `async`.
+            let token1 = {
+                let session = game_mgr
+                    .session_exclusive(&game_code)
+                    .ok_or_else(|| format!("spawned game missing: {game_code}"))?;
+                let (token, _) =
+                    session.join_with_reservation(decks[1].clone(), Some(choice1), name1, None)?;
+                session
+                    .start_game(db)
+                    .map_err(|e| format!("start_game failed for {game_code}: {e:?}"))?;
+                token
+            };
+            game_mgr.index_token(token1, &game_code);
 
             session
                 .active_matches
@@ -1640,7 +1641,7 @@ mod tests {
             .expect("missing deck submissions should skip only the incomplete pairing");
 
         assert!(spawns.is_empty());
-        assert!(game_mgr.sessions.is_empty());
+        assert_eq!(game_mgr.game_count(), 0);
     }
 
     #[test]

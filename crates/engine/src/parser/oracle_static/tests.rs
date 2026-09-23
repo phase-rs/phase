@@ -11635,10 +11635,46 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
         def.mode,
         StaticMode::ActivateAsInstant {
             cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
+}
+
+#[test]
+fn static_equip_abilities_activate_as_instant() {
+    let def =
+        parse_static_line("You may activate equip abilities any time you could cast an instant.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::ManaOnly,
+            keyword: Some(AbilityTag::Equip),
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
+    );
+    assert_eq!(def.condition, None);
+}
+
+#[test]
+fn static_boast_abilities_activate_as_instant() {
+    // Same composable grammar as equip — any taggable ability class parses
+    // through the same combinator, not a card-specific branch.
+    let def =
+        parse_static_line("You may activate boast abilities any time you could cast an instant.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::ManaOnly,
+            keyword: Some(AbilityTag::Boast),
+        }
+    );
 }
 
 // CR 400.7: Crew Captain — "This creature has indestructible as long as it
@@ -28071,14 +28107,23 @@ fn cant_attack_unless_opponent_dealt_damage_stores_not() {
     else {
         panic!("expected DamageDealtThisTurn ref, got {lhs:?}");
     };
-    // Subject "an opponent" → opponent-controller target filter.
-    assert!(
-        matches!(
-            target.as_ref(),
-            TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)
-        ),
-        "expected opponent-controller target, got {target:?}"
+    // Subject "an opponent" → the player-only recipient shape
+    // `And[Player, Typed{controller: Opponent}]` (CR 120.1 + CR 120.3 +
+    // CR 120.9): the `Player` child refuses object recipients, so damage dealt
+    // to an opponent's permanent can never satisfy the inner condition.
+    let TargetFilter::And { filters } = target.as_ref() else {
+        panic!("expected the player-only And recipient filter, got {target:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "expected [Player, Typed], got {filters:?}"
     );
+    assert_eq!(filters[0], TargetFilter::Player);
+    let TargetFilter::Typed(tf) = &filters[1] else {
+        panic!("expected the typed controller leg, got {:?}", filters[1]);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
 }
 
 /// HAZARD regression — CR 118.12a. A self-referential pay-tax that falls

@@ -15,6 +15,9 @@ expression: result
           ],
           "controller": "You",
           "properties": []
+        },
+        "selection": {
+          "at_resolution": {}
         }
       },
       "cost": {
