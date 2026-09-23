@@ -342,11 +342,20 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
 
     let mut land_choice_players = BTreeSet::new();
     let mut land_placements = BTreeSet::new();
+    let mut saw_empty_stack_live_carrier = false;
     let mut crossed_turn_boundary = false;
     for _ in 0..160 {
         if runner.state().turn_number != starting_turn {
             crossed_turn_boundary = true;
             break;
+        }
+
+        if runner.state().stack.is_empty()
+            && (runner.state().resolving_stack_entry.is_some()
+                || !runner.state().resolution_stack.is_empty()
+                || runner.state().active_ability_continuation().is_some())
+        {
+            saw_empty_stack_live_carrier = true;
         }
 
         if runner.state().resolving_stack_entry.is_some()
@@ -425,6 +434,10 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
     assert_eq!(
         land_placements, expected_players,
         "every participant's selected land must be placed independently"
+    );
+    assert!(
+        saw_empty_stack_live_carrier,
+        "the regression must reach the old empty-stack/live-carrier boundary"
     );
     assert_eq!(
         runner.state().objects[&p0_draw].zone,
