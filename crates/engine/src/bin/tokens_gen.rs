@@ -22,7 +22,7 @@ use engine::game::token_presets::{
     merge_overlay, parse_overlay, serialize_catalog, OverlayRowOutcome, PredefinedTokenKind,
     PresetFidelity, TokenCategory, TokenPreset, TokenPtProvenance, TokenSourceRef,
 };
-use engine::types::card::TokenImageRef;
+use engine::types::card::{PrintedLoyalty, TokenImageRef};
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaColor;
@@ -211,6 +211,8 @@ fn build_preset(
             .unwrap_or_else(|| token.name.clone()),
         power: parse_pt(token.power.as_deref()),
         toughness: parse_pt(token.toughness.as_deref()),
+        loyalty: PrintedLoyalty::from_raw(token.loyalty.as_deref())
+            .map(PrintedLoyalty::off_stack_value),
         core_types: token
             .types
             .iter()
@@ -228,6 +230,24 @@ fn build_preset(
             .filter_map(|s| supported_token_keyword(s))
             .collect(),
     };
+
+    // CR 306.5b: a printed loyalty > 0 must become that many loyalty counters on
+    // entry. The printed value is recorded on the object, but entry counters are not
+    // yet seeded from it through the CR 614.1c replacement pipeline, so admitting
+    // such a row would produce a walker that dies to CR 704.5i the instant it
+    // enters. Drop it with a message rather than emit a row the runtime mishandles.
+    if body.core_types.contains(&CoreType::Planeswalker)
+        && body.loyalty.is_some_and(|value| value > 0)
+    {
+        eprintln!(
+            "tokens-gen: skipping planeswalker token {} ({}) — printed loyalty {} > 0 needs \
+             CR 306.5b entry-counter seeding, which is not implemented",
+            token.uuid,
+            token.name,
+            body.loyalty.unwrap_or(0),
+        );
+        return Ok(None);
+    }
 
     if !is_catalog_token_body(&body) {
         return Ok(None);
@@ -293,7 +313,11 @@ fn is_catalog_token_body(body: &TokenCharacteristics) -> bool {
     body.core_types.iter().any(|card_type| {
         matches!(
             card_type,
-            CoreType::Artifact | CoreType::Creature | CoreType::Enchantment | CoreType::Land
+            CoreType::Artifact
+                | CoreType::Creature
+                | CoreType::Enchantment
+                | CoreType::Land
+                | CoreType::Planeswalker
         )
     })
 }
@@ -417,6 +441,12 @@ fn classify_token(body: &TokenCharacteristics) -> Result<TokenCategory, String> 
     }
     if body.core_types.contains(&CoreType::Land) {
         return Ok(TokenCategory::Land);
+    }
+    // CR 306.5 + CR 306.3: planeswalker bodies — loyalty is a characteristic only
+    // planeswalkers have, and their loyalty abilities come from the subtype-keyed
+    // registry (keyed by planeswalker subtype), not from the catalog's rules text.
+    if body.core_types.contains(&CoreType::Planeswalker) {
+        return Ok(TokenCategory::Planeswalker);
     }
     if body.core_types.contains(&CoreType::Artifact) {
         return Ok(TokenCategory::Artifact);

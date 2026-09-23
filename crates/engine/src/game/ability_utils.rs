@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
     CardTypeSetSource, CastManaSpentMetric, CombatRelationSubject, ControllerRef,
     CounterMoveSelection, DamageSource, EachDamageRecipient, Effect, EffectKind, EffectScope,
     FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
@@ -2349,7 +2349,12 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 legal.into_iter().next()
             })
             .collect()
-    } else if let Effect::Attach { attachment, target } = &validated.effect {
+    } else if let Effect::Attach {
+        attachment,
+        target,
+        selection,
+    } = &validated.effect
+    {
         // CR 608.2b (phase#4767 review): `attachment`/`target` context-refs
         // (SelfRef, ParentTarget, ...) don't need their own target slot and
         // are skipped below — but `validated.targets` can carry MORE entries
@@ -2363,7 +2368,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         let mut kept = Vec::new();
         let mut target_iter = validated.targets.iter();
         for (is_attachment, filter) in [(true, attachment), (false, target)] {
-            if !attach_side_needs_target_slot(filter, is_attachment) {
+            if !attach_side_needs_target_slot(filter, is_attachment, selection) {
                 continue;
             }
             let Some(target_ref) = target_iter.next() else {
@@ -3509,12 +3514,17 @@ fn collect_target_slots_inner(
                 effect_detail: acc.current_effect_detail,
             });
         }
-    } else if let Effect::Attach { attachment, target } = &ability.effect {
-        // CR 115.1 + CR 608.2d: an untargeted attachment choice occurs while
+    } else if let Effect::Attach {
+        attachment,
+        target,
+        selection,
+    } = &ability.effect
+    {
+        // CR 115.1a/c/d/e + CR 608.2d: a described attachment choice occurs while
         // resolving, so it must not claim a target slot when this ability is
-        // announced.
+        // announced — while a printed-target HOST keeps its own slot.
         if ability.target_choice_timing == TargetChoiceTiming::Stack {
-            collect_attach_attachment_target_slots(state, ability, attachment, acc)?;
+            collect_attach_attachment_target_slots(state, ability, attachment, selection, acc)?;
             if attach_host_filter_needs_target_slot(target) {
                 let legal_targets =
                     legal_targets_for_ability_filter(state, ability, target, &acc.slots);
@@ -4716,8 +4726,10 @@ fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
 /// `GenericEffect`'s static `affected`, the effect's own `target_filter()`, or a
 /// mass-placement `target`) satisfies `pred`.
 fn effect_bound_filter_matches(effect: &Effect, pred: fn(&TargetFilter) -> bool) -> bool {
-    if let Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } =
-        effect
+    if let Effect::Attach {
+        attachment, target, ..
+    }
+    | Effect::UnattachAll { attachment, target } = effect
     {
         if pred(attachment) || pred(target) {
             return true;
@@ -4863,7 +4875,7 @@ pub(crate) fn rewrite_chosen_player_to_you(filter: &TargetFilter) -> TargetFilte
 /// Whether the attachment operand of `Effect::Attach` consumes an explicit
 /// player-chosen target. Scan-based filters (e.g. "Equipment attached to ~")
 /// resolve from the battlefield/LKI and must not steal `ParentTarget` slots.
-fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) -> bool {
+pub(crate) fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any => true,
         TargetFilter::Typed(tf) => !tf
@@ -4879,7 +4891,14 @@ fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) -> bool {
 }
 
 /// Whether the host operand of `Effect::Attach` consumes an explicit target.
-fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
+///
+/// Single authority for "would this host filter claim a declared target slot?".
+/// Two consumers share it so they cannot drift: the parser's clause-timing
+/// classifier (`oracle_effect::lower::target_choice_timing_for_clause`, deciding
+/// whether a printed described-host Attach chooses its host while resolving) and
+/// the runtime described-host gate
+/// (`effects::attach::prompt_described_host_choice`).
+pub(crate) fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
     !filter.is_context_ref()
         && !matches!(
             filter,
@@ -4887,9 +4906,34 @@ fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
         )
 }
 
-fn attach_side_needs_target_slot(filter: &TargetFilter, is_attachment: bool) -> bool {
+/// CR 115.1a / CR 115.1c / CR 115.1d / CR 115.1e + CR 608.2d: whether the
+/// ATTACHMENT operand of an `Attach` instruction claims an ANNOUNCED target
+/// slot. Two independent facts must both hold:
+///
+/// 1. the filter can express a player choice at all
+///    ([`attach_attachment_filter_needs_target_slot`] — context references and
+///    scan-based filters resolve without one), and
+/// 2. the printed role is `Targeted` ([`AttachSelection`] — a described operand
+///    is chosen while the effect resolves, CR 608.2d).
+///
+/// Single authority for the announcement walk, the target-spec walk, the
+/// assignment windows and the two resolution-time role gates in
+/// `effects::attach`, so the slot counts cannot disagree. The role conjunct can
+/// only ever REMOVE a slot claim, never add one.
+pub(crate) fn attach_attachment_claims_announcement_slot(
+    attachment: &TargetFilter,
+    selection: &AttachSelection,
+) -> bool {
+    attach_attachment_filter_needs_target_slot(attachment) && selection.is_targeted()
+}
+
+fn attach_side_needs_target_slot(
+    filter: &TargetFilter,
+    is_attachment: bool,
+    selection: &AttachSelection,
+) -> bool {
     if is_attachment {
-        attach_attachment_filter_needs_target_slot(filter)
+        attach_attachment_claims_announcement_slot(filter, selection)
     } else {
         attach_host_filter_needs_target_slot(filter)
     }
@@ -4902,9 +4946,10 @@ fn collect_attach_attachment_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
     attachment: &TargetFilter,
+    selection: &AttachSelection,
     acc: &mut SlotAccumulator,
 ) -> Result<(), EngineError> {
-    if !attach_attachment_filter_needs_target_slot(attachment) {
+    if !attach_attachment_claims_announcement_slot(attachment, selection) {
         return Ok(());
     }
     let legal_targets = legal_targets_for_ability_filter(state, ability, attachment, &acc.slots);
@@ -4940,10 +4985,11 @@ fn collect_attach_attachment_target_slot_specs(
     state: &GameState,
     ability: &ResolvedAbility,
     attachment: &TargetFilter,
+    selection: &AttachSelection,
     specs: &mut Vec<TargetSlotSpec>,
     next_instance: &mut usize,
 ) {
-    if !attach_attachment_filter_needs_target_slot(attachment) {
+    if !attach_attachment_claims_announcement_slot(attachment, selection) {
         return;
     }
     if let Some(spec) = ability.multi_target.as_ref() {
@@ -4977,8 +5023,9 @@ fn attach_attachment_slot_bounds(
     state: &GameState,
     ability: &ResolvedAbility,
     attachment: &TargetFilter,
+    selection: &AttachSelection,
 ) -> Result<Option<MultiTargetBounds>, EngineError> {
-    if !attach_attachment_filter_needs_target_slot(attachment) {
+    if !attach_attachment_claims_announcement_slot(attachment, selection) {
         return Ok(None);
     }
     if let Some(spec) = &ability.multi_target {
@@ -4997,10 +5044,11 @@ fn assign_attach_attachment_selected_slots(
     state: &GameState,
     ability: &mut ResolvedAbility,
     attachment: &TargetFilter,
+    selection: &AttachSelection,
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
 ) -> Result<(), EngineError> {
-    let Some(bounds) = attach_attachment_slot_bounds(state, ability, attachment)? else {
+    let Some(bounds) = attach_attachment_slot_bounds(state, ability, attachment, selection)? else {
         return Ok(());
     };
     let allow_skip = ability.targeting_is_optional();
@@ -5080,11 +5128,12 @@ fn assign_attach_attachment_declared_targets(
     state: &GameState,
     ability: &mut ResolvedAbility,
     attachment: &TargetFilter,
+    selection: &AttachSelection,
     host: &TargetFilter,
     targets: &[TargetRef],
     next_target: &mut usize,
 ) -> Result<(), EngineError> {
-    let Some(bounds) = attach_attachment_slot_bounds(state, ability, attachment)? else {
+    let Some(bounds) = attach_attachment_slot_bounds(state, ability, attachment, selection)? else {
         return Ok(());
     };
     let allow_skip = ability.targeting_is_optional();
@@ -5926,12 +5975,18 @@ fn collect_target_slot_specs(
                 instance: id,
             });
         }
-    } else if let Effect::Attach { attachment, target } = &ability.effect {
+    } else if let Effect::Attach {
+        attachment,
+        target,
+        selection,
+    } = &ability.effect
+    {
         if ability.target_choice_timing == TargetChoiceTiming::Stack {
             collect_attach_attachment_target_slot_specs(
                 state,
                 ability,
                 attachment,
+                selection,
                 specs,
                 next_instance,
             );
@@ -6154,7 +6209,8 @@ fn collect_sub_chain_slot_specs(
 /// for a different zone, so they are correctly left untouched by this gate.
 ///
 /// Issue #4948 — Samwise Gamgee: checks EVERY object the cost
-/// consumed (`ability.cost_paid_object_ids`), not just the single referent in
+/// consumed (`ability.cost_paid_objects`, projected to
+/// `CostPaidObjectRecord::object_id`), not just the single referent in
 /// `ability.cost_paid_object`. A multi-object non-self cost (e.g. "Sacrifice
 /// three Foods") can move several objects into the same zone this ability's
 /// own target searches at once; excluding only the first left the rest
@@ -6163,13 +6219,25 @@ fn collect_sub_chain_slot_specs(
 /// fizzling it (CR 608.2b). `cost_paid_object`'s id is folded in too as a
 /// defense-in-depth fallback for any cost-payment site that stamps the
 /// singular referent without also calling
-/// `add_cost_paid_object_ids_recursive`.
+/// `add_cost_paid_objects_recursive`.
+///
+/// CR 400.7: this reader is MEMBERSHIP-only and order-independent, so
+/// projecting each record's `object_id` is exact — an object the cost moved
+/// must be excluded whether or not the record still names a current
+/// incarnation, and whether the entry is a payment-time
+/// `CostPaidObjectRecord::Captured` snapshot or a `MembershipOnly` id (a
+/// persisted-save migration, or CR 701.9c's hidden-destination payment).
+/// Only CAPTURED entries carry
+/// live/LKI provenance; this filter deliberately needs none of it.
+/// Deliberately NOT `live_object_id`: a cost-moved object that has since
+/// changed zones AGAIN is still an object this cost moved, and a
+/// membership-only record resolves live to nothing by construction.
 fn exclude_cost_paid_object_that_left_battlefield(
     state: &GameState,
     ability: &ResolvedAbility,
     targets: Vec<TargetRef>,
 ) -> Vec<TargetRef> {
-    if ability.cost_paid_object_ids.is_empty() && ability.cost_paid_object.is_none() {
+    if ability.cost_paid_objects.is_empty() && ability.cost_paid_object.is_none() {
         return targets;
     }
     let left_battlefield = |id: ObjectId| match state.objects.get(&id) {
@@ -6180,7 +6248,10 @@ fn exclude_cost_paid_object_that_left_battlefield(
         .into_iter()
         .filter(|target| match target {
             TargetRef::Object(id) => {
-                let was_paid_as_cost = ability.cost_paid_object_ids.contains(id)
+                let was_paid_as_cost = ability
+                    .cost_paid_objects
+                    .iter()
+                    .any(|record| record.object_id() == *id)
                     || ability
                         .cost_paid_object
                         .as_ref()
@@ -6357,7 +6428,10 @@ fn attach_host_enchant_filter(
     let mut current = Some(ability);
     let mut attachment_filter: Option<&TargetFilter> = None;
     while let Some(node) = current {
-        if let Effect::Attach { attachment, target } = &node.effect {
+        if let Effect::Attach {
+            attachment, target, ..
+        } = &node.effect
+        {
             if target == &spec.filter {
                 attachment_filter = Some(attachment);
                 break;
@@ -8008,13 +8082,20 @@ fn assign_targets_recursive(
     }
 
     if ability.target_choice_timing == TargetChoiceTiming::Stack {
-        if let Effect::Attach { attachment, target } = &ability.effect {
+        if let Effect::Attach {
+            attachment,
+            target,
+            selection,
+        } = &ability.effect
+        {
             let attachment = attachment.clone();
             let target = target.clone();
+            let selection = selection.clone();
             assign_attach_attachment_declared_targets(
                 state,
                 ability,
                 &attachment,
+                &selection,
                 &target,
                 targets,
                 next_target,
@@ -8504,13 +8585,20 @@ fn assign_selected_slots_recursive(
     }
 
     if ability.target_choice_timing == TargetChoiceTiming::Stack {
-        if let Effect::Attach { attachment, target } = &ability.effect {
+        if let Effect::Attach {
+            attachment,
+            target,
+            selection,
+        } = &ability.effect
+        {
             let attachment = attachment.clone();
             let target = target.clone();
+            let selection = selection.clone();
             assign_attach_attachment_selected_slots(
                 state,
                 ability,
                 &attachment,
+                &selection,
                 selected_slots,
                 next_slot,
             )?;
@@ -9163,9 +9251,14 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
     }
 
     if ability.target_choice_timing == TargetChoiceTiming::Stack {
-        if let Effect::Attach { attachment, target } = &ability.effect {
-            if attach_side_needs_target_slot(attachment, true)
-                || attach_side_needs_target_slot(target, false)
+        if let Effect::Attach {
+            attachment,
+            target,
+            selection,
+        } = &ability.effect
+        {
+            if attach_side_needs_target_slot(attachment, true, selection)
+                || attach_side_needs_target_slot(target, false, selection)
             {
                 return true;
             }
@@ -9944,12 +10037,17 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
         return 0;
     }
 
-    let attach_targets = if let Effect::Attach { attachment, target } = &ability.effect {
+    let attach_targets = if let Effect::Attach {
+        attachment,
+        target,
+        selection,
+    } = &ability.effect
+    {
         if ability.optional_targeting {
             0
         } else {
-            usize::from(attach_side_needs_target_slot(attachment, true))
-                + usize::from(attach_side_needs_target_slot(target, false))
+            usize::from(attach_side_needs_target_slot(attachment, true, selection))
+                + usize::from(attach_side_needs_target_slot(target, false, selection))
         }
     } else {
         0
@@ -10399,6 +10497,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                selection: AttachSelection::Targeted,
             },
             vec![TargetRef::Object(creature)],
             source,
@@ -12686,6 +12785,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::ParentTarget,
+                selection: AttachSelection::Targeted,
             },
             vec![TargetRef::Object(creature)],
             ObjectId(99),
@@ -17135,6 +17235,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                selection: AttachSelection::Targeted,
             },
             vec![],
             source,
@@ -17215,6 +17316,7 @@ mod tests {
                         .controller(ControllerRef::You),
                 ),
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                selection: AttachSelection::Targeted,
             },
             vec![],
             source,
@@ -22007,6 +22109,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
+                selection: AttachSelection::Targeted,
             },
             vec![],
             source,

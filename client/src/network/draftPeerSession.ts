@@ -5,10 +5,9 @@
  * with the draft-specific codec and session lifecycle.
  */
 
-import type { DataConnection } from "peerjs";
-
 import type { DraftP2PMessage } from "./draftProtocol";
 import { decodeDraftWireMessage, encodeDraftWireMessage } from "./draftProtocol";
+import type { TransportConnection } from "./transport";
 
 export interface DraftPeerSession {
   /** Resolves after submitting bytes to an open connection, not after peer acknowledgement. */
@@ -23,7 +22,7 @@ export interface DraftPeerSessionOptions {
 }
 
 export function createDraftPeerSession(
-  conn: DataConnection,
+  conn: TransportConnection,
   options: DraftPeerSessionOptions = {},
 ): DraftPeerSession {
   const { onSessionEnd } = options;

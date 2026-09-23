@@ -832,6 +832,7 @@ pub(crate) const CLAUSE_HEAD_VERBS: &[&str] = &[
     "unattach",
     "seek",
     "amass",
+    "empower",
     "incubate",
     "attacks",
     "attack",

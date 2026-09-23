@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} remis)",
     "draws_other": " ({{count}} remisów)",
     "main": "Główna ({{count}}, min {{min}})",
+    "mainNoMinimum": "Główna ({{count}})",
     "sideboard": "Karty boczne ({{count}})",
     "sideboardCapped": "Karty boczne ({{count}}/{{max}})",
     "moveFromSideboard": "Przenieś karty z kart bocznych.",
@@ -96,6 +97,9 @@
     "message": "Twoja gra nie będzie publicznie wyświetlana. Nadal możesz być gospodarzem przez P2P — po prostu udostępnij kod pokoju bezpośrednio przeciwnikowi.",
     "continueWithoutLobby": "Kontynuuj bez poczekalni"
   },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Ten serwer poczekalni jest za stary, aby wyświetlać gry w wybranym formacie (wymaga protokołu lobby {{needed}})."
+  },
   "joinErrorDialog": {
     "dismiss": "Zamknij"
   },
@@ -104,7 +108,8 @@
     "versionRequired": "Ten host wymaga protokołu połączenia v{{version}}. Odśwież oba okna i spróbuj ponownie.",
     "versionMismatch": "Niezgodność protokołu połączenia: klient wysłał v{{guestVersion}}, ale host używa v{{hostVersion}}. Odśwież oba okna.",
     "malformedAuthority": "Host odrzucił nieprawidłowe uprawnienia połączenia. Dołącz ponownie, używając nowego kodu pokoju.",
-    "frameUndecodable": "Host wysłał wiadomość, której ten klient nie mógł odczytać. Odśwież oba okna i spróbuj ponownie."
+    "frameUndecodable": "Host wysłał wiadomość, której ten klient nie mógł odczytać. Odśwież oba okna i spróbuj ponownie.",
+    "hostDisconnectedBeforeSetup": "Połączenie z hostem zostało przerwane przed zakończeniem konfiguracji."
   },
   "serverOfflinePrompt": {
     "title": "Dobieranie graczy nieosiągalne",
@@ -275,7 +280,11 @@
     "loadingCustomFormat": "Wczytywanie formatu…",
     "noSavedCustomFormats": "Brak zapisanych formatów niestandardowych.",
     "customFormatResolveFailed": "Nie udało się wczytać zapisanego formatu.",
-    "customFormatHostingUnavailable": "Hostowanie z formatem niestandardowym nie jest jeszcze obsługiwane — legalność talii nie może zostać dla niego sprawdzona. Na razie zapisz i tylko podglądaj."
+    "customFormatHostingUnavailable": "Hostowanie z formatem niestandardowym nie jest jeszcze obsługiwane — legalność talii nie może zostać dla niego sprawdzona. Na razie zapisz i tylko podglądaj.",
+    "botGameNotice": "Hostujesz grę z Discorda {{code}}. Połączenie i prywatność określa post na Discordzie.",
+    "botSeedIgnored": "Niektórych ustawień z posta na Discordzie nie można tu użyć — sprawdź format i liczbę graczy.",
+    "botP2PNotice": "Twoje urządzenie prowadzi grę. Pozostaw aplikację otwartą i nie rozłączaj się.",
+    "botServerNotice": "Grę prowadzi serwer dedykowany. Może zwolnić lub przejść w tryb offline."
   },
   "page": {
     "deckRejected": "Talia została odrzucona przez gospodarza.",
@@ -308,7 +317,17 @@
     "pickDeck": "Wybierz talię",
     "anonymous": "Anonimowy",
     "joining": "Dołączanie",
-    "joinNeedsServer": "Wybierz serwer, zanim dołączysz do gry."
+    "joinNeedsServer": "Wybierz serwer, zanim dołączysz do gry.",
+    "invalidGameLink": "Ten link do gry jest nieprawidłowy lub niekompletny.",
+    "waitingForHostTitle": "Czekanie na hosta…",
+    "waitingForHostMessage": "Host jeszcze nie otworzył tej gry albo została ona zamknięta. Spróbuj ponownie, gdy host otworzy swój link.",
+    "botLinkBrokerUnreachable": "Nie udało się połączyć z serwerem poczekalni, aby otworzyć tę grę z Discorda. Sprawdź połączenie, a potem ponownie otwórz swój link hosta.",
+    "updatingTitle": "Aktualizowanie do najnowszej wersji…",
+    "updatingMessage": "Dostępna jest nowsza wersja phase.rs. Strona zostanie przeładowana, gdy będzie gotowa.",
+    "refreshAfterGame": "Dokończ bieżącą grę, a potem odśwież, aby zaktualizować.",
+    "updateFailedTitle": "Nie udało się zaktualizować automatycznie",
+    "updateFailedMessage": "Odśwież, aby pobrać najnowszą wersję, lub kontynuuj na tej. Gracze z różnymi wersjami nie mogą dołączyć do tej samej gry.",
+    "continueAnyway": "Kontynuuj mimo to"
   },
   "draftLobbyPanel": {
     "draftPod": "Grupa draftu",
@@ -324,5 +343,20 @@
     "checkingLegality": "Sprawdzanie zgodności talii z zasadami…",
     "legal": "✓ Dozwolona w formacie {{format}}",
     "notLegal": "Niedozwolona w formacie {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Ten serwer nie obsługuje jeszcze gier z Discorda.",
+    "codeInUse": "Kod tej gry jest wciąż zajęty przez wcześniejszy pokój. Odczekaj kilka minut, a potem ponownie otwórz swój link hosta z Discorda. Jeśli problem się powtarza, rozpocznij nowe /lfg."
+  },
+  "openDesktop": {
+    "title": "Otwieranie aplikacji desktopowej phase.rs…",
+    "invalid": "Tego linku nie można otworzyć w aplikacji desktopowej.",
+    "openApp": "Otwórz aplikację desktopową",
+    "continueInBrowser": "Nie otworzyło się? Kontynuuj w przeglądarce",
+    "getDesktopApp": "Pobierz aplikację desktopową"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Gra w toku",
+    "gameInProgressBody": "Zakończ lub opuść bieżącą grę, a potem otwórz link ponownie."
   }
 }

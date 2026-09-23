@@ -14,7 +14,7 @@
 //!
 //! The rejection string is byte-identical to `engine-wasm`'s
 //! (`format!("Engine error: {:?}", code)`) and to
-//! `SessionManager::handle_interaction`'s, so the same engine reason code reads
+//! `GameSession::handle_interaction`'s, so the same engine reason code reads
 //! the same on the WASM and WebSocket transports and at every server layer that
 //! reports one.
 

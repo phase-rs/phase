@@ -201,6 +201,10 @@ pub enum CommanderEligibilityRule {
     TinyLeaders,
     OathbreakerSignatureSpell,
     BrawlColorIdentity,
+    /// `GameFormat::FreeformCommander`'s rule: any card that can be cast.
+    /// See `deck_validation::is_freeform_commander_eligible` for which
+    /// `CoreType`s it admits.
+    FreeformAnyCastableCard,
 }
 
 impl CommanderEligibilityRule {
@@ -226,6 +230,11 @@ impl CommanderEligibilityRule {
             GameFormat::TinyLeaders => Ok(Some(Self::TinyLeaders)),
             GameFormat::Oathbreaker => Ok(Some(Self::OathbreakerSignatureSpell)),
             GameFormat::Brawl | GameFormat::HistoricBrawl => Ok(Some(Self::BrawlColorIdentity)),
+            // Departure from CR 903.3: `Ok(None)` would
+            // claim this format has no commander-eligibility concept, and
+            // `Ok(Some(Standard))` would claim it applies CR 903.3's test —
+            // the rule this format departs from. Neither is true.
+            GameFormat::FreeformCommander => Ok(Some(Self::FreeformAnyCastableCard)),
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Pioneer
@@ -240,7 +249,8 @@ impl CommanderEligibilityRule {
             | GameFormat::TwoHeadedGiant
             | GameFormat::Archenemy
             | GameFormat::Planechase
-            | GameFormat::Momir => Ok(None),
+            | GameFormat::Momir
+            | GameFormat::Freeform => Ok(None),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "from_source_format: source must be a built-in GameFormat, never Custom({})",
                 id.0

@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 use rand::seq::SliceRandom;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, Effect, EffectKind, GuessOutcome,
-    LibraryPosition, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility,
-    TargetRef,
+    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, Effect, EffectKind,
+    ForwardedResultContext, GuessOutcome, LibraryPosition, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -916,6 +916,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
+            | WaitingFor::EmpowerJaceChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -3483,6 +3484,43 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
+            WaitingFor::EmpowerJaceChoice {
+                player,
+                source_id,
+                choices,
+                count,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // CR 701.71a + CR 608.2d: choose exactly ONE Jace planeswalker token
+            // you control from the offered candidates.
+            if chosen.len() != 1 {
+                return Err(EngineError::InvalidAction(format!(
+                    "Empower Jace requires exactly one Jace token, got {}",
+                    chosen.len()
+                )));
+            }
+            // CR 704.4: no state-based action check occurs mid-resolution, so
+            // the stored candidates are still the legal set.
+            if !choices.contains(&chosen[0]) {
+                return Err(EngineError::InvalidAction(
+                    "Selected object is not a Jace token you control".to_string(),
+                ));
+            }
+            // CR 614.1 + CR 616.1: a counter-replacement choice (an optional
+            // replacement's accept/decline, or an ordering choice among several)
+            // can interrupt placement; leave it open and let the counter drain
+            // finish the instruction.
+            if !effects::empower_jace::place_loyalty_counters(
+                state, player, source_id, chosen[0], count, events,
+            ) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
             WaitingFor::ClashChooseOpponent {
                 player,
                 candidates,
@@ -4973,6 +5011,22 @@ pub(super) fn handle_resolution_choice(
                         )
                     })
                 });
+            // CR 608.2c + CR 609.3 + CR 700.2: The zone-partition complement is
+            // an authoritative, completed result — including when it is EMPTY.
+            // An empty `Vec<TargetRef>` cannot say that: it reads identically to
+            // "no targets assigned yet", which every downstream inheritance seam
+            // treats as an invitation to fall back to the CHOSEN half. Record the
+            // empty complement in the same vocabulary the forward-result seam
+            // uses (`SpellContext::forwarded_result_context`, where `None` means
+            // "no producer ran in this resolution" and `Some([])` means "a
+            // producer ran and produced nothing"), so a continuation instruction
+            // that needs the complement does as much as possible — nothing —
+            // instead of naming the chosen card. Only the empty case is
+            // recorded: a non-empty complement already states its own binding
+            // through `targets`.
+            let empty_complement_binding = unchosen
+                .is_empty()
+                .then(|| Box::new(ForwardedResultContext::from_object_ids(state, &unchosen)));
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
                 if let Some(snapshot) = counter_kind_choice {
@@ -5042,6 +5096,15 @@ pub(super) fn handle_resolution_choice(
                         ) {
                             next_sub.targets =
                                 unchosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                            // CR 608.2c + CR 609.3: hand the sub the completed
+                            // empty complement so it is bound to nothing rather
+                            // than left unbound. `resolve_chain_body` reads this
+                            // marker before any inheritance seam can substitute
+                            // the chosen half (or the ability source) for the
+                            // complement that does not exist.
+                            if let Some(binding) = empty_complement_binding {
+                                next_sub.context.forwarded_result_context = Some(binding);
+                            }
                         }
                     }
                 }
@@ -7848,6 +7911,7 @@ pub(super) fn handle_resolution_choice(
                 target_player: _,
                 eligible,
                 required_count,
+                keeper_counter,
                 choose_filter,
                 sacrifice_filter,
                 chooser_scope,
@@ -7893,6 +7957,7 @@ pub(super) fn handle_resolution_choice(
                 &choose_filter,
                 &sacrifice_filter,
                 required_count,
+                keeper_counter.as_ref(),
                 &scoped_players,
                 events,
             )

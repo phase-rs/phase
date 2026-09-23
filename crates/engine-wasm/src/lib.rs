@@ -33,11 +33,11 @@ use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
     evaluate_deck_compatibility, filter_state_for_viewer, is_brawl_commander_eligible,
-    is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
-    rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
-    signature_spell_selection_policy, start_game, start_game_with_starting_player,
-    validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
-    PlayerDeckList, ReplayPlayer,
+    is_commander_eligible, is_freeform_commander_eligible, is_tiny_leader_eligible,
+    load_and_hydrate_decks, max_deck_copies, rehydrate_game_from_card_db_with_finalization,
+    resolve_deck_list, signature_spell_selection_policy, start_game,
+    start_game_with_starting_player, validate_name_deck_for_format_full, BracketEstimate,
+    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
@@ -1104,6 +1104,7 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             // affects PAIRING, not eligibility, so Commander Draft uses
             // Commander's own predicate.
             GameFormat::CommanderDraft => is_commander_eligible(face),
+            GameFormat::FreeformCommander => is_freeform_commander_eligible(face),
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
             GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
@@ -1122,7 +1123,8 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             | GameFormat::Archenemy
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
-            | GameFormat::Limited => false,
+            | GameFormat::Limited
+            | GameFormat::Freeform => false,
             // Phase 1d wired a real custom-format deck-legality evaluator
             // (`evaluate_custom_format`), but it is scoped to non-command-zone
             // (constructed-shaped) custom formats — a command-zone custom
@@ -3621,6 +3623,190 @@ pub fn get_ai_action_proposal_from_scores_with_diagnostics(
             "receipt": receipt,
         })))
     })?
+}
+
+// ── LLM-driven AI seats ──────────────────────────────────────────────────────
+//
+// Strictly opt-in: nothing below runs unless a player has configured an LLM
+// endpoint in Settings AND bound it to an AI seat. Every failure path returns
+// `null`, which the caller treats as "use the heuristic AI for this decision" —
+// an LLM seat can therefore degrade to an ordinary AI seat mid-game without
+// stalling it.
+//
+// The split into two calls is forced by the network round trip sitting between
+// them. `build_llm_decision_request` renders the engine-issued option domain and
+// stamps it with a fingerprint; `get_ai_action_proposal_from_llm_response`
+// re-issues the contract from LIVE state, re-derives the fingerprint, and mints
+// a proposal only when the two agree. A decision that moved on while the request
+// was in flight is refused, never applied to a different option list.
+
+/// The engine-owned LLM provider catalog: vendors, default endpoints, and
+/// suggested model ids for the settings UI. The display layer renders exactly
+/// this rather than carrying a list of its own.
+#[wasm_bindgen(js_name = llmProviderCatalog)]
+pub fn llm_provider_catalog() -> JsValue {
+    to_js(phase_llm::catalog::provider_catalog())
+}
+
+/// Build the connection-probe request for an endpoint.
+///
+/// Stateless by design: a player configures a provider in Settings, usually
+/// with no game running, and a test that required a live board would be
+/// untestable exactly when it is most needed. The request is built by the same
+/// `build_chat_request` a real decision uses, so a probe that succeeds proves
+/// the endpoint, credential and model the game path will use.
+#[wasm_bindgen(js_name = buildLlmProbeRequest)]
+pub fn build_llm_probe_request(endpoint_json: &str) -> Result<JsValue, JsValue> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid LLM endpoint config: {error}")))?;
+    let prompt = phase_llm::connection_probe_prompt();
+    match phase_llm::build_chat_request(&endpoint, &prompt) {
+        Ok(request) => Ok(to_js(&serde_json::json!({ "request": request }))),
+        Err(error) => Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+    }
+}
+
+/// Validate a probe response through the engine's own extraction and decoding.
+///
+/// The transport deliberately returns non-2xx bodies rather than rejecting, so
+/// that a vendor's error message survives to be shown. That makes "bytes came
+/// back" a meaningless success signal -- a rejected key and an unknown model
+/// both arrive as well-formed bodies. This is the authority that says whether a
+/// reply is one the game path could actually use.
+#[wasm_bindgen(js_name = validateLlmProbeResponse)]
+pub fn validate_llm_probe_response(
+    provider_label: &str,
+    status: u16,
+    response_body: &str,
+) -> JsValue {
+    let provider = phase_llm::LlmProvider::from_label(provider_label);
+    match phase_llm::validate_probe_response(provider, status, response_body) {
+        Ok(()) => to_js(&serde_json::json!({ "ok": true })),
+        Err(error) => to_js(&serde_json::json!({
+            "ok": false,
+            "error": error.to_string(),
+            "errorKind": error,
+        })),
+    }
+}
+
+/// Build the HTTP request for one LLM-driven AI decision.
+///
+/// `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`
+/// is the engine-authored game log the caller has accumulated from prior
+/// `ActionResult`s — engine data handed back for rendering, not a client
+/// derivation. Returns `null` when the seat has no decision to make; throws only
+/// on a malformed argument, which is a programming error rather than a runtime
+/// outcome.
+#[wasm_bindgen(js_name = buildLlmDecisionRequest)]
+pub fn build_llm_decision_request(
+    difficulty: &str,
+    player_id: u8,
+    endpoint_json: &str,
+    history_json: &str,
+) -> Result<JsValue, JsValue> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid LLM endpoint config: {error}")))?;
+    // An absent or unparsable history is a degraded prompt, never a failed
+    // decision: the position alone is enough to choose an action.
+    let history: Vec<engine::types::log::GameLogEntry> =
+        serde_json::from_str(history_json).unwrap_or_default();
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
+
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        if contract.candidates.is_empty() {
+            return Ok(JsValue::NULL);
+        }
+        let request = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            phase_llm::build_game_decision_prompt(
+                state,
+                &contract,
+                ai_difficulty,
+                db.as_deref(),
+                &history,
+            )
+        });
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => return Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+        };
+        let http = match phase_llm::build_chat_request(&endpoint, &request.prompt) {
+            Ok(http) => http,
+            Err(error) => return Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+        };
+        Ok(to_js(&serde_json::json!({
+            "fingerprint": request.fingerprint,
+            "optionCount": request.option_count,
+            "request": http,
+        })))
+    })?
+}
+
+/// Convert an LLM completion into an authority-bound proposal.
+///
+/// Mirrors `get_ai_action_proposal_from_scores`: the model's reply is an
+/// untrusted hint, so a fresh contract is derived from the live state and the
+/// selected action is admitted only if that contract contains it. There is
+/// intentionally no endpoint by which model text becomes a `GameAction` without
+/// this check.
+#[wasm_bindgen(js_name = getAiActionProposalFromLlmResponse)]
+pub fn get_ai_action_proposal_from_llm_response(
+    player_id: u8,
+    fingerprint: &str,
+    provider_label: &str,
+    status: u16,
+    response_body: &str,
+) -> Result<JsValue, JsValue> {
+    let provider = phase_llm::LlmProvider::from_label(provider_label);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+
+        // Status-aware: a non-2xx response is refused however its body parses,
+        // so a gateway or proxy error cannot masquerade as a decision.
+        let completion = match phase_llm::completion_from_response(provider, status, response_body)
+        {
+            Ok(text) => text,
+            Err(error) => return Ok(llm_failure(&error)),
+        };
+        let selection = match phase_llm::select_action(state, &contract, fingerprint, &completion) {
+            Ok(selection) => selection,
+            Err(error) => return Ok(llm_failure(&error)),
+        };
+        // Same admission check `mint_ai_action_proposal` performs, inlined so the
+        // reasoning can ride alongside the proposal in one payload.
+        if !contract.contains_action(state, &selection.action) {
+            return Ok(llm_failure(&phase_llm::LlmError::StaleDecision));
+        }
+        let actor = contract.authorized_actor;
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        // The reasoning is local diagnostic data bound to the same opaque token.
+        // The engine never reads it back.
+        Ok(to_js(&serde_json::json!({
+            "proposal": {
+                "token": token,
+                "semanticOwner": semantic_owner.0,
+                "actor": actor.0,
+                "action": selection.action,
+            },
+            "reasoning": selection.reasoning,
+        })))
+    })?
+}
+
+/// The tagged failure an LLM decision returns so the caller can both fall back
+/// and tell the player why.
+fn llm_failure(error: &phase_llm::LlmError) -> JsValue {
+    to_js(&serde_json::json!({
+        "proposal": serde_json::Value::Null,
+        "error": error.to_string(),
+        "errorKind": error,
+    }))
 }
 
 /// Submit an action selected from an engine-issued AI proposal.
@@ -6633,6 +6819,111 @@ mod deck_list_seat_validation_tests {
         assert_eq!(
             validate_deck_list_seats(&db, &three_seat_list(&[]), &FormatConfig::momir(), None, 4),
             None,
+        );
+    }
+
+    fn n_plains(n: usize) -> Vec<String> {
+        std::iter::repeat_n("Plains".to_string(), n).collect()
+    }
+
+    fn seat_with_commander(main_deck: Vec<String>, commander: &str) -> PlayerDeckList {
+        PlayerDeckList {
+            main_deck,
+            commander: vec![commander.to_string()],
+            ..Default::default()
+        }
+    }
+
+    fn two_seat_list(player: PlayerDeckList, opponent: PlayerDeckList) -> DeckList {
+        DeckList {
+            player,
+            opponent,
+            ..Default::default()
+        }
+    }
+
+    /// Establishes separately that the verdict is reached
+    /// through the surface the client actually calls — driven through
+    /// `validate_deck_list_seats`, the seat loop `initialize_game_impl` runs
+    /// at the game-creation boundary, rather than censused from source.
+    #[test]
+    fn freeform_commander_is_refused_a_land_commander_through_the_seat_validation_loop() {
+        let db = test_db();
+
+        // The land commander is refused, with this format's own eligibility
+        // reason, behind the loop's own "Player deck: " prefix. This format's
+        // absent deck-size floor (`Minimum(0)`) means a 10-card main deck is
+        // itself accepted, so eligibility is the only reason in play.
+        let land_seat = seat_with_commander(n_plains(10), "Plains");
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(land_seat.clone(), land_seat.clone()),
+                &FormatConfig::freeform_commander(),
+                None,
+                2,
+            ),
+            Some(vec![
+                "Player deck: Freeform Commander commanders must be cards that can be cast: \
+                 Plains"
+                    .to_string()
+            ]),
+        );
+
+        // The paired ACCEPT: a legendary creature commander passes every seat,
+        // and the loop returns None.
+        let legend_seat = seat_with_commander(n_plains(10), LEGEND_A);
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(legend_seat.clone(), legend_seat),
+                &FormatConfig::freeform_commander(),
+                None,
+                2,
+            ),
+            None,
+        );
+
+        // The degenerate end: an empty main deck with the same land commander
+        // still refuses with the same reason — this format's absent deck-size
+        // floor does not exempt the commander slot from eligibility.
+        let empty_main_land_seat = seat_with_commander(Vec::new(), "Plains");
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(empty_main_land_seat.clone(), empty_main_land_seat),
+                &FormatConfig::freeform_commander(),
+                None,
+                2,
+            ),
+            Some(vec![
+                "Player deck: Freeform Commander commanders must be cards that can be cast: \
+                 Plains"
+                    .to_string()
+            ]),
+        );
+
+        // The contrast: the SAME land-commander shape refused by Commander
+        // with Commander's own eligibility reason — not this format's
+        // string. Sized to Commander's exact 100-card requirement (the
+        // commander "Plains" is represented/netted against the identically
+        // named main-deck entries, so the count is the main deck's own
+        // length) so the deck-size reason does not also fire and the vector
+        // isolates the eligibility reason alone.
+        let commander_sized_land_seat = seat_with_commander(n_plains(100), "Plains");
+        assert_eq!(
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(commander_sized_land_seat.clone(), commander_sized_land_seat,),
+                &FormatConfig::commander(),
+                None,
+                2,
+            ),
+            Some(vec![
+                "Player deck: Commander cards must be legendary creatures or explicitly allow \
+                 being a commander: Plains"
+                    .to_string()
+            ]),
         );
     }
 }

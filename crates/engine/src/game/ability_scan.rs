@@ -92,14 +92,14 @@
 //! for the conflict model and its CR 603.3b commutation argument.
 
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, CardTypeSetSource, ContinuousModification,
-    ControllerRef, CountScope, DelayedTriggerCondition, Duration, EachDamageRecipient, Effect,
-    EffectScope, FilterProp, ForEachCategoryAction, GuessSubject, KeeperConstraint, ManaProduction,
-    ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementCondition,
-    ResolvedAbility, StaticCondition, TargetFilter, TrackedAnaphorSource, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypedFilter, UnlessPayModifier, ZoneChangeClause,
-    ZoneChoiceCandidateSource,
+    AbilityCondition, AbilityCost, AbilityDefinition, AttachCardinality, AttachSelection,
+    CardTypeSetSource, ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition,
+    Duration, EachDamageRecipient, Effect, EffectScope, FilterProp, ForEachCategoryAction,
+    GuessSubject, KeeperConstraint, ManaProduction, ModalChoice, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition, TargetFilter,
+    TrackedAnaphorSource, TriggerCondition, TriggerConstraint, TriggerDefinition, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause, ZoneChoiceCandidateSource,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{DisguiseCost, Keyword};
@@ -275,7 +275,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         distribution: _,                 // concrete pre-assigned (TargetRef, u32) portions
         chosen_x: _,                     // concrete cast-time X
         cost_paid_object: _,             // concrete captured-object snapshot
-        cost_paid_object_ids: _,         // concrete captured-object ids
+        cost_paid_objects: _,            // concrete cost-paid membership records
         effect_context_object: _,        // concrete captured-object snapshot
         amassed_army_object: _,          // concrete captured-object snapshot
         ability_index: _,                // usize provenance
@@ -436,8 +436,11 @@ fn scan_target_selection_constraint(c: &TargetSelectionConstraint, mode: ScanMod
 /// `Direct` reads only the named zone, so only a battlefield population can
 /// grow with the loop class. `Tracked` and `Legacy` can instead consume the
 /// current resolution-chain set, whose producer is not visible at this local
-/// effect node; classify both fail-closed. This is intentionally separate from
-/// the choice filter, which is scanned by the caller.
+/// effect node; classify both fail-closed. `CostPaidObjects` reads the
+/// resolving ability's own cost-payment record plus live zone membership —
+/// neither is visible at this node either, so it is classified fail-closed
+/// alongside them rather than as a plain zone read. This is intentionally
+/// separate from the choice filter, which is scanned by the caller.
 fn scan_zone_choice_candidate_source(
     candidate_source: ZoneChoiceCandidateSource,
     zone: crate::types::zones::Zone,
@@ -457,6 +460,10 @@ fn scan_zone_choice_candidate_source(
         ZoneChoiceCandidateSource::Tracked | ZoneChoiceCandidateSource::Legacy => {
             Axes::CONSERVATIVE
         }
+        // CR 400.7j + CR 601.2h: the pool is the ability-bound cost-payment
+        // record, narrowed by live zone membership. Both are ability/state reads
+        // this local node cannot see; fail closed.
+        ZoneChoiceCandidateSource::CostPaidObjects => Axes::CONSERVATIVE,
     }
 }
 
@@ -875,10 +882,23 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::Attach { attachment, target } => {
+        Effect::Attach {
+            attachment,
+            target,
+            selection,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(attachment, target_ctx, mode));
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            // CR 608.2d: a described "up to N" attachment cardinality is a read
+            // of the effect's own quantity; `One`/`AnyNumber`/`All` carry no
+            // nested filter or quantity and contribute no read.
+            if let AttachSelection::AtResolution {
+                count: AttachCardinality::UpTo(quantity),
+            } = selection
+            {
+                acc = acc.or(scan_quantity_expr(quantity, mode));
+            }
             acc
         }
         Effect::UnattachAll { attachment, target } => {
@@ -1644,6 +1664,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             sacrifice_filter,
             total_power_cap,
             keeper_constraint,
+            keeper_counter,
             categories: _,
             chooser_scope: _,
         } => {
@@ -1655,6 +1676,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             }
             if let Some(KeeperConstraint::ExactCount { count }) = keeper_constraint {
                 acc = acc.or(scan_quantity_expr(count, mode));
+            }
+            // CR 608.2c + CR 122.1: the printed keeper mark's count.
+            if let Some(mark) = keeper_counter {
+                acc = acc.or(scan_quantity_expr(&mark.count, mode));
             }
             acc
         }
@@ -1902,6 +1927,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(count, mode));
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
+            acc
+        }
+        Effect::EmpowerJace { count } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
         Effect::Monstrosity { count } => {
@@ -6307,6 +6337,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -6682,6 +6713,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -6950,6 +6982,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }

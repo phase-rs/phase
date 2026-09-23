@@ -111,6 +111,17 @@ export interface RoomMarkerPoint {
  * payload and appears in `getFormatRegistry`. Split out from `GameFormat` so
  * registry-shaped lookups (`FORMAT_DEFAULTS`, per-format metadata) can say they
  * only cover built-ins.
+ *
+ * `format::tests::client_builtin_game_format_union_matches_the_engine`, in
+ * crates/engine/src/types/format.rs, reads this file with `include_str!` and
+ * asserts this union names exactly `GameFormat::iter()`. A CLIENT-side
+ * member added, removed or renamed reds that assertion at runtime, in Tilt's
+ * `test-engine` and in CI job `rust-test` step "Run tests" (mutation-tested:
+ * renaming a member here reds the assertion above by name). An ENGINE-side
+ * variant change instead reds the compiler first (`E0004` in this crate's
+ * exhaustive `match`es over `GameFormat`), which in CI fails the earlier
+ * `rust-test-build` job rather than `rust-test`'s "Run tests" step, which
+ * only extracts and executes an already-built archive.
  */
 export type BuiltInGameFormat =
   | "Standard"
@@ -135,7 +146,9 @@ export type BuiltInGameFormat =
   | "Planechase"
   | "Limited"
   | "Momir"
-  | "CommanderDraft";
+  | "CommanderDraft"
+  | "Freeform"
+  | "FreeformCommander";
 
 /**
  * Wire form of `GameFormat::Custom(CustomFormatId)`.
@@ -220,7 +233,8 @@ export type CommanderEligibilityRule =
   | "Standard"
   | "TinyLeaders"
   | "OathbreakerSignatureSpell"
-  | "BrawlColorIdentity";
+  | "BrawlColorIdentity"
+  | "FreeformAnyCastableCard";
 
 /**
  * Whether a custom format uses the command zone (CR 903) and, if so, its
@@ -398,6 +412,8 @@ export interface FormatMetadata {
   short_label: string;
   description: string;
   group: FormatGroup;
+  /** Engine-published key of this format's legality table; null when the card data records none. */
+  legality_key: string | null;
   default_config: FormatConfig;
 }
 
@@ -1175,6 +1191,7 @@ export interface TokenCharacteristics {
   display_name: string;
   power: number | null;
   toughness: number | null;
+  loyalty?: number | null;
   core_types: CoreType[];
   subtypes: string[];
   supertypes: Supertype[];
@@ -2492,6 +2509,7 @@ export type WaitingFor =
   | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId; reciprocal_role?: "Produce" | "Consume" | null } }
   | { type: "BeholdChoice"; data: { player: PlayerId; choices: ObjectId[] } }
+  | { type: "EmpowerJaceChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[]; count: number } }
   | { type: "EffectZoneChoice"; data: {
       player: PlayerId;
       cards: ObjectId[];
@@ -2624,6 +2642,8 @@ export type WaitingFor =
       target_player: PlayerId;
       eligible: ObjectId[];
       required_count: number;
+      // CR 608.2c + CR 122.1: the printed keeper mark, already resolved (CR 608.2h).
+      keeper_counter?: [CounterType, number] | null;
       choose_filter?: TargetFilter;
       sacrifice_filter?: TargetFilter;
       chooser_scope?: "EachPlayerSelf" | "ControllerForAll";
@@ -4737,6 +4757,37 @@ export type AiCardSubsetResult =
   | { kind: "full" }
   | { kind: "subset"; json: string; count: number };
 
+/**
+ * Engine outcome for one LLM-driven decision.
+ *
+ * `proposal: null` with an `error` is the normal recoverable case — a missing
+ * key, a rate limit, a reply the engine could not bind to a legal option, or a
+ * decision that moved on while the request was in flight. Every one of them
+ * means "use the heuristic AI for this decision".
+ */
+export interface AiLlmProposalResult {
+  proposal: AiActionProposal | null;
+  /** The model's own one-line justification, for local diagnostics only. */
+  reasoning?: string | null;
+  error?: string;
+}
+
+/** Engine-built HTTP call for one LLM request. Executed verbatim. */
+export interface LlmHttpRequestSpec {
+  url: string;
+  method: string;
+  headers: { name: string; value: string }[];
+  body: string;
+}
+
+/** Engine output for one LLM decision request, or an engine-authored refusal. */
+export interface LlmDecisionRequestResult {
+  fingerprint?: string;
+  optionCount?: number;
+  request?: LlmHttpRequestSpec;
+  error?: string;
+}
+
 /** Result of submitting an opaque AI proposal to its issuing authority. */
 export type AiProposalSubmission =
   | { status: "applied"; result: SubmitResult }
@@ -4800,6 +4851,30 @@ export interface EngineAdapter {
   getAiTacticalActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
   /** Applies a proposal only if its authority token and exact action remain current. */
   submitAiActionProposal?(proposal: AiActionProposal): Promise<AiProposalSubmission> | AiProposalSubmission;
+  /**
+   * Builds the engine-authored LLM request for this seat's current decision.
+   *
+   * Optional capability: an adapter that omits it simply has no LLM seats, and
+   * the AI controller uses the heuristic path. `historyJson` is the
+   * engine-authored game log the caller has accumulated, handed back for
+   * rendering.
+   */
+  buildLlmDecisionRequest?(
+    difficulty: string,
+    playerId: number,
+    endpointJson: string,
+    historyJson: string,
+  ): Promise<LlmDecisionRequestResult | null>;
+  /** Binds an LLM response to an engine-issued proposal, or reports why it could not. */
+  getAiActionProposalFromLlmResponse?(
+    playerId: number,
+    fingerprint: string,
+    provider: string,
+    status: number,
+    responseBody: string,
+  ): Promise<AiLlmProposalResult | null>;
+  /** The engine-owned LLM provider/model catalog for the settings UI. */
+  llmProviderCatalog?(): Promise<unknown>;
   restoreState(state: PersistedGameState): void | Promise<void>;
   /** Trusted local persistence snapshot, when this adapter owns the engine. */
   exportPersistenceState?(): Promise<string>;

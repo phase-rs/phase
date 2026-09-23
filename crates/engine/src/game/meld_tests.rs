@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::database::CardDatabase;
 use crate::game::meld::perform_meld;
 use crate::game::scenario::{GameScenario, P0, P1};
 use crate::types::ability::{Effect, PtValue, ResolvedAbility};
@@ -2374,5 +2375,129 @@ fn hosted_aura_meld_result_enters_attached_to_its_only_legal_host() {
         survivor.merged_components,
         vec![source, partner],
         "the meld itself still completes normally"
+    );
+}
+
+/// The face this database's Gisela conjures. `Effect::Conjure` is digital-only,
+/// so a paper format's pool cannot hold the card that produces it.
+const CONJURED_NAME: &str = "Conjured Bauble";
+
+fn export_face(name: &str, oracle_id: &str) -> CardFace {
+    let mut face = CardFace {
+        name: name.to_string(),
+        power: Some(PtValue::Fixed(4)),
+        toughness: Some(PtValue::Fixed(3)),
+        scryfall_oracle_id: Some(oracle_id.to_string()),
+        ..CardFace::default()
+    };
+    face.card_type.core_types.push(CoreType::Creature);
+    face
+}
+
+/// The meld pair, plus the face Gisela conjures, in the export's JSON shape.
+/// The `meld` layout and the front/result shared oracle id are fixture
+/// constructions, not export data; `meld_front_maps_to_result` reads that
+/// shared id when reconstructed `CardRules` are absent.
+fn meld_layout_export_db() -> CardDatabase {
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ConjureCard, ConjureSource, PermanentEntryMode,
+        QuantityExpr, TargetFilter,
+    };
+
+    const SOURCE_ORACLE: &str = "gisela-the-broken-blade-oracle";
+    const PARTNER_ORACLE: &str = "bruna-the-fading-light-oracle";
+
+    let mut source = export_face("Gisela, the Broken Blade", SOURCE_ORACLE);
+    source.abilities.push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Meld {
+            source: "Gisela, the Broken Blade".to_string(),
+            partner: "Bruna, the Fading Light".to_string(),
+            result: RESULT_NAME.to_string(),
+            source_filter: TargetFilter::SelfRef,
+            partner_filter: TargetFilter::Any,
+            entry: PermanentEntryMode::Normal,
+        },
+    ));
+    source.abilities.push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Conjure {
+            cards: vec![ConjureCard {
+                source: ConjureSource::Named {
+                    name: CONJURED_NAME.to_string(),
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+            }],
+            destination: Zone::Hand,
+            tapped: false,
+            library_position: None,
+            library_players: None,
+        },
+    ));
+    let partner = export_face("Bruna, the Fading Light", PARTNER_ORACLE);
+    let result_for_source = export_face(RESULT_NAME, SOURCE_ORACLE);
+    let result_for_partner = export_face(RESULT_NAME, PARTNER_ORACLE);
+    let conjured = export_face(CONJURED_NAME, "conjured-bauble-oracle");
+
+    let mut export = serde_json::Map::new();
+    for (key, face, layout) in [
+        ("gisela, the broken blade", &source, "meld"),
+        ("brisela, voice of nightmares", &result_for_source, "meld"),
+        ("bruna, the fading light", &partner, "meld"),
+        ("hidden partner meld result", &result_for_partner, "meld"),
+        ("conjured bauble", &conjured, "normal"),
+    ] {
+        let mut json = serde_json::to_value(face).unwrap();
+        // No face in the card-data export carries a `meld` layout, so this
+        // fixture supplies the one `build_meld_pair_registry` reads.
+        json["layout"] = serde_json::json!(layout);
+        export.insert(key.to_string(), json);
+    }
+    CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+        .expect("the fixture export parses")
+}
+
+/// CR 701.42: meld is a paper keyword action, so the registry's meld leg carries
+/// no format gate. Both registries are built by production rehydration with
+/// nothing hand-seeded, under a format whose pool admits no digital-only card —
+/// where the conjure ability on the very same face is gated out.
+#[test]
+fn meld_resolves_under_a_format_that_forbids_digital_only_cards() {
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = meld_layout_export_db();
+    let mut sc = GameScenario::new();
+    let source = sc.add_real_card(P0, "Gisela, the Broken Blade", Zone::Battlefield, &db);
+    let partner = sc.add_real_card(P0, "Bruna, the Fading Light", Zone::Battlefield, &db);
+    let mut state = sc.state;
+    assert!(
+        !state.format_config.format.admits_digital_only_cards(),
+        "this scenario's format must be the closed side of the gate"
+    );
+
+    crate::game::printed_cards::rehydrate_game_from_card_db(&mut state, &db);
+
+    let mut events = Vec::new();
+    perform_meld(
+        &mut state,
+        &meld_ability(source, P0, "Bruna, the Fading Light"),
+        &mut events,
+    )
+    .unwrap();
+
+    // Reach guard: the meld resolved off a production-built registry, so the
+    // conjure name's absence below is the gate's doing, not a fixture that never
+    // reached the seed walk.
+    let survivor = state.objects.get(&source).expect("survivor exists");
+    assert_eq!(
+        survivor.name, RESULT_NAME,
+        "CR 701.42: meld is a paper keyword action, so the survivor is the meld result"
+    );
+    assert_eq!(survivor.merged_components, vec![source, partner]);
+    assert!(
+        !state
+            .card_face_registry
+            .contains_key(&CONJURED_NAME.to_lowercase()),
+        "the digital leg on the same face is gated out"
     );
 }

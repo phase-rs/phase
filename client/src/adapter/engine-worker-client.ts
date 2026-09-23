@@ -7,11 +7,13 @@
 import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
+  AiLlmProposalResult,
   AiProposalSubmission,
   FormatConfig,
   GameAction,
   GameState,
   LegalActionsResult,
+  LlmDecisionRequestResult,
   MatchConfig,
   ReplayHeader,
   RestoredStackAutomationPresentation,
@@ -425,6 +427,44 @@ export class EngineWorkerClient {
       { type: "getAiTacticalActionProposalWithDiagnostics", difficulty, playerId },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
+  }
+
+  /** Engine-authored LLM request for this seat's current decision. */
+  async buildLlmDecisionRequest(
+    difficulty: string,
+    playerId: number,
+    endpointJson: string,
+    historyJson: string,
+  ): Promise<LlmDecisionRequestResult | null> {
+    return this.request<LlmDecisionRequestResult | null>(
+      { type: "buildLlmDecisionRequest", difficulty, playerId, endpointJson, historyJson },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  /** Main authority re-issues a contract before an LLM reply can mint anything. */
+  async getAiActionProposalFromLlmResponse(
+    playerId: number,
+    fingerprint: string,
+    provider: string,
+    status: number,
+    responseBody: string,
+  ): Promise<AiLlmProposalResult | null> {
+    return this.request<AiLlmProposalResult | null>(
+      {
+        type: "getAiActionProposalFromLlmResponse",
+        playerId,
+        fingerprint,
+        provider,
+        status,
+        responseBody,
+      },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async llmProviderCatalog(): Promise<unknown> {
+    return this.request<unknown>({ type: "llmProviderCatalog" }, ENGINE_REQUEST_TIMEOUT_MS);
   }
 
   /** This worker-side endpoint scores only; it cannot mint a proposal. */

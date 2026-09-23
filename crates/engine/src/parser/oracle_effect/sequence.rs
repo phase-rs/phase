@@ -23,13 +23,14 @@ use crate::parser::oracle_quantity::{
     parse_quantity_ref,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider,
-    DigRestOrder, DigSource, Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody,
-    FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
-    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
+    CastingPermission, ChoiceType, Chooser, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigSource, Duration, Effect,
+    EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp, ForEachCategoryAction,
+    LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope, PermissionGrantee,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1982,7 +1983,10 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     if starts_have_base_power_toughness(trimmed) {
         return None;
     }
-    if starts_clause_text_or_conjugated(trimmed) || starts_with_damage_clause(&trimmed_lower) {
+    if starts_clause_text_or_conjugated(trimmed)
+        || starts_with_damage_clause(&trimmed_lower)
+        || starts_targeted_pt_conjunct_lower(&trimmed_lower).is_ok()
+    {
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
 
@@ -2684,6 +2688,40 @@ fn starts_target_continuous_clause_lower(s: &str) -> OracleResult<'_, ()> {
     Ok((rest, ()))
 }
 
+/// CR 601.2c + CR 115.6: a "[up to one] [other] target <noun phrase> gets +-N/+-M" or
+/// "another target <noun phrase> gets +-N/+-M" conjunct opens its OWN target - each
+/// instance of the word "target" is a separate announced choice, and "up to one"
+/// admits zero - so it starts a new clause after a comma ("target creature gets
+/// +3/+3, up to one other target creature gets +2/+2, and ...") or after a bare
+/// " and " ("... and another target creature gets -2/-0"). The discriminator is a P/T
+/// modifier right after this conjunct's " gets ": a noun-phrase continuation ("... and
+/// another target creature") and a keyword conjunct ("... other target creature gains
+/// flying") are left un-split. The search is bounded to THIS conjunct (up to the next
+/// comma or period) so a later conjunct's or sentence's " gets " is never pulled back
+/// onto this subject.
+fn starts_targeted_pt_conjunct_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((
+        value((), tag("another target ")),
+        value(
+            (),
+            (
+                opt(tag::<_, _, OracleError<'_>>("up to one ")),
+                opt(tag::<_, _, OracleError<'_>>("other ")),
+                tag("target "),
+            ),
+        ),
+    ))
+    .parse(s)?;
+    let (_, segment) = take_till::<_, _, OracleError<'_>>(|c| c == ',' || c == '.').parse(rest)?;
+    let _ = (
+        take_until(" gets "),
+        tag(" gets "),
+        nom_primitives::parse_pt_modifier,
+    )
+        .parse(segment)?;
+    Ok((rest, ()))
+}
+
 /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a second "each opponent"/"each
 /// player" clause joined by a bare " and " is a fresh player-scoped clause start
 /// (Slitherwisp "you draw a card and each opponent loses 1 life"; Curry Favor;
@@ -3238,6 +3276,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `starts_they_continuous_clause_lower` helper) rather than a new tuple
     // element so the enclosing `alt(...)` cluster stays under nom's 21-arm limit.
     .or(value((), starts_target_continuous_clause_lower))
+    // CR 601.2c + CR 115.6: a "[up to one] [other] target <noun> gets +-N/+-M" or
+    // "another target <noun> gets +-N/+-M" conjunct opens its OWN announced target,
+    // so a bare " and " before it starts a fresh clause (Rookie Mistake, Arm the
+    // Cathars' ", and" join). Trailing `.or()` arm for the same arity reason.
+    .or(value((), starts_targeted_pt_conjunct_lower))
     // CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a fresh "each opponent"/"each
     // player" conjunct + conjugated player-action verb is a player-scoped clause
     // start (Slitherwisp, Curry Favor, Disinformation Campaign, Bad Deal,
@@ -3973,9 +4016,8 @@ fn severed_prefix_end(body: &str, sub: &[ClauseChunk], ctx: &ParseContext) -> Op
         // G5 — same rule, recovered-conjunct side. LAST because it is the only guard
         // that costs a parse per conjunct: reached only where the boundary would
         // otherwise be accepted, which is what makes its decline counter mean
-        // "boundaries this guard removed" (measured: exactly 1, The Belligerent).
-        // Corpus cost, measured: 6 parses across 5 such boundaries — Opportunistic
-        // Dragon contributes two recovered conjuncts, the other four one each.
+        // "boundaries this guard removed". Its corpus cost is one parse per
+        // recovered conjunct of each boundary that reaches it.
         if sub[k + 1..]
             .iter()
             .any(|c| recovered_conjunct_is_unparsed(&c.text, ctx))
@@ -4472,6 +4514,10 @@ pub(super) fn apply_clause_continuation(
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
                         target: host,
+                        // The moved card is the host; the attachment is the source.
+                        selection: AttachSelection::AtResolution {
+                            count: AttachCardinality::One,
+                        },
                     },
                 )));
             }
@@ -7176,6 +7222,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
@@ -10551,6 +10598,7 @@ mod tests {
             sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
             total_power_cap: None,
             keeper_constraint: None,
+            keeper_counter: None,
         };
         assert_eq!(
             parse_followup_continuation_ast(
@@ -13792,6 +13840,114 @@ mod tests {
         // Genuine noun-phrase continuation — "target land" with no CM verb.
         assert!(!starts_bare_and_clause("target land"));
         assert!(!starts_bare_and_clause("target creature you control"));
+    }
+
+    /// CR 601.2c + CR 115.6 — H-3a.1 (H-3 case map: COMMA JOIN + the
+    /// "up to one other target" subject; the full case -> row table lives on
+    /// `h3_case_map_comma_and_and_join_rider_and_duration` in
+    /// `oracle_effect/tests.rs`).
+    ///
+    /// Each instance of the word "target" is a separate announced choice
+    /// (CR 601.2c) and "up to one" admits zero (CR 115.6), so a comma before
+    /// such a conjunct is a clause boundary, not a predicate-list comma.
+    #[test]
+    fn targeted_pt_conjunct_starts_after_comma() {
+        assert_eq!(
+            clause_texts("target creature gets +3/+3, up to one other target creature gets +2/+2"),
+            vec![
+                "target creature gets +3/+3".to_string(),
+                "up to one other target creature gets +2/+2".to_string(),
+            ],
+            "CR 601.2c: the second `target` instance opens its own clause"
+        );
+    }
+
+    /// CR 601.2c + CR 115.6 — H-3a.2 (H-3 case map: ", and" JOIN).
+    #[test]
+    fn targeted_pt_conjunct_starts_after_comma_and() {
+        let chunks = clause_texts(
+            "target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1",
+        );
+        assert_eq!(
+            chunks.len(),
+            3,
+            "three announced target instances, three clauses: {chunks:?}"
+        );
+    }
+
+    /// CR 601.2c + CR 115.6 — H-3a.3 (H-3 case map: bare " and " JOIN + the
+    /// "another target" subject).
+    #[test]
+    fn another_target_pt_conjunct_starts_after_bare_and() {
+        assert!(starts_bare_and_clause("another target creature gets -2/-0"));
+        assert!(starts_bare_and_clause(
+            "up to one other target creature gets +1/+1"
+        ));
+    }
+
+    /// H-3a.N1 — HOSTILE NEIGHBOUR (Jump Scare). A predicate list hangs off ONE
+    /// subject: "gains flying" and "becomes a Horror ..." announce no target of
+    /// their own, so neither may open a targeted conjunct. The new recognizer
+    /// declines them at its SUBJECT prefix.
+    ///
+    /// The row deliberately does NOT assert a chunk count, and does not assert
+    /// anything about the ", and becomes ..." tail. MEASURED at PHASE_BASE:
+    /// `split_clause_sequence` already bisects this sentence, and
+    /// `starts_bare_and_clause("becomes a horror enchantment creature ...")` is
+    /// already TRUE — the pre-existing carried-subject animation arm
+    /// (CR 205.1b + CR 613.1d) admits it on purpose, and the chunks re-merge
+    /// onto the carried subject downstream, so Jump Scare's export is ONE
+    /// `GenericEffect` on both sides. Phase 6 neither creates nor removes that
+    /// boundary, so asserting a count or that tail here would make the row a
+    /// claim about someone else's arm. The one-node reading is asserted where
+    /// it is actually a game fact — at the effect layer, by
+    /// `jump_scare_predicate_list_announces_no_second_target` in
+    /// `tests/integration/arm_the_cathars_conjunct_anaphor_p6.rs`.
+    ///
+    /// PAIR: **NONE — this row is NON-DISCRIMINATING, measured.** Its input
+    /// carries no `"target "` subject, and EVERY arm of
+    /// `starts_targeted_pt_conjunct_lower` requires that prefix before any
+    /// later step is reached. So no recognizer-internal mutation can move this
+    /// row: dropping the P/T-modifier requirement leaves it GREEN `[measured]`,
+    /// and narrowing the segment bound cannot reach it either — both fail at
+    /// the subject prefix first. It is kept as a guard against a future
+    /// widening of that prefix, and must not be read as a strict row. The
+    /// red-at-base POSITIVE for this function is
+    /// `another_target_pt_conjunct_starts_after_bare_and` (H-3a.3), and the
+    /// P/T-modifier discriminator lives on H-3a.N2.
+    #[test]
+    fn predicate_list_continuations_do_not_open_a_conjunct() {
+        assert!(!starts_bare_and_clause("gains flying"));
+    }
+
+    /// H-3a.N2 — HOSTILE NEIGHBOUR, and the row that carries M-7's
+    /// discriminator. The recognizer's discriminator is a P/T modifier right
+    /// after THIS conjunct's " gets "; a conjunct that announces its own
+    /// target but modifies something else is left un-split.
+    ///
+    /// PAIR: M-7 (`parse_pt_modifier` -> `nom::combinator::rest`). The second
+    /// assertion is the one M-7 moves: " gets " IS present, so the search
+    /// reaches the modifier step, and only the modifier step rejects it.
+    #[test]
+    fn keyword_conjunct_on_other_target_not_split() {
+        assert!(!starts_bare_and_clause(
+            "up to one other target creature gains flying"
+        ));
+        assert!(!starts_bare_and_clause(
+            "up to one other target creature gets a +1/+1 counter"
+        ));
+    }
+
+    /// H-3a.N3 — HOSTILE NEIGHBOUR (Joust). The search is bounded to THIS
+    /// conjunct, so a LATER sentence's " gets " is never pulled back onto this
+    /// subject and a two-target declaration is not bisected.
+    ///
+    /// PAIR: M-8 (remove `.` from the recognizer's `take_till` bound).
+    #[test]
+    fn later_sentence_gets_not_pulled_back() {
+        assert!(!starts_bare_and_clause(
+            "target creature you don\'t control. the creature you control gets +2/+1"
+        ));
     }
 
     /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: A second "each opponent"/"each

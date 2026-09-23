@@ -78,6 +78,13 @@ import {
   saveWsSession,
 } from "../../services/multiplayerSession";
 import { HandshakeError, openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
+import {
+  BrokerRequestError,
+  LobbyCapabilityError,
+  type RegisterHostRequest,
+} from "../../services/brokerClient";
+import i18n from "i18next";
+import multiplayerEn from "../../i18n/locales/en/multiplayer.json";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -143,12 +150,20 @@ vi.mock("../../adapter/p2p-adapter", () => ({
   }),
 }));
 
-vi.mock("../../services/brokerClient", () => ({
-  openBrokerClient: brokerMocks.openBrokerClient,
-  subscribeLobbyOver: brokerMocks.subscribeLobbyOver,
-  lookupJoinTargetOver: brokerMocks.lookupJoinTargetOver,
-  resolveGuestOver: brokerMocks.resolveGuestOver,
-}));
+// `BrokerRequestError` and `LobbyCapabilityError` are the real classes so the
+// store's `instanceof` checks and this file's constructed errors share the
+// production identity.
+vi.mock("../../services/brokerClient", async (importActual) => {
+  const actual = await importActual<typeof import("../../services/brokerClient")>();
+  return {
+    BrokerRequestError: actual.BrokerRequestError,
+    LobbyCapabilityError: actual.LobbyCapabilityError,
+    openBrokerClient: brokerMocks.openBrokerClient,
+    subscribeLobbyOver: brokerMocks.subscribeLobbyOver,
+    lookupJoinTargetOver: brokerMocks.lookupJoinTargetOver,
+    resolveGuestOver: brokerMocks.resolveGuestOver,
+  };
+});
 
 // Only `renewTournamentCredentialOver` is stubbed — every other tournament
 // sender stays real (importActual) so unrelated store tests are untouched.
@@ -1462,6 +1477,109 @@ describe("multiplayerStore", () => {
     },
   );
 
+  describe("registerHost lobby-capability toast", () => {
+    beforeEach(() => {
+      useMultiplayerStore.setState({ toasts: new Map() });
+    });
+
+    function openBrokerRequest(): RegisterHostRequest {
+      return {
+        hostPeerId: "peer-host",
+        displayName: "Host",
+        public: true,
+        password: null,
+        timerSeconds: null,
+        playerCount: 2,
+        matchConfig: { match_type: "Bo1" },
+        formatConfig: null,
+        roomName: null,
+        draftMetadata: null,
+      };
+    }
+
+    it("startP2PHostingSession resolves false and toasts on LobbyCapabilityError", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new LobbyCapabilityError(10, 9));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings(),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { brokerUrl: "wss://broker.example/ws" },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", { needed: 10 }),
+      );
+    });
+
+    it("startP2PHostingSession resolves false with no capability toast on a generic error", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings(),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { brokerUrl: "wss://broker.example/ws" },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("openBroker resolves null and toasts on LobbyCapabilityError", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new LobbyCapabilityError(10, 9));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(brokerMocks.close).toHaveBeenCalledOnce();
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", { needed: 10 }),
+      );
+    });
+
+    it("openBroker resolves null with no capability toast on a generic error", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("closes the broker socket it opened when registerHost rejects", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(brokerMocks.close).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the broker open and hands it to getBroker when registerHost resolves", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).not.toBeNull();
+      expect(brokerMocks.close).not.toHaveBeenCalled();
+      expect(useMultiplayerStore.getState().getBroker()).toEqual({
+        broker: result!.broker,
+        gameCode: result!.gameCode,
+      });
+    });
+  });
+
   it("removes open P2P seats in order before starting with current players", async () => {
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(
       hostingSettings(),
@@ -1544,6 +1662,154 @@ describe("multiplayerStore", () => {
 
     expect(useMultiplayerStore.getState().activePlayerId).toBe(2);
     expect(useMultiplayerStore.getState().pendingGameRoute).toBeNull();
+  });
+
+  describe("Discord requested codes", () => {
+    const deck = { main_deck: ["Forest"], sideboard: [], commander: [] };
+    const BROKER_URL = "wss://broker.example/ws";
+
+    beforeEach(() => {
+      useMultiplayerStore.setState({ toasts: new Map() });
+    });
+
+    it("withdraws a P2P listing when an old broker mints its own code", async () => {
+      brokerMocks.registerHost.mockResolvedValueOnce({
+        gameCode: "ZZZ999",
+        playerToken: "host-token",
+      });
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      // Reach guard: the requested code reached the broker request.
+      expect(brokerMocks.registerHost).toHaveBeenCalledWith(
+        expect.objectContaining({ requestedCode: "AB12CD" }),
+      );
+      expect(ok).toBe(false);
+      expect(brokerMocks.unregister).toHaveBeenCalledWith("ZZZ999");
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeUnsupported,
+      );
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+    });
+
+    it("keeps a P2P listing whose code matches the requested one", async () => {
+      brokerMocks.registerHost.mockResolvedValueOnce({
+        gameCode: "AB12CD",
+        playerToken: "host-token",
+      });
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(true);
+      expect(brokerMocks.unregister).not.toHaveBeenCalled();
+    });
+
+    it("explains a held code on the P2P host path", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(
+        new BrokerRequestError("Game code AB12CD is already in use", "code_in_use"),
+      );
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeInUse,
+      );
+    });
+
+    it("stays silent on a generic P2P registration failure", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("socket gone"));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("cancels a Full host when an old server mints its own code", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+        data: { requested_code: unknown };
+      };
+      expect(frame.data.requested_code).toBe("AB12CD");
+
+      emitServerMessage("GameCreated", { game_code: "ZZZ999", player_token: "host-token" });
+
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeUnsupported,
+      );
+    });
+
+    it("waits on a Full host whose code matches the requested one", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("GameCreated", { game_code: "AB12CD", player_token: "host-token" });
+
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("waiting");
+      expect(useMultiplayerStore.getState().hostGameCode).toBe("AB12CD");
+    });
+
+    it("explains a held code on the Full host path", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("Error", {
+        message: "Game code AB12CD is already in use",
+        code: "code_in_use",
+      });
+
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeInUse,
+      );
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+    });
+
+    it("shows an un-coded Full host error verbatim", async () => {
+      useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+        data: { requested_code: unknown };
+      };
+      expect(frame.data.requested_code).toBeNull();
+      emitServerMessage("Error", { message: "Server is full" });
+
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        "Server is full",
+      );
+    });
   });
 
   it("reports a server host connection error instead of falling through to P2P", async () => {

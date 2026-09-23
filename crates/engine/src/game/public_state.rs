@@ -812,6 +812,7 @@ mod tests {
                         .controller(crate::types::ability::ControllerRef::You),
                 ),
                 target: TargetFilter::TriggeringSource,
+                selection: crate::types::ability::AttachSelection::Targeted,
             },
             vec![],
             ObjectId(19),

@@ -1560,6 +1560,12 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // needs it to remap a `"that creature"` copy-token anaphor to the
         // enchanted host (Springheart Nantuko's landfall trigger).
         host_self_reference: ctx.host_self_reference.clone(),
+        // CR 109.1 + CR 205.2 + CR 701.41a: a trigger body is still the enclosing
+        // card's text, so the card's printed core types travel with it. Without
+        // this, `support N` inside an ETB trigger would read an empty type list
+        // and take the non-creature branch of its CR 701.41a expansion on every
+        // creature that has it.
+        source_core_types: ctx.source_core_types.clone(),
         // CR 701.42a: stage the meld partner so the effect-clause combinator can
         // stamp `Effect::Meld { source, partner, .. }` (the context carries the
         // source name; the gate carried the partner name).
@@ -5068,6 +5074,10 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<AbilityCost> {
 /// - "another creature you control to its owner's hand"
 /// - "an untapped island you control to its owner's hand"
 /// - "a non-lair land you control to its owner's hand"
+/// - "a basic land card from your graveyard to your hand"
+/// - "an enchantment to its owner's hand" (Drake Familiar — no controller
+///   restriction; any enchantment on the battlefield, yours or an
+///   opponent's, may be returned)
 fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     let to_pos = rest.find(" to ")?; // allow-noncombinator: delimiter split on pre-tokenized unless clause text
     let filter_part = rest[..to_pos].trim().trim_end_matches('.').trim();
@@ -5104,15 +5114,20 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     // Derive from_zone from FilterProp::InZone that parse_target absorbed from zone suffixes.
     let from_zone = filter.extract_in_zone();
 
-    // Ensure controller scoping — parse_target sets it from "you control" but
-    // some forms omit it (e.g., "a basic land card from your graveyard").
-    let filter = match &filter {
-        TargetFilter::Typed(tf) if tf.controller.is_some() => filter,
-        _ => TargetFilter::And {
-            filters: vec![TargetFilter::Controller, filter],
-        },
-    };
-
+    // NO additional ownership/controller scoping is applied here — `parse_target`
+    // (specifically its zone-suffix combinator, `parse_zone_suffix` in
+    // `oracle_target.rs`) already encodes exactly the ownership the printed
+    // phrase specifies, per-qualifier: "you control" / "your graveyard" sets
+    // `tf.controller = Some(You)`; "an opponent's graveyard" / "target player's
+    // graveyard" / "their graveyard" stamp `FilterProp::Owned{Opponent /
+    // TargetPlayer / ScopedPlayer}`; a bare/indefinite/definite zone ("a
+    // graveyard", "the graveyard") or no zone at all (Drake Familiar — "an
+    // enchantment to its owner's hand") carries NO ownership restriction and is
+    // left exactly as parsed. A prior version of this function force-added a
+    // controller/owner scope onto every zone-qualified filter, which wrongly
+    // narrowed an unrestricted zone (any player's graveyard) down to only the
+    // payer's — the same class of bug Drake Familiar's battlefield case had,
+    // just one level down in the zone-possessive grammar.
     Some(AbilityCost::ReturnToHand {
         count,
         filter: Some(filter),
