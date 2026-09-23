@@ -976,8 +976,34 @@ pub(crate) fn parse_enchanted_equipped_predicate(
                 if companions.is_empty() {
                     return Vec::new();
                 }
+                // CR 508.1c (:2270): the printed trailing gate governs EVERY
+                // conjunct, not just the first. The recursion above is handed
+                // `companion_pred`, which comes from the body AFTER the trailing
+                // condition was split off — so a companion never sees that gate on
+                // its own, and composing without re-applying it grants the
+                // companion UNCONDITIONALLY while the permission stays gated.
+                // "…can attack as though it didn't have defender AND HAS FLYING as
+                // long as you control a Mountain" would grant flying with no
+                // Mountain. That is a fail-OPEN, and it is the same conjoin rule
+                // the non-attached composer already applies to both halves.
+                //
+                // `combine_conditions` so a companion carrying its own inner
+                // condition CONJOINS rather than being overwritten, and
+                // `attach_gated_condition` so a gate unrepresentable on the
+                // companion's mode fails CLOSED exactly as it does on the
+                // permission. Guarded by the conditional-companion fixture in
+                // `attached_subject_rules_bearing_remainder_composes_or_declines`.
                 let mut composed = vec![def];
-                composed.extend(companions);
+                for mut companion in companions {
+                    if let Some(gate) = suffix_condition.clone() {
+                        if let Some(merged) =
+                            combine_conditions(companion.condition.clone(), Some(gate))
+                        {
+                            attach_gated_condition(&mut companion, merged, &gap_text);
+                        }
+                    }
+                    composed.push(companion);
+                }
                 return composed;
             }
             return vec![def];

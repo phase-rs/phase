@@ -37323,8 +37323,9 @@ fn word_boundary_guard_refuses_the_attackers_minimal_pair() {
 /// this is the same defect on its sibling, which is why it needs its own row
 /// rather than inheriting the other's coverage.
 ///
-/// FOUR-SIDED:
+/// FIVE-SIDED:
 ///  * a modellable companion COMPOSES (both definitions, same `affected`);
+///  * a PRINTED GATE governs every conjunct, not just the permission;
 ///  * an UNMODELLABLE companion DECLINES entirely — no partial prefix;
 ///  * a punctuation-only tail is untouched (the plain attached form still parses);
 ///  * the SINGLE-RETURN dispatch caller declines the composed pair rather than
@@ -37366,6 +37367,43 @@ fn attached_subject_rules_bearing_remainder_composes_or_declines() {
             def.affected,
             Some(enchanted.clone()),
             "both halves affect the enchanted creature"
+        );
+    }
+
+    // (1b) THE GATE GOVERNS EVERY CONJUNCT. The recursion that parses the
+    // companion is handed the body AFTER the trailing condition was split off, so
+    // the companion never sees the gate on its own. Composing without re-applying
+    // it grants the companion UNCONDITIONALLY while the permission stays gated —
+    // a fail-OPEN, and the defect this fixture exists to catch. Fixture (1) above
+    // cannot: its conjunction carries no gate at all, so both the correct and the
+    // defective parse look identical there.
+    let gated = super::grammar::parse_enchanted_equipped_predicate(
+        "can attack as though it didn't have defender and has flying as long as you control a mountain.",
+        enchanted.clone(),
+        "Enchanted creature can attack as though it didn't have defender and has flying as long as you control a Mountain.",
+    );
+    assert_eq!(
+        gated.len(),
+        2,
+        "the gated conjunction still composes both halves; got {gated:?}"
+    );
+    let mountain = StaticCondition::IsPresent {
+        filter: Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InZone {
+                zone: crate::types::zones::Zone::Battlefield,
+            }],
+        })),
+    };
+    for def in &gated {
+        assert_eq!(
+            def.condition,
+            Some(mountain.clone()),
+            "CR 508.1c: the printed gate governs {:?} too — an unconditioned \
+             companion grants flying with no Mountain; got {:?}",
+            def.mode,
+            def.condition
         );
     }
 
