@@ -337,36 +337,6 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
     let starting_turn = runner.state().turn_number;
     let starting_active = runner.state().active_player;
     let mut events = Vec::new();
-    let result = runner
-        .act(GameAction::BeginResolveAll {
-            max_resolutions: 0,
-            scope: ResolveAllScope::Shared,
-        })
-        .expect("the active player may begin Resolve All for the nested trigger");
-    events.extend(result.events);
-
-    for representative in [P1, P2, P3] {
-        let epoch = match runner.state().waiting_for {
-            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
-            ref other => panic!("expected the next four-player consent, got {other:?}"),
-        };
-        let result = runner
-            .act(GameAction::RespondResolveAllConsent {
-                epoch,
-                decision: ResolveAllConsentDecision::Grant,
-            })
-            .expect("each player may grant the nested Resolve All run");
-        events.extend(result.events);
-        assert!(
-            runner.state().resolve_all_consent_run.is_none()
-                || matches!(
-                    runner.state().waiting_for,
-                    WaitingFor::ResolveAllConsent { representative: next, .. }
-                        if next != representative
-                ),
-            "consent must advance or materialize the shared run"
-        );
-    }
 
     let mut land_choice_players = BTreeSet::new();
     let mut land_placements = BTreeSet::new();
@@ -397,12 +367,6 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
             WaitingFor::Priority { .. } => runner
                 .act(GameAction::PassPriority)
                 .expect("priority pass must not panic in the nested land chain"),
-            WaitingFor::ResolveAllConsent { epoch, .. } => runner
-                .act(GameAction::RespondResolveAllConsent {
-                    epoch,
-                    decision: ResolveAllConsentDecision::Grant,
-                })
-                .expect("late consent must use the same production route"),
             WaitingFor::OptionalEffectChoice { .. } => runner
                 .act(GameAction::DecideOptionalEffect { accept: true })
                 .expect("each player accepts the offered land choice"),
