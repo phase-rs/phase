@@ -324,6 +324,7 @@ mod face_down_cast_offer;
 mod face_down_cause_marker;
 mod face_down_spell_cost_filter;
 mod fact_or_fiction_pile_separation;
+mod fall_from_favor_monarch_untap;
 mod fantastic_four_bounded_loop;
 mod fateful_handoff_target_mana_value_draw;
 mod faunsbane_troll_sacrifice_attached_aura;

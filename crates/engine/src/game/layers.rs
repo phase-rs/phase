@@ -30,9 +30,10 @@ use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttackedYouScope,
     BasicLandType, CardTypeSetSource, CastingPermission, ChosenSubtypeKind, CommanderOwnership,
-    ContinuousModification, CopiableValues, Duration, Effect, FilterProp, ManaContribution,
-    ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
+    ContinuousModification, CopiableValues, Designation, Duration, Effect, FilterProp,
+    ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
+    TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -1384,6 +1385,27 @@ impl ConditionContext {
         self.declared_attack = target;
         self
     }
+
+    /// Which designation subject this evaluation context can bind. Paired
+    /// with `StaticMode::binds_designation_scope` at parse time.
+    pub(crate) fn binds_designation_scope(&self, scope: &PlayerScope) -> bool {
+        match scope {
+            PlayerScope::Controller => true,
+            PlayerScope::RecipientController => self.recipient.is_some(),
+            // No static designation resolver currently binds this subject.
+            PlayerScope::DefendingPlayer => false,
+            // Engine limitation, not CR-mandated: no binding authority for
+            // these scopes is carried by this layer evaluation context.
+            PlayerScope::ScopedPlayer
+            | PlayerScope::Target
+            | PlayerScope::Opponent { .. }
+            | PlayerScope::AllPlayers { .. }
+            | PlayerScope::ParentObjectTargetController
+            | PlayerScope::SourceChosenPlayer
+            | PlayerScope::AnyTurn
+            | PlayerScope::SpecificPlayer { .. } => false,
+        }
+    }
 }
 
 /// Evaluate a `StaticCondition` for the given controller and source object.
@@ -1422,26 +1444,57 @@ pub(crate) fn evaluate_condition_with_recipient(
     )
 }
 
-/// CR 109.4 + CR 725.5 (static analogue of the trigger-side CR 603.4 gate):
-/// layer evaluation has no triggering event and no combat anchor, so it cannot
-/// resolve any [`PlayerScope`] other than `Controller`. A scoped designation
-/// leaf is therefore unanswerable here.
-///
-/// Reject the whole condition at the entry boundary — returning `false` from the
-/// leaf would let [`StaticCondition::Not`] invert it into an APPLIED
-/// restriction, which is exactly the printed "unless that player is the
-/// monarch" shape. CR 725.5 independently prescribes "the effect does nothing"
-/// for the analogous vacant-monarch case, so `false` here is the
-/// rules-prescribed outcome rather than an invented default.
-///
-/// Purely structural (no `GameState` needed), mirroring the shape of
-/// `condition_uses_recipient_context` and `static_condition_uses_object_population`
-/// in this module. Delegates the leaf question and the Boolean-combinator walk
-/// to [`StaticCondition::has_unbindable_designation_anchor`] — the single
-/// authority shared with any parser-time gate that must decline to mark such a
-/// condition "supported" when it can never bind at runtime.
-fn static_condition_has_unresolvable_designation_anchor(condition: &StaticCondition) -> bool {
-    condition.has_unbindable_designation_anchor()
+/// CR 725.5: a monarch-dependent static effect does nothing while nobody is
+/// monarch. CR 726 gives no equivalent vacancy rule for initiative, so this
+/// answer is explicitly per designation.
+fn designation_is_held(state: &GameState, designation: Designation) -> bool {
+    match designation {
+        Designation::Monarch => !eval_no_monarch(state),
+    }
+}
+
+/// CR 109.4 + CR 725.5: refuse the whole condition when its designation
+/// subject cannot be bound or the designation is vacant. Refusing at entry
+/// prevents `Not` from inverting a missing answer into an applied restriction.
+/// `NoMonarch` carries no designation subject and remains independently true
+/// when no player is monarch.
+fn static_condition_has_unanswerable_designation_anchor(
+    state: &GameState,
+    condition: &StaticCondition,
+    context: ConditionContext,
+) -> bool {
+    condition.has_unanswerable_designation_anchor(|designation, scope| {
+        context.binds_designation_scope(scope) && designation_is_held(state, designation)
+    })
+}
+
+/// Resolve the player whose designation a static condition names. An absent
+/// subject has no fallback: the entry gate must reject it before `Not` can
+/// invert the leaf's false value.
+fn designation_player(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    _source_id: ObjectId,
+    context: ConditionContext,
+) -> Option<PlayerId> {
+    match scope {
+        PlayerScope::Controller => Some(controller), // CR 109.5.
+        // CR 303.4m: "enchanted creature" is the Aura's current recipient.
+        PlayerScope::RecipientController => context
+            .recipient
+            .and_then(|id| state.objects.get(&id))
+            .map(|object| object.controller),
+        PlayerScope::DefendingPlayer
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::AllPlayers { .. }
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => None,
+    }
 }
 
 /// Selects the controller that supplies "you" for an active effect's
@@ -1511,6 +1564,11 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         // creature this static applies to), not the source, so this condition is
         // recipient-relative regardless of what its filter reads.
         StaticCondition::DefendingPlayerControls { .. } => true,
+        // CR 303.4m + CR 611.3a: resolve a recipient-anchored monarch subject
+        // for each affected object, not once against the source.
+        StaticCondition::IsMonarch { player } => {
+            matches!(player, PlayerScope::RecipientController)
+        }
         // CR 105.2 + CR 611.3a: "Enchanted creature gets +3/+3 unless IT shares a
         // color…" — the color check is on the recipient (the enchanted creature),
         // not the Aura source, so it must route through the recipient-eval path.
@@ -1994,7 +2052,7 @@ pub(crate) fn evaluate_condition_with_context(
     source_id: ObjectId,
     context: ConditionContext,
 ) -> bool {
-    if static_condition_has_unresolvable_designation_anchor(condition) {
+    if static_condition_has_unanswerable_designation_anchor(state, condition, context) {
         return false;
     }
     evaluate_condition_inner(state, condition, controller, source_id, context)
@@ -2452,22 +2510,13 @@ fn evaluate_condition_inner(
                 .find(|a| a.object_id == source_id)
                 .is_some_and(|a| a.blocked)
         }),
-        // CR 725.1 + CR 109.5: a static ability's "you" is the object's current
-        // controller. Layer evaluation has no trigger event and no combat
-        // anchor, so no other scope can EVER resolve here. The scoped form never
-        // reaches this arm — `evaluate_condition{,_with_recipient}` has already
-        // rejected the condition at its entry boundary — and
-        // `coverage::static_condition_feature` reports those scopes `Unhandled`,
-        // so coverage does not claim support.
-        //
-        // CR 725.5: while there is no monarch, a monarch-dependent continuous
-        // effect does nothing, and begins to apply once a player becomes the
-        // monarch. `eval_is_monarch` returns false for a vacant designation and
-        // layers re-evaluate on the monarch change, which is exactly that.
-        StaticCondition::IsMonarch {
-            player: PlayerScope::Controller,
-        } => eval_is_monarch(state, controller),
-        StaticCondition::IsMonarch { .. } => false,
+        // CR 725.1: monarch identity; CR 109.5 and CR 303.4m provide the
+        // source and recipient subjects. CR 725.5 vacancy is handled at the
+        // entry gate, before `Not` can invert a missing designation.
+        StaticCondition::IsMonarch { player } => {
+            designation_player(state, player, controller, source_id, context)
+                .is_some_and(|player| eval_is_monarch(state, player))
+        }
         // CR 726.3: True when the controller has the initiative.
         StaticCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
@@ -19555,6 +19604,163 @@ mod tests {
         assert_eq!(bear_obj.toughness, Some(3));
     }
 
+    #[test]
+    fn recipient_anchored_monarch_condition_binds_only_with_a_recipient() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Source Aura".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, PlayerId(1));
+        let affirmative = StaticCondition::IsMonarch {
+            player: PlayerScope::RecipientController,
+        };
+        let negated = StaticCondition::Not {
+            condition: Box::new(affirmative.clone()),
+        };
+        state.monarch = Some(PlayerId(0));
+        assert!(!evaluate_condition(
+            &state,
+            &affirmative,
+            PlayerId(0),
+            source
+        ));
+        assert!(!evaluate_condition(&state, &negated, PlayerId(0), source));
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &affirmative,
+            PlayerId(0),
+            source,
+            recipient
+        ));
+        assert!(evaluate_condition_with_recipient(
+            &state,
+            &negated,
+            PlayerId(0),
+            source,
+            recipient
+        ));
+        state.monarch = Some(PlayerId(1));
+        assert!(evaluate_condition_with_recipient(
+            &state,
+            &affirmative,
+            PlayerId(0),
+            source,
+            recipient
+        ));
+        assert!(!evaluate_condition_with_recipient(
+            &state,
+            &negated,
+            PlayerId(0),
+            source,
+            recipient
+        ));
+    }
+
+    /// A synthetic continuous static is necessary because the parser gate
+    /// accepts RecipientController only at CantUntap. This exercises the layer
+    /// pipeline's per-recipient routing without claiming a printed card uses it.
+    #[test]
+    fn recipient_controller_monarch_anthem_applies_per_recipient_in_continuous_mode() {
+        let mut state = setup();
+        let anthem = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Monarch Recipient Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        let timestamp = state.next_timestamp();
+        {
+            let object = state.objects.get_mut(&anthem).unwrap();
+            object.card_types.core_types.push(CoreType::Enchantment);
+            object.base_card_types = object.card_types.clone();
+            object.timestamp = timestamp;
+            object.static_definitions.push(
+                StaticDefinition::continuous()
+                    .condition(StaticCondition::IsMonarch {
+                        player: PlayerScope::RecipientController,
+                    })
+                    .affected(TargetFilter::Typed(TypedFilter::creature()))
+                    .modifications(vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ]),
+            );
+        }
+        let p0_creature = make_creature(&mut state, "P0 Bear", 2, 2, PlayerId(0));
+        let p1_creature = make_creature(&mut state, "P1 Bear", 2, 2, PlayerId(1));
+        state.monarch = Some(PlayerId(1));
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&p0_creature].power, Some(2));
+        assert_eq!(state.objects[&p1_creature].power, Some(3));
+        state.monarch = Some(PlayerId(0));
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&p0_creature].power, Some(3));
+        assert_eq!(state.objects[&p1_creature].power, Some(2));
+    }
+
+    #[test]
+    fn vacant_monarch_static_condition_is_false_in_both_polarities_cr_725_5() {
+        for (monarch, condition, expected_power) in [
+            (
+                None,
+                StaticCondition::IsMonarch {
+                    player: PlayerScope::Controller,
+                },
+                2,
+            ),
+            (
+                None,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::IsMonarch {
+                        player: PlayerScope::Controller,
+                    }),
+                },
+                2,
+            ),
+            (None, StaticCondition::NoMonarch, 3),
+            (
+                Some(PlayerId(0)),
+                StaticCondition::IsMonarch {
+                    player: PlayerScope::Controller,
+                },
+                3,
+            ),
+        ] {
+            let mut state = setup();
+            state.monarch = monarch;
+            let anthem = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Vacancy Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let timestamp = state.next_timestamp();
+            {
+                let object = state.objects.get_mut(&anthem).unwrap();
+                object.card_types.core_types.push(CoreType::Enchantment);
+                object.base_card_types = object.card_types.clone();
+                object.timestamp = timestamp;
+                object.static_definitions.push(
+                    StaticDefinition::continuous()
+                        .condition(condition)
+                        .affected(TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        ))
+                        .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                );
+            }
+            let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+            evaluate_layers(&mut state);
+            assert_eq!(state.objects[&bear].power, Some(expected_power));
+        }
+    }
+
     /// CR 109.4 + CR 725.5: layer evaluation has no triggering event and no
     /// combat anchor, so a SCOPED monarch subject is unanswerable there. It must
     /// be false in BOTH polarities.
@@ -19562,9 +19768,9 @@ mod tests {
     /// The negated case is the revert-failing one: without the entry-boundary
     /// gate in `evaluate_condition{,_with_recipient}` the leaf's `false` inverts
     /// under `StaticCondition::Not` and the anthem applies UNCONDITIONALLY —
-    /// which is exactly the printed "unless that player is the monarch"
-    /// (Fall from Favor) restriction shape, applied when the engine cannot
-    /// identify the player at all.
+    /// which is the shape of an unbindable designation subject here:
+    /// `DefendingPlayer` has no layer declaration context. The printed Fall
+    /// from Favor line instead binds `RecipientController` at its untap step.
     #[test]
     fn scoped_monarch_static_condition_is_false_in_both_polarities_cr_725_5() {
         for (label, condition) in [

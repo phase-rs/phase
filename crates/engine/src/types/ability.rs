@@ -8008,6 +8008,15 @@ pub enum PlayerScope {
     SpecificPlayer { id: PlayerId },
 }
 
+/// CR 725.1 + CR 726.1: a designation a player can hold. This classifies a
+/// static condition's player anchor without changing its serialized shape.
+/// CR 725.5 gives the monarch a vacancy rule that CR 726 does not give the
+/// initiative; a future designation must receive its own runtime answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Designation {
+    Monarch,
+}
+
 /// CR 109.5: SINGLE serde default for every [`PlayerScope`] subject axis — a
 /// clause with no printed subject means "you", the ability's controller. Keeps
 /// pre-field rows (`{"type":"IsMonarch"}`, `GrantNextSpellAbility` without
@@ -11469,21 +11478,28 @@ impl StaticMode {
         }
     }
 
-    /// Engine limitation, not CR-mandated: can THIS static mode's enforcement
-    /// point bind a scoped-player designation anchor
-    /// ([`StaticCondition::has_unbindable_designation_anchor`])?
-    ///
-    /// Separate axis from [`Self::provides_continuation`]: a designation anchor
-    /// needs a RECIPIENT (or a triggering event) to resolve "that player"
-    /// against, which recipient-bearing evaluators
-    /// (`game::layers::evaluate_condition_with_recipient`) supply and the plain
-    /// `evaluate_condition` does not. CR 502.3's untap step is the one
-    /// enforcement point audited to lack it (PR #8012 rounds 3-4); every other
-    /// mode is left un-gated rather than guessed at, for the same reason as
-    /// above. Widening this needs a per-mode audit of which evaluator each
-    /// enforcement point calls.
-    pub(crate) fn binds_scoped_player_anchor(&self) -> bool {
-        !matches!(self, StaticMode::CantUntap)
+    /// Which designation subject this mode's enforcement point can bind.
+    /// Controller is supplied by every source (CR 109.5). CantUntap supplies
+    /// the affected permanent (CR 502.3 + CR 303.4m + CR 611.3a); attack
+    /// declaration can supply a defender (CR 508.1c + CR 508.5), but no
+    /// designation resolver binds it here yet. A new mode must be paired with
+    /// a printed card and an enforcement-path test before joining a row.
+    pub(crate) fn binds_designation_scope(&self, scope: &PlayerScope) -> bool {
+        match scope {
+            PlayerScope::Controller => true,
+            PlayerScope::RecipientController => matches!(self, StaticMode::CantUntap),
+            PlayerScope::DefendingPlayer => false,
+            // Engine limitation, not CR-mandated: these scopes have no binding
+            // authority in this static enforcement context.
+            PlayerScope::ScopedPlayer
+            | PlayerScope::Target
+            | PlayerScope::Opponent { .. }
+            | PlayerScope::AllPlayers { .. }
+            | PlayerScope::ParentObjectTargetController
+            | PlayerScope::SourceChosenPlayer
+            | PlayerScope::AnyTurn
+            | PlayerScope::SpecificPlayer { .. } => false,
+        }
     }
 }
 
@@ -11656,8 +11672,9 @@ pub enum StaticCondition {
     /// CR 725.1: monarch IDENTITY — true when `player` currently holds the
     /// monarch designation (CR 725.3: exactly one player at a time; CR 725.4
     /// governs reassignment). Distinct from [`NoMonarch`](Self::NoMonarch),
-    /// true only when the designation is VACANT, and from `Not(IsMonarch)`,
-    /// which is also true when vacant.
+    /// true only when the designation is VACANT. A raw `Not(IsMonarch)` leaf
+    /// would read true while vacant; the static entry gate applies CR 725.5
+    /// first and refuses that whole effect.
     ///
     /// CR 725.5: on the STATIC side, a continuous effect whose result depends
     /// on who is currently the monarch does nothing while there is no monarch,
@@ -11670,14 +11687,16 @@ pub enum StaticCondition {
     /// - [`PlayerScope::Controller`] ← "you're the monarch" (printed default)
     /// - [`PlayerScope::ScopedPlayer`] ← "that player is the monarch" (an
     ///   anaphor to the player named by the triggering event)
+    /// - [`PlayerScope::RecipientController`] ← the enchanted creature's
+    ///   controller in an untap-step clause (CR 303.4m + CR 502.3)
     /// - [`PlayerScope::DefendingPlayer`] ← the same anaphor once an attack
     ///   trigger's clause has bound it (CR 508.5; see
     ///   `parser::oracle_trigger::rebind_attack_anaphor_to_defending_player`)
     ///
-    /// A scope the evaluator cannot resolve makes the condition UNANSWERABLE,
-    /// not false — see the entry-boundary gates in `game::triggers` and
-    /// `game::layers`, which reject the whole condition so `Not` cannot invert
-    /// a missing anchor into a firing trigger or an applied restriction.
+    /// A scope the evaluation context cannot bind, or a designation no player
+    /// currently holds (CR 725.5), makes the static condition UNANSWERABLE.
+    /// The entry-boundary gate in `game::layers` rejects the whole condition
+    /// so `Not` cannot invert a missing anchor into an applied restriction.
     IsMonarch {
         #[serde(
             default = "player_scope_controller",
@@ -11981,14 +12000,17 @@ impl StaticCondition {
     /// the guard that makes the static-side polarity boundary gate in
     /// `game::layers` total: adding a future designation leaf that carries a
     /// [`PlayerScope`] (e.g. an `IsInitiative { player }`) is a COMPILE ERROR
-    /// here, not a latent fail-open under [`StaticCondition::Not`].
+    /// here, not a latent fail-open under [`StaticCondition::Not`]. Adding
+    /// its `Designation` variant also forces a runtime vacancy decision in
+    /// `game::layers::designation_is_held`.
     ///
-    /// Boolean combinators return `None`; the gate recurses them itself.
+    /// Boolean combinators return `None`; the tree predicate descends into
+    /// them through `any_leaf`.
     /// `QuantityComparison` returns `None` BY DEFINITION — it tests a quantity,
     /// not a designation.
-    pub(crate) fn designation_player_anchor(&self) -> Option<&PlayerScope> {
+    pub(crate) fn designation_anchor(&self) -> Option<(Designation, &PlayerScope)> {
         match self {
-            StaticCondition::IsMonarch { player } => Some(player),
+            StaticCondition::IsMonarch { player } => Some((Designation::Monarch, player)),
             StaticCondition::DevotionGE { .. }
             | StaticCondition::IsPresent { .. }
             | StaticCondition::ChosenColorIs { .. }
@@ -12052,25 +12074,17 @@ impl StaticCondition {
         }
     }
 
-    /// Engine limitation (not CR-mandated): true when this condition (or a
-    /// Boolean sub-condition of it) tests a [`PlayerScope`] designation anchor
-    /// other than `Controller` — a "that player" / "that opponent" / other
-    /// scoped-player reference that has no runtime binding authority outside a
-    /// triggering event or combat context (a recipient id, a combat-tax
-    /// defender, etc.).
-    ///
-    /// Single authority shared by the runtime layer evaluator
-    /// (`game::layers::evaluate_condition`, which has no triggering event to
-    /// bind a scoped player against and must reject the condition outright) and
-    /// any parser-time gate that would otherwise mark such a condition
-    /// "supported" while it can never actually apply at runtime. Recipient-
-    /// bearing evaluators (`evaluate_condition_with_recipient`) intentionally do
-    /// NOT call this — a recipient id is exactly the binding authority a
-    /// `ScopedPlayer` anchor needs.
-    pub(crate) fn has_unbindable_designation_anchor(&self) -> bool {
+    /// Engine limitation on the scope half, CR 725.5 on the designation half:
+    /// true when a designation leaf cannot be answered by this caller.
+    /// The parser answers scope only; the runtime also answers vacancy.
+    /// Delegates Boolean recursion to [`Self::any_leaf`].
+    pub(crate) fn has_unanswerable_designation_anchor(
+        &self,
+        answerable: impl Fn(Designation, &PlayerScope) -> bool + Copy,
+    ) -> bool {
         self.any_leaf(|leaf| {
-            leaf.designation_player_anchor()
-                .is_some_and(|scope| !matches!(scope, PlayerScope::Controller))
+            leaf.designation_anchor()
+                .is_some_and(|(designation, scope)| !answerable(designation, scope))
         })
     }
 
@@ -12080,7 +12094,7 @@ impl StaticCondition {
     /// layer pipeline at all.
     ///
     /// Exhaustive by design — there is deliberately no wildcard arm, mirroring
-    /// [`Self::designation_player_anchor`]. A future leaf whose truth is
+    /// [`Self::designation_anchor`]. A future leaf whose truth is
     /// established by an interactive round-trip (a "unless you discard a card"
     /// tax, a "unless you sacrifice" gate) is a COMPILE ERROR here, not a
     /// latent false green in every gate that consults this.
@@ -12217,7 +12231,8 @@ impl StaticCondition {
     /// green.
     pub(crate) fn is_unenforceable_on(&self, mode: &StaticMode) -> bool {
         self.requires_unavailable_continuation(mode)
-            || (!mode.binds_scoped_player_anchor() && self.has_unbindable_designation_anchor())
+            || self
+                .has_unanswerable_designation_anchor(|_, scope| mode.binds_designation_scope(scope))
     }
 
     /// True when this condition (or a Boolean sub-condition of it, at ANY
@@ -12271,7 +12286,7 @@ impl StaticCondition {
     /// anchor-dependence of the leaf is what this function must not do.
     ///
     /// Delegates to [`Self::any_leaf`], the same compiler-forced leaf walker
-    /// `contains_unrecognized` and `has_unbindable_designation_anchor` use, so a
+    /// `contains_unrecognized` and `has_unanswerable_designation_anchor` use, so a
     /// future nested-condition variant is a compile error here too.
     pub(crate) fn needs_defending_player_anchor(&self) -> bool {
         self.any_leaf(|leaf| {
@@ -12427,7 +12442,7 @@ impl StaticCondition {
     ///
     /// Single authority for tree recursion over `StaticCondition`. Every
     /// tree-level view — [`Self::contains_unrecognized`],
-    /// [`Self::unrecognized_texts`], [`Self::has_unbindable_designation_anchor`],
+    /// [`Self::unrecognized_texts`], [`Self::has_unanswerable_designation_anchor`],
     /// [`Self::requires_unavailable_continuation`] — is DERIVED from this one
     /// walk rather than reimplementing its own `And`/`Or`/`Not` recursion.
     /// Parallel walks are exactly how a nested `Unrecognized` came to be seen by
@@ -12435,7 +12450,7 @@ impl StaticCondition {
     /// with one traversal they cannot drift.
     ///
     /// Exhaustive by design — there is deliberately no wildcard arm, mirroring
-    /// [`Self::designation_player_anchor`]. Adding a future variant that NESTS a
+    /// [`Self::designation_anchor`]. Adding a future variant that NESTS a
     /// `StaticCondition` (a ternary combinator, an `Xor`, a quantified
     /// sub-condition) is a COMPILE ERROR here, forcing an explicit
     /// descend-or-treat-as-leaf decision, instead of silently returning
@@ -39471,15 +39486,15 @@ mod monarch_subject_axis_tests {
             StaticCondition::IsMonarch {
                 player: PlayerScope::ScopedPlayer
             }
-            .designation_player_anchor(),
-            Some(&PlayerScope::ScopedPlayer)
+            .designation_anchor(),
+            Some((Designation::Monarch, &PlayerScope::ScopedPlayer))
         );
         // CR 725.1: vacancy is a different predicate and carries no subject.
         assert_eq!(
             TriggerCondition::NoMonarch.designation_player_anchor(),
             None
         );
-        assert_eq!(StaticCondition::NoMonarch.designation_player_anchor(), None);
+        assert_eq!(StaticCondition::NoMonarch.designation_anchor(), None);
         // A quantity tests a quantity, not a designation — by definition.
         assert_eq!(
             TriggerCondition::QuantityComparison {
@@ -39523,7 +39538,7 @@ mod monarch_subject_axis_tests {
 
 /// PR #8012 (Bombur, Gentle Dreamer), maintainer review round 5 [MED]:
 /// `contains_unrecognized`, `unrecognized_texts` and
-/// `has_unbindable_designation_anchor` used to be three INDEPENDENT
+/// `has_unanswerable_designation_anchor` used to be three INDEPENDENT
 /// wildcard-recursive walks that could silently diverge. They — plus the new
 /// `requires_unavailable_continuation` — are now all derived from the single
 /// exhaustive [`StaticCondition::walk_leaves`]. These tests pin that
@@ -39607,14 +39622,17 @@ mod static_condition_traversal_tests {
     }
 
     /// Engine limitation, not CR-mandated. CR 725.1 designation leaves carry a
-    /// [`PlayerScope`]; only `Controller` can be bound by the layer pipeline.
+    /// [`PlayerScope`]; `Controller` binds at every mode and
+    /// `RecipientController` binds at CantUntap (CR 502.3 + CR 303.4m).
     #[test]
     fn static_condition_designation_anchor_view_recurses_to_full_depth() {
         let unbindable = nested_at_depth(StaticCondition::IsMonarch {
             player: PlayerScope::ScopedPlayer,
         });
         assert!(
-            unbindable.has_unbindable_designation_anchor(),
+            unbindable.has_unanswerable_designation_anchor(|_, scope| {
+                StaticMode::CantUntap.binds_designation_scope(scope)
+            }),
             "a ScopedPlayer designation nested under And(Or(Not(..))) must be found"
         );
 
@@ -39622,9 +39640,17 @@ mod static_condition_traversal_tests {
             player: PlayerScope::Controller,
         });
         assert!(
-            !bindable.has_unbindable_designation_anchor(),
+            !bindable.has_unanswerable_designation_anchor(|_, scope| {
+                StaticMode::CantUntap.binds_designation_scope(scope)
+            }),
             "a Controller-scoped designation binds fine at any depth and must NOT be rejected"
         );
+        let recipient = nested_at_depth(StaticCondition::IsMonarch {
+            player: PlayerScope::RecipientController,
+        });
+        assert!(!recipient.has_unanswerable_designation_anchor(|_, scope| {
+            StaticMode::CantUntap.binds_designation_scope(scope)
+        }));
     }
 
     /// CR 118.12a / CR 601.2f: leaves whose truth is decided by an

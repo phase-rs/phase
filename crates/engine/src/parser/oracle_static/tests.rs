@@ -9751,7 +9751,8 @@ fn static_cant_untap_unless_trailing_garbage_is_unrecognized() {
 }
 
 /// Engine limitation, not CR-mandated (maintainer-flagged blocker on PR
-/// #8012): a recipient-scoped `unless` tail — "unless that player is the monarch" —
+/// #8012): an anaphor-scoped (`PlayerScope::ScopedPlayer`) `unless` tail —
+/// "unless that player is the monarch" —
 /// parses to `Not(IsMonarch { player: ScopedPlayer })` via the same generic
 /// `parse_unless_condition` route Bombur uses, but `ScopedPlayer` has no
 /// runtime binding authority for a `CantUntap` static (no triggering event or
@@ -9763,7 +9764,7 @@ fn static_cant_untap_unless_trailing_garbage_is_unrecognized() {
 /// of a false green. Ordinary controller-scoped `unless` conditions (the test
 /// above) must continue to bind and parse normally.
 #[test]
-fn static_cant_untap_unless_recipient_scoped_designation_is_unrecognized() {
+fn static_cant_untap_unless_anaphor_scoped_designation_is_unrecognized() {
     let def = parse_static_line(
         "Bombur doesn't untap during your untap step unless that player is the monarch.",
     )
@@ -9777,10 +9778,45 @@ fn static_cant_untap_unless_recipient_scoped_designation_is_unrecognized() {
                 text: "that player is the monarch".to_string(),
             }),
         }),
-        "recipient-scoped 'unless' tail with no runtime binding authority must \
+        "anaphor-scoped 'unless' tail with no runtime binding authority must \
          be marked Unrecognized, not silently accepted as IsMonarch{{ScopedPlayer}}, got {:?}",
         def.condition
     );
+}
+
+/// CR 502.3 + CR 303.4m: the printed anaphor names the enchanted creature's
+/// controller. The parser must bind it before the CantUntap gate checks whether
+/// that scope is enforceable at the untap step.
+#[test]
+fn fall_from_favor_unless_that_player_is_the_monarch_binds_recipient_controller() {
+    use crate::types::ability::PlayerScope;
+
+    const ORACLE: &str = "Enchant creature\nWhen this Aura enters, tap enchanted creature and you become the monarch.\nEnchanted creature doesn't untap during its controller's untap step unless that player is the monarch.";
+    let def = parse_static_line(ORACLE.lines().last().unwrap()).unwrap();
+    assert_eq!(def.mode, StaticMode::CantUntap);
+    assert!(matches!(def.affected, Some(TargetFilter::Typed(_))));
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsMonarch {
+                player: PlayerScope::RecipientController,
+            }),
+        })
+    );
+}
+
+#[test]
+fn untap_antecedent_does_not_consume_next_or_for_as_long_as() {
+    use super::static_helpers::extract_cant_untap_condition;
+
+    for line in [
+        "That land doesn't untap during its controller's next untap step.", // Winter's Night
+        "Each of those creatures doesn't untap during its controller's next untap step.", // Juvenile Mist Dragon
+        "That land doesn't untap during its controller's next untap step.", // Mana Skimmer
+        "That creature doesn't untap during its controller's untap step for as long as this creature remains on the battlefield.", // Somnophore
+    ] {
+        assert!(extract_cant_untap_condition(line).is_none(), "{line}");
+    }
 }
 
 /// Maintainer-flagged HIGH blocker on PR #8012 (round 5): the generic `unless`
@@ -9869,6 +9905,9 @@ fn cant_untap_gate_rejects_every_unenforceable_leaf_at_any_depth() {
         StaticCondition::IsMonarch {
             player: PlayerScope::ScopedPlayer,
         },
+        StaticCondition::IsMonarch {
+            player: PlayerScope::DefendingPlayer,
+        },
         // Nested Boolean forms — the specific escape route flagged in round 5.
         StaticCondition::And {
             conditions: vec![StaticCondition::HasEnduringStory, unless_pay.clone()],
@@ -9919,6 +9958,10 @@ fn cant_untap_gate_passes_through_every_enforceable_leaf() {
         // CR 725.1: controller-scoped designations DO bind.
         StaticCondition::IsMonarch {
             player: PlayerScope::Controller,
+        },
+        // CR 502.3 + CR 303.4m: the untap check carries the affected permanent.
+        StaticCondition::IsMonarch {
+            player: PlayerScope::RecipientController,
         },
         // CR 122.1: recipient counters — the untap loop supplies the affected
         // permanent as recipient, so this is answerable.
