@@ -45,7 +45,8 @@ export interface Lfg {
   seated: string[];
   /** The ready game's private thread, once the bot has opened one. `ended`: a
    *  player pressed End game, or the thread timed out or failed to set up; the
-   *  bot closes it in Discord (and retries until that succeeds). */
+   *  bot then closes it in Discord, retrying until that succeeds or Discord
+   *  refuses (a 4xx). */
   thread: { id: string; ended: boolean } | null;
 }
 
@@ -147,7 +148,8 @@ const ADDED_COLUMNS: readonly { name: string; type: string }[] = [
   { name: "thread_id", type: "TEXT" },
   /** When the game was ended (End game, time-out, or a failed setup). */
   { name: "thread_end_ms", type: "INTEGER" },
-  /** When Discord confirmed the thread closed (archived and locked). */
+  /** When the bot stopped trying to close the thread: Discord closed it, or
+   *  refused with a 4xx. */
   { name: "thread_closed_ms", type: "INTEGER" },
 ];
 

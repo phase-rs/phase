@@ -217,6 +217,8 @@ async function announceReady(i: ComponentInteraction, lfg: Lfg, deps: LfgDeps): 
     await deps.followup(i.application_id, i.token, readyPing(lfg));
     return;
   }
+  // This edit follows the thread's own REST calls, so Discord has long since
+  // processed the UPDATE_MESSAGE; if it fails, only the post's link is lost.
   await deps.editOriginal(i.application_id, i.token, renderLfg({ ...lfg, thread: { id: threadId, ended: false } }));
 }
 

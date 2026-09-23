@@ -45,9 +45,10 @@ cd "$(dirname "$0")/.."
 echo "Testing card-bot..."
 bun test scripts/card-bot
 
-# `docker run --env-file` reads the file as the SSH user, after the old
-# container is already removed, so check it first.
-if ! ssh "${HOST}" "test -r ${ENV_FILE}"; then
+# `docker run --env-file` reads the file as whoever runs the docker CLI (the SSH
+# user, or root under `sudo docker`), after the old container is removed, so
+# check it first as that same user (`${D%docker}` is "" or "sudo ").
+if ! ssh "${HOST}" "${detect} \${D%docker}test -r ${ENV_FILE}"; then
   echo "error: ${ENV_FILE} is missing or unreadable on ${HOST}; not deploying" >&2
   exit 1
 fi

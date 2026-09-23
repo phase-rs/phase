@@ -266,7 +266,8 @@ async function discordRequest(
   throw new Error(`${label} → exhausted retries`);
 }
 
-/** Edits the original (deferred) interaction response with the final content. */
+/** Edits an interaction's original message: the deferred /card response, or
+ *  the message a button was on (after an UPDATE_MESSAGE response). */
 export async function editOriginalResponse(
   appId: string,
   interactionToken: string,
