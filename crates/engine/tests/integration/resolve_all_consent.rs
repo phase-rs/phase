@@ -305,7 +305,8 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
         .get_face_by_name("Kynaios and Tiro of Meletis")
         .expect("integration card fixture must include Kynaios and Tiro of Meletis");
     assert_eq!(
-        face.oracle_text, KYNAIOS_STYLE_NESTED_LAND_ORACLE,
+        face.oracle_text.as_deref(),
+        Some(KYNAIOS_STYLE_NESTED_LAND_ORACLE),
         "the regression must exercise the printed Kynaios-and-Tiro Oracle text"
     );
 
