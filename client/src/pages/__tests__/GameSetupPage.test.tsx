@@ -112,8 +112,10 @@ function renderGameSetupPage(initialEntry = "/game-setup") {
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/game-setup" element={<GameSetupPage />} />
+        <Route path="/setup" element={<GameSetupPage />} />
         <Route path="/" element={<div>Home</div>} />
         <Route path="/game/:id" element={<div>Game</div>} />
+        <Route path="/multiplayer" element={<div>Multiplayer</div>} />
         <Route path="/deck-builder" element={<div>Deck Builder</div>} />
       </Routes>
     </MemoryRouter>,
@@ -151,6 +153,15 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
     expect(screen.getByText("Planechase")).toBeInTheDocument();
     expect(screen.getByText("Archenemy")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Free-for-All/i })).toBeInTheDocument();
+  });
+
+  it("opens the existing multiplayer host setup from /setup", async () => {
+    const user = userEvent.setup();
+    renderGameSetupPage("/setup");
+
+    await user.click(await screen.findByRole("button", { name: /Play against people/i }));
+
+    expect(screen.getByText("Multiplayer")).toBeInTheDocument();
   });
 
   it("restores the format chip after a pointer-style open does not move focus", async () => {

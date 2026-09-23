@@ -12,7 +12,7 @@ import { getEffectiveOffline } from "../stores/connectivityStore";
 // when self-hosting.
 const IMPORT_DECK_BASE =
   import.meta.env.VITE_IMPORT_DECK_URL
-  ?? (import.meta.env.DEV ? "" : "https://lobby.phase-rs.dev");
+  ?? __IMPORT_DECK_BASE__;
 
 const MOXFIELD_HOST_RE = /^(?:www\.)?moxfield\.com$/;
 const ARCHIDEKT_HOST_RE = /^(?:www\.)?archidekt\.com$/;

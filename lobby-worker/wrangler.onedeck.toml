@@ -1,0 +1,48 @@
+# OneDeck's isolated lobby/TURN Worker profile.
+#
+# This deliberately points at the upstream lobby source instead of copying it.
+# The deployment identity and Durable Object namespace are different from the
+# phase.rs public lobby, so OneDeck traffic, room codes, and TURN credentials
+# never share that service's state or secrets.
+
+name = "onedeck-lobby"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+[build]
+command = "bash ../scripts/build-broker-wasm.sh release"
+watch_dir = [
+  "broker-wasm/src",
+  "broker-wasm/Cargo.toml",
+  "broker-wasm/Cargo.lock",
+  "broker-wasm/.cargo/config.toml",
+  "../crates/lobby-broker/src",
+  "../crates/lobby-broker/Cargo.toml",
+  "../crates/engine/src",
+  "../crates/engine/Cargo.toml",
+  "../Cargo.toml",
+  "../.cargo/config.toml",
+  "../scripts/build-broker-wasm.sh",
+]
+
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "LobbyDO"
+
+[[ratelimits]]
+name = "TURN_LIMIT"
+namespace_id = "1005"
+simple = { limit = 60, period = 60 }
+
+# A separate script gets a separate SQLite-backed namespace. The tag is kept
+# distinct so operators can tell this migration stream from phase-lobby's.
+[[migrations]]
+tag = "onedeck-v1"
+new_sqlite_classes = ["LobbyDO"]
+
+[vars]
+# TURN_KEY_ID and TURN_KEY_API_TOKEN are supplied by Cloudflare separately;
+# neither value belongs in the repository or Pages artifact. Keep the CORS
+# default narrow so an operator has to explicitly widen it for another origin.
+TURN_TTL_SECONDS = "86400"
+ALLOWED_ORIGINS = "https://onedeck-play.pages.dev"

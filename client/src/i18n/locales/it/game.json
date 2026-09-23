@@ -1309,6 +1309,7 @@
     "title": "Avvia una partita.",
     "startMatch": "Avvia partita",
     "startMatchWithOpponents": "Avvia partita ({{count}} avv.)",
+    "startMultiplayer": "Gioca contro altre persone",
     "deckNotLegal": "Il mazzo non è legale in {{format}}.",
     "aiUnsupportedFormat": "{{format}} è disponibile per ospitare partite multigiocatore, ma le partite contro l'IA non sono ancora supportate.",
     "cedhWarning": "Il tuo mazzo è di bracket {{bracket}} contro un'IA cEDH: preparati a perdere in fretta.",

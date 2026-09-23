@@ -84,6 +84,9 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),
     __ENGINE_WASM_URL__: "undefined",
+    __DRAFT_WASM_URL__: "undefined",
+    __IMPORT_DECK_BASE__: JSON.stringify(""),
+    __TURN_CREDENTIALS_URL__: JSON.stringify("https://lobby.phase-rs.dev/turn-credentials"),
     // Same resolver vite.config.ts uses — the order is single-authority.
     __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
     __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),

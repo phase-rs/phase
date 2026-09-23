@@ -19,6 +19,11 @@ inputs:
     required: false
     default: e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe
 
+  cache:
+    description: Restore the verified Binaryen archive from the Actions cache.
+    required: false
+    default: "true"
+
 runs:
   using: composite
   steps:
@@ -50,6 +55,7 @@ runs:
 
     - name: Restore cached Binaryen archive
       id: cache
+      if: inputs.cache == 'true'
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         # Cache the ARCHIVE, not the extracted executables. Extracted binaries

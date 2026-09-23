@@ -223,6 +223,13 @@ export function GameSetupPage() {
     );
   };
 
+  // Keep the common entry point on /setup while reusing the established
+  // multiplayer host setup. That page owns the P2P/server choice, room
+  // creation, deck commitment, and its existing 2–6 seat limits.
+  const handleStartMultiplayer = () => {
+    navigate("/multiplayer?view=host-setup");
+  };
+
   // Sidebar deck preview. `selectedCompat` is now state pushed up from MyDecks
   // (active-deck-only) rather than derived from a full compatibilities map.
   // Fixed-deck formats (Momir's Madness) supply both the player's deck and the
@@ -368,6 +375,17 @@ export function GameSetupPage() {
                 {playerCount > 2
                   ? t("gameSetup.startMatchWithOpponents", { count: playerCount - 1 })
                   : t("gameSetup.startMatch")}
+              </button>
+              <button
+                type="button"
+                onClick={handleStartMultiplayer}
+                className={menuButtonClass({
+                  tone: "neutral",
+                  size: "lg",
+                  className: "w-full px-6 text-center",
+                })}
+              >
+                {t("gameSetup.startMultiplayer")}
               </button>
 
               {/* Separator */}

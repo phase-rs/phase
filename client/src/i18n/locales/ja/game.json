@@ -1352,6 +1352,7 @@
     "title": "対戦を開始",
     "startMatch": "対戦を開始",
     "startMatchWithOpponents": "対戦を開始（対戦相手{{count}}人）",
+    "startMultiplayer": "対人プレイ",
     "deckNotLegal": "{{format}}ではデッキが適正ではありません。",
     "aiUnsupportedFormat": "{{format}}は多人数ホストで利用できますが、AI対戦にはまだ対応していません。",
     "cedhWarning": "あなたのデッキはブラケット{{bracket}}です。cEDH AI相手ではすぐに敗北すると予想されます。",

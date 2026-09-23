@@ -5,6 +5,9 @@ declare const __APP_VERSION__: string;
 declare const __BUILD_HASH__: string;
 declare const __ENGINE_FINGERPRINT__: string | undefined;
 declare const __ENGINE_WASM_URL__: string | undefined;
+declare const __DRAFT_WASM_URL__: string | undefined;
+declare const __IMPORT_DECK_BASE__: string;
+declare const __TURN_CREDENTIALS_URL__: string;
 declare const __OFFICIAL_MULTIPLAYER_SERVER_URL__: string;
 declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
 

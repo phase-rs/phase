@@ -1,3 +1,5 @@
+import type { IngestLimiter } from "./directory";
+
 // Mints short-lived Cloudflare Realtime TURN credentials on demand, so the
 // client never ships static TURN credentials in its bundle (the prior Metered
 // setup hardcoded them — anyone could extract and burn the quota).
@@ -15,6 +17,8 @@ export interface TurnEnv {
   TURN_TTL_SECONDS?: string;
   /** Comma-separated origin allowlist, or "*" (default) to allow any. */
   ALLOWED_ORIGINS?: string;
+  /** Optional per-IP throttle for credential minting. */
+  TURN_LIMIT?: IngestLimiter;
 }
 
 function corsHeaders(request: Request, env: TurnEnv): Record<string, string> {
@@ -63,6 +67,15 @@ export async function handleTurnCredentials(
 
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: cors });
+  }
+
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const limited = env.TURN_LIMIT && !(await env.TURN_LIMIT.limit({ key: `turn:${ip}` })).success;
+  if (limited) {
+    return Response.json(
+      { error: "TURN credential request rate limit exceeded" },
+      { status: 429, headers: { ...cors, "Retry-After": "60" } },
+    );
   }
 
   if (!env.TURN_KEY_ID || !env.TURN_KEY_API_TOKEN) {

@@ -57,6 +57,30 @@ function externalEngineWasm(): Plugin {
   };
 }
 
+// Draft WASM is lazy-loaded when a draft route is entered. External profile
+// builds use the same content-addressed R2 boundary as the game engine so the
+// Pages artifact contains neither WASM binary.
+function externalDraftWasm(): Plugin {
+  const draftGlue = path.resolve(__dirname, "src/wasm/draft_wasm.js");
+  const bundledWasmUrl = "new URL('draft_wasm_bg.wasm', import.meta.url)";
+  return {
+    name: "external-draft-wasm",
+    apply: "build",
+    transform(code, id) {
+      if (!process.env.DRAFT_WASM_URL || id !== draftGlue) return;
+      if (!code.includes(bundledWasmUrl)) {
+        this.error(
+          "draft_wasm.js no longer contains the expected wasm-bindgen fallback URL",
+        );
+      }
+      return {
+        code: code.replace(bundledWasmUrl, "__DRAFT_WASM_URL__"),
+        map: null,
+      };
+    },
+  };
+}
+
 // mana-font ships a legacy @font-face (eot/woff/ttf/svg) for BOTH the "Mana"
 // glyph family AND an unused "MPlantin" text family. Imported verbatim, Vite
 // emits every referenced url() — ~3.4 MB of fonts (a 1.8 MB SVG among them,
@@ -146,6 +170,22 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
     __ENGINE_WASM_URL__: process.env.ENGINE_WASM_URL
       ? JSON.stringify(process.env.ENGINE_WASM_URL)
       : "undefined",
+    __DRAFT_WASM_URL__: process.env.DRAFT_WASM_URL
+      ? JSON.stringify(process.env.DRAFT_WASM_URL)
+      : "undefined",
+    // Self-hosted builds can override this with VITE_IMPORT_DECK_URL. Keep the
+    // fallback build-time-only so an external profile cannot retain the
+    // official import endpoint as a dead string in its Pages bundle.
+    __IMPORT_DECK_BASE__: JSON.stringify(
+      process.env.VITE_IMPORT_DECK_URL ||
+        (mode === "development" ? "" : "https://lobby.phase-rs.dev"),
+    ),
+    // P2P builds may use a dedicated Worker for ephemeral TURN credentials.
+    // Keep the official endpoint as the upstream-compatible default; the
+    // OneDeck Cloudflare profile supplies its own Worker URL at build time.
+    __TURN_CREDENTIALS_URL__: JSON.stringify(
+      process.env.TURN_CREDENTIALS_URL || "https://lobby.phase-rs.dev/turn-credentials",
+    ),
     __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
@@ -259,6 +299,7 @@ export default defineConfig(({ mode }) => {
   plugins: [
     wasmEnvShim(),
     externalEngineWasm(),
+    externalDraftWasm(),
     trimManaFont(),
     offlineShellMarker(buildHash),
     buildManifest(buildHash),

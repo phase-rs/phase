@@ -105,7 +105,8 @@ export const RECONNECT_DIAL_TIMEOUT_MS = 15_000;
 // Worker's /turn-credentials endpoint rather than hardcoded in the bundle —
 // previously static Metered credentials shipped in plaintext and could be
 // extracted to burn the relay quota.
-const TURN_CREDENTIALS_URL = "https://lobby.phase-rs.dev/turn-credentials";
+/** Build-time seam for a profile-owned TURN minting Worker. */
+export const TURN_CREDENTIALS_URL = __TURN_CREDENTIALS_URL__;
 
 // Used when the credentials endpoint is unreachable or unconfigured. STUN-only:
 // direct and STUN-assisted connections still work; symmetric-NAT/CGNAT peers

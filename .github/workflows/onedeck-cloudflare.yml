@@ -1,0 +1,176 @@
+name: Deploy OneDeck Cloudflare profile
+
+# This is intentionally manual. It publishes only the operator-selected
+# OneDeck Pages project and its isolated Worker/R2 resources; the normal Phase
+# preview and production workflows remain unchanged.
+on:
+  workflow_dispatch:
+    inputs:
+      pages_project:
+        description: Cloudflare Pages project name
+        required: true
+        default: onedeck-play
+        type: string
+      pages_origin:
+        description: Exact Pages origin allowed to mint TURN credentials
+        required: true
+        default: https://onedeck-play.pages.dev
+        type: string
+      worker_url:
+        description: HTTPS base URL of the deployed onedeck-lobby Worker
+        required: true
+        type: string
+      r2_public_url:
+        description: Public R2 prefix used for OneDeck runtime assets
+        required: true
+        type: string
+      r2_bucket:
+        description: R2 bucket containing the OneDeck runtime assets
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Deployment credentials are reachable only from the protected default branch.
+  deploy-worker:
+    if: github.ref == 'refs/heads/main'
+    name: Deploy isolated OneDeck Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      ONEDECK_PAGES_ORIGIN: ${{ inputs.pages_origin }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Normalize Pages origin
+        run: |
+          normalized_origin="$(node scripts/normalize-web-origin.mjs "$ONEDECK_PAGES_ORIGIN")"
+          echo "ONEDECK_PAGES_ORIGIN=$normalized_origin" >> "$GITHUB_ENV"
+
+      - name: Install Worker dependencies
+        run: npm ci --prefix lobby-worker
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          targets: wasm32-unknown-unknown
+          cache: false
+          rustflags: ""
+
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+
+      - uses: ./.github/actions/binaryen
+        with:
+          cache: "false"
+
+      - name: Check deploy inputs without printing credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ONEDECK_TURN_KEY_ID: ${{ secrets.ONEDECK_TURN_KEY_ID }}
+          ONEDECK_TURN_API_TOKEN: ${{ secrets.ONEDECK_TURN_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN is required" >&2; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID is required" >&2; exit 1; }
+          test -n "$ONEDECK_TURN_KEY_ID" || { echo "ONEDECK_TURN_KEY_ID is required" >&2; exit 1; }
+          test -n "$ONEDECK_TURN_API_TOKEN" || { echo "ONEDECK_TURN_API_TOKEN is required" >&2; exit 1; }
+
+      - name: Install the dedicated TURN API secret
+        working-directory: lobby-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ONEDECK_TURN_API_TOKEN: ${{ secrets.ONEDECK_TURN_API_TOKEN }}
+        run: |
+          printf '%s' "$ONEDECK_TURN_API_TOKEN" \
+            | npx wrangler secret put TURN_KEY_API_TOKEN --config wrangler.onedeck.toml
+
+      - name: Deploy the dedicated Worker and Durable Object
+        working-directory: lobby-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ONEDECK_TURN_KEY_ID: ${{ secrets.ONEDECK_TURN_KEY_ID }}
+        run: |
+          npx wrangler deploy --config wrangler.onedeck.toml \
+            --var "TURN_KEY_ID:$ONEDECK_TURN_KEY_ID" \
+            --var "ALLOWED_ORIGINS:$ONEDECK_PAGES_ORIGIN"
+
+  deploy-pages:
+    if: github.ref == 'refs/heads/main'
+    name: Build and deploy OneDeck Pages
+    needs: [deploy-worker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      ONEDECK_R2_PUBLIC_URL: ${{ inputs.r2_public_url }}
+      ONEDECK_R2_BUCKET: ${{ inputs.r2_bucket }}
+      ONEDECK_WORKER_URL: ${{ inputs.worker_url }}
+      ONEDECK_PAGES_ORIGIN: ${{ inputs.pages_origin }}
+      ONEDECK_PAGES_PROJECT: ${{ inputs.pages_project }}
+      ONEDECK_R2_STAGING_DIR: ${{ github.workspace }}/.onedeck-r2
+      ONEDECK_GENERATE_DATA: "1"
+      ONEDECK_RUN_SEMANTIC_AUDIT: "1"
+      ONEDECK_UPLOAD_R2: "0"
+      ONEDECK_VERIFY_R2: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Normalize Pages origin
+        run: |
+          normalized_origin="$(node scripts/normalize-web-origin.mjs "$ONEDECK_PAGES_ORIGIN")"
+          echo "ONEDECK_PAGES_ORIGIN=$normalized_origin" >> "$GITHUB_ENV"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          targets: wasm32-unknown-unknown
+          cache: false
+          rustflags: ""
+
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+
+      - uses: ./.github/actions/binaryen
+        with:
+          cache: "false"
+
+      - name: Install frontend dependencies
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and audit the OneDeck artifact
+        run: ./scripts/build-onedeck-cloudflare.sh
+
+      - name: Upload gzip runtime assets to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ONEDECK_VERIFY_R2: "1"
+        run: ./scripts/upload-onedeck-r2.sh
+
+      - name: Deploy the Pages shell
+        working-directory: client
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm wrangler pages deploy dist --project-name "$ONEDECK_PAGES_PROJECT" --branch=main --commit-dirty=true
