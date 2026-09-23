@@ -15061,6 +15061,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
         count: QuantityExpr::Fixed { value: 1 },
         position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     });
     clause.sub_ability = Some(Box::new(put_counter));
     Some(EffectChainIr::single_clause(
@@ -24357,6 +24358,8 @@ fn lower_subject_predicate_ast(
                     count,
                     position: crate::types::ability::LibraryPosition::Top,
                     face_down,
+                    // CR 608.2c: the subject exiles from their own library.
+                    actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 });
             }
             // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of

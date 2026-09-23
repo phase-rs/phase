@@ -1298,6 +1298,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             position: _,
             face_down: _,
+            actor: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(player, target_ctx, mode));

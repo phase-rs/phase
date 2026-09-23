@@ -39,6 +39,7 @@ fn furious_rise_parses_mandatory_exile_with_optional_play_grant() {
             count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
             position: engine::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         }
     );
     let grant = execute

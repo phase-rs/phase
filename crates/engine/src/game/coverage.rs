@@ -2656,8 +2656,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             count,
             position,
             face_down,
+            actor,
         } => {
             d.push(("player".into(), fmt_target(player)));
+            if !actor.is_controller() {
+                d.push(("actor".into(), format!("{actor:?}")));
+            }
             d.push(("count".into(), fmt_quantity(count)));
             if !matches!(position, crate::types::ability::LibraryPosition::Top) {
                 d.push(("position".into(), format!("{position:?}")));

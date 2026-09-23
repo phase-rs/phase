@@ -488,6 +488,57 @@ impl FromStr for ExileCastTiming {
     }
 }
 
+/// CR 406.6 + CR 607.1: Who a `StaticMode::ExileCastPermission` grants its
+/// play permission to, and which cards of the source's pool each grantee may
+/// use. A typed axis (not a `bool`) so further grantee shapes (e.g. "each
+/// opponent") slot in without a refactor.
+///
+/// - `SourceController` — "*You* may play … from among cards exiled with ~."
+///   The source's controller may use every card in the pool (Maralen, The
+///   Matrix of Time, the Prosper/Tibalt impulse class).
+/// - `EachPlayerOwnExiles` — "*Each player* may play lands and cast spells from
+///   among cards *they* exiled with ~" (Uba Mask). Every player is a grantee,
+///   but each may use only the pool cards they themselves exiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExileCastGrantee {
+    /// Only the source's controller; the whole pool is eligible.
+    #[default]
+    SourceController,
+    /// Each player, restricted to the pool cards that player exiled.
+    ///
+    /// RUNTIME: the pool stays the source-linked set (CR 406.6 + CR 607.2b);
+    /// each player's share is the pool cards whose recorded exiling player
+    /// (`GameObject::exiled_by`) is that player. Ownership plays no part — a
+    /// player who exiled an opponent's card may use it, and its owner may not.
+    /// A pool card with no recorded exiling player is usable by nobody.
+    EachPlayerOwnExiles,
+}
+
+impl fmt::Display for ExileCastGrantee {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExileCastGrantee::SourceController => write!(f, "source_controller"),
+            ExileCastGrantee::EachPlayerOwnExiles => write!(f, "each_player_own_exiles"),
+        }
+    }
+}
+
+impl FromStr for ExileCastGrantee {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "source_controller" => Ok(ExileCastGrantee::SourceController),
+            "each_player_own_exiles" => Ok(ExileCastGrantee::EachPlayerOwnExiles),
+            other => Err(format!("unknown ExileCastGrantee: {other}")),
+        }
+    }
+}
+
+fn is_default_exile_cast_grantee(grantee: &ExileCastGrantee) -> bool {
+    *grantee == ExileCastGrantee::default()
+}
+
 /// CR 118.9 + CR 601.2f: Whether a non-mana cost rider on a graveyard/exile
 /// cast-permission static is an *alternative* cost (paid in lieu of the spell's
 /// mana cost, which is zeroed — CR 118.9) or an *additional* cost (paid on top
@@ -1662,6 +1713,12 @@ pub enum StaticMode {
         /// Mirrors `Effect::CastFromZone.enters_with_counter`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_with_counter: Option<super::counter::CounterType>,
+        /// CR 406.6 + CR 607.1: Who the permission is granted to and which pool
+        /// cards each grantee may use. `SourceController` (default) preserves
+        /// every "you may …" shape; `EachPlayerOwnExiles` is the Uba Mask
+        /// "each player may … from among cards they exiled with ~" shape.
+        #[serde(default, skip_serializing_if = "is_default_exile_cast_grantee")]
+        grantee: ExileCastGrantee,
     },
     /// CR 113.6 + CR 601.2a: Marker static identifying a source whose linked
     /// "play a card from exile with a collection counter on it" permission is
@@ -2900,10 +2957,12 @@ impl Hash for StaticMode {
                 mana_spend_permission,
                 grants_flash,
                 extra_cost,
+                grantee,
                 // Collision-safe skip of the enters-with rider (see the
                 // `GraveyardCastPermission` note above).
                 ..
             } => {
+                grantee.hash(state);
                 frequency.hash(state);
                 play_mode.hash(state);
                 pool.hash(state);
@@ -3318,6 +3377,7 @@ impl fmt::Display for StaticMode {
                 mana_spend_permission,
                 grants_flash,
                 extra_cost,
+                grantee,
                 // CR 122.1: enters-with counter payload rides on serde, not the
                 // Display round-trip (see `GraveyardCastPermission` above).
                 ..
@@ -3350,6 +3410,9 @@ impl fmt::Display for StaticMode {
                 }
                 if *grants_flash {
                     write!(f, ",flash")?;
+                }
+                if matches!(grantee, ExileCastGrantee::EachPlayerOwnExiles) {
+                    write!(f, ",grantee={grantee}")?;
                 }
                 // CR 118.9 + CR 601.2f: extra_cost payload preserved through
                 // serde; emit only the mode marker here.
@@ -3866,6 +3929,7 @@ impl FromStr for StaticMode {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             s if s.starts_with("ExileCastPermission(") => {
                 // Display form: "ExileCastPermission(<play_mode>,<frequency>[,free]
@@ -3891,6 +3955,7 @@ impl FromStr for StaticMode {
                 let mut timing = ExileCastTiming::AnyTime;
                 let mut mana_spend_permission = None;
                 let mut grants_flash = false;
+                let mut grantee = ExileCastGrantee::SourceController;
                 for seg in parts {
                     if seg == "free" {
                         cost = ExileCastCost::WithoutPayingManaCost;
@@ -3913,6 +3978,10 @@ impl FromStr for StaticMode {
                         if let Ok(t) = scope.parse() {
                             timing = t;
                         }
+                    } else if let Some(scope) = seg.strip_prefix("grantee=") {
+                        if let Ok(g) = scope.parse() {
+                            grantee = g;
+                        }
                     }
                     // CR 118.9 + CR 601.2f: the extra_cost payload rides on serde,
                     // not the Display round-trip — the "extra_cost=<mode>" marker
@@ -3928,6 +3997,7 @@ impl FromStr for StaticMode {
                     grants_flash,
                     extra_cost: None,
                     enters_with_counter: None,
+                    grantee,
                 }
             }
             "CantBeCountered" => StaticMode::CantBeCountered,
@@ -4623,6 +4693,7 @@ mod tests {
             grants_flash: false,
             extra_cost: None,
             enters_with_counter: None,
+            grantee: ExileCastGrantee::SourceController,
         }
     }
 
@@ -4914,6 +4985,7 @@ mod tests {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4925,6 +4997,7 @@ mod tests {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             // Persistent, your-turn-only exile-play permission
             // (The Matrix of Time; Prosper/Tibalt impulse-commander class).
@@ -4938,6 +5011,7 @@ mod tests {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             // CR 609.4b + CR 702.8a: Azula, Cunning Usurper — Cast mode from a
             // persistent pool, your-turn-only, granting any-type mana and flash.
@@ -4953,6 +5027,7 @@ mod tests {
                 grants_flash: true,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             // NOTE: Valgavoth (alternative pay-life) and Dawnhand (additional
             // remove-counters) `extra_cost`-bearing exile permissions are
@@ -5058,6 +5133,7 @@ mod tests {
                     mode: CastCostMode::Alternative,
                 }),
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -5089,6 +5165,7 @@ mod tests {
                     mode: CastCostMode::Additional,
                 }),
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             StaticMode::Other("Custom".to_string()),
         ];

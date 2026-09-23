@@ -228,6 +228,7 @@ fn ordinary_scoped_sequential_exile_producer_remains_a_batch_barrier() {
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         },
         vec![],
         source,

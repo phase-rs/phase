@@ -19457,6 +19457,7 @@ fn exile_top_of_your_library_parses_as_exile_top() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, 1), got {:?}",
@@ -19480,6 +19481,7 @@ fn exile_top_card_of_your_library_face_down_parses_with_face_down_true() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, 1, face_down=true), got {:?}",
@@ -19507,6 +19509,7 @@ fn exile_card_from_top_of_your_library_face_down_for_each_opponent() {
                 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, opponents, face_down), got {:?}",
@@ -19529,6 +19532,7 @@ fn exile_top_target_opponents_library() {
             count,
             position: LibraryPosition::Top,
             face_down,
+            actor: _,
         } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
             assert!(!*face_down);
@@ -19557,6 +19561,7 @@ fn exile_top_target_players_library_singular() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(Player, 1, face_down=false), got {:?}",
@@ -19585,6 +19590,7 @@ fn gonti_night_minister_look_and_exile_face_down_fuses_to_exile_top() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected fused look-and-exile to lower to ExileTop, got {:?}",
@@ -19628,6 +19634,7 @@ fn look_at_top_then_exile_it_face_down_rewrites_dig_to_exile_top() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected the look-then-exile idiom to lower to a face-down ExileTop, got {:?}",
@@ -19702,6 +19709,7 @@ fn exile_top_then_free_play_that_card_binds_cast_to_tracked_set() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected a controller ExileTop head, got {:?}",
@@ -19753,6 +19761,7 @@ fn abbot_of_keral_keep_paid_impulse_grant_unchanged() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected a controller ExileTop head, got {:?}",
@@ -25817,6 +25826,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
             face_down: false,
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
         },
     ];
     for effect in &direct_publishers {
@@ -26886,6 +26896,7 @@ fn parse_impulse_draw_chain_next_turn() {
                 count: QuantityExpr::Fixed { value: 2 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, 2), got {:?}",
@@ -26931,6 +26942,7 @@ fn escape_to_the_wilds_play_clause() {
                 count: QuantityExpr::Fixed { value: 5 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(Controller, 5), got {:?}",
@@ -27270,6 +27282,7 @@ fn parse_impulse_draw_chain() {
                 count: QuantityExpr::Fixed { value: 2 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(controller, 2), got {:?}",
@@ -27438,6 +27451,7 @@ fn exile_top_x_cards_of_your_library() {
                 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             } if name == "X"
         ),
         "Expected ExileTop(controller, X), got {:?}",
@@ -27465,6 +27479,7 @@ fn exile_top_x_cards_with_where_x_card_types_among_other_nonland_permanents() {
             },
         position: LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     } = &*def.effect
     else {
         panic!(
@@ -27511,6 +27526,7 @@ fn jeleva_etb_each_player_exiles_top_x_resolves_to_mana_spent_to_cast() {
             },
         position: LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     } = &*def.effect
     else {
         panic!(
@@ -27547,6 +27563,7 @@ fn exile_top_card_of_that_players_library_uses_parent_target() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "Expected ExileTop(parent target, 1), got {:?}",
@@ -28410,6 +28427,7 @@ fn defending_player_exiles_top_twenty_cards() {
                 count: QuantityExpr::Fixed { value: 20 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             }
         ),
         "Expected ExileTop(DefendingPlayer, 20), got {:?}",
@@ -28429,6 +28447,7 @@ fn target_opponent_exiles_top_half_library() {
             count,
             position: LibraryPosition::Top,
             face_down: _,
+            actor: _,
         } => {
             assert!(
                 matches!(player, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)),
@@ -48631,6 +48650,7 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
         count: QuantityExpr::Fixed { value: 1 },
         position: LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     } = *def.effect
     else {
         panic!("expected all-player ExileTop, got {:?}", def.effect);
@@ -53365,6 +53385,7 @@ fn alt_cost_rider_folds_onto_prior_cast_from_zone() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected all-player ExileTop to use player_scope + Controller, got {:?}",

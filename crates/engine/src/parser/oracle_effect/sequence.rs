@@ -5786,6 +5786,7 @@ pub(super) fn apply_clause_continuation(
                 count,
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             };
             // CR 608.2c + CR 401.1: "look at the top card of each player's library,
             // then exile those cards" — the `ScopedPlayer` owner marker set by

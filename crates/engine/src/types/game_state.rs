@@ -5710,6 +5710,9 @@ pub struct PendingBatchZoneMoveRequest {
     pub chain_referent: ChainReferentIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_to: Option<AttachTarget>,
+    /// CR 608.2c + CR 406.6: the player performing this parked move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performed_by: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<LibraryPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -13977,6 +13980,12 @@ pub enum WaitingFor {
     /// CR 608.2d: Player must choose whether to perform an optional effect ("You may X").
     OptionalEffectChoice {
         player: PlayerId,
+        /// Display-only identity of the single object this optional instruction
+        /// operates on. This is latched from the resolved ability; `source_id`
+        /// remains the ability source and the resolution authority remains the
+        /// parked optional-effect frame.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_subject_id: Option<ObjectId>,
         source_id: ObjectId,
         /// Human-readable description of the effect (e.g. "draw a card").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -14030,6 +14039,11 @@ pub enum WaitingFor {
     /// Prompts opponents in APNAP order. First accept wins; remaining are not prompted.
     OpponentMayChoice {
         player: PlayerId,
+        /// Display-only, latched identity of the single object the opponents
+        /// are deciding about. Re-prompts preserve it unchanged; `source_id`
+        /// remains the ability source and provenance authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_subject_id: Option<ObjectId>,
         source_id: ObjectId,
         /// Human-readable description of the effect.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27287,6 +27301,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.goaded_by == y.goaded_by // CR 701.15c goad set
         && x.detained_by == y.detained_by // CR 701.35a detain set
         && x.casting_permissions == y.casting_permissions // CR 715.3d exile-grant Vec
+        && x.exiled_by == y.exiled_by // CR 406.6 + CR 607.2b exiling player
         && x.saddled_by == y.saddled_by // CR 702.171c saddle set
         // #6865: a cast occurrence is resolution-semantic provenance while the
         // spell remains on the stack. Comparing it is fail-safe for loop detection.
@@ -28325,6 +28340,7 @@ mod forced_cascade_window_tests {
                 WaitingFor::OptionalEffectChoice {
                     player: PlayerId(0),
                     source_id: ObjectId(1),
+                    decision_subject_id: None,
                     description: None,
                     may_trigger_key: None,
                     same_card_may_trigger_choice_available: false,

@@ -637,6 +637,7 @@ pub fn room_effects(
                     count: fixed(2),
                     position: crate::types::ability::LibraryPosition::Top,
                     face_down: false,
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                 },
                 source_id,
                 controller,

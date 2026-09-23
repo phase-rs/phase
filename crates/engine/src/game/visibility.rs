@@ -1400,6 +1400,37 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 400.2 + CR 708.5: Hidden-zone and face-down identities are shown only
+    // to a viewer entitled to look. Optional prompts transport a display
+    // identity, so apply the shared post-projection identity check without
+    // changing the authoritative state's latched ID.
+    let optional_decision_subject_id = match &filtered.waiting_for {
+        WaitingFor::OptionalEffectChoice {
+            decision_subject_id,
+            ..
+        }
+        | WaitingFor::OpponentMayChoice {
+            decision_subject_id,
+            ..
+        } => *decision_subject_id,
+        _ => None,
+    };
+    if optional_decision_subject_id
+        .is_some_and(|id| !interaction_object_identity_is_visible(&filtered, id))
+    {
+        match &mut filtered.waiting_for {
+            WaitingFor::OptionalEffectChoice {
+                decision_subject_id,
+                ..
+            }
+            | WaitingFor::OpponentMayChoice {
+                decision_subject_id,
+                ..
+            } => *decision_subject_id = None,
+            _ => {}
+        }
+    }
+
     // A target object is hidden from this viewer iff it sits in a private zone whose
     // owner the viewer can't privately view AND it isn't otherwise revealed/peeked.
     // Hoisted above the CR 732.2a/b blocks below because all THREE pin carriers
@@ -7481,6 +7512,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn optional_decision_subject_identity_is_projected_for_both_prompt_siblings() {
+        for opponent_may in [false, true] {
+            for (zone, face_down, subject_exists, visible) in [
+                (Zone::Exile, false, true, true),
+                (Zone::Library, false, true, false),
+                (Zone::Hand, false, true, false),
+                (Zone::Exile, true, true, false),
+                (Zone::Exile, false, false, false),
+            ] {
+                let mut state = GameState::new_two_player(42);
+                let source = create_object(
+                    &mut state,
+                    CardId(80_000),
+                    PlayerId(0),
+                    "Public Source".to_string(),
+                    Zone::Battlefield,
+                );
+                let subject = if subject_exists {
+                    let subject = create_object(
+                        &mut state,
+                        CardId(80_001),
+                        PlayerId(1),
+                        "Private Subject".to_string(),
+                        zone,
+                    );
+                    state.objects.get_mut(&subject).unwrap().face_down = face_down;
+                    subject
+                } else {
+                    ObjectId(80_001)
+                };
+                state.waiting_for = if opponent_may {
+                    WaitingFor::OpponentMayChoice {
+                        player: PlayerId(0),
+                        decision_subject_id: Some(subject),
+                        source_id: source,
+                        description: None,
+                        remaining: vec![PlayerId(1)],
+                    }
+                } else {
+                    WaitingFor::OptionalEffectChoice {
+                        player: PlayerId(0),
+                        decision_subject_id: Some(subject),
+                        source_id: source,
+                        description: None,
+                        may_trigger_key: None,
+                        same_card_may_trigger_choice_available: false,
+                    }
+                };
+
+                let projected = filter_state_for_viewer(&state, PlayerId(0));
+                let projected_subject = match &projected.waiting_for {
+                    WaitingFor::OptionalEffectChoice {
+                        decision_subject_id,
+                        ..
+                    }
+                    | WaitingFor::OpponentMayChoice {
+                        decision_subject_id,
+                        ..
+                    } => *decision_subject_id,
+                    other => panic!("projection changed the prompt variant: {other:?}"),
+                };
+                assert_eq!(projected_subject, visible.then_some(subject));
+                assert!(
+                    matches!(
+                        state.waiting_for,
+                        WaitingFor::OptionalEffectChoice {
+                            decision_subject_id: Some(id),
+                            ..
+                        } | WaitingFor::OpponentMayChoice {
+                            decision_subject_id: Some(id),
+                            ..
+                        } if id == subject
+                    ),
+                    "viewer projection must not mutate authoritative state"
+                );
+
+                let wire = serde_json::to_value(&projected.waiting_for)
+                    .expect("projected prompt serializes");
+                if visible {
+                    assert_eq!(wire["data"]["decision_subject_id"], subject.0);
+                } else {
+                    assert!(
+                        wire["data"].get("decision_subject_id").is_none(),
+                        "redacted optional subject must not cross the viewer wire: {wire}"
+                    );
+                }
+            }
+        }
+    }
+
     /// A three-player authoritative state carrying both Step-6 authorities:
     /// a live `TriggeredManaResume` whose pending context holds a private
     /// description sentinel and a real `TriggeredMana` rules-execution node plus
@@ -7537,6 +7659,7 @@ mod tests {
         state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
+            decision_subject_id: None,
             source_id: hidden,
             description: Some("Accepted triggered mana may".to_string()),
             may_trigger_key: None,

@@ -374,6 +374,9 @@ pub(crate) fn apply_zone_exit_cleanup(
             // while it remains in exile. Once it changes zones, the new object
             // is no longer a foretold card.
             obj_mut.foretold = false;
+            // CR 400.7 + CR 406.6: which player exiled this card is a fact
+            // about its stay in exile; the new object has no such history.
+            obj_mut.exiled_by = None;
             // CR 708.4: a spell CAST face down (morph/disguise via an exile
             // permission) is turned face down as part of the cast and keeps
             // that status on the stack. Only the exile-zone face-down

@@ -14877,6 +14877,27 @@ impl LegacyPaymentCost {
 // Effect enum -- typed variants, zero HashMap
 // ---------------------------------------------------------------------------
 
+/// CR 608.2c: who performs an instruction that acts on a player's library.
+/// The controller of the spell or ability follows its instructions, unless the
+/// instruction names its subject — and a subject acting on "their library" is
+/// the player whose library it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum LibraryInstructionActor {
+    /// "Exile the top card of target player's library" — the controller acts.
+    #[default]
+    Controller,
+    /// "That player exiles the top card of their library" — the player whose
+    /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary).
+    LibraryPlayer,
+}
+
+impl LibraryInstructionActor {
+    /// Serde skip-helper: `Controller` is the default and is omitted from JSON.
+    pub fn is_controller(&self) -> bool {
+        matches!(self, Self::Controller)
+    }
+}
+
 /// Specific position within a library for placement effects. Top and Bottom use
 /// move_to_library_position; NthFromTop inserts at index n-1.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -17862,6 +17883,19 @@ pub enum Effect {
         /// unchanged.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         face_down: bool,
+        /// CR 608.2c: who performs this exile — the controller by default
+        /// ("exile the top card of target player's library"), or the player
+        /// whose library it is when the instruction names that player as its
+        /// subject (Uba Mask: "that player exiles that card"). Expressed
+        /// relative to `player`, so every parser rewrite of the library owner
+        /// carries the subject along. Recorded on each exiled card as the
+        /// player who exiled it. Omitted from JSON when it is the
+        /// controller, so existing card-data is unchanged.
+        #[serde(
+            default,
+            skip_serializing_if = "LibraryInstructionActor::is_controller"
+        )]
+        actor: LibraryInstructionActor,
     },
     /// CR 406.3 + CR 608.2c: Exile one explicit object and the top `count`
     /// cards of `player`'s library face down as one pile. The resolver keeps the

@@ -573,6 +573,14 @@ pub enum ProposedEvent {
         /// choices. Unrelated zone changes omit it from the wire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+        /// CR 608.2c: the player performing the instruction that moves this
+        /// object ("that player exiles that card" names the drawer; a
+        /// controller-worded instruction names the controller). Rides the
+        /// event through replacement and CR 616.1 pause/resume so delivery can
+        /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
+        /// `None` for moves no player performs (rules processes, raw movers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        performed_by: Option<PlayerId>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -953,6 +961,7 @@ impl ProposedEvent {
             chain_referent: ChainReferentIntent::default(),
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
         }
     }

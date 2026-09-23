@@ -913,6 +913,7 @@ fn enter_battlefield_with_etb(
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         discard_frame: None,
+        performed_by: None,
         applied: HashSet::new(),
     };
 

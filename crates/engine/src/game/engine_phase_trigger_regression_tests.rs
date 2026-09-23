@@ -2116,6 +2116,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
+        decision_subject_id: None,
         source_id,
         description: None,
         may_trigger_key: None,
@@ -2168,6 +2169,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
     });
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
+        decision_subject_id: None,
         remaining: vec![],
         source_id,
         description: None,

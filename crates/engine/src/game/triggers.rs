@@ -17803,6 +17803,7 @@ pub mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: controller,
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -22463,6 +22464,7 @@ pub mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: P0,
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -39315,6 +39317,7 @@ pub mod tests {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id: ObjectId(1),
+                decision_subject_id: None,
                 description: None,
                 may_trigger_key: None,
                 same_card_may_trigger_choice_available: false,
@@ -39844,6 +39847,7 @@ pub mod tests {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id: observer,
+                decision_subject_id: None,
                 description: Some("paused".to_string()),
                 may_trigger_key: None,
                 same_card_may_trigger_choice_available: false,

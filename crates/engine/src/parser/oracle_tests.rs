@@ -23654,6 +23654,7 @@ fn crumbling_sanctuary_parses_as_replacement_without_swallowed_clause() {
             },
             position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
         }
     ));
 }

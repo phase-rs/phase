@@ -464,6 +464,7 @@ fn advance_acceptance(
     state.pending_scoped_library_search = Some(pending);
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player,
+        decision_subject_id: None,
         source_id,
         description,
         may_trigger_key: None,

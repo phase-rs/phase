@@ -114,13 +114,27 @@ fn free_cast_when_mana_value_within_life_gained() {
         "the nonland hit must be exiled by ExileFromTopUntil before the cast offer"
     );
     // The gate passed, so the optional free-cast offer is presented to P0.
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice { player, .. } if player == P0
-        ),
-        "expected a 'you may cast' offer for P0 when mana value <= life gained; got {:?}",
-        runner.state().waiting_for
+    let WaitingFor::OptionalEffectChoice {
+        player,
+        source_id,
+        decision_subject_id,
+        ..
+    } = runner.state().waiting_for
+    else {
+        panic!(
+            "expected a 'you may cast' offer for P0 when mana value <= life gained; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(decision_subject_id, Some(hit));
+    assert_eq!(
+        runner.state().objects[&source_id].name,
+        "Bre of Clan Stoutarm"
+    );
+    assert_ne!(
+        source_id, hit,
+        "ability source and decision subject must stay distinct"
     );
 
     runner

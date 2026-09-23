@@ -6037,6 +6037,7 @@ fn build_ingest_trigger() -> TriggerDefinition {
         count: QuantityExpr::Fixed { value: 1 },
         position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
     };
     let execute = AbilityDefinition::new(AbilityKind::Spell, exile).description(
         "CR 702.115a: Ingest — that player exiles the top card of their library".to_string(),
@@ -6069,6 +6070,7 @@ fn is_ingest_trigger(t: &TriggerDefinition) -> bool {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             })
         )
 }
@@ -25274,6 +25276,7 @@ mod ingest_gravestorm_synthesis_tests {
             count,
             position: _,
             face_down,
+            actor: _,
         } = effect
         else {
             panic!("Ingest must exile the top card, got {effect:?}");

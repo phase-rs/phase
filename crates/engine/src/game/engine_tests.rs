@@ -3073,6 +3073,7 @@ fn a_room_cast_from_exile_offers_the_face_choice_per_cast() {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: crate::types::statics::ExileCastGrantee::SourceController,
             })
             .affected(TargetFilter::Any),
         );

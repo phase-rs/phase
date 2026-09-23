@@ -4628,6 +4628,7 @@ fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: true,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected face-down ExileTop from the triggering player's library, got: {:?}",
@@ -5172,6 +5173,7 @@ fn opponent_attacks_that_player_library_binds_to_triggering_player() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             }
         ),
         "expected ExileTop to bind to TriggeringPlayer, got {:?}",
@@ -5234,6 +5236,7 @@ fn trigger_maralen_etb_exile_top_two_of_target_opponents_library() {
             count,
             position: crate::types::ability::LibraryPosition::Top,
             face_down,
+            actor: _,
         } => {
             assert_eq!(
                 *count,
@@ -5277,6 +5280,7 @@ fn completed_scry_bottom_trigger_preserves_threshold_and_effect_provenance() {
             },
             position: crate::types::ability::LibraryPosition::Bottom,
             face_down: false,
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
         }
     ));
 }
@@ -9221,6 +9225,7 @@ fn trigger_evelyn_exiles_each_library_with_collection_counter_and_permission() {
             count: QuantityExpr::Fixed { value: 1 },
             position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
         }
     ));
 

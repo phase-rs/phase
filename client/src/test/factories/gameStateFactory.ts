@@ -46,6 +46,11 @@ type ResolutionOptionalPaymentWaitingFor = Extract<
   WaitingFor,
   { type: "ResolutionOptionalPaymentChoice" }
 >;
+type OptionalEffectChoiceWaitingFor = Extract<
+  WaitingFor,
+  { type: "OptionalEffectChoice" }
+>;
+type OpponentMayChoiceWaitingFor = Extract<WaitingFor, { type: "OpponentMayChoice" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
 /**
@@ -207,6 +212,33 @@ export const resolutionOptionalPaymentWaitingForFactory =
       },
     }),
   );
+
+export class OptionalEffectChoiceWaitingForFactory extends PlayerWaitingForFactory<OptionalEffectChoiceWaitingFor> {}
+
+export const optionalEffectChoiceWaitingForFactory =
+  OptionalEffectChoiceWaitingForFactory.define((): OptionalEffectChoiceWaitingFor => ({
+    type: "OptionalEffectChoice",
+    data: {
+      player: 0,
+      source_id: 1,
+      description: undefined,
+      may_trigger_key: undefined,
+      same_card_may_trigger_choice_available: false,
+    },
+  }));
+
+export class OpponentMayChoiceWaitingForFactory extends PlayerWaitingForFactory<OpponentMayChoiceWaitingFor> {}
+
+export const opponentMayChoiceWaitingForFactory =
+  OpponentMayChoiceWaitingForFactory.define((): OpponentMayChoiceWaitingFor => ({
+    type: "OpponentMayChoice",
+    data: {
+      player: 0,
+      source_id: 1,
+      description: undefined,
+      remaining: [],
+    },
+  }));
 
 export class UntapChoiceWaitingForFactory extends PlayerWaitingForFactory<UntapChoiceWaitingFor> {}
 
@@ -546,6 +578,14 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     );
   }
 
+  optionalEffectChoice(data: Partial<OptionalEffectChoiceWaitingFor["data"]> = {}) {
+    return this.variant(optionalEffectChoiceWaitingForFactory.withData(data).build());
+  }
+
+  opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
+    return this.variant(opponentMayChoiceWaitingForFactory.withData(data).build());
+  }
+
   untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
     return this.variant(untapChoiceWaitingForFactory.withData(data).build());
   }
@@ -809,6 +849,14 @@ export class GameStateFactory extends Factory<GameState> {
     data: Partial<ResolutionOptionalPaymentWaitingFor["data"]> = {},
   ) {
     return this.waitingFor(waitingForFactory.resolutionOptionalPayment(data).build());
+  }
+
+  optionalEffectChoice(data: Partial<OptionalEffectChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.optionalEffectChoice(data).build());
+  }
+
+  opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.opponentMayChoice(data).build());
   }
 
   untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {

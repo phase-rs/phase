@@ -6221,6 +6221,7 @@ mod tests {
             .validate(&WaitingFor::OpponentMayChoice {
                 player: PlayerId(1),
                 source_id: ObjectId(6),
+                decision_subject_id: None,
                 description: None,
                 remaining: Vec::new(),
             })
@@ -6230,6 +6231,7 @@ mod tests {
             optional_effect.validate(&WaitingFor::OpponentMayChoice {
                 player: PlayerId(1),
                 source_id: ObjectId(6),
+                decision_subject_id: None,
                 description: None,
                 remaining: Vec::new(),
             }),
@@ -6393,6 +6395,7 @@ mod tests {
         WaitingFor::OpponentMayChoice {
             player: PlayerId(1),
             source_id: ObjectId(7),
+            decision_subject_id: None,
             description: None,
             remaining: Vec::new(),
         }
@@ -6824,6 +6827,7 @@ mod tests {
         let opponent_may = WaitingFor::OpponentMayChoice {
             player: PlayerId(1),
             source_id: ObjectId(81),
+            decision_subject_id: None,
             description: None,
             remaining: Vec::new(),
         };
@@ -6908,6 +6912,7 @@ mod tests {
         repeated.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -6935,6 +6940,7 @@ mod tests {
         optional.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(102),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -8328,6 +8334,7 @@ mod tests {
         buried_optional.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(151),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,

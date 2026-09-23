@@ -76,6 +76,7 @@ pub(crate) fn complete_discard_to_graveyard(
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         discard_frame,
+        performed_by: None,
         applied,
     };
     match replacement::replace_event(state, proposed, events) {

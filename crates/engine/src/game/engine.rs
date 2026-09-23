@@ -16130,6 +16130,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 }
                 return Ok(Some(WaitingFor::OptionalEffectChoice {
                     player,
+                    decision_subject_id: None,
                     source_id,
                     description: trigger_description,
                     may_trigger_key,
@@ -22179,7 +22180,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            46,
+            53,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -22187,22 +22188,20 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 9, 32),
-            "the partition, not just the total: five PRODUCTION producers, nine PRODUCTION \
-             readers (they read `state.waiting_for` and never write it), 32 `#[cfg(test)]` lines \
-             (the 31st is `sba.rs`'s paused-resolution fixture for the CR 704.4 safety-net guard; \
-             the 32nd is `triggers.rs`'s positive reach-guard row for \
-             `resolution_frame_is_live_off_priority`).\nproducers={producers:#?}\n\
+            (5, 11, 37),
+            "the partition, not just the total: five PRODUCTION producers, eleven PRODUCTION \
+             readers (including the two new optional-subject projection reads), and 37 \
+             `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
             producers,
             vec![
-                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
-                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
-                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
-                "game/effects/scoped_library_search.rs::advance_acceptance {player,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
-                "game/engine.rs::begin_pending_trigger_target_selection {player,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+                "game/effects/mod.rs::drive_sequential_repeated_optional_payment {player:ability.controller,decision_subject_id:None,source_id:ability.source_id,description:ability.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,decision_subject_id,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+                "game/effects/mod.rs::resolve_repeated_optional_payment_choice {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/scoped_library_search.rs::advance_acceptance {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/engine.rs::begin_pending_trigger_target_selection {player,decision_subject_id:None,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
             ],
             "the five production producers, each keyed by its ENCLOSING FUNCTION and the \
              CONSTRUCTION it mints, compared as a sorted MULTISET, so a sixth mint inside one \
@@ -22673,6 +22672,7 @@ mod stage2_injector_tests {
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: asked,
+            decision_subject_id: None,
             source_id: src,
             description: None,
             may_trigger_key: None,
