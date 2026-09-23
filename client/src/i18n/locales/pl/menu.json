@@ -131,7 +131,9 @@
       "feed": "Kanał",
       "user": "Użytkownik",
       "precon": "Precon"
-    }
+    },
+    "brain": "Sterowany przez",
+    "brainEngine": "AI silnika"
   },
   "feedManager": {
     "title": "Zarządzaj kanałami",

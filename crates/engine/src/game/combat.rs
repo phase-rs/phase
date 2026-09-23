@@ -9,10 +9,11 @@ use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{StaticCondition, StaticDefinition, TargetFilter, TargetRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{ExtraPhase, GameState};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit,
@@ -241,6 +242,15 @@ impl<'de> Deserialize<'de> for BlockRequirement {
     }
 }
 
+/// CR 509.1g + CR 400.7: One recorded block. Each creature is pinned to its exact
+/// incarnation, so a creature that left and returned is not mistaken for the one
+/// that blocked or was blocked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct BlockHistoryPair {
+    pub blocker: ObjectIncarnationRef,
+    pub attacker: ObjectIncarnationRef,
+}
+
 /// Tracks the state of the current combat phase.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CombatState {
@@ -282,6 +292,16 @@ pub struct CombatState {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub attacking_incarnations_this_combat: HashSet<ObjectIncarnationRef>,
+    /// CR 509.1g + CR 400.7: Every blocker/attacker pair recorded as blocking
+    /// this combat, each side pinned to its exact incarnation. Historical
+    /// record, not live blocker membership: CR 506.4 does not prune it, so a
+    /// trigger that resolves after either creature left combat can still read
+    /// it.
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub creature_blocked_attackers_this_combat: HashSet<BlockHistoryPair>,
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
@@ -312,6 +332,8 @@ impl PartialEq for CombatState {
             && self.creature_attacked_defenders_this_combat
                 == other.creature_attacked_defenders_this_combat
             && self.attacking_incarnations_this_combat == other.attacking_incarnations_this_combat
+            && self.creature_blocked_attackers_this_combat
+                == other.creature_blocked_attackers_this_combat
             && self.first_strike_done == other.first_strike_done
             && self.first_strike_participants == other.first_strike_participants
     }
@@ -507,6 +529,34 @@ fn record_combat_membership_edit(
             cause,
         })
         .expect("resolved combat membership must have a live journal cause");
+}
+
+/// CR 509.1g + CR 400.7: Records one (blocker, attacker) pair into the
+/// block-history windows. Single authority, so the live declaration path, the
+/// CR 506.3e put-onto-the-battlefield-blocking path and the CR 733 replay applier
+/// cannot drift. The caller supplies the blocker's exact incarnation from its
+/// own authority; the attacker's is captured from the live object, and an
+/// attacker with no live object records nothing.
+fn record_block_history(
+    state: &mut GameState,
+    blocker: ObjectIncarnationRef,
+    attacker_id: ObjectId,
+) {
+    let Some(attacker_ref) = state
+        .objects
+        .get(&attacker_id)
+        .map(ObjectIncarnationRef::from_object)
+    else {
+        return;
+    };
+    let pair = BlockHistoryPair {
+        blocker,
+        attacker: attacker_ref,
+    };
+    if let Some(combat) = state.combat.as_mut() {
+        combat.creature_blocked_attackers_this_combat.insert(pair);
+    }
+    state.creature_blocked_attackers_this_turn.insert(pair);
 }
 
 /// CR 508.4: Place a permanent onto the battlefield attacking.
@@ -785,13 +835,15 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
         .push(blocker_id);
     // CR 509.1a tracking: record the blocker for per-turn "blocked this turn" queries.
     state.creatures_blocked_this_turn.insert(blocker_id);
+    // CR 509.1g + CR 400.7: record the pair into the block-history
+    // windows through the single write authority.
+    record_block_history(state, reference, attacker_id);
     // CR 506.4 + CR 613.1f: a new blocking creature can satisfy Layer 6
     // `FilterProp::Blocking` grants; re-evaluate continuous effects.
     state.layers_dirty.mark_full();
-    // CR 733: journal the settled block. All four writes above (the sticky
-    // blocked bit, both blocker maps, and the per-turn blocked set) follow
-    // structurally from this blocker/attacker pair, so the pair plus the prior
-    // blocked bit is the whole receipt.
+    // CR 733: journal the settled block. Every write above follows structurally
+    // from this blocker/attacker pair, so the pair plus the prior blocked bit is
+    // the whole receipt.
     record_combat_membership_edit(
         state,
         reference,
@@ -925,7 +977,7 @@ pub fn apply_resolved_combat_membership(
                     },
                 );
             }
-            // CR 509.1h then CR 509.1g: the same four writes the live authority
+            // CR 509.1h then CR 509.1g: the same writes the live authority
             // performed, in the same order.
             info.blocked = true;
             combat
@@ -939,6 +991,7 @@ pub fn apply_resolved_combat_membership(
                 .or_default()
                 .push(object_id);
             state.creatures_blocked_this_turn.insert(object_id);
+            record_block_history(state, command.object, *resulting_attacker);
         }
         ResolvedCombatMembershipEdit::MarkBlocked => {
             let combat = state
@@ -1168,17 +1221,49 @@ fn validate_attackers_with_cap(
     Ok(())
 }
 
+/// CR 508.1c + CR 611.2c: the attacker restriction in force for ONE combat
+/// phase, paired with the source object its filter resolves against. The pair
+/// is what `ExtraPhase` stores for a scheduled combat and what
+/// `GameState.current_combat_attacker_restriction{,_source}` stores for the one
+/// in progress.
+#[derive(Clone, Copy)]
+struct AttackerRestriction<'a> {
+    filter: Option<&'a TargetFilter>,
+    source: Option<ObjectId>,
+}
+
+impl<'a> AttackerRestriction<'a> {
+    /// The restriction of the combat phase in progress, or none outside one.
+    fn current(state: &'a GameState) -> Self {
+        Self {
+            filter: state.current_combat_attacker_restriction.as_ref(),
+            source: state.current_combat_attacker_restriction_source,
+        }
+    }
+
+    /// CR 500.8: the restriction a scheduled phase will impose when it begins —
+    /// readable before `turns.rs` makes it current.
+    fn scheduled(extra: &'a ExtraPhase) -> Self {
+        Self {
+            filter: extra.attacker_restriction.as_ref(),
+            source: extra.attacker_restriction_source,
+        }
+    }
+}
+
 /// CR 508.1c + CR 611.2c: A creature may be declared as an attacker during a
-/// restricted additional combat phase (Last Night Together / Bumi) only if it
-/// matches the active filter. The restriction is a rules-modifying continuous
+/// restricted combat phase (Last Night Together / Bumi) only if it matches
+/// the active filter. The restriction is a rules-modifying continuous
 /// effect (re-evaluated per declaration), so it correctly covers creatures that
 /// entered after the scheduling spell resolved (`Typed` subjects) while a
 /// fixed `TrackedSet`/`SpecificObject` membership stays constant. `None` (no
-/// restriction) permits every creature. This is the single shared authority the
-/// candidate-set query, the declaration gate, and the AI fallback all route
-/// through.
-pub fn passes_combat_attacker_restriction(state: &GameState, obj_id: ObjectId) -> bool {
-    match &state.current_combat_attacker_restriction {
+/// restriction) permits every creature.
+fn passes_attacker_restriction(
+    state: &GameState,
+    restriction: AttackerRestriction<'_>,
+    obj_id: ObjectId,
+) -> bool {
+    match restriction.filter {
         None => true,
         // CR 500.10a + CR 508.1c: the restricted extra combat phase is only ever
         // added to the active player's turn (the scheduling spell's controller),
@@ -1200,13 +1285,16 @@ pub fn passes_combat_attacker_restriction(state: &GameState, obj_id: ObjectId) -
             obj_id,
             filter,
             &FilterContext::from_source_with_controller(
-                state
-                    .current_combat_attacker_restriction_source
-                    .unwrap_or(ObjectId(0)),
+                restriction.source.unwrap_or(ObjectId(0)),
                 state.active_player,
             ),
         ),
     }
+}
+
+/// CR 508.1c + CR 611.2c: the current-combat caller of `passes_attacker_restriction`.
+pub fn passes_combat_attacker_restriction(state: &GameState, obj_id: ObjectId) -> bool {
+    passes_attacker_restriction(state, AttackerRestriction::current(state), obj_id)
 }
 
 /// CR 508.1c: The global "no more than N creatures can attack each combat" cap
@@ -4555,39 +4643,156 @@ fn active_attacking_team(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
+/// CR 508.1a + CR 805.10a: whether `player` is a member of the team that
+/// would attack this turn (the active player and their teammates),
+/// independent of whether combat has started.
+pub fn is_on_attacking_team(state: &GameState, player: PlayerId) -> bool {
+    active_attacking_team(state).contains(&player)
+}
+
+/// CR 500.1 + CR 506.1 + CR 508.1: whether the declare-attackers step of the
+/// combat phase this turn is IN — or has not yet reached — is still ahead with
+/// the attacking team yet to declare. Reads `state.phase` and `state.combat`
+/// only; a combat phase that is merely scheduled is the other arm of
+/// `attacker_declaration_pending_for`.
+///
+/// CR 508.1 performs the declaration once per combat phase as a turn-based
+/// action, and CR 508.2 gives priority only afterwards, so a creature not chosen
+/// then cannot join the combat in progress — CR 506.4 lists the ways a permanent
+/// leaves combat and has no counterpart for joining one late.
+fn declaration_pending_at_current_phase(state: &GameState) -> bool {
+    match state.phase {
+        // CR 500.1 + CR 506.1: the declare-attackers step of this turn's combat
+        // phase is still ahead.
+        Phase::Untap | Phase::Upkeep | Phase::Draw | Phase::PreCombatMain | Phase::BeginCombat => {
+            true
+        }
+        // CR 508.1k: the chosen creatures become attacking creatures, so an
+        // attacking creature is the mark that the turn-based action has run.
+        // CR 508.8 keeps the empty declaration out of this arm: the engine
+        // leaves the step immediately when nothing is declared (pinned by
+        // `declaration_pending_at_current_phase_survives_an_empty_declaration`).
+        Phase::DeclareAttackers => state
+            .combat
+            .as_ref()
+            .is_none_or(|combat| combat.attackers.is_empty()),
+        Phase::DeclareBlockers
+        | Phase::CombatDamage
+        | Phase::EndCombat
+        | Phase::PostCombatMain
+        | Phase::End
+        | Phase::Cleanup => false,
+    }
+}
+
+/// CR 500.8 + CR 508.1 + CR 508.1c: whether `obj_id` could still be declared as
+/// an attacker at some declare-attackers step this turn that has not happened
+/// yet.
+///
+/// Each pending declaration carries its own CR 508.1c attacker restriction, so
+/// the CR 508.1a per-creature test is applied INSIDE each one rather than once
+/// outside all of them:
+///
+/// * the declare-attackers step of the phase the turn is at, under the
+///   restriction of the combat in progress; and
+/// * each combat phase already on `state.extra_phases`, under the restriction
+///   that entry carries. `turns.rs` copies that restriction into
+///   `state.current_combat_attacker_restriction` only when the phase begins, so
+///   a query made before then must read it from the entry (pinned by
+///   `attacker_declaration_pending_for_reads_each_scheduled_combats_own_restriction`).
+///
+/// This is the lifecycle question `get_valid_attacker_ids` does not answer: that
+/// helper applies CR 508.1a's per-creature restrictions to the whole team
+/// whatever the phase, so a ready creature that sat out the declaration stays in
+/// its result (pinned by
+/// `declaration_pending_at_current_phase_is_false_once_attackers_are_declared`).
+///
+/// Conservative in one direction only. It answers from the current game state,
+/// so an additional combat no effect has scheduled yet reads as absent, and a
+/// scheduled entry whose anchor phase has already passed still reads as pending
+/// (the entry filter is `extra.phase == Phase::BeginCombat`, the same one
+/// `analysis/resource.rs` counts queued extra combats with; anchor reachability
+/// is not modelled).
+pub fn attacker_declaration_pending_for(state: &GameState, obj_id: ObjectId) -> bool {
+    // CR 604.1: one hoisted static-presence sweep for every arm below, as
+    // `get_valid_attacker_ids` does for its list.
+    let gates = CombatStaticGates::compute(state);
+    let active_team = active_attacking_team(state);
+    if declaration_pending_at_current_phase(state)
+        && team_attacker_eligible(
+            state,
+            obj_id,
+            &gates,
+            &active_team,
+            AttackerRestriction::current(state),
+        )
+    {
+        return true;
+    }
+    state.extra_phases.iter().any(|extra| {
+        extra.phase == Phase::BeginCombat
+            && team_attacker_eligible(
+                state,
+                obj_id,
+                &gates,
+                &active_team,
+                AttackerRestriction::scheduled(extra),
+            )
+    })
+}
+
 /// CR 508.1a + CR 805.10a: eligible attacker ids for the whole attacking team,
 /// applying every creature-level restriction `get_valid_attacker_ids` applies,
 /// but keyed to team membership rather than the literal active player.
 fn team_eligible_attacker_ids(state: &GameState, gates: &CombatStaticGates) -> Vec<ObjectId> {
     let active_team = active_attacking_team(state);
+    let restriction = AttackerRestriction::current(state);
     let mut ids: Vec<ObjectId> = state
-        .battlefield_phased_in_ids()
+        .battlefield
         .iter()
-        .filter_map(|id| {
-            let obj = state.objects.get(id)?;
-            let eligible = active_team.contains(&obj.controller)
-                && obj.card_types.core_types.contains(&CoreType::Creature)
-                && !obj.tapped
-                && (!obj.has_keyword(&Keyword::Defender)
-                    || super::functioning_abilities::active_static_definitions(state, obj)
-                        .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                    || (gates.has_can_attack_with_defender
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::CanAttackWithDefender,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(*id),
-                                ..Default::default()
-                            },
-                        )))
-                && !creature_cant_attack_gated(state, *id, gates)
-                && !has_summoning_sickness(obj)
-                && passes_combat_attacker_restriction(state, *id);
-            eligible.then_some(*id)
-        })
+        .copied()
+        .filter(|id| team_attacker_eligible(state, *id, gates, &active_team, restriction))
         .collect();
     ids.sort_unstable_by_key(|id| id.0);
     ids
+}
+
+/// CR 508.1a + CR 805.10a: whether ONE object is an eligible attacker for the
+/// attacking team, under a named combat phase's CR 508.1c restriction rather
+/// than always the current one — which is what lets a query about a combat
+/// phase that has not begun yet reuse this body instead of copying it.
+/// CR 702.26b: the phased-in check lives here, so a caller that arrives with a
+/// single id is gated the same way the list path is.
+fn team_attacker_eligible(
+    state: &GameState,
+    obj_id: ObjectId,
+    gates: &CombatStaticGates,
+    active_team: &[PlayerId],
+    restriction: AttackerRestriction<'_>,
+) -> bool {
+    let Some(obj) = state.objects.get(&obj_id) else {
+        return false;
+    };
+    obj.is_phased_in()
+        && state.battlefield.contains(&obj_id)
+        && active_team.contains(&obj.controller)
+        && obj.card_types.core_types.contains(&CoreType::Creature)
+        && !obj.tapped
+        && (!obj.has_keyword(&Keyword::Defender)
+            || super::functioning_abilities::active_static_definitions(state, obj)
+                .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
+            || (gates.has_can_attack_with_defender
+                && crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CanAttackWithDefender,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(obj_id),
+                        ..Default::default()
+                    },
+                )))
+        && !creature_cant_attack_gated(state, obj_id, gates)
+        && !has_summoning_sickness(obj)
+        && passes_attacker_restriction(state, restriction, obj_id)
 }
 
 impl AttackDeclarationConstraints {
@@ -6259,6 +6464,24 @@ pub fn declare_blockers_for_player(
 
     propagate_banding_block_state(combat);
 
+    // CR 509.1g + CR 702.22h: read the pairs back from the live authority AFTER
+    // banding propagation, so a band member the defending player never chose —
+    // which CR 702.22h makes blocked by this blocker — is recorded with the
+    // explicitly chosen ones. Scoped to the blockers this declaration named, so a
+    // co-defender's earlier declaration is not re-recorded.
+    let declared_pairs: Vec<(ObjectId, ObjectId)> = assignments
+        .iter()
+        .flat_map(|(blocker_id, _)| {
+            combat
+                .blocker_to_attacker
+                .get(blocker_id)
+                .into_iter()
+                .flatten()
+                .map(|attacker_id| (*blocker_id, *attacker_id))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     // CR 509.1a: Record blocker object IDs for per-turn tracking.
     state
         .creatures_blocked_this_turn
@@ -6271,6 +6494,20 @@ pub fn declare_blockers_for_player(
         .pending_blocker_declaration_events
         .push(event.clone());
     events.push(event);
+
+    for (blocker_id, attacker_id) in declared_pairs {
+        // CR 509.1g + CR 400.7: the blocker is live on the battlefield —
+        // `validate_blockers_for_player` ran at entry — so its exact
+        // incarnation is read from the live object.
+        let Some(blocker_ref) = state
+            .objects
+            .get(&blocker_id)
+            .map(ObjectIncarnationRef::from_object)
+        else {
+            continue;
+        };
+        record_block_history(state, blocker_ref, attacker_id);
+    }
 
     Ok(())
 }
@@ -12017,6 +12254,283 @@ mod tests {
         // CR 805.10a: attacking your own team is a hard target-validity restriction,
         // now surfaced through the unified per-pairing restriction message.
         assert!(err.contains("can't attack"), "err={err}");
+    }
+
+    /// CR 508.1a + CR 805.10a: `is_on_attacking_team` answers about the whole
+    /// attacking team (active player ∪ teammates), not only the literal
+    /// active player.
+    #[test]
+    fn is_on_attacking_team_covers_the_active_player_and_their_teammate() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        // Plain active-player arm.
+        assert!(is_on_attacking_team(&state, PlayerId(0)));
+        // Teammate arm: PlayerId(1) is not the active player but shares
+        // PlayerId(0)'s team in Two-Headed Giant.
+        assert!(is_on_attacking_team(&state, PlayerId(1)));
+        // Defending team: neither opponent is on the attacking team.
+        assert!(!is_on_attacking_team(&state, PlayerId(2)));
+        assert!(!is_on_attacking_team(&state, PlayerId(3)));
+    }
+
+    /// CR 500.1 + CR 506.1: the whole `=> true` arm group reads as pending
+    /// with no combat state yet, and so does a `DeclareAttackers` board whose
+    /// `CombatState` exists but has no attackers declared (the `is_none_or`
+    /// pre-declaration arm).
+    #[test]
+    fn declaration_pending_at_current_phase_is_true_before_the_declaration() {
+        let mut state = setup();
+        for phase in [
+            Phase::Untap,
+            Phase::Upkeep,
+            Phase::Draw,
+            Phase::PreCombatMain,
+            Phase::BeginCombat,
+        ] {
+            state.phase = phase;
+            state.combat = None;
+            assert!(
+                declaration_pending_at_current_phase(&state),
+                "{phase:?} must read as pending with no combat state yet"
+            );
+        }
+
+        state.phase = Phase::DeclareAttackers;
+        state.combat = Some(CombatState::default());
+        assert!(declaration_pending_at_current_phase(&state));
+    }
+
+    /// CR 508.1k: once attackers are declared, the whole `=> false` arm group
+    /// reads as no longer pending -- not just the immediate post-declaration
+    /// `DeclareAttackers` board. A split of any member out of that arm group
+    /// (M14) is what this loop is written to catch.
+    #[test]
+    fn declaration_pending_at_current_phase_is_false_once_attackers_are_declared() {
+        let mut state = setup();
+        let ready = create_creature(&mut state, PlayerId(0), "Ready", 2, 2);
+        let declared = create_creature(&mut state, PlayerId(0), "Declared", 2, 2);
+        state.phase = Phase::DeclareAttackers;
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(declared, PlayerId(1))],
+            ..Default::default()
+        });
+        assert!(!declaration_pending_at_current_phase(&state));
+        assert!(get_valid_attacker_ids(&state).contains(&ready));
+
+        for phase in [
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+            Phase::PostCombatMain,
+            Phase::End,
+            Phase::Cleanup,
+        ] {
+            state.phase = phase;
+            assert!(
+                !declaration_pending_at_current_phase(&state),
+                "{phase:?} must stay non-pending once attackers are declared"
+            );
+        }
+    }
+
+    /// CR 508.8: an empty declaration is a legal declare-attackers turn-based
+    /// action, and the engine leaves the step immediately when it happens --
+    /// this drives that through the real engine rather than assuming it.
+    #[test]
+    fn declaration_pending_at_current_phase_survives_an_empty_declaration() {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // A legal potential attacker must exist, or
+        // `WaitingFor::DeclareAttackers` is never surfaced to the caller --
+        // there would be nothing for `declare_attackers(&[])` to decline.
+        scenario.add_creature(PlayerId(0), "Ready Non-Attacker", 2, 2);
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::DeclareAttackers);
+        assert!(matches!(
+            runner.state().waiting_for,
+            crate::types::game_state::WaitingFor::DeclareAttackers { .. }
+        ));
+        runner
+            .declare_attackers(&[])
+            .expect("CR 508.8: an empty declaration must be legal");
+
+        assert_ne!(
+            runner.state().phase,
+            Phase::DeclareAttackers,
+            "CR 508.8: an empty declaration must skip past declare-attackers"
+        );
+        assert!(!declaration_pending_at_current_phase(runner.state()));
+    }
+
+    /// CR 508.1c + CR 611.2c + CR 500.8: `attacker_declaration_pending_for`
+    /// evaluates a scheduled combat's per-creature eligibility under THAT
+    /// combat's own restriction — read off the queued `ExtraPhase` entry, not
+    /// off `state.current_combat_attacker_restriction` — because `turns.rs`
+    /// does not copy a scheduled restriction into the current-combat fields
+    /// until the phase actually begins. Bumi's `Typed` shape: land creatures
+    /// pass, non-land creatures do not.
+    #[test]
+    fn attacker_declaration_pending_for_reads_each_scheduled_combats_own_restriction() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        let source = create_creature(&mut state, PlayerId(0), "Bumi Stand-In", 3, 3);
+        let declared = create_creature(&mut state, PlayerId(0), "Declared", 2, 2);
+        let plain = create_creature(&mut state, PlayerId(0), "Plain", 2, 2);
+        let land_creature = create_creature(&mut state, PlayerId(0), "Land Creature", 2, 2);
+        state
+            .objects
+            .get_mut(&land_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        state.phase = Phase::PostCombatMain;
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(declared, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // Reach guard: no restriction is current, so the pre-fix scan would
+        // have admitted both creatures.
+        let valid = get_valid_attacker_ids(&state);
+        assert!(valid.contains(&plain));
+        assert!(valid.contains(&land_creature));
+
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PostCombatMain,
+            phase: Phase::BeginCombat,
+            attacker_restriction: Some(TargetFilter::Typed(
+                TypedFilter::land().with_type(TypeFilter::Creature),
+            )),
+            attacker_restriction_source: Some(source),
+        });
+        assert!(!attacker_declaration_pending_for(&state, plain));
+        assert!(attacker_declaration_pending_for(&state, land_creature));
+
+        // Negative sibling: a non-combat extra phase must not open either arm.
+        state.extra_phases.clear();
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PostCombatMain,
+            phase: Phase::Untap,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+        assert!(!attacker_declaration_pending_for(&state, plain));
+        assert!(!attacker_declaration_pending_for(&state, land_creature));
+
+        // Second negative sibling: with no extra_phases at all, both read
+        // false -- pinning that the queued arm is the only thing the
+        // restricted entry above changed.
+        state.extra_phases.clear();
+        assert!(!attacker_declaration_pending_for(&state, plain));
+        assert!(!attacker_declaration_pending_for(&state, land_creature));
+
+        // Carried over from the test this replaces: a single unrestricted
+        // queued combat reopens the window for both creatures.
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PostCombatMain,
+            phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+        assert!(attacker_declaration_pending_for(&state, plain));
+        assert!(attacker_declaration_pending_for(&state, land_creature));
+    }
+
+    /// CR 508.1c + CR 500.8: the queued arm is an `any(..)` over EVERY scheduled
+    /// combat, each under its own restriction — not the first, not the last,
+    /// and not an intersection of them. Two queued combats with different
+    /// restrictions, each admitting a different creature and neither admitting
+    /// a third, is the fixture that discriminates all three wrong
+    /// simplifications from the real disjunction.
+    #[test]
+    fn attacker_declaration_pending_for_admits_an_object_any_scheduled_combat_allows() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        let source = create_creature(&mut state, PlayerId(0), "Scheduling Source", 3, 3);
+        let plain = create_creature(&mut state, PlayerId(0), "Plain", 2, 2);
+        let land_creature = create_creature(&mut state, PlayerId(0), "Land Creature", 2, 2);
+        state
+            .objects
+            .get_mut(&land_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let named = create_creature(&mut state, PlayerId(0), "Named", 2, 2);
+
+        state.phase = Phase::PostCombatMain;
+        state.combat = Some(CombatState::default());
+
+        // Reach guard: no restriction is current, so all three read as valid
+        // attackers by `get_valid_attacker_ids`.
+        let valid = get_valid_attacker_ids(&state);
+        assert!(valid.contains(&plain));
+        assert!(valid.contains(&land_creature));
+        assert!(valid.contains(&named));
+
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PostCombatMain,
+            phase: Phase::BeginCombat,
+            attacker_restriction: Some(TargetFilter::Typed(
+                TypedFilter::land().with_type(TypeFilter::Creature),
+            )),
+            attacker_restriction_source: Some(source),
+        });
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PostCombatMain,
+            phase: Phase::BeginCombat,
+            attacker_restriction: Some(TargetFilter::SpecificObject { id: named }),
+            attacker_restriction_source: Some(source),
+        });
+
+        assert!(!attacker_declaration_pending_for(&state, plain));
+        assert!(attacker_declaration_pending_for(&state, land_creature));
+        assert!(attacker_declaration_pending_for(&state, named));
+    }
+
+    /// CR 508.1c + CR 500.8: a restriction that is CURRENT (a Bumi-shaped combat
+    /// already in progress) must not close the queued arm for a scheduled
+    /// combat that carries no restriction of its own. Composing the two
+    /// restrictions instead of keeping them separate produces a false penalty
+    /// on a creature the live restriction excludes but the queued unrestricted
+    /// combat would still admit.
+    #[test]
+    fn attacker_declaration_pending_for_ignores_the_live_restriction_for_a_scheduled_combat() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::game_state::ExtraPhase;
+
+        let mut state = setup();
+        let source = create_creature(&mut state, PlayerId(0), "Bumi Stand-In", 3, 3);
+        let plain = create_creature(&mut state, PlayerId(0), "Plain", 2, 2);
+
+        state.phase = Phase::BeginCombat;
+        state.current_combat_attacker_restriction = Some(TargetFilter::Typed(
+            TypedFilter::land().with_type(TypeFilter::Creature),
+        ));
+        state.current_combat_attacker_restriction_source = Some(source);
+
+        // Reach guard: this is exactly the value HEAD's conjunct reads, and
+        // reading it for the queued arm is what produces the false penalty.
+        assert!(!get_valid_attacker_ids(&state).contains(&plain));
+
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::PostCombatMain,
+            phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+
+        assert!(attacker_declaration_pending_for(&state, plain));
     }
 
     #[test]

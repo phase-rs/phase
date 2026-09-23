@@ -183,6 +183,7 @@
     "packProgress": "Booster {{current}} sur {{total}}",
     "openPack": "Ouvrir le booster",
     "openPackArt": "Ouvrir l’illustration du booster",
+    "openAllPacks": "Ouvrir tous les boosters",
     "pulls": "Vos cartes",
     "nextPack": "Booster suivant",
     "viewPool": "Voir votre pool",

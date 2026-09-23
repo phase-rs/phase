@@ -1,0 +1,33 @@
+[package]
+name = "phase-llm"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+# Engine-owned LLM opponent support: provider wire formats, prompt rendering and
+# response parsing. This crate contains NO networking. It builds an
+# `HttpRequestSpec` for a transport to execute and parses the raw response body
+# back into an engine-domain decision, so every LLM opponent behaviour lives in
+# Rust and the transport layer stays a thin serialization boundary.
+
+[dependencies]
+engine = { path = "../engine", package = "phase-engine" }
+phase-ai = { path = "../phase-ai" }
+draft-core = { path = "../draft-core", optional = true }
+serde = { workspace = true }
+serde_json = "1"
+
+[dev-dependencies]
+# The established URL authority, used to PROVE the request-boundary property in
+# tests: every emitted request URL must resolve to the validated host under an
+# http document base, an https document base, and no base at all. A
+# dev-dependency deliberately -- this must not add weight to the size-tuned wasm
+# artifacts, and the runtime rule it verifies needs no parser, because only one
+# spelling is accepted.
+url = "2"
+
+[features]
+default = []
+# Draft-pod prompt rendering. Gated so `engine-wasm` (a game-only consumer)
+# never pulls `draft-core` into its size-tuned wasm artifact.
+draft = ["dep:draft-core"]

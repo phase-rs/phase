@@ -3,8 +3,8 @@ import { registerSW } from "virtual:pwa-register";
 import { isBundledTauriOrigin } from "../services/platform";
 import { markRemoteLoadOk } from "../services/legacyMigration";
 import { getEffectiveOffline, subscribeEffectiveOffline } from "../stores/connectivityStore";
-import { deferUntilMultiplayerSessionEnds } from "./multiplayerGuard";
-import { claimServiceWorkerReload, markPendingAutoUpdate } from "./updateMarker";
+import { deferUntilMultiplayerSessionEnds, isMultiplayerGameLive } from "./multiplayerGuard";
+import { claimServiceWorkerReload, hasServiceWorkerReloadBudget, markPendingAutoUpdate } from "./updateMarker";
 import {
   claimUpdateStatus,
   clearUpdateError,
@@ -21,6 +21,7 @@ const ACTIVATION_TIMEOUT_MS = 20 * 1000;
 const PROGRESS_TICK_MS = 200;
 const PROGRESS_RATE = 0.08;
 const PROGRESS_CEILING = 95;
+const BUILD_CHECK_TIMEOUT_MS = 5_000;
 
 type Registration = ServiceWorkerRegistration;
 type LifecycleStatus = "checking" | "deferred" | null;
@@ -86,6 +87,9 @@ let progressIntervalId: number | null = null;
 let activationTimeoutId: number | null = null;
 let simulatedProgress = 0;
 let markerProbeSequence = 0;
+// Notified by `submitRetainedReload` only once the reload budget is claimed
+// and `window.location.reload()` is about to run.
+const needReloadListeners = new Set<() => void>();
 
 interface ShellProbe {
   readonly candidate: Lifecycle;
@@ -373,6 +377,7 @@ function submitRetainedReload(candidate: Lifecycle): void {
     markPendingAutoUpdate();
     settleLifecycleStatus(candidate);
     pushUpdateDebug("Service worker update ready; reloading.");
+    for (const listener of needReloadListeners) listener();
     window.location.reload();
   }, "reload");
   if (scheduled.deferred) {
@@ -466,6 +471,103 @@ export function checkForServiceWorkerUpdate(): boolean {
     return false;
   }
   void requestCheck(candidate, "manual");
+  return true;
+}
+
+export type DeployedBuildStatus = "current" | "stale" | "unknown";
+export type BuildUpdateOutcome = "reloading" | "manual";
+
+/**
+ * Compares the deployed build (`/build.json`, network-only) with this bundle's
+ * `__BUILD_HASH__`. Any failure to read it is `"unknown"`, never `"stale"`.
+ */
+export async function checkDeployedBuild(): Promise<DeployedBuildStatus> {
+  try {
+    const response = await fetch("/build.json", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(BUILD_CHECK_TIMEOUT_MS),
+    });
+    if (!response.ok) return "unknown";
+    const payload: unknown = await response.json();
+    const build = payload !== null && typeof payload === "object" ? (payload as { build?: unknown }).build : undefined;
+    if (typeof build !== "string") return "unknown";
+    return build === __BUILD_HASH__ ? "current" : "stale";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Moves this tab onto the deployed build. `"reloading"` means a reload is
+ * running now; `"manual"` means none happened within `deadlineMs` and the user
+ * must choose. The deadline bounds this wait only: a worker still downloading
+ * at the deadline may activate later and reload the tab through the usual
+ * `onNeedReload` path (see `isBuildUpdateInFlight`).
+ */
+export function updateToLatestBuild({ deadlineMs }: { deadlineMs: number }): Promise<BuildUpdateOutcome> {
+  // A live game is never reloaded from here, on any branch; with no budget left
+  // no automatic reload can happen this session.
+  if (isMultiplayerGameLive() || !hasServiceWorkerReloadBudget()) return Promise.resolve("manual");
+  if (!("serviceWorker" in navigator) || navigator.serviceWorker.controller === null) {
+    // Nothing is cached by a worker, so a plain reload fetches the deployed
+    // build. It spends the same per-session budget as the worker path.
+    claimServiceWorkerReload();
+    markPendingAutoUpdate();
+    window.location.reload();
+    return Promise.resolve("reloading");
+  }
+  const candidate = lifecycle;
+  if (
+    !candidate
+    || !isCurrent(candidate)
+    || getEffectiveOffline()
+    // Registration failed and nothing is pending: no check will run in this document.
+    || (candidate.attempt === null && candidate.registration === null)
+  ) {
+    return Promise.resolve("manual");
+  }
+  return new Promise((resolve) => {
+    const settle = (outcome: BuildUpdateOutcome) => {
+      window.clearTimeout(timeoutId);
+      needReloadListeners.delete(listener);
+      resolve(outcome);
+    };
+    const listener = () => settle("reloading");
+    const timeoutId = window.setTimeout(() => settle("manual"), deadlineMs);
+    needReloadListeners.add(listener);
+    // Before registration lands, its `onRegisteredSW` → `installScheduler`
+    // runs the "resume" check itself.
+    if (candidate.registration) void requestCheck(candidate, "manual");
+  });
+}
+
+/**
+ * True when this lifecycle may still reload the tab without further user
+ * action. Read live, when the user chooses to continue on this build.
+ *
+ * An installing or waiting worker may still activate: offline does not stop
+ * that, and the reload it triggers is retained and submitted on reconnect. It
+ * may also die (turn redundant), and then nothing reloads; the Discord-link
+ * stash a caller keeps for that reload is bounded by its 10-minute expiry.
+ */
+export function isBuildUpdateInFlight(): boolean {
+  const candidate = lifecycle;
+  if (!candidate || !isCurrent(candidate) || !hasServiceWorkerReloadBudget()) return false;
+  const registration = candidate.registration;
+  return candidate.attempt !== null // registration pending: its onRegisteredSW runs a "resume" check
+    || candidate.checkActive // registration.update() is running and may find a worker
+    || candidate.deferredReload !== null // a reload is retained and not yet run
+    || Boolean(registration?.installing || registration?.waiting); // a worker is downloading or activating
+}
+
+/**
+ * The user-driven Refresh: reloads unless a multiplayer game is live, in which
+ * case it returns `false` and reloads nothing. It does not claim the service
+ * worker reload budget.
+ */
+export function reloadIfNoLiveGame(): boolean {
+  if (isMultiplayerGameLive()) return false;
+  window.location.reload();
   return true;
 }
 

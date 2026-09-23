@@ -12,6 +12,7 @@ import { NonFatalPanicToast } from "./components/modal/NonFatalPanicToast";
 import { StuckDecisionToast } from "./components/modal/StuckDecisionToast";
 import { SplashScreen } from "./components/splash/SplashScreen";
 import { useFeedInitialization } from "./hooks/useFeedInitialization";
+import { useDesktopDeepLinks } from "./hooks/useDesktopDeepLinks";
 import { useHostingSession } from "./hooks/useHostingSession";
 import { migrateSavedDecks } from "./services/deckMigrations";
 import { useDeckLibraryAutoSync } from "./services/visualPacks/deckLibraryAutoSync";
@@ -37,6 +38,7 @@ const DraftSpectatorPage = lazy(() =>
   import("./pages/DraftSpectatorPage").then((m) => ({ default: m.DraftSpectatorPage })),
 );
 const ReplayPage = lazy(() => import("./pages/ReplayPage").then((m) => ({ default: m.ReplayPage })));
+const OpenDesktopPage = lazy(() => import("./pages/OpenDesktopPage").then((m) => ({ default: m.OpenDesktopPage })));
 const TournamentLandingPage = lazy(() => import("./pages/TournamentLandingPage").then((m) => ({ default: m.TournamentLandingPage })));
 const TournamentPage = lazy(() => import("./pages/TournamentPage").then((m) => ({ default: m.TournamentPage })));
 
@@ -70,6 +72,7 @@ function AppContent() {
   const effectiveOffline = useEffectiveOffline();
   const feedInitializationReady = useFeedInitialization(effectiveOffline);
   useHostingSession();
+  useDesktopDeepLinks();
 
   // One-shot localStorage migrations. Must run before cloud-sync init so the
   // first sync sees the canonical (repaired) deck shapes and doesn't push a
@@ -139,6 +142,7 @@ function AppContent() {
           </Route>
           <Route path="/game/:id" element={<GameRouteElement />} />
           <Route path="/replay" element={<ReplayPage />} />
+          <Route path="/open-desktop" element={<OpenDesktopPage />} />
         </Routes>
       </Suspense>
       </ErrorBoundary>

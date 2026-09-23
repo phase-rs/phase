@@ -47,23 +47,32 @@ pub fn apply_debug_action(
             simulate,
         } => {
             validate_object(state, object_id)?;
-            // Debug forces a zone change — route through the zone pipeline under
-            // the `DebugCommand` exempt cause, which is FULLY inert: it skips
-            // both the replacement consult and the delivery tail (no
-            // enters-with-counter statics, no pending-ETB-counter consumption,
-            // no devour snapshot), while the unconditional primitive guards
-            // still run. DebugCommand is non-pausing by construction (always
-            // `Done`), so the result is safely discarded. The library-position
-            // arm folds the raw `move_to_library_position` / `_at_index`
-            // siblings in via the placement request.
-            let mut req = crate::game::zone_pipeline::ZoneMoveRequest::debug(object_id, to_zone);
-            if to_zone == Zone::Library {
-                req = req.at_library_position(library_position.unwrap_or(LibraryPosition::Bottom));
-            }
-            crate::game::zone_pipeline::move_object(state, req, events);
-            if simulate {
-                super::sba::check_state_based_actions(state, events);
-                super::triggers::process_triggers(state, events);
+            if simulate && to_zone == Zone::Battlefield {
+                // "Run ETB effects": a battlefield entry goes through the real
+                // entry pipeline so enters-with/as-enters replacements apply
+                // and ETB triggers fire, exactly as a debug-created card does.
+                enter_battlefield_with_etb(state, object_id, None, events);
+            } else {
+                // Debug forces a zone change — route through the zone pipeline under
+                // the `DebugCommand` exempt cause, which is FULLY inert: it skips
+                // both the replacement consult and the delivery tail (no
+                // enters-with-counter statics, no pending-ETB-counter consumption,
+                // no devour snapshot), while the unconditional primitive guards
+                // still run. DebugCommand is non-pausing by construction (always
+                // `Done`), so the result is safely discarded. The library-position
+                // arm folds the raw `move_to_library_position` / `_at_index`
+                // siblings in via the placement request.
+                let mut req =
+                    crate::game::zone_pipeline::ZoneMoveRequest::debug(object_id, to_zone);
+                if to_zone == Zone::Library {
+                    req = req
+                        .at_library_position(library_position.unwrap_or(LibraryPosition::Bottom));
+                }
+                crate::game::zone_pipeline::move_object(state, req, events);
+                if simulate {
+                    super::sba::check_state_based_actions(state, events);
+                    super::triggers::process_triggers(state, events);
+                }
             }
             crate::game::layers::mark_layers_full(state);
         }
@@ -862,6 +871,26 @@ pub fn route_debug_create_to_battlefield(
         return route_debug_token_to_battlefield(state, object_id, attach_to);
     }
 
+    enter_battlefield_with_etb(state, object_id, attach_to, &mut events);
+    ActionResult {
+        events,
+        waiting_for: state.waiting_for.clone(),
+        log_entries: vec![],
+    }
+}
+
+/// CR 614.12 + CR 603.6a: Move an existing object onto the battlefield through
+/// the real entry pipeline — the replacement consult (enters tapped, enters
+/// with counters, "as enters" choices), delivery, ETB triggers, then SBAs. A
+/// replacement choice parks on `state.waiting_for`. Shared by debug card
+/// creation and `MoveToZone { simulate: true }`; tokens that already left the
+/// battlefield stay put via the CR 111.8 delivery guard.
+fn enter_battlefield_with_etb(
+    state: &mut GameState,
+    object_id: ObjectId,
+    attach_to: Option<AttachTarget>,
+    events: &mut Vec<GameEvent>,
+) {
     let from = state
         .objects
         .get(&object_id)
@@ -886,7 +915,7 @@ pub fn route_debug_create_to_battlefield(
         applied: HashSet::new(),
     };
 
-    match replacement::replace_event(state, proposed, &mut events) {
+    match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             // CR 614.12a: a Devour as-enters sacrifice may surface its own
             // `EffectZoneChoice`; park on it so the debug-place flow keeps the
@@ -900,26 +929,20 @@ pub fn route_debug_create_to_battlefield(
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
                 None,
-                &mut events,
+                events,
             ) {
                 super::effects::change_zone::ZoneDeliveryResult::Done => {}
                 super::effects::change_zone::ZoneDeliveryResult::NeedsChoice(player) => {
                     replacement::park_waiting_for(state, player);
                 }
             }
-            super::triggers::process_triggers(state, &events); // CR 603: Process triggers
-            super::sba::check_state_based_actions(state, &mut events); // CR 704: Check SBAs
+            super::triggers::process_triggers(state, events); // CR 603: Process triggers
+            super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
         }
         ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
         }
-    }
-
-    ActionResult {
-        events,
-        waiting_for: state.waiting_for.clone(),
-        log_entries: vec![],
     }
 }
 
@@ -1809,6 +1832,7 @@ mod tests {
             display_name: "Test Token".to_string(),
             power: Some(0),
             toughness: Some(0),
+            loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: Vec::new(),
             supertypes: Vec::new(),
@@ -2736,6 +2760,53 @@ mod tests {
             !state.objects.contains_key(&token_id),
             "0/0 token with no counters should be removed by SBA + CR 704.5d",
         );
+    }
+
+    /// CR 614.1c + CR 603.6a: `MoveToZone { simulate: true }` onto the
+    /// battlefield runs the real entry pipeline — the "enters tapped"
+    /// replacement applies and the ETB trigger fires. `simulate: false` stages
+    /// the permanent raw with neither.
+    #[test]
+    fn debug_move_to_battlefield_simulate_runs_etb_effects() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+
+        for simulate in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let id = scenario
+                .add_creature_to_hand_from_oracle(
+                    P0,
+                    "Entering Creature",
+                    2,
+                    2,
+                    "This creature enters tapped.\nWhen this creature enters, you gain 3 life.",
+                )
+                .id();
+            let mut runner = scenario.build();
+            runner.state_mut().debug_mode = true;
+            let life_before = runner.state().players[0].life;
+
+            runner
+                .act(GameAction::Debug(DebugAction::MoveToZone {
+                    object_id: id,
+                    to_zone: Zone::Battlefield,
+                    library_position: None,
+                    simulate,
+                }))
+                .expect("debug MoveToZone battlefield should succeed");
+            runner.advance_until_stack_empty();
+
+            let obj = &runner.state().objects[&id];
+            assert_eq!(obj.zone, Zone::Battlefield);
+            assert_eq!(obj.tapped, simulate, "simulate={simulate}: enters-tapped");
+            let expected_life = life_before + if simulate { 3 } else { 0 };
+            assert_eq!(
+                runner.state().players[0].life,
+                expected_life,
+                "simulate={simulate}: ETB trigger"
+            );
+        }
     }
 
     /// CR 603.2 + CR 121.1: Debug draw must scan CardDrawn events for triggers,

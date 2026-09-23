@@ -70,6 +70,39 @@ fn canonical_client_frames_parse_via_broker() {
     }
 }
 
+/// A canonical create frame's `requested_code` survives the broker's parse.
+#[test]
+fn canonical_create_frame_keeps_requested_code_through_the_broker_parse() {
+    let canonical = sc::ClientMessage::CreateGameWithSettings {
+        deck: sc::DeckData::default(),
+        display_name: "Host".into(),
+        public: true,
+        password: None,
+        timer_seconds: None,
+        player_count: 2,
+        match_config: Default::default(),
+        ai_seats: Vec::new(),
+        format_config: None,
+        room_name: None,
+        host_peer_id: Some("peer-1".into()),
+        draft_metadata: None,
+        start_when_full: true,
+        ranked: false,
+        requested_code: Some("AB12CD".into()),
+        booster_pack_pool: None,
+    };
+    let json = serde_json::to_string(&canonical).unwrap();
+    match lb::parse_lobby_client_message(&json) {
+        lb::ParsedFrame::Message(msg) => match *msg {
+            lb::LobbyClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+            }
+            other => panic!("expected CreateGameWithSettings, got {other:?}"),
+        },
+        other => panic!("expected CreateGameWithSettings, got {other:?}"),
+    }
+}
+
 /// A canonical NON-lobby frame (e.g. game `Action`) must route to the broker's
 /// reject path, not silently parse into a lobby variant.
 #[test]
@@ -105,7 +138,8 @@ fn lobby_server_messages_byte_identical_to_canonical() {
         message: "deck invalid".into(),
         code: Some(lb::ServerErrorCode::DeckRejected),
     };
-    let sc_typed = sc::ServerMessage::deck_rejected("deck invalid");
+    let sc_typed =
+        sc::ServerMessage::error_with_code(sc::ServerErrorCode::DeckRejected, "deck invalid");
     assert_eq!(
         serde_json::to_string(&lb_typed).unwrap(),
         r#"{"type":"Error","data":{"message":"deck invalid","code":"deck_rejected"}}"#
@@ -114,6 +148,24 @@ fn lobby_server_messages_byte_identical_to_canonical() {
         serde_json::to_string(&lb_typed).unwrap(),
         serde_json::to_string(&sc_typed).unwrap()
     );
+
+    // The requested-room-code reasons (lobby protocol 10), through the same
+    // parameterized constructor on both enums.
+    for (code, wire) in [
+        (lb::ServerErrorCode::GameNotFound, "game_not_found"),
+        (lb::ServerErrorCode::CodeInUse, "code_in_use"),
+    ] {
+        let lb_coded = lb::LobbyServerMessage::error_with_code(code, "m");
+        let sc_coded = sc::ServerMessage::error_with_code(code, "m");
+        assert_eq!(
+            serde_json::to_string(&lb_coded).unwrap(),
+            format!(r#"{{"type":"Error","data":{{"message":"m","code":"{wire}"}}}}"#)
+        );
+        assert_eq!(
+            serde_json::to_string(&lb_coded).unwrap(),
+            serde_json::to_string(&sc_coded).unwrap()
+        );
+    }
 
     // Pong.
     let lb_pong = lb::LobbyServerMessage::Pong { timestamp: 7 };

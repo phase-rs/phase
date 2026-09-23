@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use strum::EnumCount;
 
 use super::ability::{
-    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter, QuantityExpr,
-    QuantityRef, TargetFilter,
+    AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter,
+    QuantityExpr, QuantityRef, TargetFilter,
 };
 use super::events::ActivatedAbilityKind;
 use super::identifiers::ObjectIncarnationRef;
@@ -1320,8 +1320,27 @@ pub enum StaticMode {
     /// activated abilities in the specified cost category to be activated at
     /// instant timing. The affected permanent filter lives on `StaticDefinition`.
     /// Canonical class: The Wandering Emperor's same-turn loyalty permission.
+    ///
+    /// `cost_category` alone is coarse: a mana-cost ability class (equip,
+    /// fortify, reconfigure — all `CostCategory::ManaOnly`) would over-grant
+    /// instant-speed permission to every mana-only-cost ability on the
+    /// affected permanent, mana abilities included, and would wrongly *deny*
+    /// the permission to a same-tag ability with a non-mana cost (a
+    /// sacrifice-cost equip-like ability still carries `AbilityTag::Equip`
+    /// per CR 702.6a). `keyword`, when present, replaces the cost-category
+    /// match with an `AbilityTag` match (e.g. `"equip"`) — the tagged class
+    /// is defined by what the ability *is*, not what it costs — mirroring
+    /// `ReduceAbilityCost`'s tag-keyed matching. `cost_category` is then an
+    /// unused placeholder (kept non-`Option` for the untagged case's
+    /// back-compat serialization). `None` keeps the original
+    /// cost-category-only match (Wandering Emperor's loyalty permission,
+    /// where `PaysLoyalty` is already unambiguous). Leonin Shikari's class:
+    /// "You may activate equip abilities any time you could cast an
+    /// instant."
     ActivateAsInstant {
         cost_category: CostCategory,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keyword: Option<AbilityTag>,
     },
     /// CR 118.3 + CR 601.2h + CR 602.2b: The scoped player can't pay a
     /// matching non-mana cost to cast spells or activate abilities.
@@ -2613,8 +2632,12 @@ impl Hash for StaticMode {
                 keyword.hash(state);
                 new_limit.hash(state);
             }
-            StaticMode::ActivateAsInstant { cost_category } => {
+            StaticMode::ActivateAsInstant {
+                cost_category,
+                keyword,
+            } => {
                 cost_category.hash(state);
+                keyword.hash(state);
             }
             StaticMode::CrewContribution { kind, actions } => {
                 kind.hash(state);
@@ -3034,9 +3057,17 @@ impl fmt::Display for StaticMode {
             StaticMode::ModifyActivationLimit { keyword, new_limit } => {
                 write!(f, "ModifyActivationLimit({keyword},{new_limit})")
             }
-            StaticMode::ActivateAsInstant { cost_category } => {
-                write!(f, "ActivateAsInstant({cost_category:?})")
-            }
+            StaticMode::ActivateAsInstant {
+                cost_category,
+                keyword,
+            } => match keyword {
+                Some(kw) => write!(
+                    f,
+                    "ActivateAsInstant({cost_category:?},{})",
+                    kw.keyword_str()
+                ),
+                None => write!(f, "ActivateAsInstant({cost_category:?})"),
+            },
             StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
             StaticMode::CantLoseLife => write!(f, "CantLoseLife"),
@@ -3507,8 +3538,22 @@ impl FromStr for StaticMode {
                 match inner {
                     Some("PaysLoyalty") => StaticMode::ActivateAsInstant {
                         cost_category: CostCategory::PaysLoyalty,
+                        keyword: None,
                     },
-                    _ => StaticMode::Other(s.to_string()),
+                    Some(other) => {
+                        if let Some((category, kw)) = other.split_once(',') {
+                            match (category, AbilityTag::from_keyword_str(kw)) {
+                                ("ManaOnly", Some(tag)) => StaticMode::ActivateAsInstant {
+                                    cost_category: CostCategory::ManaOnly,
+                                    keyword: Some(tag),
+                                },
+                                _ => StaticMode::Other(s.to_string()),
+                            }
+                        } else {
+                            StaticMode::Other(s.to_string())
+                        }
+                    }
+                    None => StaticMode::Other(s.to_string()),
                 }
             }
             "RaiseCost" => StaticMode::ModifyCost {

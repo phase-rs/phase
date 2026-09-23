@@ -100,6 +100,13 @@ const SERVER_BUILD_COMMIT = "lobby-rs";
 // native 10s tokio tick because each alarm wakes the (otherwise hibernating) DO:
 // 60s reaps a stale entry within a minute of the 300s threshold while still
 // letting a fully idle lobby hibernate (the alarm stops rescheduling when empty).
+// The timeout is measured from the listing's last host-liveness refresh
+// (`LobbyManager::check_expired`), not from creation or from the host's last
+// frame: frames advance that clock at most once per `LIVENESS_REFRESH_SECS`
+// (60s), so a listing can be reaped up to 60s sooner than 300s after its host's
+// last frame. Do NOT configure `setWebSocketAutoResponse` for Ping — an
+// auto-responded Ping never reaches the broker and would stop a connected
+// host's listing from being kept alive.
 const REAP_TIMEOUT_SECONDS = 300;
 const REAP_INTERVAL_MS = 60_000;
 

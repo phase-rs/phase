@@ -131,7 +131,9 @@
       "feed": "フィード",
       "user": "ユーザー",
       "precon": "構築済み"
-    }
+    },
+    "brain": "使用するAI",
+    "brainEngine": "エンジンAI"
   },
   "feedManager": {
     "title": "フィードを管理",

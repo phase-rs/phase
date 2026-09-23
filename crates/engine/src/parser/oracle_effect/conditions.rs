@@ -36,10 +36,11 @@ use crate::parser::oracle_ir::effect_chain::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
-    ControllerRef, CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal,
-    FilterProp, GuessOutcome, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
+    CoinFlipResult, Comparator, ControllerRef, CountScope, DamageChannel, DigSource, Duration,
+    Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1765,6 +1766,10 @@ pub(super) fn try_parse_moved_card_subtype_attach_followup(
     let attach = Effect::Attach {
         attachment: TargetFilter::SelfRef,
         target: TargetFilter::ParentTarget,
+        // The attachment is the source; the host is the returned permanent.
+        selection: AttachSelection::AtResolution {
+            count: AttachCardinality::One,
+        },
     };
     Some((condition, attach, is_optional))
 }
@@ -9853,7 +9858,10 @@ mod tests {
         let attach = def
             .sub_ability
             .expect("expected conditional attach sub-ability");
-        let Effect::Attach { attachment, target } = &*attach.effect else {
+        let Effect::Attach {
+            attachment, target, ..
+        } = &*attach.effect
+        else {
             panic!("expected attach sub-ability, got {:?}", attach.effect);
         };
         assert_eq!(*attachment, TargetFilter::TriggeringSource);
@@ -11728,6 +11736,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::ParentTarget,
+                    ..
                 }
             ),
             "moved card must be the attachment (SelfRef) and the source the host (ParentTarget), got {effect:?}"

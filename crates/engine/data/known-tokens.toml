@@ -206,6 +206,11 @@ scryfall_id = "f82fce56-307a-44bf-8c46-0e1328550e17"
 [[token.source_card_refs]]
 card_name = "Fanatic of Rhonas"
 scryfall_oracle_id = "7973820b-fdaf-46ec-9e3e-d4c0e77b5067"
+scryfall_id = "15844392-111e-4bab-91eb-4fe53c52c34c"
+
+[[token.source_card_refs]]
+card_name = "Fanatic of Rhonas"
+scryfall_oracle_id = "7973820b-fdaf-46ec-9e3e-d4c0e77b5067"
 scryfall_id = "1f9fb33a-3b39-4aff-93b8-aedafe0ea694"
 
 [token.token_image_ref]
@@ -250,9 +255,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -729,6 +737,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -848,9 +857,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -970,6 +982,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -2589,6 +2602,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -3538,6 +3552,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -4065,6 +4080,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -4581,6 +4597,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -5746,6 +5763,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -6936,6 +6954,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -6973,6 +6992,215 @@ scryfall_id = "2b3d86bd-0686-42bc-b540-3c1e2cb75e35"
 scryfall_id = "fd2eef3b-9001-477a-8ec4-2a59d906acc6"
 scryfall_oracle_id = "bf690282-125f-431c-a363-39f6772324c8"
 preset_id = "05d27210-820f-5d3f-988c-2c92c209ed6f"
+
+[[token]]
+id = "05d9cd8a-966d-5502-a296-62da2690493d"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Acererak the Archlich",
+    "Aphemia, the Cacophony",
+    "Archdemon of Unx",
+    "Army of the Damned",
+    "Assemble the Rank and Vile",
+    "Awaken the Erstwhile",
+    "Bone Miser",
+    "Boneclad Necromancer",
+    "Bridge from Below",
+    "Captive Audience",
+    "Cellar Door",
+    "Cemetery Reaper",
+    "Cradle of the Accursed",
+    "Cryptbreaker",
+    "Cryptcaller Chariot",
+    "Curse of Disturbance",
+    "Curse of Shallow Graves",
+    "Dark Salvation",
+    "Death Tyrant",
+    "Diregraf Colossus",
+    "Doomed Dissenter",
+    "Drana's Chosen",
+    "Dread Summons",
+    "Drunau Corpse Trawler",
+    "Dunes of the Dead",
+    "Dying to Serve",
+    "Embalmed Ascendant",
+    "Empty the Pits",
+    "Endless Ranks of the Dead",
+    "Feast or Famine",
+    "Field of the Dead",
+    "From Under the Floorboards",
+    "Ghoulcaller Gisa",
+    "Ghoulcaller's Accomplice",
+    "Gisa's Bidding",
+    "Graf Harvest",
+    "Grave Titan",
+    "Gravedig",
+    "Graveyard Marshal",
+    "Grim Reaper's Scythe",
+    "Grixis Slavedriver",
+    "Havengul Runebinder",
+    "Headless Rider",
+    "Hildibrand Manderville // Gentleman's Rise",
+    "Hour of Promise",
+    "Hour of Victory",
+    "Invasion of Innistrad // Deluge of the Dead",
+    "Kalitas, Traitor of Ghet",
+    "Lair of the Ashen Idol",
+    "Liliana's Devotee",
+    "Liliana's Mastery",
+    "Liliana's Reaver",
+    "Liliana, Death's Majesty",
+    "Liliana, Dreadhorde General",
+    "Liliana, Heretical Healer // Liliana, Defiant Necromancer",
+    "Liliana, the Last Hope",
+    "Liliana, the Last Hope Emblem",
+    "Maalfeld Twins",
+    "Magus of the Bridge",
+    "Midnight Ritual",
+    "Moan of the Unhallowed",
+    "Necromancer's Covenant",
+    "Necromancer's Stockpile",
+    "Necromaster Dragon",
+    "Necromentia",
+    "Necrotic Hex",
+    "Never // Return",
+    "Nevinyrral, Urborg Tyrant",
+    "Noosegraf Mob",
+    "Null Caller",
+    "Oath of Liliana",
+    "Oglor, Devoted Assistant",
+    "Open the Graves",
+    "Overseer of the Damned",
+    "Rakshasa Gravecaller",
+    "Rank Officer",
+    "Reap the Seagraf",
+    "Rise from the Tides",
+    "Risen Necroregent",
+    "Rotlung Reanimator",
+    "Rotted Ones, Lay Siege",
+    "Sarcomancy",
+    "Shamble Back",
+    "Sidisi, Brood Tyrant",
+    "Skull Skaab",
+    "Stir the Sands",
+    "Suspicious Shambler",
+    "Syphon Flesh",
+    "The Book of Vile Darkness",
+    "The Fourth Sphere",
+    "The Necrobloom",
+    "Thomil, the Destroyer",
+    "Tobias, Doomed Conqueror",
+    "Tormod, the Desecrator",
+    "Tymaret Calls the Dead",
+    "Undead Alchemist",
+    "Undead Servant",
+    "Unscythe, Killer of Kings",
+    "Varina, Lich Queen",
+    "Vile Rebirth",
+    "Wakedancer",
+    "Wand of Orcus",
+    "Waste Not",
+    "Wight",
+    "Xathrid Necromancer",
+    "Zahur, Glory's Past",
+    "Zombie Infestation",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "5"
+released_at = "2024-11-15"
+type_line = "Token Creature — Zombie"
+
+[token.body]
+display_name = "Zombie"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Zombie"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Ghoulcaller Gisa"
+scryfall_oracle_id = "0dd894cb-1968-471c-af08-ea7ec5ce8428"
+scryfall_id = "909e62fa-4585-495e-812b-5df56af24610"
+
+[[token.source_card_refs]]
+card_name = "Army of the Damned"
+scryfall_oracle_id = "75d667ec-86f4-4850-a3b6-e7a9fc7053b0"
+scryfall_id = "33c01126-1918-4c67-8ee8-14ffc1325b97"
+
+[[token.source_card_refs]]
+card_name = "Liliana's Reaver"
+scryfall_oracle_id = "97332d4e-a55c-4e4f-9040-bf426a7c8e39"
+scryfall_id = "2ee81094-87e3-45a2-8ad8-2610ca52d357"
+
+[[token.source_card_refs]]
+card_name = "Cemetery Reaper"
+scryfall_oracle_id = "70fa209f-5e79-44de-81ce-1d8d0d8c1006"
+scryfall_id = "c179dd0e-4904-457f-b11e-7d267d0bb9eb"
+
+[[token.source_card_refs]]
+card_name = "Kalitas, Traitor of Ghet"
+scryfall_oracle_id = "e1cfd1cb-44a5-429f-a5c1-e6d29bad1c71"
+scryfall_id = "d188a93a-cd9b-4a0b-80fb-738907b228cf"
+
+[[token.source_card_refs]]
+card_name = "Diregraf Colossus"
+scryfall_oracle_id = "fd62ad01-601f-4250-bc2a-8ef3982e45c4"
+scryfall_id = "89a24a9c-ad0d-49df-b7d8-e898da567e51"
+
+[[token.source_card_refs]]
+card_name = "Liliana's Mastery"
+scryfall_oracle_id = "bd104c7e-311e-4b03-98d3-5f20f3a99d26"
+scryfall_id = "8d107d3f-1f6f-41dc-999f-b18bb55bf892"
+
+[[token.source_card_refs]]
+card_name = "Syphon Flesh"
+scryfall_oracle_id = "bc7c3151-ad07-429a-8af8-e4f24b7d9f6b"
+scryfall_id = "e92628a2-9a26-4a44-bb2c-98418cb950b0"
+
+[[token.source_card_refs]]
+card_name = "Moan of the Unhallowed"
+scryfall_oracle_id = "ce87e5ed-2562-4563-9a5b-bd53c04ec4a5"
+scryfall_id = "983efb06-c4e3-4fe4-8a67-9ea9b54344a6"
+
+[[token.source_card_refs]]
+card_name = "Cryptbreaker"
+scryfall_oracle_id = "16f75a65-d067-4f79-81b9-833c373cf4d2"
+scryfall_id = "c9d70cc4-379d-41db-8eb0-10643d2aafd1"
+
+[[token.source_card_refs]]
+card_name = "Headless Rider"
+scryfall_oracle_id = "d4fdacd7-3101-44e2-a880-dde7326137a4"
+scryfall_id = "54280b46-470f-46bd-9407-5bb5e34302b1"
+
+[[token.source_card_refs]]
+card_name = "Grave Titan"
+scryfall_oracle_id = "f3abd4d1-a975-4e85-8684-aa0fce029670"
+scryfall_id = "5bde28a1-635f-48f8-bed8-444921d5912c"
+
+[[token.source_card_refs]]
+card_name = "Open the Graves"
+scryfall_oracle_id = "28778958-a1f9-4fea-b551-c193d1257f18"
+scryfall_id = "9a6bc939-3d31-4a78-9925-27435bec2a67"
+
+[[token.source_card_refs]]
+card_name = "Necrotic Hex"
+scryfall_oracle_id = "a6e720a2-9819-40ec-a811-7812898b531a"
+scryfall_id = "815334d8-8f4b-47dd-b24a-07ac297e14c8"
+
+[[token.source_card_refs]]
+card_name = "Endless Ranks of the Dead"
+scryfall_oracle_id = "69d4ecac-4735-4667-bfc1-c8800b436d08"
+scryfall_id = "859a3a66-dae9-4a67-936d-2681397a6bc2"
+
+[token.token_image_ref]
+scryfall_id = "f7a49477-b7b5-4f0e-885f-e1d2b580c52e"
+scryfall_oracle_id = "ddc8c973-c31e-463f-be45-f3fa7d632362"
+preset_id = "05d9cd8a-966d-5502-a296-62da2690493d"
 
 [[token]]
 id = "0628f530-1f4d-5171-b7d0-da2a155273e6"
@@ -7722,6 +7950,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -8195,6 +8424,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -8237,6 +8467,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -11418,6 +11649,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -11857,6 +12089,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -12437,9 +12670,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -16166,9 +16401,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -16346,9 +16584,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -16541,6 +16782,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -16573,6 +16815,63 @@ scryfall_id = "83245e11-a020-4d81-9d83-e1505f1d125e"
 scryfall_id = "b1b0c498-b457-4865-96da-a69647179456"
 scryfall_oracle_id = "40c64f08-ab2f-4933-8e0e-d1a1c729008f"
 preset_id = "11d7a8d3-7981-51e7-8bed-345c72eff4ba"
+
+[[token]]
+id = "11d95378-83e4-59a0-95fa-0029d75ab6ff"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Angelic Accord",
+    "Angelic Ascension",
+    "Angelic Favor",
+    "Court of Grace",
+    "Decree of Justice",
+    "Descend upon the Sinful",
+    "Devout Invocation",
+    "Empyrial Storm",
+    "Entreat the Angels",
+    "Geist of Saint Traft",
+    "Invocation of Saint Traft",
+    "Luminarch Ascension",
+    "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
+    "Saint Traft and Rem Karolus",
+    "Seraphic Greatsword",
+    "Sigil of the Empty Throne",
+    "Speaker of the Heavens",
+    "Urbis Protector",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "2"
+released_at = "2024-11-15"
+type_line = "Token Creature — Angel"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Angel"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Court of Grace"
+scryfall_oracle_id = "f63c2438-27d4-449a-828f-f0a2ea86ff16"
+scryfall_id = "f0deb485-4895-4a3e-b1a7-e3c969593f97"
+
+[[token.source_card_refs]]
+card_name = "Speaker of the Heavens"
+scryfall_oracle_id = "e4bacf1b-0a45-4c73-857d-dffadb7e6fa5"
+scryfall_id = "2c4d0c8c-5bf7-494f-859b-334ff54b16eb"
+
+[token.token_image_ref]
+scryfall_id = "d41f6ac8-6aa3-45b8-8ab3-8c6065e842be"
+scryfall_oracle_id = "40c64f08-ab2f-4933-8e0e-d1a1c729008f"
+preset_id = "11d95378-83e4-59a0-95fa-0029d75ab6ff"
 
 [[token]]
 id = "11eaab19-aa24-53b1-b785-d6477b7bb899"
@@ -17405,6 +17704,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -17915,6 +18215,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -18502,6 +18803,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -18582,9 +18884,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -19149,6 +19454,58 @@ scryfall_oracle_id = "b6ca7bd1-d72e-4260-8b52-997ee1377279"
 preset_id = "150509ae-ac3b-5e5a-9670-0cc97ab89d4e"
 
 [[token]]
+id = "1513ab44-5c07-5320-9ecb-3857a22a0753"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Arachnogenesis",
+    "Arasta of the Endless Web",
+    "Brood Weaver",
+    "Curse of Clinging Webs",
+    "Gloomwidow's Feast",
+    "Ishkanah, Grafwidow",
+    "Rotwidow Pack",
+    "Spider Spawning",
+    "Twin-Silk Spider",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "12"
+released_at = "2024-11-15"
+type_line = "Token Creature — Spider"
+rules_text = "Reach"
+
+[token.body]
+display_name = "Spider"
+power = 1
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spider"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Reach"]
+
+[[token.source_card_refs]]
+card_name = "Arachnogenesis"
+scryfall_oracle_id = "b655bee5-52d3-467e-b16c-cfc2edf2b1a1"
+scryfall_id = "0cc5faf4-c42b-4bbe-bd1f-92be522330b3"
+
+[[token.source_card_refs]]
+card_name = "Arasta of the Endless Web"
+scryfall_oracle_id = "695eea46-1535-48c5-bbb6-0b8379e77bfc"
+scryfall_id = "0bb78900-984b-4eb0-b0c1-29eb5cbd6939"
+
+[[token.source_card_refs]]
+card_name = "Arasta of the Endless Web"
+scryfall_oracle_id = "695eea46-1535-48c5-bbb6-0b8379e77bfc"
+scryfall_id = "d75a8f9b-e16c-496c-80a2-6fc857e9d159"
+
+[token.token_image_ref]
+scryfall_id = "5547973c-b0df-4103-a657-ac20611bd600"
+scryfall_oracle_id = "bd386399-69f0-4653-96a1-fd05b8fd148c"
+preset_id = "1513ab44-5c07-5320-9ecb-3857a22a0753"
+
+[[token]]
 id = "15262dac-3f84-5e10-8fec-290207a80892"
 category = "Creature"
 fidelity = "Full"
@@ -19494,6 +19851,43 @@ scryfall_id = "7f2aa3b8-b41c-432b-9927-c7eae1d6e78e"
 scryfall_id = "8baa11ac-c774-4faf-8bc3-e8e1fb945c01"
 scryfall_oracle_id = "d3ba803c-ce17-44a3-9ba2-98e6fc42d5f9"
 preset_id = "157e07f6-6d96-58f5-ae0c-f8027f00400c"
+
+[[token]]
+id = "1585c0d8-f0f0-569d-aa11-bdd0ab8792cb"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Lyra, Tolarian Archangel"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "3"
+released_at = "2026-10-02"
+type_line = "Token Creature — Angel"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Angel"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Lyra, Tolarian Archangel"
+scryfall_oracle_id = "d9060fff-0b65-4b3d-930d-6e36315b802c"
+scryfall_id = "06796f03-18d4-4286-ab77-3cd9aa517090"
+
+[[token.source_card_refs]]
+card_name = "Lyra, Tolarian Archangel"
+scryfall_oracle_id = "d9060fff-0b65-4b3d-930d-6e36315b802c"
+scryfall_id = "a5183681-447b-4023-91f7-00e9338f4417"
+
+[token.token_image_ref]
+scryfall_id = "5165055a-89e1-471b-ac96-732e593c910b"
+scryfall_oracle_id = "35030576-3f03-417a-a52a-c4356b78362f"
+preset_id = "1585c0d8-f0f0-569d-aa11-bdd0ab8792cb"
 
 [[token]]
 id = "158c1dbe-1ad6-553a-af66-fb2a910dd9f2"
@@ -20095,9 +20489,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -21028,6 +21424,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -21355,9 +21752,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -21750,6 +22149,42 @@ scryfall_oracle_id = "eac25f12-6459-438c-a09e-93e23d2cf80d"
 preset_id = "176730b2-a301-57ad-9050-9b15cf0fe42d"
 
 [[token]]
+id = "1774b872-3a0d-539c-a55a-5fc1034e7068"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Mega Flare",
+    "The Misty Mountains Cold",
+    "Utvara Hellkite",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "9"
+released_at = "2024-11-15"
+type_line = "Token Creature — Dragon"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Dragon"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Utvara Hellkite"
+scryfall_oracle_id = "05a6a571-643e-429e-8e5c-1c3f8b0dc746"
+scryfall_id = "a299293c-cdf9-42fa-af9c-ac2e9966234a"
+
+[token.token_image_ref]
+scryfall_id = "e36a8e84-b105-4494-b90a-c12cea553045"
+scryfall_oracle_id = "606c46d7-18a5-4cce-9975-029899b82b34"
+preset_id = "1774b872-3a0d-539c-a55a-5fc1034e7068"
+
+[[token]]
 id = "17970de2-7d33-583c-9f8e-ad8e4842225b"
 category = "Creature"
 fidelity = "Full"
@@ -21834,6 +22269,11 @@ subtypes = [
 supertypes = []
 colors = ["Black"]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Nettlecyst"
+scryfall_oracle_id = "04c7f4fe-2098-4311-866d-6733c08d5178"
+scryfall_id = "91ef92af-de6b-4dc4-81ab-8e527cb96fdd"
 
 [[token.source_card_refs]]
 card_name = "Bonehoard"
@@ -21944,6 +22384,11 @@ scryfall_id = "62f449cc-461e-4e89-8cd2-83e539bb40f4"
 card_name = "Batterskull"
 scryfall_oracle_id = "d12e5ce0-5705-4c35-9a93-b883db52c80c"
 scryfall_id = "2abc5ac8-b944-4b71-b022-c78183eb92c3"
+
+[[token.source_card_refs]]
+card_name = "Tangleweave Armor"
+scryfall_oracle_id = "b9cec31a-9891-414f-b528-954612168832"
+scryfall_id = "9fd7ac91-8f76-4fd1-afc5-9a3fd5ce6894"
 
 [[token.source_card_refs]]
 card_name = "Batterskull"
@@ -23126,6 +23571,51 @@ scryfall_oracle_id = "79029843-d4d3-483f-b2bd-c5f7fcaa2ee1"
 preset_id = "18bca77f-d2a0-501b-a469-d8475badfa6c"
 
 [[token]]
+id = "18e2c29a-5498-52b5-a4d8-e22129ee84de"
+fidelity = "Full"
+source_card_names = ["Vraska, Soul of Stone"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "13"
+released_at = "2026-10-02"
+type_line = "Token Artifact Creature — Sculpture Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Sculpture Treasure"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Sculpture",
+    "Treasure",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Vraska, Soul of Stone"
+scryfall_oracle_id = "cad63b31-667b-4518-bc49-be4ffb82bc63"
+scryfall_id = "c4f56034-fab2-4f23-923d-cb5c395a0a87"
+
+[[token.source_card_refs]]
+card_name = "Vraska, Soul of Stone"
+scryfall_oracle_id = "cad63b31-667b-4518-bc49-be4ffb82bc63"
+scryfall_id = "f3869752-eade-4e7a-8dd1-68cafb9e10be"
+
+[token.token_image_ref]
+scryfall_id = "a0fec445-c6fb-4ca2-b63f-1d608c418a22"
+scryfall_oracle_id = "c0e859ec-aced-4514-a561-bc145bbd9061"
+preset_id = "18e2c29a-5498-52b5-a4d8-e22129ee84de"
+
+[[token]]
 id = "18e320e5-9766-5783-b74a-a7208e05068a"
 category = "Creature"
 fidelity = "Full"
@@ -23801,6 +24291,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -25260,6 +25751,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -25861,34 +26353,6 @@ scryfall_oracle_id = "f81c047d-de36-4aed-806b-f14a290771a4"
 preset_id = "1cb75630-1114-5430-b13c-b23dea69bb89"
 
 [[token]]
-id = "1cb84b18-676d-5b79-9c4c-4f94af329ae5"
-category = "Artifact"
-fidelity = "PartialMissingAbilities"
-source_card_names = ["Soul Tether"]
-set_code = "FRA"
-set_name = "Reality Fracture"
-released_at = "2026-10-02"
-type_line = "Token Artifact — Heartwood"
-rules_text = "{T}: Add {R} or {G}."
-
-[token.body]
-display_name = "Heartwood"
-core_types = ["Artifact"]
-subtypes = ["Heartwood"]
-supertypes = []
-colors = [
-    "Red",
-    "Green",
-]
-keywords = []
-
-[[token.source_card_refs]]
-card_name = "Woodwork Prodigy // Soul Tether"
-face_name = "Soul Tether"
-scryfall_oracle_id = "f3ed157f-a09b-405f-aec4-0e7a81d80fc8"
-scryfall_id = "7d17f7e3-7b63-4674-9024-4fd1827f40ec"
-
-[[token]]
 id = "1cfb9daa-8bf2-52e4-a048-b442f30a3a56"
 category = "Creature"
 fidelity = "Full"
@@ -26116,6 +26580,67 @@ scryfall_id = "6c53df6a-618d-40d4-a390-44b2e3202d7d"
 scryfall_id = "798cef87-237b-4e4a-b7ed-78d15c720391"
 scryfall_oracle_id = "fe8478ec-2af9-472b-b104-a71521a3559f"
 preset_id = "1d4754fb-6636-50bc-b84b-273f1dc27277"
+
+[[token]]
+id = "1d8ecdac-1b22-5aac-9969-80ad2e3ae582"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Beast Within",
+    "Bringer of the Green Dawn",
+    "Curious Herd",
+    "Druid of Horns",
+    "Elder Gargaroth",
+    "Feral Incarnation",
+    "Fresh Meat",
+    "Garruk Wildspeaker",
+    "Garruk, Primal Hunter",
+    "Garruk, Unleashed",
+    "Herd Migration",
+    "Midsummer Revel",
+    "Primeval Bounty",
+    "Pulse of the Tangle",
+    "Radagast, Wizard of Wilds",
+    "Savage Conception",
+    "Sawtusk Demolisher",
+    "Somberwald Beastmaster",
+    "Soul of Zendikar",
+    "The Huntsman's Redemption",
+    "Thragtusk",
+    "Trumpeting Gnarr",
+    "Vivien, Monsters' Advocate",
+    "Wild Endeavor",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "10"
+released_at = "2024-11-15"
+type_line = "Token Creature — Beast"
+
+[token.body]
+display_name = "Beast"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Elder Gargaroth"
+scryfall_oracle_id = "397b9dcf-690a-4a58-8637-bb9baab7cc2f"
+scryfall_id = "be0d51ff-9a01-41bd-8e80-ee1e7117d695"
+
+[[token.source_card_refs]]
+card_name = "Beast Within"
+scryfall_oracle_id = "7735eeba-693b-47e2-bd51-414379cf1016"
+scryfall_id = "cd6d61e9-239d-472b-a603-94290efbdad9"
+
+[token.token_image_ref]
+scryfall_id = "c198b9b4-bde6-45ec-9bc7-ae61adad22b3"
+scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
+preset_id = "1d8ecdac-1b22-5aac-9969-80ad2e3ae582"
 
 [[token]]
 id = "1db0c88c-7933-5683-a0bf-6e5da7185fc9"
@@ -26502,6 +27027,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -26741,6 +27267,63 @@ scryfall_id = "6c980998-7124-4ec6-a0b6-e8d9a2364925"
 scryfall_id = "278adad2-49a6-4baa-8dbe-93474545eef7"
 scryfall_oracle_id = "dc4e2134-f0c2-49aa-9ea3-ebf83af1445c"
 preset_id = "1e59b4ed-5f6e-57f1-9e1c-06282af80df1"
+
+[[token]]
+id = "1e5cacde-2744-55d6-8e81-87f0d2b551a8"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Angelic Accord",
+    "Angelic Ascension",
+    "Angelic Favor",
+    "Court of Grace",
+    "Decree of Justice",
+    "Descend upon the Sinful",
+    "Devout Invocation",
+    "Empyrial Storm",
+    "Entreat the Angels",
+    "Geist of Saint Traft",
+    "Invocation of Saint Traft",
+    "Luminarch Ascension",
+    "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
+    "Saint Traft and Rem Karolus",
+    "Seraphic Greatsword",
+    "Sigil of the Empty Throne",
+    "Speaker of the Heavens",
+    "Urbis Protector",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "1"
+released_at = "2026-10-02"
+type_line = "Token Creature — Angel"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Angel"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Ob Nixilis, the Ascended"
+scryfall_oracle_id = "3a49b518-61c8-4dea-8008-c5edf8384581"
+scryfall_id = "a022d35a-9d24-4818-9ff3-a522cfcb178e"
+
+[[token.source_card_refs]]
+card_name = "Ob Nixilis, the Ascended"
+scryfall_oracle_id = "3a49b518-61c8-4dea-8008-c5edf8384581"
+scryfall_id = "c889f089-423b-4b36-b1ca-8ccc7485d144"
+
+[token.token_image_ref]
+scryfall_id = "1159d02c-0291-42de-91e6-e9a49d5ed968"
+scryfall_oracle_id = "40c64f08-ab2f-4933-8e0e-d1a1c729008f"
+preset_id = "1e5cacde-2744-55d6-8e81-87f0d2b551a8"
 
 [[token]]
 id = "1e851ec5-fc7c-52e0-b201-7c350377c8a9"
@@ -27313,9 +27896,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -27623,6 +28209,42 @@ scryfall_id = "681caa94-e95e-47f0-8305-eca0ed55cb5e"
 scryfall_id = "bba307eb-814c-4c87-acdf-b54c87d04f82"
 scryfall_oracle_id = "20f3d81f-e0cc-472c-bbd2-4a2f380a5dee"
 preset_id = "1fb16f1b-36a5-5421-968c-19c83c42fdca"
+
+[[token]]
+id = "1fbedc1d-a3cd-5948-a8d0-78702cc81820"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Kher Keep",
+    "Prossh, Skyraider of Kher",
+    "Rohgahh, Kher Keep Overlord",
+    "Rosnakht, Heir of Rohgahh",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "10"
+released_at = "2026-10-02"
+type_line = "Token Creature — Kobold"
+
+[token.body]
+display_name = "Kobolds of Kher Keep"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Kobold"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Kher Keep"
+scryfall_oracle_id = "79638767-fbc7-451a-b29f-d93f2ac6f102"
+scryfall_id = "15ca0b68-33a1-4d25-b622-d3f5ba05b0a5"
+
+[token.token_image_ref]
+scryfall_id = "d0d630b2-1e42-4cf7-bfa1-36d5c135877b"
+scryfall_oracle_id = "6790eb4e-f6ed-44f5-85f1-bd7e167b828c"
+preset_id = "1fbedc1d-a3cd-5948-a8d0-78702cc81820"
 
 [[token]]
 id = "1fcde5b3-a6ba-52e8-a46f-d41809973467"
@@ -28382,6 +29004,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -28858,6 +29481,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -29569,6 +30193,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -31094,6 +31719,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -31179,6 +31805,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -32018,6 +32645,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -32972,6 +33600,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -33763,6 +34392,11 @@ keywords = []
 card_name = "Vernal Sovereign"
 scryfall_oracle_id = "bf30b8ae-0125-4a00-bae8-ac1aa7703a08"
 scryfall_id = "7c54fe0b-56f6-4cff-adde-56aa5326194d"
+
+[[token.source_card_refs]]
+card_name = "Voice of Resurgence"
+scryfall_oracle_id = "5cbbb3f3-63a4-4983-81ea-8c405b10e63f"
+scryfall_id = "5af28ad7-5736-44f0-81ae-67ec82d03ee2"
 
 [[token.source_card_refs]]
 card_name = "Voice of Resurgence"
@@ -35300,9 +35934,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -35466,6 +36103,422 @@ scryfall_id = "c2559933-958b-4dfd-a037-3778b914f319"
 scryfall_id = "46b36476-71f3-4128-81a6-726ed18c0023"
 scryfall_oracle_id = "3d4ebac1-6151-4c6f-93ae-7110e54af786"
 preset_id = "2920e221-5ed1-517f-a049-cc6acbeb6f79"
+
+[[token]]
+id = "295029a3-2f31-5634-871e-c547056d3435"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Alchemist's Talent",
+    "Alicia Masters, Skilled Sculptor",
+    "An Offer You Can't Refuse",
+    "Ancestors' Aid",
+    "Ancient Adamantoise",
+    "Ancient Copper Dragon",
+    "Ant-Man's Army",
+    "Ant-Man, Elusive Avenger",
+    "Ashling's Command",
+    "Atsushi, the Blazing Sky",
+    "Avengers: Under Siege",
+    "Axgard Artisan",
+    "Baeloth Barrityl, Entertainer",
+    "Bank Job",
+    "Battle Angels of Tyr",
+    "Beamtown Beatstick",
+    "Bejeweled Warg",
+    "Beza, the Bounding Spring",
+    "Big Score",
+    "Big Spender",
+    "Bilbo's Gambit",
+    "Bilbo, Retired Burglar",
+    "Bill Ferny, Bree Swindler",
+    "Black Market Connections",
+    "Black Market Tycoon",
+    "Blood Money",
+    "Bloodroot Apothecary",
+    "Blooming Blast",
+    "Bonehoard Dracosaur",
+    "Boneyard Desecrator",
+    "Bootleggers' Stash",
+    "Bottle-Cap Blast",
+    "Boxing Ring",
+    "Brass's Bounty",
+    "Brazen Freebooter",
+    "Breeches, Eager Pillager",
+    "Bucknard's Everfull Purse",
+    "Burakos, Party Leader",
+    "Burdened Aerialist",
+    "Buy Your Silence",
+    "Captain Lannery Storm",
+    "Careening Mine Cart",
+    "Casey & Raph, Hotheads",
+    "Cataclysmic Prospecting",
+    "Cavern-Hoard Dragon",
+    "Centrifuge",
+    "Charming Scoundrel",
+    "Chira, All In",
+    "City of Death",
+    "Cloud, Ex-SOLDIER",
+    "Coin of Mastery",
+    "Collector's Vault",
+    "Common Crook",
+    "Contested Game Ball",
+    "Contract Hero",
+    "Contract Killing",
+    "Corsair Captain",
+    "Covetous Elegy",
+    "Crack Open",
+    "Creative Outburst",
+    "Crossover Collaboration",
+    "Culmination of Studies",
+    "Currency Converter",
+    "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
+    "Deadeye Plunderers",
+    "Deadly Derision",
+    "Deadly Dispute",
+    "Death to Our Enemies",
+    "Decadent Dragon // Expensive Taste",
+    "Depths of Desire",
+    "Descent into Avernus",
+    "Diamond Pick-Axe",
+    "Dihada, Binder of Wills",
+    "Dire Fleet Hoarder",
+    "Discerning Financier",
+    "Dockside Extortionist",
+    "Don Andres, the Renegade",
+    "Done for the Day",
+    "Dori, Bearer of Friends",
+    "Dragon-Cursed Halls",
+    "Dungeon of the Mad Mage",
+    "Dungeoneer's Pack",
+    "Edward Kenway",
+    "Elemental Masterpiece",
+    "Emissary Green",
+    "Enterprising Scallywag",
+    "Erestor of the Council",
+    "Evin, Waterdeep Opportunist",
+    "Excavation Technique",
+    "Exhibition Magician",
+    "Exit Through the Grift Shop",
+    "Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
+    "Fae Offering",
+    "Fain, the Broker",
+    "Fake Your Own Death",
+    "Flamekin Gildweaver",
+    "Flick a Coin",
+    "Forging the Tyrite Sword",
+    "Forsworn Paladin",
+    "Fountainport",
+    "Furnace Reins",
+    "Gadrak, the Crown-Scourge",
+    "Gala Greeters",
+    "Galadriel, Gift-Giver",
+    "Galazeth Prismari",
+    "Ganax, Astral Hunter",
+    "Gemcutter Buccaneer",
+    "Generous Plunderer",
+    "Gilded Ghoda",
+    "Gilded Pinions",
+    "Gimli of the Glittering Caves",
+    "Gleaming Barrier",
+    "Gleaming Splendor",
+    "Glittermonger",
+    "Gluntch, the Bestower",
+    "Glóin, Dwarf Emissary",
+    "Goblin Airbrusher",
+    "Goblin Glasswright // Craft with Pride",
+    "Goblin Shaman",
+    "Gold Pan",
+    "Gold Rush",
+    "Goldlust Triad",
+    "Goldspan Dragon",
+    "Goldvein Hydra",
+    "Goldvein Pick",
+    "Gonti, Night Minister",
+    "Gorbag of Minas Morgul",
+    "Grabby Giant // That's Mine",
+    "Great Train Heist",
+    "Greedy Freebooter",
+    "Grim Bounty",
+    "Grim Hireling",
+    "Guild Artisan",
+    "Halo Scarab",
+    "Heap Gate",
+    "Heartless Pillage",
+    "Hell to Pay",
+    "Henry Wu, InGen Geneticist",
+    "Herald of Hadar",
+    "Heroes for Hire",
+    "Hit the Mother Lode",
+    "Hoard Hauler",
+    "Hoard Robber",
+    "Hoarding Ogre",
+    "Hornswoggle",
+    "Hullbreacher",
+    "Ignacio of Myra's Marvels",
+    "Impetuous Lootmonger",
+    "Improvised Weaponry",
+    "Impulsive Pilferer",
+    "Indulge // Excess",
+    "Ingenious Mastery",
+    "Inspired Tinkering",
+    "Instrument of the Bards",
+    "Invasion of Ergamon // Truga Cliffcharger",
+    "Involuntary Employment",
+    "Iron Man, Titan of Innovation",
+    "J. Jonah Jameson",
+    "Jan Jansen, Chaos Crafter",
+    "Jared Carthalion",
+    "Jewel Thief",
+    "Jewel-Eyed Cobra",
+    "Jolene, Plundering Pugilist",
+    "Jolene, the Plunder Queen",
+    "Kain, Traitorous Dragoon",
+    "Kalain, Reclusive Painter",
+    "Kamachal, Ship's Mascot",
+    "Kellogg, Dangerous Mind",
+    "Kerblam! Warehouse",
+    "Kheru Goldkeeper",
+    "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
+    "Knuckles the Echidna",
+    "Korvold and the Noble Thief",
+    "Lara Croft, Tomb Raider",
+    "Life Insurance",
+    "Lobelia Sackville-Baggins",
+    "Locke, Treasure Hunter",
+    "Long-Bodied Grey Dog",
+    "Loot Dispute",
+    "Lost Mine of Phandelver",
+    "Lotho, Corrupt Shirriff",
+    "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
+    "Luxurious Locomotive",
+    "Magda, Brazen Outlaw",
+    "Magda, the Hoardmaster",
+    "Magic Pot",
+    "Magma Opus",
+    "Magmatic Galleon",
+    "Mahadi, Emporium Master",
+    "Malcolm, Keen-Eyed Navigator",
+    "Malik, Grim Manipulator",
+    "Marching Duodrone",
+    "Mari, the Killing Quill",
+    "Marut",
+    "Mary Read and Anne Bonny",
+    "Master of Ceremonies",
+    "Mastermind Plum",
+    'Meet and Greet "Sisay"',
+    "Megaton's Fate",
+    "Meticulous Artisan",
+    "Mine Raider",
+    "Mines of Moria",
+    "Misfortune Teller",
+    "Monologue Tax",
+    "Monument to Endurance",
+    "Most Wanted",
+    "Mr. House, President and CEO",
+    "My Wealth Will Bury You",
+    "Namazu Trader",
+    "New New York",
+    "Noble's Purse",
+    "Noggle Robber",
+    "North Pole Research Base",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Ognis, the Dragon's Lash",
+    "Old Gnawbone",
+    "Old Rutstein",
+    "Olivia, Opulent Outlaw",
+    "Orcrist, Goblin-cleaver",
+    "Orochi Soul-Reaver",
+    "Pain Distributor",
+    "Patient Naturalist",
+    "Patron of the Arts",
+    "Petty Larceny",
+    "Pick-a-Beeble",
+    "Pictures of Spider-Man",
+    "Piggy Bank",
+    "Pinkie Pie",
+    "Pirate's Pillage",
+    "Pirate's Prize",
+    "Pitiless Plunderer",
+    "Plundering Barbarian",
+    "Plundering Pirate",
+    "Poetic Ingenuity",
+    "Prismari Command",
+    "Prized Statue",
+    "Prizefight",
+    "Professional Face-Breaker",
+    "Professional Wrestler",
+    "Prompto Argentum",
+    "Prosper, Tome-Bound",
+    "Prosperous Bandit",
+    "Prosperous Innkeeper",
+    "Prosperous Partnership",
+    "Prosperous Pirates",
+    "Prosperous Thief",
+    "Prying Blade",
+    "Puppet Master, String Puller",
+    "RMS Titanic",
+    "Racketeer Boss",
+    "Ragavan, Nimble Pilferer",
+    "Rain of Riches",
+    "Ramirez DePietro, Pillager",
+    "Rankle and Torbran",
+    "Rapacious Dragon",
+    "Rashmi and Ragavan",
+    "Reckless Endeavor",
+    "Reckless Lackey",
+    "Reckless Ransacking",
+    "Reckoner Bankbuster // Reckoner Bankbuster",
+    "Redcap Thief",
+    "Redrock Sentinel",
+    "Relic Retriever",
+    "Rev, Tithe Extractor",
+    "Revel in Riches",
+    "Riveteers Requisitioner",
+    "Rocketeer Boostbuggy",
+    "Rose Room Treasurer",
+    "Ruthless Knave",
+    "Ruthless Technomancer",
+    "Safana, Calimport Cutthroat",
+    "Sailor of Means",
+    "Sanar, Unfinished Genius // Wild Idea",
+    "Sarkhan, Dragon Ascendant",
+    "Scion of Opulence",
+    "Scuzzback Scrounger",
+    "Season of the Bold",
+    "Seize the Spoils",
+    "Seize the Spotlight",
+    "Setzer, Wandering Gambler",
+    "Shambling Ghast",
+    "Shiny Impetus",
+    "Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark",
+    "Skullport Merchant",
+    "Smashing Success",
+    "Smaug",
+    "Smaug the Impenetrable",
+    "Smaug the Magnificent",
+    "Smaug, Wicked Worm",
+    "Smoke Blessing",
+    "Smoke Spirits' Aid",
+    "Smothering Tithe",
+    "Smuggler's Share",
+    "Song of Eärendil",
+    "Sonic the Hedgehog",
+    "Spectrox Mines",
+    "Spell Swindle",
+    "Spiked Pit Trap",
+    "Spiteful Banditry",
+    "Spiteful Repossession",
+    "Stark Industries Executive",
+    "Sticky Fingers",
+    "Stimulus Package",
+    "Storm the Vault // Vault of Catlacan",
+    "Storm-Kiln Artist",
+    "Strike It Rich",
+    "Sudden Breakthrough",
+    "Summon: Yojimbo",
+    "Surly Badgersaur",
+    "Swarming of Moria",
+    "Swashbuckler Extraordinaire",
+    "Sword of Wealth and Power",
+    "Tataru Taru",
+    "Tavern Scoundrel",
+    "Tempting Contract",
+    "Teval's Judgment",
+    "The Balrog of Moria",
+    "The Belligerent",
+    "The Ghoul, Gunslinger",
+    "The Gold Saucer",
+    "The Golden City of Orazca",
+    "The Matrix of Time",
+    "The Misty Mountains Cold",
+    "The Reaver Cleaver",
+    "The Sackville-Bagginses",
+    "The Third Doctor",
+    "The Western Cloud",
+    "There and Back Again",
+    "Thieves' Tools",
+    "Thorin, Company's Leader",
+    "Thorin, King of Durin's Folk",
+    "Ticket Tortoise",
+    "Tireless Provisioner",
+    "Tivit, Seller of Secrets",
+    "Tokka & Rahzar, Unsupervised",
+    "Treasure Chest",
+    "Treasure Dredger",
+    "Treasure Map // Treasure Cove",
+    "Treasure Vault",
+    "Trove of Temptation",
+    "Typhoid Mary, Fractured",
+    "Ultimate Green Goblin",
+    "Undercity // The Initiative",
+    "Undercity Dire Rat",
+    "Undercity Scrounger",
+    "Unexpected Windfall",
+    "Urabrask // The Great Work",
+    "Vaan, Street Thief",
+    "Vault 21: House Gambit",
+    "Vault Robber",
+    "Vazi, Keen Negotiator",
+    "Village Pillagers",
+    "Visions of Ruin",
+    "Volatile Fault",
+    "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
+    "Wanted Scoundrels",
+    "Warren Soultrader",
+    "Widespread Thieving",
+    "Wily Goblin",
+    "Wish Good Luck",
+    "Xorn",
+    "You Find a Cursed Idol",
+    "You've Been Caught Stealing",
+    "Young Red Dragon // Bathe in Gold",
+    "Zhentarim Bandit",
+    "Ziatora, the Incinerator",
+    "Zidane, Tantalus Thief",
+]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "15"
+released_at = "2026-10-02"
+type_line = "Token Artifact — Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Treasure"
+core_types = ["Artifact"]
+subtypes = ["Treasure"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Vraska, the Cutting Glare"
+scryfall_oracle_id = "580de511-863c-4b7a-9d2e-fcdf6e12d54b"
+scryfall_id = "9e80737c-c228-4a69-acd8-c8bb2f6d8bd0"
+
+[[token.source_card_refs]]
+card_name = "Currency Converter"
+scryfall_oracle_id = "981298e6-ddee-49c0-9377-f47f019b4138"
+scryfall_id = "f91b18ef-ac8a-4d4c-9586-b101681d33e2"
+
+[[token.source_card_refs]]
+card_name = "Vraska, the Cutting Glare"
+scryfall_oracle_id = "580de511-863c-4b7a-9d2e-fcdf6e12d54b"
+scryfall_id = "5c28b012-5efb-488f-a1c1-09e2dddfd6ee"
+
+[token.token_image_ref]
+scryfall_id = "03992f88-7a15-4234-9bed-b7617d7ff09c"
+scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
+preset_id = "295029a3-2f31-5634-871e-c547056d3435"
 
 [[token]]
 id = "2953b6f0-98fb-5815-8d57-8f7c18a0b35a"
@@ -35965,6 +37018,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -37335,9 +38389,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -37959,6 +39016,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -39792,6 +40850,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -40407,6 +41466,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -42257,9 +43317,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -42877,6 +43940,437 @@ scryfall_id = "bbc06a88-1eb6-4edb-8f03-d8274560cc41"
 scryfall_id = "124e0b03-d9fb-44f1-9e3c-3462aabdd42e"
 scryfall_oracle_id = "3e6a1c13-16f0-4256-b468-1f537de78629"
 preset_id = "32e9dfb0-c0f4-5aee-87d9-aab57cecb719"
+
+[[token]]
+id = "33137d92-df8c-5b58-986c-ecc8b24dbf94"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Alchemist's Talent",
+    "Alicia Masters, Skilled Sculptor",
+    "An Offer You Can't Refuse",
+    "Ancestors' Aid",
+    "Ancient Adamantoise",
+    "Ancient Copper Dragon",
+    "Ant-Man's Army",
+    "Ant-Man, Elusive Avenger",
+    "Ashling's Command",
+    "Atsushi, the Blazing Sky",
+    "Avengers: Under Siege",
+    "Axgard Artisan",
+    "Baeloth Barrityl, Entertainer",
+    "Bank Job",
+    "Battle Angels of Tyr",
+    "Beamtown Beatstick",
+    "Bejeweled Warg",
+    "Beza, the Bounding Spring",
+    "Big Score",
+    "Big Spender",
+    "Bilbo's Gambit",
+    "Bilbo, Retired Burglar",
+    "Bill Ferny, Bree Swindler",
+    "Black Market Connections",
+    "Black Market Tycoon",
+    "Blood Money",
+    "Bloodroot Apothecary",
+    "Blooming Blast",
+    "Bonehoard Dracosaur",
+    "Boneyard Desecrator",
+    "Bootleggers' Stash",
+    "Bottle-Cap Blast",
+    "Boxing Ring",
+    "Brass's Bounty",
+    "Brazen Freebooter",
+    "Breeches, Eager Pillager",
+    "Bucknard's Everfull Purse",
+    "Burakos, Party Leader",
+    "Burdened Aerialist",
+    "Buy Your Silence",
+    "Captain Lannery Storm",
+    "Careening Mine Cart",
+    "Casey & Raph, Hotheads",
+    "Cataclysmic Prospecting",
+    "Cavern-Hoard Dragon",
+    "Centrifuge",
+    "Charming Scoundrel",
+    "Chira, All In",
+    "City of Death",
+    "Cloud, Ex-SOLDIER",
+    "Coin of Mastery",
+    "Collector's Vault",
+    "Common Crook",
+    "Contested Game Ball",
+    "Contract Hero",
+    "Contract Killing",
+    "Corsair Captain",
+    "Covetous Elegy",
+    "Crack Open",
+    "Creative Outburst",
+    "Crossover Collaboration",
+    "Culmination of Studies",
+    "Currency Converter",
+    "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
+    "Deadeye Plunderers",
+    "Deadly Derision",
+    "Deadly Dispute",
+    "Death to Our Enemies",
+    "Decadent Dragon // Expensive Taste",
+    "Depths of Desire",
+    "Descent into Avernus",
+    "Diamond Pick-Axe",
+    "Dihada, Binder of Wills",
+    "Dire Fleet Hoarder",
+    "Discerning Financier",
+    "Dockside Extortionist",
+    "Don Andres, the Renegade",
+    "Done for the Day",
+    "Dori, Bearer of Friends",
+    "Dragon-Cursed Halls",
+    "Dungeon of the Mad Mage",
+    "Dungeoneer's Pack",
+    "Edward Kenway",
+    "Elemental Masterpiece",
+    "Emissary Green",
+    "Enterprising Scallywag",
+    "Erestor of the Council",
+    "Evin, Waterdeep Opportunist",
+    "Excavation Technique",
+    "Exhibition Magician",
+    "Exit Through the Grift Shop",
+    "Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
+    "Fae Offering",
+    "Fain, the Broker",
+    "Fake Your Own Death",
+    "Flamekin Gildweaver",
+    "Flick a Coin",
+    "Forging the Tyrite Sword",
+    "Forsworn Paladin",
+    "Fountainport",
+    "Furnace Reins",
+    "Gadrak, the Crown-Scourge",
+    "Gala Greeters",
+    "Galadriel, Gift-Giver",
+    "Galazeth Prismari",
+    "Ganax, Astral Hunter",
+    "Gemcutter Buccaneer",
+    "Generous Plunderer",
+    "Gilded Ghoda",
+    "Gilded Pinions",
+    "Gimli of the Glittering Caves",
+    "Gleaming Barrier",
+    "Gleaming Splendor",
+    "Glittermonger",
+    "Gluntch, the Bestower",
+    "Glóin, Dwarf Emissary",
+    "Goblin Airbrusher",
+    "Goblin Glasswright // Craft with Pride",
+    "Goblin Shaman",
+    "Gold Pan",
+    "Gold Rush",
+    "Goldlust Triad",
+    "Goldspan Dragon",
+    "Goldvein Hydra",
+    "Goldvein Pick",
+    "Gonti, Night Minister",
+    "Gorbag of Minas Morgul",
+    "Grabby Giant // That's Mine",
+    "Great Train Heist",
+    "Greedy Freebooter",
+    "Grim Bounty",
+    "Grim Hireling",
+    "Guild Artisan",
+    "Halo Scarab",
+    "Heap Gate",
+    "Heartless Pillage",
+    "Hell to Pay",
+    "Henry Wu, InGen Geneticist",
+    "Herald of Hadar",
+    "Heroes for Hire",
+    "Hit the Mother Lode",
+    "Hoard Hauler",
+    "Hoard Robber",
+    "Hoarding Ogre",
+    "Hornswoggle",
+    "Hullbreacher",
+    "Ignacio of Myra's Marvels",
+    "Impetuous Lootmonger",
+    "Improvised Weaponry",
+    "Impulsive Pilferer",
+    "Indulge // Excess",
+    "Ingenious Mastery",
+    "Inspired Tinkering",
+    "Instrument of the Bards",
+    "Invasion of Ergamon // Truga Cliffcharger",
+    "Involuntary Employment",
+    "Iron Man, Titan of Innovation",
+    "J. Jonah Jameson",
+    "Jan Jansen, Chaos Crafter",
+    "Jared Carthalion",
+    "Jewel Thief",
+    "Jewel-Eyed Cobra",
+    "Jolene, Plundering Pugilist",
+    "Jolene, the Plunder Queen",
+    "Kain, Traitorous Dragoon",
+    "Kalain, Reclusive Painter",
+    "Kamachal, Ship's Mascot",
+    "Kellogg, Dangerous Mind",
+    "Kerblam! Warehouse",
+    "Kheru Goldkeeper",
+    "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
+    "Knuckles the Echidna",
+    "Korvold and the Noble Thief",
+    "Lara Croft, Tomb Raider",
+    "Life Insurance",
+    "Lobelia Sackville-Baggins",
+    "Locke, Treasure Hunter",
+    "Long-Bodied Grey Dog",
+    "Loot Dispute",
+    "Lost Mine of Phandelver",
+    "Lotho, Corrupt Shirriff",
+    "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
+    "Luxurious Locomotive",
+    "Magda, Brazen Outlaw",
+    "Magda, the Hoardmaster",
+    "Magic Pot",
+    "Magma Opus",
+    "Magmatic Galleon",
+    "Mahadi, Emporium Master",
+    "Malcolm, Keen-Eyed Navigator",
+    "Malik, Grim Manipulator",
+    "Marching Duodrone",
+    "Mari, the Killing Quill",
+    "Marut",
+    "Mary Read and Anne Bonny",
+    "Master of Ceremonies",
+    "Mastermind Plum",
+    'Meet and Greet "Sisay"',
+    "Megaton's Fate",
+    "Meticulous Artisan",
+    "Mine Raider",
+    "Mines of Moria",
+    "Misfortune Teller",
+    "Monologue Tax",
+    "Monument to Endurance",
+    "Most Wanted",
+    "Mr. House, President and CEO",
+    "My Wealth Will Bury You",
+    "Namazu Trader",
+    "New New York",
+    "Noble's Purse",
+    "Noggle Robber",
+    "North Pole Research Base",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Ognis, the Dragon's Lash",
+    "Old Gnawbone",
+    "Old Rutstein",
+    "Olivia, Opulent Outlaw",
+    "Orcrist, Goblin-cleaver",
+    "Orochi Soul-Reaver",
+    "Pain Distributor",
+    "Patient Naturalist",
+    "Patron of the Arts",
+    "Petty Larceny",
+    "Pick-a-Beeble",
+    "Pictures of Spider-Man",
+    "Piggy Bank",
+    "Pinkie Pie",
+    "Pirate's Pillage",
+    "Pirate's Prize",
+    "Pitiless Plunderer",
+    "Plundering Barbarian",
+    "Plundering Pirate",
+    "Poetic Ingenuity",
+    "Prismari Command",
+    "Prized Statue",
+    "Prizefight",
+    "Professional Face-Breaker",
+    "Professional Wrestler",
+    "Prompto Argentum",
+    "Prosper, Tome-Bound",
+    "Prosperous Bandit",
+    "Prosperous Innkeeper",
+    "Prosperous Partnership",
+    "Prosperous Pirates",
+    "Prosperous Thief",
+    "Prying Blade",
+    "Puppet Master, String Puller",
+    "RMS Titanic",
+    "Racketeer Boss",
+    "Ragavan, Nimble Pilferer",
+    "Rain of Riches",
+    "Ramirez DePietro, Pillager",
+    "Rankle and Torbran",
+    "Rapacious Dragon",
+    "Rashmi and Ragavan",
+    "Reckless Endeavor",
+    "Reckless Lackey",
+    "Reckless Ransacking",
+    "Reckoner Bankbuster // Reckoner Bankbuster",
+    "Redcap Thief",
+    "Redrock Sentinel",
+    "Relic Retriever",
+    "Rev, Tithe Extractor",
+    "Revel in Riches",
+    "Riveteers Requisitioner",
+    "Rocketeer Boostbuggy",
+    "Rose Room Treasurer",
+    "Ruthless Knave",
+    "Ruthless Technomancer",
+    "Safana, Calimport Cutthroat",
+    "Sailor of Means",
+    "Sanar, Unfinished Genius // Wild Idea",
+    "Sarkhan, Dragon Ascendant",
+    "Scion of Opulence",
+    "Scuzzback Scrounger",
+    "Season of the Bold",
+    "Seize the Spoils",
+    "Seize the Spotlight",
+    "Setzer, Wandering Gambler",
+    "Shambling Ghast",
+    "Shiny Impetus",
+    "Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark",
+    "Skullport Merchant",
+    "Smashing Success",
+    "Smaug",
+    "Smaug the Impenetrable",
+    "Smaug the Magnificent",
+    "Smaug, Wicked Worm",
+    "Smoke Blessing",
+    "Smoke Spirits' Aid",
+    "Smothering Tithe",
+    "Smuggler's Share",
+    "Song of Eärendil",
+    "Sonic the Hedgehog",
+    "Spectrox Mines",
+    "Spell Swindle",
+    "Spiked Pit Trap",
+    "Spiteful Banditry",
+    "Spiteful Repossession",
+    "Stark Industries Executive",
+    "Sticky Fingers",
+    "Stimulus Package",
+    "Storm the Vault // Vault of Catlacan",
+    "Storm-Kiln Artist",
+    "Strike It Rich",
+    "Sudden Breakthrough",
+    "Summon: Yojimbo",
+    "Surly Badgersaur",
+    "Swarming of Moria",
+    "Swashbuckler Extraordinaire",
+    "Sword of Wealth and Power",
+    "Tataru Taru",
+    "Tavern Scoundrel",
+    "Tempting Contract",
+    "Teval's Judgment",
+    "The Balrog of Moria",
+    "The Belligerent",
+    "The Ghoul, Gunslinger",
+    "The Gold Saucer",
+    "The Golden City of Orazca",
+    "The Matrix of Time",
+    "The Misty Mountains Cold",
+    "The Reaver Cleaver",
+    "The Sackville-Bagginses",
+    "The Third Doctor",
+    "The Western Cloud",
+    "There and Back Again",
+    "Thieves' Tools",
+    "Thorin, Company's Leader",
+    "Thorin, King of Durin's Folk",
+    "Ticket Tortoise",
+    "Tireless Provisioner",
+    "Tivit, Seller of Secrets",
+    "Tokka & Rahzar, Unsupervised",
+    "Treasure Chest",
+    "Treasure Dredger",
+    "Treasure Map // Treasure Cove",
+    "Treasure Vault",
+    "Trove of Temptation",
+    "Typhoid Mary, Fractured",
+    "Ultimate Green Goblin",
+    "Undercity // The Initiative",
+    "Undercity Dire Rat",
+    "Undercity Scrounger",
+    "Unexpected Windfall",
+    "Urabrask // The Great Work",
+    "Vaan, Street Thief",
+    "Vault 21: House Gambit",
+    "Vault Robber",
+    "Vazi, Keen Negotiator",
+    "Village Pillagers",
+    "Visions of Ruin",
+    "Volatile Fault",
+    "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
+    "Wanted Scoundrels",
+    "Warren Soultrader",
+    "Widespread Thieving",
+    "Wily Goblin",
+    "Wish Good Luck",
+    "Xorn",
+    "You Find a Cursed Idol",
+    "You've Been Caught Stealing",
+    "Young Red Dragon // Bathe in Gold",
+    "Zhentarim Bandit",
+    "Ziatora, the Incinerator",
+    "Zidane, Tantalus Thief",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "16"
+released_at = "2024-11-15"
+type_line = "Token Artifact — Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Treasure"
+core_types = ["Artifact"]
+subtypes = ["Treasure"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Hit the Mother Lode"
+scryfall_oracle_id = "a49900b3-cc34-428f-806d-71861dc8059d"
+scryfall_id = "a636f0ea-d605-453c-8b10-c0ecfeffd573"
+
+[[token.source_card_refs]]
+card_name = "Rapacious Dragon"
+scryfall_oracle_id = "0944ec2e-1dd9-459f-8f1d-667242cf52fe"
+scryfall_id = "271b249a-2cca-4a52-bbff-0f44f0ab51f9"
+
+[[token.source_card_refs]]
+card_name = "Goldlust Triad"
+scryfall_oracle_id = "86d76078-9af3-45a7-90d6-72946afdc78b"
+scryfall_id = "6b6e8aec-de61-4404-b4c8-d8eecc7d92b2"
+
+[[token.source_card_refs]]
+card_name = "Sarkhan, Dragon Ascendant"
+scryfall_oracle_id = "71cb48e2-2328-471c-a04a-7b6461f378f4"
+scryfall_id = "af6826db-29c2-446d-8a76-1faf87535c25"
+
+[[token.source_card_refs]]
+card_name = "Unexpected Windfall"
+scryfall_oracle_id = "498c10c9-253d-4b15-b48c-1509381b17e8"
+scryfall_id = "374e1c0d-1dcc-4214-828a-624ef1af826a"
+
+[[token.source_card_refs]]
+card_name = "Atsushi, the Blazing Sky"
+scryfall_oracle_id = "535f405d-94df-4f45-aedc-b331103720b7"
+scryfall_id = "bedb57f3-bda8-4eba-ba4d-895e38f882f2"
+
+[token.token_image_ref]
+scryfall_id = "3101b6f5-b3a7-43db-9454-9f42b9c34e53"
+scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
+preset_id = "33137d92-df8c-5b58-986c-ecc8b24dbf94"
 
 [[token]]
 id = "33138258-8135-5875-ba96-57a1cebaf1f0"
@@ -43511,6 +45005,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -44007,6 +45502,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -44172,6 +45668,65 @@ scryfall_id = "8971938c-cd26-4b83-96d7-1408cd0b0de6"
 scryfall_id = "89eb9f92-d189-4438-b6fe-cb253055d63e"
 scryfall_oracle_id = "d32c3005-d2d9-4863-a4f3-2301b854230c"
 preset_id = "343e8a60-15d6-5115-b490-64e639348116"
+
+[[token]]
+id = "344aec1a-35dd-5742-b53d-00f6ed2300d8"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+source_card_names = [
+    "Basilica Shepherd",
+    "Charge of the Mites",
+    "Crawling Chorus",
+    "Indoctrination Attendant",
+    "Infested Fleshcutter",
+    "Mirrex",
+    "Mite Overseer",
+    "Poison Counter",
+    "Ria Ivor, Bane of Bladehold",
+    "Skrelv's Hive",
+    "Stinging Hivemaster",
+    "Vishgraz, the Doomhive",
+    "White Sun's Twilight",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "16"
+released_at = "2026-10-02"
+type_line = "Token Artifact Creature — Phyrexian Mite"
+rules_text = """
+Toxic 1 (Players dealt combat damage by this creature also get a poison counter.)
+This creature can't block."""
+
+[token.body]
+display_name = "Phyrexian Mite"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Mite",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Skrelv's Hive"
+scryfall_oracle_id = "06d219ff-0083-4c2a-b5b3-2b84bb58f57e"
+scryfall_id = "e2652c4d-38a7-4014-94bb-7efd277de992"
+
+[[token.source_card_refs]]
+card_name = "White Sun's Twilight"
+scryfall_oracle_id = "a38828be-781e-4340-9c6f-f40b1d34773f"
+scryfall_id = "ae7a778c-f4a7-447f-90f0-146997e03398"
+
+[token.token_image_ref]
+scryfall_id = "e9c68c64-f3b9-45b7-83d1-bd1439a49942"
+scryfall_oracle_id = "2667d723-01c8-4ea3-ac17-cedb3b842c3b"
+preset_id = "344aec1a-35dd-5742-b53d-00f6ed2300d8"
 
 [[token]]
 id = "3459327e-38e0-52c6-a20d-8c866d674693"
@@ -46250,12 +47805,72 @@ scryfall_oracle_id = "180881c9-5ae7-4810-a17a-06b5994a48a1"
 preset_id = "379963cb-e18b-5b99-b6d0-488a0727ba5e"
 
 [[token]]
+id = "37ac6522-5659-51e5-95d4-d41812a98843"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Angrath, Captain of Chaos",
+    "Aven Eternal",
+    "Bleeding Edge",
+    "Callous Dismissal",
+    "Commence the Endgame",
+    "Crush Dissent",
+    "Dreadhorde Invasion",
+    "Dreadhorde Twins",
+    "Enter the God-Eternals",
+    "Eternal Skylord",
+    "Gleaming Overseer",
+    "Grim Initiate",
+    "Herald of the Dreadhorde",
+    "Honor the God-Pharaoh",
+    "Invade the City",
+    "Invading Manticore",
+    "Lazotep Chancellor",
+    "Lazotep Plating",
+    "Lazotep Reaver",
+    "Mindless Conscription",
+    "Relentless Advance",
+    "Toll of the Invasion",
+    "Vizier of the Scorpion",
+    "Widespread Brutality",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "8"
+released_at = "2026-10-02"
+type_line = "Token Creature — Zombie Army"
+
+[token.body]
+display_name = "Zombie Army"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Army",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Dreadhorde Invasion"
+scryfall_oracle_id = "01deabbb-af6a-4998-99a7-35b7cfa9ef77"
+scryfall_id = "9bbfad2d-a3b5-4119-aea4-0793b7a9da88"
+
+[token.token_image_ref]
+scryfall_id = "14474e29-27a4-475a-9d2c-eb1d6c146421"
+scryfall_oracle_id = "8bf1137a-163c-446f-8d34-168a7705df4e"
+preset_id = "37ac6522-5659-51e5-95d4-d41812a98843"
+
+[[token]]
 id = "37c45f60-9cdb-5706-8070-48d24b7ece38"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -46771,6 +48386,74 @@ scryfall_id = "4ba02df9-4ccd-4e0f-a1f2-f0f6c7fd6329"
 scryfall_id = "4ace3018-7d6e-4b77-9487-f280fd723d12"
 scryfall_oracle_id = "1a6c2152-71ca-46be-ab83-c84633442257"
 preset_id = "3937d118-134c-59bb-b38f-5cd60d31c753"
+
+[[token]]
+id = "395884e6-ceaf-5e5d-9559-c78e72428b6b"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Bestial Incursion",
+    "Garruk, Curse Breaker",
+    "Garruk, Veiled Butcher",
+    "Way of the Deathbringer",
+    "Way of the Wildspeaker",
+]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "8"
+released_at = "2026-10-02"
+type_line = "Token Creature — Beast"
+rules_text = "Trample"
+
+[token.body]
+display_name = "Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token.source_card_refs]]
+card_name = "Garruk, Veiled Butcher"
+scryfall_oracle_id = "4a6972fe-348a-4a19-a1d0-bdf8f1f9c792"
+scryfall_id = "9efdedea-c9a4-4085-9da9-4293200b99e0"
+
+[[token.source_card_refs]]
+card_name = "Garruk, Veiled Butcher"
+scryfall_oracle_id = "4a6972fe-348a-4a19-a1d0-bdf8f1f9c792"
+scryfall_id = "d48bfb8a-d135-45f3-be99-4694b4b9ab93"
+
+[[token.source_card_refs]]
+card_name = "Way of the Deathbringer"
+scryfall_oracle_id = "54775625-bf44-4035-969e-7e70578c8b98"
+scryfall_id = "12dd46b2-e892-4660-b120-55766fd4d878"
+
+[[token.source_card_refs]]
+card_name = "Garruk, Curse Breaker"
+scryfall_oracle_id = "184d4672-05a9-4182-8b3f-3561fb33ed62"
+scryfall_id = "90c84a1c-ee2b-4b63-8d81-d4e940a16162"
+
+[[token.source_card_refs]]
+card_name = "Bestial Incursion"
+scryfall_oracle_id = "bc00f29a-e9d2-4b86-bb22-33b686ac4365"
+scryfall_id = "e0de5f66-f0df-4866-9f73-104ce50411b4"
+
+[[token.source_card_refs]]
+card_name = "Way of the Wildspeaker"
+scryfall_oracle_id = "501580b9-692c-4804-be34-012a25ba8adf"
+scryfall_id = "a252cb01-537b-4afe-9abc-81a98c4a1439"
+
+[[token.source_card_refs]]
+card_name = "Garruk, Curse Breaker"
+scryfall_oracle_id = "184d4672-05a9-4182-8b3f-3561fb33ed62"
+scryfall_id = "90ca5812-ceb5-46bd-b049-aed7ff10e6af"
+
+[token.token_image_ref]
+scryfall_id = "859bda9a-fa90-4ad3-b0c1-6fc62e27c12f"
+scryfall_oracle_id = "7ed8a016-a259-4fda-aae5-02f8df94f2de"
+preset_id = "395884e6-ceaf-5e5d-9559-c78e72428b6b"
 
 [[token]]
 id = "3968de9a-3aac-5b38-8a48-51f1cdfe3f9d"
@@ -47775,6 +49458,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -48536,6 +50220,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -48989,6 +50674,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -50000,6 +51686,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -51063,6 +52750,11 @@ keywords = [
     "Flying",
     "Vigilance",
 ]
+
+[[token.source_card_refs]]
+card_name = "Resplendent Angel"
+scryfall_oracle_id = "2ac93092-1a57-4cf7-8f03-1dca86d5c476"
+scryfall_id = "1740ef90-42a6-454d-bb85-b495bb149ca6"
 
 [token.token_image_ref]
 scryfall_id = "2e974146-736c-430c-860a-2230f52c8a4e"
@@ -53800,6 +55492,108 @@ scryfall_oracle_id = "7b646e97-6c1d-4b37-8e27-82c36f2561e9"
 preset_id = "40ea0deb-83d1-565f-9f72-592652ed3606"
 
 [[token]]
+id = "4103cee6-f37f-5554-a28d-2c0fe10acb3e"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "A Killer Among Us",
+    "Ainok Strike Leader",
+    "Ardoz, Cobbler of War",
+    "Battle Cry Goblin",
+    "Beetleback Chief",
+    "Blast from the Past",
+    "Box of Free-Range Goblins",
+    "Den of the Bugbear",
+    "Dragon Fodder",
+    "Empty the Warrens",
+    "Frontline Rush",
+    "Garbage Elemental",
+    "General Kreat, the Boltbringer",
+    "Gift Horse",
+    "Goblin Assault",
+    "Goblin Gang Leader",
+    "Goblin Gathering",
+    "Goblin Goliath",
+    "Goblin Instigator",
+    "Goblin Marshal",
+    "Goblin Morningstar",
+    "Goblin Negotiation",
+    "Goblin Offensive",
+    "Goblin Rabblemaster",
+    "Goblin Rally",
+    "Goblin Surprise",
+    "Goblin Traprunner",
+    "Goblin War Party",
+    "Goblin Warrens",
+    "Goblinslide",
+    "Hordeling Outburst",
+    "Howlsquad Heavy",
+    "Hunted Phantasm",
+    "Ib Halfheart, Goblin Tactician",
+    "Jund",
+    "Kathari Bomber",
+    "Krenko's Command",
+    "Krenko, Baron of Tin Street",
+    "Krenko, Mob Boss",
+    "Krenko, Tin Street Kingpin",
+    "Kuldotha Rebirth",
+    "Legion Warboss",
+    "Lost Mine of Phandelver",
+    "Mardu Ascendancy",
+    "Mogg Alarm",
+    "Mogg Infestation",
+    "Mogg War Marshal",
+    "Neriv, Crackling Vanguard",
+    "Pashalik Mons",
+    "Ponyback Brigade",
+    "Rasputin, the Oneiromancer",
+    "Rulik Mons, Warren Chief",
+    "Sarpadian Empires, Vol. VII",
+    "Searslicer Goblin",
+    "Siege-Gang Commander",
+    "Siege-Gang Lieutenant",
+    "Sling-Gang Lieutenant",
+    "Squee, Dubious Monarch",
+    "Survey the Wreckage",
+    "Swarming Goblins",
+    "Tin Street Cadet",
+    "Underfoot Underdogs",
+    "Warbreak Trumpeter",
+    "Windcrag Siege",
+    "You See a Pair of Goblins",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "9"
+released_at = "2026-10-02"
+type_line = "Token Creature — Goblin"
+
+[token.body]
+display_name = "Goblin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Goblin"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Windcrag Siege"
+scryfall_oracle_id = "64df560a-905f-45d1-bc70-14d99e3112d3"
+scryfall_id = "235f5564-0928-411f-ade8-53838890f720"
+
+[[token.source_card_refs]]
+card_name = "Beetleback Chief"
+scryfall_oracle_id = "f5c5f64c-6911-430c-a825-b32b96d39c7d"
+scryfall_id = "9eb27caf-57e4-4fca-a734-148195dcad1b"
+
+[token.token_image_ref]
+scryfall_id = "0c7f299e-4774-4e8b-bb0e-db27d57d2621"
+scryfall_oracle_id = "4465eff4-5851-4721-a248-866c686c2ab8"
+preset_id = "4103cee6-f37f-5554-a28d-2c0fe10acb3e"
+
+[[token]]
 id = "4109db31-6037-50fc-a8ba-07c1a21b59f4"
 fidelity = "Full"
 source_card_names = [
@@ -54724,6 +56518,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -55081,6 +56876,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -56186,6 +57982,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -56898,9 +58695,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -58437,6 +60236,7 @@ source_card_names = [
     "Battle Screech",
     "Beck // Call",
     "Bird",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -58841,6 +60641,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -59636,6 +61437,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -60882,6 +62684,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -61625,6 +63428,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -62511,6 +64315,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -63349,6 +65154,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -65115,6 +66921,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -65223,9 +67030,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -65642,9 +67452,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -66056,6 +67869,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -66697,6 +68511,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -67816,6 +69631,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -69141,6 +70957,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -70160,9 +71977,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -70768,6 +72588,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -71000,6 +72821,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -73519,6 +75341,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -75576,6 +77399,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -75712,6 +77536,40 @@ scryfall_id = "57289725-5ad2-46dd-a7f9-a78db67022e5"
 scryfall_id = "b3c0ff23-6c20-4637-99d6-6cbca26d75ba"
 scryfall_oracle_id = "318d6000-b6e0-4ef0-ad58-d470f4a271e6"
 preset_id = "57e99f8c-df70-5bba-901b-6b0e62805982"
+
+[[token]]
+id = "57ecd736-caab-593c-8ab6-f5de65439312"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Shark Typhoon"]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "6"
+released_at = "2026-10-02"
+type_line = "Token Creature — Shark"
+rules_text = "Flying"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
+[token.body]
+display_name = "Shark"
+core_types = ["Creature"]
+subtypes = ["Shark"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Shark Typhoon"
+scryfall_oracle_id = "8c0520fa-276b-4d21-b4a9-dce1fce59f6b"
+scryfall_id = "605ca3c0-7c9a-4bc1-9795-82aeb6f552ee"
+
+[token.token_image_ref]
+scryfall_id = "21a614b0-2e65-4ea0-94c3-9c9afa0bc03c"
+scryfall_oracle_id = "9a010305-a9d9-48e5-8e1d-b0a6a7627832"
+preset_id = "57ecd736-caab-593c-8ab6-f5de65439312"
 
 [[token]]
 id = "583a9407-fae0-5b72-8017-c49e5c4701dc"
@@ -75992,11 +77850,6 @@ scryfall_oracle_id = "ef08d371-9d6c-4a2d-a444-d475fbf1b633"
 scryfall_id = "f9540288-9aef-49a2-a5da-3e42ba9dbbcd"
 
 [[token.source_card_refs]]
-card_name = "Xyris, the Writhing Storm"
-scryfall_oracle_id = "8687948c-456b-495b-9b31-f818c65624b6"
-scryfall_id = "466a7198-d022-47af-a7c5-351a54eb71de"
-
-[[token.source_card_refs]]
 card_name = "Orochi Eggwatcher // Shidako, Broodmistress"
 face_name = "Orochi Eggwatcher"
 scryfall_oracle_id = "e448e27c-f66d-4369-8215-7f7275e456e1"
@@ -76006,6 +77859,11 @@ scryfall_id = "a2a0181f-44bf-487d-a685-f92a8a43afe3"
 card_name = "Xyris, the Writhing Storm"
 scryfall_oracle_id = "8687948c-456b-495b-9b31-f818c65624b6"
 scryfall_id = "1032c8be-3de4-47e4-8885-38dba8d90de0"
+
+[[token.source_card_refs]]
+card_name = "Xyris, the Writhing Storm"
+scryfall_oracle_id = "8687948c-456b-495b-9b31-f818c65624b6"
+scryfall_id = "648ab4fb-337a-4ef2-895f-3687ad927337"
 
 [token.token_image_ref]
 scryfall_id = "4bfc751d-af71-49ff-a8b2-0d3a20eb136a"
@@ -77443,6 +79301,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -78196,6 +80055,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -78272,6 +80132,51 @@ scryfall_id = "15fa581a-724e-4196-a9a3-ff84c54bdb7d"
 scryfall_id = "229a41de-91dd-4696-bfc1-10d702787c3e"
 scryfall_oracle_id = "e9a9599e-828e-4598-a315-391c2cc5b4bb"
 preset_id = "5c11257f-fd89-5f00-87c8-ff8fad9fb5c1"
+
+[[token]]
+id = "5c1174af-247d-5ef8-aaf3-d45da2156e1d"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Kwia Vigorbloom"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "12"
+released_at = "2026-10-02"
+type_line = "Token Artifact"
+rules_text = "{T}, Sacrifice this token: Add three mana of any one color."
+
+[token.body]
+display_name = "Lotus"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Kwia Vigorbloom"
+scryfall_oracle_id = "07a28621-e617-46b0-af3e-2efb03b5056a"
+scryfall_id = "081ce1a1-e6a1-40cf-b2ba-eb20d7d56061"
+
+[[token.source_card_refs]]
+card_name = "Kwia Vigorbloom"
+scryfall_oracle_id = "07a28621-e617-46b0-af3e-2efb03b5056a"
+scryfall_id = "c5ba91b6-1678-4bd5-8f83-9d7f418562f5"
+
+[[token.source_card_refs]]
+card_name = "Kwia Vigorbloom"
+scryfall_oracle_id = "07a28621-e617-46b0-af3e-2efb03b5056a"
+scryfall_id = "2d6ff182-a853-4898-895b-072c89324ca7"
+
+[[token.source_card_refs]]
+card_name = "Kwia Vigorbloom"
+scryfall_oracle_id = "07a28621-e617-46b0-af3e-2efb03b5056a"
+scryfall_id = "4d5c27d8-b8c0-4a67-ad6e-3e21ace14e52"
+
+[token.token_image_ref]
+scryfall_id = "c59b7223-00a9-4c0d-896d-1cd463860c40"
+scryfall_oracle_id = "9eafaa49-cf0b-470d-b8a3-c51cff3d26e0"
+preset_id = "5c1174af-247d-5ef8-aaf3-d45da2156e1d"
 
 [[token]]
 id = "5c38d6e3-0e9d-56ac-95a0-5c0e180c2fd2"
@@ -78750,6 +80655,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -79217,6 +81123,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -80407,6 +82314,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -81394,6 +83302,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -82337,6 +84246,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -82770,6 +84680,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -83139,6 +85050,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -83939,6 +85851,11 @@ scryfall_id = "adea9871-807e-471d-9a9f-ad6efcf07e80"
 card_name = "Ghalta and Mavren"
 scryfall_oracle_id = "756042c5-e444-45d7-8dc6-ae7c83c98438"
 scryfall_id = "7ccb21e9-5169-4934-83c3-78ac00e5ffc7"
+
+[[token.source_card_refs]]
+card_name = "Ghalta and Mavren"
+scryfall_oracle_id = "756042c5-e444-45d7-8dc6-ae7c83c98438"
+scryfall_id = "05e1189b-837d-4c1f-85a2-35d229c4dee8"
 
 [token.token_image_ref]
 scryfall_id = "50b6ea55-c976-40e7-aa09-5ba77688bfe9"
@@ -84924,6 +86841,256 @@ scryfall_id = "83b60a89-cf45-4e90-a84f-d4674b926bf7"
 scryfall_id = "53500f0f-ef65-4534-a8db-80ce73030bc1"
 scryfall_oracle_id = "67f21c0c-2083-4eda-9dc3-cc8aee42289f"
 preset_id = "635c3b86-6abb-5d76-8cb9-edf324c55576"
+
+[[token]]
+id = "635f825d-d6fb-59ac-a807-af08713a3794"
+category = "Planeswalker"
+fidelity = "PartialMissingAbilities"
+source_card_names = [
+    "Academic Ascent",
+    "Arcane Amphisbaena",
+    "Avatar of Burgeoning Echoes",
+    "Campus Crier",
+    "Countersculpt",
+    "Hexhaven Battalion",
+    "Inspired Tethermage",
+    "Jace's Machinations",
+    "Keeper of the Quiet Hour",
+    "Mindseeker Oculus",
+    "No Admittance",
+    "Overwrite the Multiverse",
+    "Plan for All Outcomes",
+    "Protege's Awakening",
+    "Repurposed Enforcer",
+    "Rewrite Regrets",
+    "Solve for Disappointment",
+    "Tam's Resistance",
+    "Theorist's Proxy",
+    "Violent Echoes",
+    "Vraska's Final Mercy",
+    "Way of the Cryomancer",
+    "Way of the Deathbringer",
+    "Way of the Healer",
+    "Way of the Mentor",
+    "Way of the Mind Sculptor",
+    "Way of the Necromancer",
+    "Way of the Paradox",
+    "Way of the Pyromancer",
+    "Way of the Warlord",
+    "Way of the Wildspeaker",
+]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "5"
+released_at = "2026-10-02"
+type_line = "Token Planeswalker — Jace"
+rules_text = """
+[−1]: Surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)
+[−3]: Draw a card."""
+
+[token.body]
+display_name = "Jace"
+loyalty = 0
+core_types = ["Planeswalker"]
+subtypes = ["Jace"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Theorist's Proxy"
+scryfall_oracle_id = "0089acfe-da66-4dd7-b1e5-4d7407f58257"
+scryfall_id = "a46d570d-2abb-4270-87bc-b4b3baf5ed3b"
+
+[[token.source_card_refs]]
+card_name = "Jace's Machinations"
+scryfall_oracle_id = "89bd056d-8f5b-4d0e-b80a-58a984e21100"
+scryfall_id = "aabdc0a6-5d60-44c4-96cb-692eeeac0630"
+
+[[token.source_card_refs]]
+card_name = "Violent Echoes"
+scryfall_oracle_id = "e8ecec61-cc47-4051-a599-0e7470764488"
+scryfall_id = "ad03ba90-2442-4a71-94df-2088b5b63662"
+
+[[token.source_card_refs]]
+card_name = "Avatar of Burgeoning Echoes"
+scryfall_oracle_id = "08e8a63c-9fcc-48cf-a9af-15cbaeec943f"
+scryfall_id = "5905995b-7a20-4602-a7cc-90aa5089a082"
+
+[[token.source_card_refs]]
+card_name = "Way of the Cryomancer"
+scryfall_oracle_id = "7d32c63d-aa9e-4f5d-a3e6-51377a786009"
+scryfall_id = "838b0efb-7398-4df9-8fdf-b8af43b47938"
+
+[[token.source_card_refs]]
+card_name = "Jace's Machinations"
+scryfall_oracle_id = "89bd056d-8f5b-4d0e-b80a-58a984e21100"
+scryfall_id = "282588b9-3656-453b-aa25-2419e078ddc1"
+
+[[token.source_card_refs]]
+card_name = "Countersculpt"
+scryfall_oracle_id = "fc3353e9-fe24-4ca7-bff8-9da767f2903a"
+scryfall_id = "145b928d-a7ff-4fe5-ae4d-bbae7b1d955b"
+
+[[token.source_card_refs]]
+card_name = "Way of the Healer"
+scryfall_oracle_id = "cb27dc83-85ee-4f54-b032-41cd1806d3ac"
+scryfall_id = "50326a2a-7e10-464b-a97e-e880bda0558c"
+
+[[token.source_card_refs]]
+card_name = "Rewrite Regrets"
+scryfall_oracle_id = "42565432-3a17-4274-87fc-016ab900e313"
+scryfall_id = "453cfde7-c460-4b55-9472-b714e16f24bb"
+
+[[token.source_card_refs]]
+card_name = "Tam's Resistance"
+scryfall_oracle_id = "7500b7dc-588d-46bd-acc5-885dcd464668"
+scryfall_id = "b3d33df2-a77b-4c2e-ba7f-2cc9c1505f9b"
+
+[[token.source_card_refs]]
+card_name = "Way of the Necromancer"
+scryfall_oracle_id = "f3087daa-d2ff-4227-abff-3398da6297af"
+scryfall_id = "a0ff9689-ea49-4fff-b37c-4abbaeb0f73d"
+
+[[token.source_card_refs]]
+card_name = "Repurposed Enforcer"
+scryfall_oracle_id = "b775a404-ec0a-47ff-bb9d-eae2273d945b"
+scryfall_id = "ac0bd1be-36cb-483f-9c47-2714e534cb6c"
+
+[[token.source_card_refs]]
+card_name = "Vraska's Final Mercy"
+scryfall_oracle_id = "7799413d-e313-4a05-ad28-f4c926c26d28"
+scryfall_id = "992bd991-7cfb-459f-bafd-9a44f3c925c5"
+
+[[token.source_card_refs]]
+card_name = "Inspired Tethermage"
+scryfall_oracle_id = "80c2784b-f27d-4a51-9380-171eb32b961d"
+scryfall_id = "073f4998-a204-447b-93d5-746ae87fd6a1"
+
+[[token.source_card_refs]]
+card_name = "Hexhaven Battalion"
+scryfall_oracle_id = "158823ed-6015-437a-82b0-8dadb1e9aab2"
+scryfall_id = "3b6ac80e-c726-4bd0-893a-e666041a04a6"
+
+[[token.source_card_refs]]
+card_name = "Way of the Warlord"
+scryfall_oracle_id = "10721d62-dc68-43b4-bfa2-dcb8cf8ea980"
+scryfall_id = "6d86e410-20c4-4248-96bf-5780ece6274a"
+
+[[token.source_card_refs]]
+card_name = "Protege's Awakening"
+scryfall_oracle_id = "07617648-6490-4719-acec-7705671f7e01"
+scryfall_id = "a08c7ec2-4c6a-4db2-85a7-41afe8731523"
+
+[[token.source_card_refs]]
+card_name = "Keeper of the Quiet Hour"
+scryfall_oracle_id = "ecdfee75-15fd-41ea-89d4-4bfc1fa4d032"
+scryfall_id = "b6331218-dbb8-44a9-8ba5-5fb1ab41c5c0"
+
+[[token.source_card_refs]]
+card_name = "Vraska's Final Mercy"
+scryfall_oracle_id = "7799413d-e313-4a05-ad28-f4c926c26d28"
+scryfall_id = "c9535252-1a05-4d3a-98e1-54bfd7832ce4"
+
+[[token.source_card_refs]]
+card_name = "Way of the Mind Sculptor"
+scryfall_oracle_id = "94be2e86-ba0e-4b8d-9b9c-114adacb26db"
+scryfall_id = "5838af68-66c3-4fe8-ab89-0a1721b0cfeb"
+
+[[token.source_card_refs]]
+card_name = "Campus Crier"
+scryfall_oracle_id = "c1a9d60f-a469-48f9-8f1c-3ca5ae86bd64"
+scryfall_id = "6047b14c-91d5-4f8e-af3f-057a541e2546"
+
+[[token.source_card_refs]]
+card_name = "Avatar of Burgeoning Echoes"
+scryfall_oracle_id = "08e8a63c-9fcc-48cf-a9af-15cbaeec943f"
+scryfall_id = "58910deb-a99f-43c6-acc8-46563682b486"
+
+[[token.source_card_refs]]
+card_name = "Way of the Deathbringer"
+scryfall_oracle_id = "54775625-bf44-4035-969e-7e70578c8b98"
+scryfall_id = "12dd46b2-e892-4660-b120-55766fd4d878"
+
+[[token.source_card_refs]]
+card_name = "Plan for All Outcomes"
+scryfall_oracle_id = "7fd2cac5-cd29-4a47-9e89-9c6be39a0b67"
+scryfall_id = "c4effc17-0d0e-423a-b5f2-597ea6c71f67"
+
+[[token.source_card_refs]]
+card_name = "Arcane Amphisbaena"
+scryfall_oracle_id = "5c151e3b-fcf2-4adb-a60b-9eff0c360705"
+scryfall_id = "1bf923c4-f0b7-4271-978c-fd2e79fe1cc8"
+
+[[token.source_card_refs]]
+card_name = "Academic Ascent"
+scryfall_oracle_id = "406e853b-713f-4c89-9efb-aca74a11183f"
+scryfall_id = "730d8c28-1e58-4b8e-89e9-445d154d2e83"
+
+[[token.source_card_refs]]
+card_name = "Overwrite the Multiverse"
+scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
+scryfall_id = "f28b1518-8347-4385-9f34-a9c48818c770"
+
+[[token.source_card_refs]]
+card_name = "Way of the Mentor"
+scryfall_oracle_id = "ce924285-f4c5-44e6-909b-f5f7d302ebaf"
+scryfall_id = "1a59d5b1-12d6-486b-bd29-ca371359addd"
+
+[[token.source_card_refs]]
+card_name = "Way of the Paradox"
+scryfall_oracle_id = "76771cd1-6b74-49bb-9421-8845fe344567"
+scryfall_id = "98dc5470-507a-4364-8480-42607255e56c"
+
+[[token.source_card_refs]]
+card_name = "Solve for Disappointment"
+scryfall_oracle_id = "3241a3f5-7ae5-4497-9dd2-a55f3370a055"
+scryfall_id = "7beaa8c9-1a2c-4c88-b579-91e371d8d9e3"
+
+[[token.source_card_refs]]
+card_name = "No Admittance"
+scryfall_oracle_id = "d53ae01b-87e1-48e1-9fc3-23a734ce6622"
+scryfall_id = "11ba4fdd-cc03-4bb6-a493-91a9785771d0"
+
+[[token.source_card_refs]]
+card_name = "Way of the Wildspeaker"
+scryfall_oracle_id = "501580b9-692c-4804-be34-012a25ba8adf"
+scryfall_id = "a252cb01-537b-4afe-9abc-81a98c4a1439"
+
+[[token.source_card_refs]]
+card_name = "Repurposed Enforcer"
+scryfall_oracle_id = "b775a404-ec0a-47ff-bb9d-eae2273d945b"
+scryfall_id = "35000e93-85d3-44f8-976a-5918ee4c71e0"
+
+[[token.source_card_refs]]
+card_name = "Mindseeker Oculus"
+scryfall_oracle_id = "aa9547b3-e4e4-4557-9dd1-3aa9a7cb9937"
+scryfall_id = "f5324741-353a-4a70-adb2-b631b00806dd"
+
+[[token.source_card_refs]]
+card_name = "Way of the Pyromancer"
+scryfall_oracle_id = "68d3f547-674a-4d8a-b02f-01bc2f161916"
+scryfall_id = "c1a00020-7c14-4503-a057-5763704bb83e"
+
+[[token.source_card_refs]]
+card_name = "Overwrite the Multiverse"
+scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
+scryfall_id = "c4554f5b-791b-48f6-bf54-ad28699e1beb"
+
+[[token.source_card_refs]]
+card_name = "Overwrite the Multiverse"
+scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
+scryfall_id = "c318cd29-89db-4643-b3ef-5ff8492f5c1a"
+
+[[token.source_card_refs]]
+card_name = "Theorist's Proxy"
+scryfall_oracle_id = "0089acfe-da66-4dd7-b1e5-4d7407f58257"
+scryfall_id = "710302ca-c4be-4069-8ce1-f531414c74e9"
+
+[token.token_image_ref]
+scryfall_id = "8d1e424f-6407-4f8c-bed2-eaf148237c81"
+scryfall_oracle_id = "a6a09b69-dd86-4fda-8971-b77a2a4abddb"
+preset_id = "635f825d-d6fb-59ac-a807-af08713a3794"
 
 [[token]]
 id = "6367ef3e-ca9b-5df6-9803-9c9e2fb7fea8"
@@ -87071,9 +89238,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -87557,6 +89727,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -87763,6 +89934,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -88563,6 +90735,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -89091,6 +91264,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -90035,6 +92209,127 @@ scryfall_oracle_id = "63ff850d-df4a-4903-95cb-cc04dfacc3f1"
 preset_id = "69a13b2c-d2e9-516c-8bf9-97f350163d3f"
 
 [[token]]
+id = "69b34ffc-28e4-54b9-a815-d54517c8afa9"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Abdel Adrian, Gorion's Ward",
+    "Akroan Horse",
+    "Alistair, the Brigadier",
+    "Alliance of Arms",
+    "Ancestral Blade",
+    "Argivian Cavalier",
+    "Attended Knight",
+    "Baird, Argivian Recruiter",
+    "Bant Sojourners",
+    "Basri Ket",
+    "Basri Ket Emblem",
+    "Benalish Commander",
+    "Black Panther, Vanguard",
+    "Captain America, Liberator",
+    "Captain of the Watch",
+    "Captain's Call",
+    "Charisma Bobblehead",
+    "Company Commander",
+    "Darien, King of Kjeldor",
+    "Decree of Justice",
+    "Defiler of Faith",
+    "Deploy to the Front",
+    "Elspeth Tirel",
+    "Elspeth's Talent",
+    "Elspeth, Knight-Errant",
+    "Elspeth, Storm Slayer",
+    "Elspeth, Sun's Champion",
+    "Entrapment Maneuver",
+    "Evangel of Heliod",
+    "Even the Odds",
+    "First Response",
+    "Grizzlegom, Hurloon Hero",
+    "Heidegger, Shinra Executive",
+    "Hero of Bladehold",
+    "Heroic Reinforcements",
+    "Historian's Boon",
+    "Horn of Valhalla // Ysgard's Call",
+    "Ironroot Warlord",
+    "Kate Stewart",
+    "Keeper of the Accord",
+    "Keldon Strike Team",
+    "Kimoyo Beads",
+    "King Darien XLVIII",
+    "Kjeldoran Outpost",
+    "Knight-Captain of Eos",
+    "Launch the Fleet",
+    "Lena, Selfless Champion",
+    "Lieutenants of the Guard",
+    "Martial Coup",
+    "Memorial to Glory",
+    "Midnight Angel Armor",
+    "Mobilization",
+    "Murder Investigation",
+    "Okoye, Dora Milaje Leader",
+    "Phyrexian Warhorse",
+    "Prava of the Steel Legion",
+    "Precinct Captain",
+    "Protect the Negotiators",
+    "Queen Allenal of Ruadach",
+    "Raise the Alarm",
+    "Recruit the Worthy",
+    "Recruitment Drive",
+    "Resolute Reinforcements",
+    "Royal Talon Fighter Jet",
+    "S.H.I.E.L.D. Deployment Drone",
+    "S.H.I.E.L.D. Helicarrier",
+    "SOLDIER Military Program",
+    "Scout the Wilderness",
+    "Secure Detention",
+    "Secure the Scene",
+    "Security Detail",
+    "Sergeant-at-Arms",
+    "Skyknight Vanguard",
+    "Stormfront Riders",
+    "Throne of Empires",
+    "Timely Reinforcements",
+    "Torsten, Founder of Benalia",
+    "Tura Kennerüd, Skyknight",
+    "UNIT Headquarters",
+    "Undercellar Sweep",
+    "Veteran Soldier",
+    "Wakandan Shield Guard",
+    "Yes Man, Personal Securitron",
+    "You're Confronted by Robbers",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "3"
+released_at = "2026-10-02"
+type_line = "Token Creature — Soldier"
+
+[token.body]
+display_name = "Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Elspeth, Sun's Champion"
+scryfall_oracle_id = "05e6b243-48a6-4a42-bc5f-413441de9c33"
+scryfall_id = "a91d9163-c1f2-4eae-acab-5dabbc71d7d4"
+
+[[token.source_card_refs]]
+card_name = "Martial Coup"
+scryfall_oracle_id = "2b7c4dab-e432-4b34-b058-3cec5c0d72df"
+scryfall_id = "5c4d0ad9-4d57-4e5c-b478-059220f5b1dd"
+
+[token.token_image_ref]
+scryfall_id = "a58c2fc3-c07f-4f06-a9d5-1d0fe3dbde1f"
+scryfall_oracle_id = "eac25f12-6459-438c-a09e-93e23d2cf80d"
+preset_id = "69b34ffc-28e4-54b9-a815-d54517c8afa9"
+
+[[token]]
 id = "69cebd8e-e868-56d6-ba05-f1db85b34227"
 category = "Creature"
 fidelity = "Full"
@@ -90553,6 +92848,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -91112,6 +93408,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -91705,9 +94002,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -92339,6 +94638,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -92819,6 +95119,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -93274,9 +95575,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -94662,6 +96966,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -94739,9 +97044,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -95280,6 +97588,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -95353,9 +97662,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -95977,9 +98289,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -97504,6 +99819,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -97930,6 +100246,38 @@ scryfall_id = "45dedbf8-2a36-415d-bed5-65a3329c5ea9"
 scryfall_id = "d98c546e-2933-4833-b47b-084db56fb5d6"
 scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
 preset_id = "715980fd-eb77-560a-8a91-dcd0c4623485"
+
+[[token]]
+id = "716623ac-be85-5ebd-8673-62869a59eb3a"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Kiora of Salt and Sand"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "6"
+released_at = "2026-10-02"
+type_line = "Token Creature — Leviathan"
+rules_text = "Hexproof"
+
+[token.body]
+display_name = "Leviathan"
+power = 8
+toughness = 8
+core_types = ["Creature"]
+subtypes = ["Leviathan"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Hexproof"]
+
+[[token.source_card_refs]]
+card_name = "Kiora of Salt and Sand"
+scryfall_oracle_id = "e70bb7f8-8098-49c5-929c-68f63cd821c5"
+scryfall_id = "8151f5f5-e9f6-4fbe-b543-f456ebf22aa5"
+
+[token.token_image_ref]
+scryfall_id = "a4339d5a-7c07-4326-b0e6-d2519332803d"
+scryfall_oracle_id = "7aca8155-f42b-44f5-b27d-ca083f28faba"
+preset_id = "716623ac-be85-5ebd-8673-62869a59eb3a"
 
 [[token]]
 id = "7168a2ff-69b1-508f-a3cb-52bee903e83e"
@@ -99534,6 +101882,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -99646,6 +101995,67 @@ scryfall_oracle_id = "29ff8699-53d8-413b-8a3c-0e3ea1e13ff0"
 preset_id = "73467036-f7aa-527a-96a8-5868e33c368b"
 
 [[token]]
+id = "7350fa3a-c619-569f-b519-66dea57138d7"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Awaken the Sky Tyrant",
+    "Broodmate Tyrant",
+    "Day of the Dragons",
+    "Death by Dragons",
+    "Draconic Disciple",
+    "Draconic Visitor",
+    "Dragon Roost",
+    "Dragonkin Berserker",
+    "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
+    "Lathliss, Dragon Queen",
+    "Look Skyward and Despair",
+    "Loot Dispute",
+    "Rite of the Dragoncaller",
+    "Sarkhan the Mad",
+    "Sarkhan, Fireblood",
+    "Shiv",
+    "Skyline Despot",
+]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "7"
+released_at = "2026-10-02"
+type_line = "Token Creature — Dragon"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Dragon"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Draconic Visitor"
+scryfall_oracle_id = "6745e850-68f6-480b-a1e0-e06180dde169"
+scryfall_id = "112f8478-bd89-4a14-9721-8ab750613129"
+
+[[token.source_card_refs]]
+card_name = "Draconic Visitor"
+scryfall_oracle_id = "6745e850-68f6-480b-a1e0-e06180dde169"
+scryfall_id = "d061676d-093a-47ac-9064-3edcacbc4485"
+
+[[token.source_card_refs]]
+card_name = "Kiora of Fire and Ashes"
+scryfall_oracle_id = "02b41d0e-82e7-4307-8cc4-8175ff78ea1f"
+scryfall_id = "08657053-86f9-4c52-abf0-d9cdd443ae3b"
+
+[token.token_image_ref]
+scryfall_id = "991a5840-adc7-45b5-8d5f-b24dae384bab"
+scryfall_oracle_id = "60fe4897-6760-4c5a-8074-c92bd64df52b"
+preset_id = "7350fa3a-c619-569f-b519-66dea57138d7"
+
+[[token]]
 id = "739eae77-2810-5d5e-8c6b-203db53cdd3b"
 category = "Creature"
 fidelity = "Full"
@@ -99697,6 +102107,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -100964,6 +103375,121 @@ scryfall_oracle_id = "8d7d636d-4ae7-4411-8f45-fc57fead851e"
 preset_id = "74a6afcf-21ee-526d-876d-15aabe19fffb"
 
 [[token]]
+id = "74a8ea63-91e1-5cb6-b851-b0d333a5ba80"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Access Denied",
+    "Aspiring Aeronaut",
+    "Aviation Pioneer",
+    "Barbed Spike",
+    "Breya's Apprentice",
+    "Broadcast Rambler",
+    "Camera Launcher",
+    "Depose // Deploy",
+    "Detective's Satchel",
+    "Deviant Skytech",
+    "Dovin, Grand Arbiter",
+    "Efficient Construction",
+    "Etherium Spinner",
+    "Experimental Aviator",
+    "Fairgrounds Patrol",
+    "Filigree Crawler",
+    "Foundry of the Consuls",
+    "Fuss // Bother",
+    "Gadget Technician",
+    "Ghirapur Gearcrafter",
+    "Hangarback Walker",
+    "Harried Dronesmith",
+    "Haunt the Network",
+    "Inspired Sphinx",
+    "Invasion of Kaladesh // Aetherwing, Golden-Scale Flagship",
+    "Launch Mishap",
+    "Loyal Apprentice",
+    "Maverick Thopterist",
+    "Nimble Thopterist",
+    "Pia Nalaar",
+    "Pia Nalaar, Consul of Revival",
+    "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
+    "Rangers' Aetherhive",
+    "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
+    "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
+    "Sai, Master Thopterist",
+    "Stridehangar Automaton",
+    "Surveillance Monitor",
+    "Sweep the Skies",
+    "Tezzeret, Artifice Master",
+    "Thopter Assembly",
+    "Thopter Engineer",
+    "Thopter Fabricator",
+    "Thopter Mechanic",
+    "Thopter Pie Network",
+    "Thopter Shop",
+    "Thopter Spy Network",
+    "Thopter Squadron",
+    "Whirler Rogue",
+    "Whirler Virtuoso",
+    "Whirlermaker",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "15"
+released_at = "2024-11-15"
+type_line = "Token Artifact Creature — Thopter"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Thopter"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Thopter"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Thopter Spy Network"
+scryfall_oracle_id = "49be65fd-3755-410d-b0dc-2e5861ea2552"
+scryfall_id = "8628d622-d682-4264-87d7-ad8434bb4328"
+
+[[token.source_card_refs]]
+card_name = "Sai, Master Thopterist"
+scryfall_oracle_id = "52241b9c-7a69-4176-9234-8bdab09d8e64"
+scryfall_id = "5650587a-27a5-4d68-97e2-5745627bd094"
+
+[[token.source_card_refs]]
+card_name = "Thopter Fabricator"
+scryfall_oracle_id = "8aab9181-c306-471a-8061-9a7a7654dab5"
+scryfall_id = "36123651-430b-4ae3-a055-713f81bb0f53"
+
+[[token.source_card_refs]]
+card_name = "Whirler Rogue"
+scryfall_oracle_id = "7060f2c8-fca0-4b7a-bddf-37682f434596"
+scryfall_id = "51505039-b6f6-4dd6-9a09-5494e030deff"
+
+[[token.source_card_refs]]
+card_name = "Foundry of the Consuls"
+scryfall_oracle_id = "0498ea14-53d9-4655-a616-0ff3cf73de4e"
+scryfall_id = "0087b1ea-beba-49e6-924c-b792c473a8ce"
+
+[[token.source_card_refs]]
+card_name = "Launch Mishap"
+scryfall_oracle_id = "5d4ed768-0a37-4604-8121-43920ed9fb4a"
+scryfall_id = "803c058c-4ccc-40cd-a74d-1bda5a4c453b"
+
+[token.token_image_ref]
+scryfall_id = "3597cf76-f0db-4d2c-b01c-d518d7c7a764"
+scryfall_oracle_id = "7c0b6b53-4ddb-4bb5-8a26-0041b2006d3f"
+preset_id = "74a8ea63-91e1-5cb6-b851-b0d333a5ba80"
+
+[[token]]
 id = "74c9115b-2802-5edb-939e-fd3d82713790"
 category = "Creature"
 fidelity = "Full"
@@ -101386,6 +103912,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -102079,6 +104606,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -102667,6 +105195,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -102771,9 +105300,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -102820,9 +105351,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -105692,6 +108225,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -106153,6 +108687,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -106198,6 +108733,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -106407,6 +108943,52 @@ keywords = []
 scryfall_id = "29c4e4f2-0040-4490-b357-660d729ad9cc"
 scryfall_oracle_id = "e2b387e7-8b4c-41cd-95ca-df5dd1680425"
 preset_id = "7a13db1f-523c-5b19-80e5-d4d6f0121c6b"
+
+[[token]]
+id = "7a2e1064-95a1-5bc7-8723-e75792067dad"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Genesis Chamber",
+    "Master's Call",
+    "Memnarch, the Warden",
+    "Mirrodin Besieged",
+    "Myr Battlesphere",
+    "Myr Incubator",
+    "Myr Matrix",
+    "Myr Turbine",
+    "Myrsmith",
+    "Origin Spellbomb",
+    "Urtet, Remnant of Memnarch",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "14"
+released_at = "2024-11-15"
+type_line = "Token Artifact Creature — Myr"
+
+[token.body]
+display_name = "Myr"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Myr"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Myr Battlesphere"
+scryfall_oracle_id = "c53ba31a-ba27-4e17-9a92-311acb1cab29"
+scryfall_id = "7d2ca7dc-a999-4708-aeec-9f8e0f0db1e5"
+
+[token.token_image_ref]
+scryfall_id = "345a3db8-90f4-4574-8040-e0fa4ea6b3e6"
+scryfall_oracle_id = "bf690282-125f-431c-a363-39f6772324c8"
+preset_id = "7a2e1064-95a1-5bc7-8723-e75792067dad"
 
 [[token]]
 id = "7a31461f-de1f-510e-af84-58c841687c1b"
@@ -106814,6 +109396,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -106904,6 +109487,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -107916,6 +110500,45 @@ scryfall_oracle_id = "cb78f496-a5db-4d23-b63d-04584e8f3bb1"
 preset_id = "7c1e5cb6-23f4-5829-b6c3-7e8759b266d7"
 
 [[token]]
+id = "7c3e9afb-35ab-5604-9fa6-ed3e740110e0"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Elspeth Resplendent",
+    "Linvala, the Preserver",
+    "Seraphic Steed",
+    "Soul of Emancipation",
+    "The Book of Exalted Deeds",
+    "The Pit",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "1"
+released_at = "2024-11-15"
+type_line = "Token Creature — Angel"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Angel"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Linvala, the Preserver"
+scryfall_oracle_id = "64f5689d-504d-40e9-bdb5-36dcefd257e2"
+scryfall_id = "3c31c48d-7833-4235-bc49-7e12a4ed607a"
+
+[token.token_image_ref]
+scryfall_id = "e1e5dbd5-5fba-4d09-aa27-359505042651"
+scryfall_oracle_id = "263fd9ed-d3dc-4a96-b731-dd8f4bb0f95a"
+preset_id = "7c3e9afb-35ab-5604-9fa6-ed3e740110e0"
+
+[[token]]
 id = "7c4596d5-af5c-5e16-802e-38e3cee1fdbc"
 category = "Creature"
 fidelity = "Full"
@@ -108325,6 +110948,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -108756,6 +111380,75 @@ scryfall_oracle_id = "8c0aa0c3-4513-4525-b682-2be7203d3bc7"
 preset_id = "7cbf2555-0c09-5272-aa0a-d372d1bbd198"
 
 [[token]]
+id = "7ccdd9e7-6060-5cf2-849d-15da2fb3dc94"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Assimilate Essence",
+    "Blight Titan",
+    "Blighted Burgeoning",
+    "Bloated Processor",
+    "Brimaz, Blight of Oreskos",
+    "Chrome Host Seedshark",
+    "Compleated Huntmaster",
+    "Converter Beast",
+    "Corruption of Towashi",
+    "Elesh Norn // The Argent Etchings",
+    "Elvish Vatkeeper",
+    "Essence of Orthodoxy",
+    "Excise the Imperfect",
+    "Eyes of Gitaxias",
+    "Furnace Gremlin",
+    "Gift of Compleation",
+    "Glissa, Herald of Predation",
+    "Glistening Dawn",
+    "Ichor Drinker",
+    "Infected Defector",
+    "Injector Crocodile",
+    "Marauding Dreadship",
+    "Merciless Repurposing",
+    "Norn's Inquisitor",
+    "Phyrexian Awakening",
+    "Progenitor Exarch",
+    "Sculpted Perfection",
+    "Searing Barb",
+    "Sunder the Gateway",
+    "Sunfall",
+    "Tangled Skyline",
+    "Tiller of Flesh",
+    "Traumatic Revelation",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "13"
+released_at = "2026-10-02"
+type_line = "Token Artifact Creature — Phyrexian"
+
+[token.body]
+display_name = "Phyrexian"
+power = 0
+toughness = 0
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Phyrexian"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Sunfall"
+scryfall_oracle_id = "fb3f5097-0da0-458c-8508-60823567e2da"
+scryfall_id = "a560b9a7-4c00-4c0c-b63d-774d3f6b9aa9"
+
+[token.token_image_ref]
+scryfall_id = "7b7f2e3a-ec43-4408-affd-a09338566ce3"
+scryfall_oracle_id = "dd3bf75e-9ef0-4ded-9b65-1a60a78a6253"
+face_name = "Phyrexian"
+preset_id = "7ccdd9e7-6060-5cf2-849d-15da2fb3dc94"
+
+[[token]]
 id = "7cd70cbb-bb33-5421-b474-f53ccaef070c"
 fidelity = "Full"
 source_card_names = [
@@ -109120,6 +111813,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -110124,6 +112818,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -110161,12 +112856,45 @@ scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
 preset_id = "7daecc09-9012-5a81-86c2-3f6a831f41a7"
 
 [[token]]
+id = "7db8e2a5-7f1f-5d61-a0fd-9f842d9cc8d9"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Overlord of the Mistmoors"]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "2"
+released_at = "2026-10-02"
+type_line = "Token Creature — Insect"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Insect"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Overlord of the Mistmoors"
+scryfall_oracle_id = "7e64b1dc-a238-4bff-98ff-2bea44340568"
+scryfall_id = "152d9e61-40f4-489a-b94d-af17a3674441"
+
+[token.token_image_ref]
+scryfall_id = "f5d782a4-6726-4d64-9977-82ea2ab77e0f"
+scryfall_oracle_id = "9e8fc105-68f6-4fd6-b760-a77a61793d06"
+preset_id = "7db8e2a5-7f1f-5d61-a0fd-9f842d9cc8d9"
+
+[[token]]
 id = "7dba114e-b4ca-5481-a9bd-3c68ecbfc4ef"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -110383,9 +113111,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -110587,6 +113317,67 @@ scryfall_id = "f78c0976-83c4-4694-a93f-13046902cdd9"
 scryfall_oracle_id = "b973cb86-3a1b-42de-83ae-74dffa5bcb8a"
 face_name = "Goblin"
 preset_id = "7e080177-07a7-5ea5-9898-5bd30f4fdd72"
+
+[[token]]
+id = "7e1f83bc-1fb5-569a-aea0-b2ce5b365568"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Awaken the Sky Tyrant",
+    "Broodmate Tyrant",
+    "Day of the Dragons",
+    "Death by Dragons",
+    "Draconic Disciple",
+    "Draconic Visitor",
+    "Dragon Roost",
+    "Dragonkin Berserker",
+    "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
+    "Lathliss, Dragon Queen",
+    "Look Skyward and Despair",
+    "Loot Dispute",
+    "Rite of the Dragoncaller",
+    "Sarkhan the Mad",
+    "Sarkhan, Fireblood",
+    "Shiv",
+    "Skyline Despot",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "8"
+released_at = "2024-11-15"
+type_line = "Token Creature — Dragon"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Dragon"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Lathliss, Dragon Queen"
+scryfall_oracle_id = "15fef45d-f1a9-49b2-abaa-fe77bb9d1afd"
+scryfall_id = "8a17ec4e-b508-41af-803b-32acd863e598"
+
+[[token.source_card_refs]]
+card_name = "Skyline Despot"
+scryfall_oracle_id = "c0ce54a1-14a1-45f3-91d0-c57b581afc63"
+scryfall_id = "5dde8c11-96fe-4cd0-b28f-f11ee16a9e5c"
+
+[[token.source_card_refs]]
+card_name = "Dragonmaster Outcast"
+scryfall_oracle_id = "b6fb79c3-cd32-4045-8177-e52841eea65b"
+scryfall_id = "ee9e2f35-6e1d-4ccc-9cb9-20955d5178c5"
+
+[token.token_image_ref]
+scryfall_id = "4fbb6ef8-cf45-476b-8985-36023b6884ee"
+scryfall_oracle_id = "60fe4897-6760-4c5a-8074-c92bd64df52b"
+preset_id = "7e1f83bc-1fb5-569a-aea0-b2ce5b365568"
 
 [[token]]
 id = "7e3a99c3-57e2-5db9-8b1a-94a9e7c694ba"
@@ -111771,6 +114562,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -112477,6 +115269,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -113894,6 +116687,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -114675,6 +117469,7 @@ source_card_names = [
     "Battle Screech",
     "Beck",
     "Beck // Call",
+    "Blustering Barnyard",
     "Call",
     "Emeria Angel",
     "Eyes in the Skies",
@@ -114837,6 +117632,49 @@ scryfall_oracle_id = "8e067701-3b0b-4985-a8f9-fd634b6b8e78"
 preset_id = "824e4285-56ea-5d9f-9db2-48a34f3fddd6"
 
 [[token]]
+id = "8262695d-9cb6-5b31-b8e4-efc806db13a5"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Verdant Kraken"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "9"
+released_at = "2026-10-02"
+type_line = "Token Land Creature — Forest Tentacle"
+rules_text = """(This token has "{T}: Add {G}." It's affected by summoning sickness until your next turn.)"""
+
+[token.body]
+display_name = "Forest Tentacle"
+power = 3
+toughness = 3
+core_types = [
+    "Land",
+    "Creature",
+]
+subtypes = [
+    "Forest",
+    "Tentacle",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Verdant Kraken"
+scryfall_oracle_id = "83c61083-b357-4775-a855-5a9013cc2bdf"
+scryfall_id = "decca9e3-5ca8-4b48-8ec9-23b26ca683cb"
+
+[[token.source_card_refs]]
+card_name = "Verdant Kraken"
+scryfall_oracle_id = "83c61083-b357-4775-a855-5a9013cc2bdf"
+scryfall_id = "2bb7a8eb-227f-410b-859f-750ef0aea2f0"
+
+[token.token_image_ref]
+scryfall_id = "fc924972-5014-45d1-9676-6a76d862b205"
+scryfall_oracle_id = "00ae3028-7b59-4166-96da-6b65859bd5db"
+preset_id = "8262695d-9cb6-5b31-b8e4-efc806db13a5"
+
+[[token]]
 id = "826738d7-4d93-5ba8-bd2d-ea8a6a986e20"
 category = "Creature"
 fidelity = "Full"
@@ -114931,6 +117769,116 @@ scryfall_id = "b9169431-a5b1-42ea-bcf4-6c750d2a2dbb"
 scryfall_id = "dfb61889-9bc6-426d-8ce5-7b1c0e6e959b"
 scryfall_oracle_id = "0045c5fa-3229-4050-b139-5712fa24b308"
 preset_id = "82c844d0-9918-52d5-8bf1-201e32ea2acb"
+
+[[token]]
+id = "82e4297d-b153-50b8-bd2a-7984050d9ac7"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Abzan Ascendancy",
+    "Afterlife",
+    "Alharu, Solemn Ritualist",
+    "Andúril, Flame of the West",
+    "Avacyn's Collar",
+    "Benevolent Offering",
+    "Bishop of Wings",
+    "Blessed Defiance",
+    "Brine Comber // Brinebound Gift",
+    "Clarion Spirit",
+    "Confront the Assault",
+    "Court of Grace",
+    "Custodi Soulbinders",
+    "Dauntless Cathar",
+    "Doomed Traveler",
+    "Drogskol Cavalry",
+    "Elgaud Inquisitor",
+    "Emissary of the Sleepless",
+    "Ethereal Investigator",
+    "Field of Souls",
+    "Funeral Pyre",
+    "Gallows at Willow Hill",
+    "Geist-Honored Monk",
+    "Hallowed Spiritkeeper",
+    "Hanged Executioner",
+    "Haunted Dead",
+    "Haunted Library",
+    "Heron-Blessed Geist",
+    "Kaya the Inexorable",
+    "Kaya, Geist Hunter",
+    "King of the Oathbreakers",
+    "Kirtar's Wrath",
+    "Kykar, Wind's Fury",
+    "Kykar, Zephyr Awakener",
+    "Lingering Souls",
+    "Luminous Angel",
+    "March of Souls",
+    "Mausoleum Guard",
+    "Midnight Haunting",
+    "Millicent, Restless Revenant",
+    "Moorland Haunt",
+    "Muster the Departed",
+    "Nearheath Chaplain",
+    "Not Forgotten",
+    "Nurturing Presence",
+    "Oath of the Grey Host",
+    "Occult Epiphany",
+    "Path of the Ghosthunter",
+    "Priest of the Blessed Graf",
+    "Ranar the Ever-Watchful",
+    "Requiem Angel",
+    "Rousing of Souls",
+    "Sanctifier of Souls",
+    "Sandsteppe Outcast",
+    "Seize the Soul",
+    "Shadow Summoning",
+    "Slayer's Plate",
+    "Spectral Procession",
+    "Spectral Reserves",
+    "Spirit Bonds",
+    "Spirit Cairn",
+    "Staff of the Storyteller",
+    "Summoner's Sending",
+    "Teysa, Orzhov Scion",
+    "Thalia's Geistcaller",
+    "Thalisse, Reverent Medium",
+    "Transluminant",
+    "Triplicate Spirits",
+    "Twilight Drover",
+    "Valor of the Worthy",
+    "Vessel of Ephemera",
+    "Whispering Wizard",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "3"
+released_at = "2024-11-15"
+type_line = "Token Creature — Spirit"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Bishop of Wings"
+scryfall_oracle_id = "af4684cf-f109-44be-adfb-7c551a36635e"
+scryfall_id = "e4a34101-1be3-44ae-b709-f0398998d4c4"
+
+[[token.source_card_refs]]
+card_name = "Court of Grace"
+scryfall_oracle_id = "f63c2438-27d4-449a-828f-f0a2ea86ff16"
+scryfall_id = "f0deb485-4895-4a3e-b1a7-e3c969593f97"
+
+[token.token_image_ref]
+scryfall_id = "9ca99f61-a1cd-4c61-9e0a-791b5f211f56"
+scryfall_oracle_id = "dc4e2134-f0c2-49aa-9ea3-ebf83af1445c"
+preset_id = "82e4297d-b153-50b8-bd2a-7984050d9ac7"
 
 [[token]]
 id = "831c4ca5-fd24-5d3d-8360-ae07040c64a3"
@@ -115362,9 +118310,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -115658,6 +118609,36 @@ scryfall_id = "601c59cf-f3df-4003-9ae9-613a1d4a620b"
 scryfall_id = "d93d0098-2147-4e84-af15-91dec8b98d21"
 scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
 preset_id = "840111a4-9785-54fb-afed-e66da65b9b99"
+
+[[token]]
+id = "843ed1fd-d928-5565-b515-be85a737fa82"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Ajani, Strength of the Pride"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "2"
+released_at = "2026-10-02"
+type_line = "Token Creature — Cat Soldier"
+rules_text = "Whenever you gain life, put a +1/+1 counter on Ajani's Pridemate."
+
+[token.body]
+display_name = "Ajani's Pridemate"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Cat",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "7801c326-d740-4cec-9268-05348ace8302"
+scryfall_oracle_id = "9fcff433-c6f7-44c6-8279-04625703cb3e"
+preset_id = "843ed1fd-d928-5565-b515-be85a737fa82"
 
 [[token]]
 id = "84534351-3a79-50ce-abe2-5b5776bf4768"
@@ -116476,6 +119457,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -116694,6 +119676,11 @@ scryfall_id = "ebcf9ad6-5c1c-4b12-9778-2b9338bf49aa"
 card_name = "Mercy Killing"
 scryfall_oracle_id = "4d80bac5-ce62-4c5c-873a-ce81d2697842"
 scryfall_id = "0ef5649d-10a4-44cc-b94a-9f2ee4c0aac7"
+
+[[token.source_card_refs]]
+card_name = "Rhys the Redeemed"
+scryfall_oracle_id = "f7252190-ad24-4ba3-a644-2790dd1d680d"
+scryfall_id = "af107542-ebf3-4a35-a313-b8803d8eda0c"
 
 [token.token_image_ref]
 scryfall_id = "cee23d72-2cd6-4133-98d1-c7b8da839408"
@@ -117171,7 +120158,7 @@ source_card_names = [
 ]
 set_code = "PLST"
 set_name = "The List"
-collector_number = "CMM-40"
+collector_number = "TCMM-40"
 released_at = "2020-09-26"
 type_line = "Token Artifact — Clue"
 rules_text = "{2}, Sacrifice this token: Draw a card."
@@ -119368,6 +122355,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -119802,9 +122790,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -120300,6 +123291,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -120351,6 +123343,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -120934,6 +123927,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -122733,6 +125727,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -123618,6 +126613,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -124404,6 +127400,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -124983,6 +127980,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -125302,6 +128300,121 @@ keywords = []
 scryfall_id = "f2c859e1-181e-44d1-afbd-bbd6e52cf42a"
 scryfall_oracle_id = "496e1083-c792-40a4-adf4-fec1d559cd5e"
 preset_id = "8dd78d67-3a54-53ed-8da6-636e03f78a38"
+
+[[token]]
+id = "8de210ad-ccfa-5af6-95b0-2c4fcfb287bf"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Abzan Ascendancy",
+    "Afterlife",
+    "Alharu, Solemn Ritualist",
+    "Andúril, Flame of the West",
+    "Avacyn's Collar",
+    "Benevolent Offering",
+    "Bishop of Wings",
+    "Blessed Defiance",
+    "Brine Comber // Brinebound Gift",
+    "Clarion Spirit",
+    "Confront the Assault",
+    "Court of Grace",
+    "Custodi Soulbinders",
+    "Dauntless Cathar",
+    "Doomed Traveler",
+    "Drogskol Cavalry",
+    "Elgaud Inquisitor",
+    "Emissary of the Sleepless",
+    "Ethereal Investigator",
+    "Field of Souls",
+    "Funeral Pyre",
+    "Gallows at Willow Hill",
+    "Geist-Honored Monk",
+    "Hallowed Spiritkeeper",
+    "Hanged Executioner",
+    "Haunted Dead",
+    "Haunted Library",
+    "Heron-Blessed Geist",
+    "Kaya the Inexorable",
+    "Kaya, Geist Hunter",
+    "King of the Oathbreakers",
+    "Kirtar's Wrath",
+    "Kykar, Wind's Fury",
+    "Kykar, Zephyr Awakener",
+    "Lingering Souls",
+    "Luminous Angel",
+    "March of Souls",
+    "Mausoleum Guard",
+    "Midnight Haunting",
+    "Millicent, Restless Revenant",
+    "Moorland Haunt",
+    "Muster the Departed",
+    "Nearheath Chaplain",
+    "Not Forgotten",
+    "Nurturing Presence",
+    "Oath of the Grey Host",
+    "Occult Epiphany",
+    "Path of the Ghosthunter",
+    "Priest of the Blessed Graf",
+    "Ranar the Ever-Watchful",
+    "Requiem Angel",
+    "Rousing of Souls",
+    "Sanctifier of Souls",
+    "Sandsteppe Outcast",
+    "Seize the Soul",
+    "Shadow Summoning",
+    "Slayer's Plate",
+    "Spectral Procession",
+    "Spectral Reserves",
+    "Spirit Bonds",
+    "Spirit Cairn",
+    "Staff of the Storyteller",
+    "Summoner's Sending",
+    "Teysa, Orzhov Scion",
+    "Thalia's Geistcaller",
+    "Thalisse, Reverent Medium",
+    "Transluminant",
+    "Triplicate Spirits",
+    "Twilight Drover",
+    "Valor of the Worthy",
+    "Vessel of Ephemera",
+    "Whispering Wizard",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "4"
+released_at = "2026-10-02"
+type_line = "Token Creature — Spirit"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Occult Epiphany"
+scryfall_oracle_id = "6df1c314-b97b-4bbc-8b7e-a07785347a49"
+scryfall_id = "e5fcfaff-2fd0-46d8-b863-ad25558c9e95"
+
+[[token.source_card_refs]]
+card_name = "Staff of the Storyteller"
+scryfall_oracle_id = "0c4e2c90-c17b-42cc-b4d7-cf75970fbe90"
+scryfall_id = "f9321060-c1bf-4190-aaf6-253d6df64237"
+
+[[token.source_card_refs]]
+card_name = "Lingering Souls"
+scryfall_oracle_id = "0b8c3337-04dd-4798-8203-6d8b8cfb936b"
+scryfall_id = "e5b16141-d185-4be2-97c1-5b0ef5483728"
+
+[token.token_image_ref]
+scryfall_id = "06a96ac2-94a4-4b1c-a3c5-add1a3112cb2"
+scryfall_oracle_id = "dc4e2134-f0c2-49aa-9ea3-ebf83af1445c"
+preset_id = "8de210ad-ccfa-5af6-95b0-2c4fcfb287bf"
 
 [[token]]
 id = "8de388a3-945c-5afd-b555-fa73ef6fd938"
@@ -125692,6 +128805,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -125762,9 +128876,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -125993,6 +129110,71 @@ scryfall_id = "f76e5d23-a45f-4100-8638-fce33f290fc6"
 scryfall_id = "b5000cf8-2104-4d85-95df-29efa92256f6"
 scryfall_oracle_id = "eac25f12-6459-438c-a09e-93e23d2cf80d"
 preset_id = "8e4feafb-d457-5954-9d4c-acb3b30eb384"
+
+[[token]]
+id = "8e938e0e-390c-50ea-ad96-fac4ad190fe2"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+source_card_names = [
+    "Assimilate Essence",
+    "Blight Titan",
+    "Blighted Burgeoning",
+    "Bloated Processor",
+    "Brimaz, Blight of Oreskos",
+    "Chrome Host Seedshark",
+    "Compleated Huntmaster",
+    "Converter Beast",
+    "Corruption of Towashi",
+    "Elesh Norn // The Argent Etchings",
+    "Elvish Vatkeeper",
+    "Essence of Orthodoxy",
+    "Excise the Imperfect",
+    "Eyes of Gitaxias",
+    "Furnace Gremlin",
+    "Gift of Compleation",
+    "Glissa, Herald of Predation",
+    "Glistening Dawn",
+    "Ichor Drinker",
+    "Infected Defector",
+    "Injector Crocodile",
+    "Marauding Dreadship",
+    "Merciless Repurposing",
+    "Norn's Inquisitor",
+    "Phyrexian Awakening",
+    "Progenitor Exarch",
+    "Sculpted Perfection",
+    "Searing Barb",
+    "Sunder the Gateway",
+    "Sunfall",
+    "Tangled Skyline",
+    "Tiller of Flesh",
+    "Traumatic Revelation",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "13"
+released_at = "2026-10-02"
+type_line = "Token Artifact — Incubator"
+rules_text = "{2}: Transform this artifact."
+
+[token.body]
+display_name = "Incubator"
+core_types = ["Artifact"]
+subtypes = ["Incubator"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Sunfall"
+scryfall_oracle_id = "fb3f5097-0da0-458c-8508-60823567e2da"
+scryfall_id = "a560b9a7-4c00-4c0c-b63d-774d3f6b9aa9"
+
+[token.token_image_ref]
+scryfall_id = "7b7f2e3a-ec43-4408-affd-a09338566ce3"
+scryfall_oracle_id = "dd3bf75e-9ef0-4ded-9b65-1a60a78a6253"
+face_name = "Incubator"
+preset_id = "8e938e0e-390c-50ea-ad96-fac4ad190fe2"
 
 [[token]]
 id = "8ec2e8c1-7398-566d-be58-0e624d4c8d14"
@@ -127291,6 +130473,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -127619,6 +130802,11 @@ keywords = ["Vigilance"]
 card_name = "Grove of the Guardian"
 scryfall_oracle_id = "f746612a-fbed-44ca-b2cc-5928e10cf4bb"
 scryfall_id = "0079326b-ef87-49b8-9772-9134fb5deb3e"
+
+[[token.source_card_refs]]
+card_name = "Grove of the Guardian"
+scryfall_oracle_id = "f746612a-fbed-44ca-b2cc-5928e10cf4bb"
+scryfall_id = "d41f7539-738f-4e27-a538-a442e0d2fe84"
 
 [[token.source_card_refs]]
 card_name = "Grove of the Guardian"
@@ -128343,6 +131531,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -129044,6 +132233,42 @@ scryfall_id = "104503a6-bca5-48d7-88b1-424f98985d75"
 scryfall_id = "2d1446ed-f114-421d-bb60-9aeb655e5adb"
 scryfall_oracle_id = "4bd91cb2-be86-4950-8b84-7b330a8a61b9"
 preset_id = "9100049f-4585-5c92-8a35-98ae8a4effb8"
+
+[[token]]
+id = "911a497e-63a8-5ce5-b25b-be42446ed5df"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Currency Converter",
+    "Girder Goons",
+    "Misfortune Teller",
+    "Waste Management",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "7"
+released_at = "2026-10-02"
+type_line = "Token Creature — Rogue"
+
+[token.body]
+display_name = "Rogue"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Rogue"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Currency Converter"
+scryfall_oracle_id = "981298e6-ddee-49c0-9377-f47f019b4138"
+scryfall_id = "f91b18ef-ac8a-4d4c-9586-b101681d33e2"
+
+[token.token_image_ref]
+scryfall_id = "0526330e-40eb-4c5f-b0f5-5489839e5f44"
+scryfall_oracle_id = "9acbc363-827c-4146-a004-81be179a8c28"
+preset_id = "911a497e-63a8-5ce5-b25b-be42446ed5df"
 
 [[token]]
 id = "9138077f-b563-55d5-a333-de099c084a2b"
@@ -130338,6 +133563,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -130586,9 +133812,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -131153,6 +134381,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -132260,6 +135489,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -132565,6 +135795,11 @@ scryfall_id = "0b883558-b550-4654-ad1e-dc363b88dc6e"
 card_name = "Voice of the Provinces"
 scryfall_oracle_id = "81b15ed1-7069-4f8b-96b9-f6d67298afef"
 scryfall_id = "c2599730-fc82-468b-bb5c-7e722dbabbe7"
+
+[[token.source_card_refs]]
+card_name = "Stroke of Midnight"
+scryfall_oracle_id = "9a107e48-3d50-4941-95b1-10f2b29a4245"
+scryfall_id = "d42b9f9e-2df2-491e-b6ac-3b2bac8a8d8e"
 
 [[token.source_card_refs]]
 card_name = "Castle Ardenvale"
@@ -133612,6 +136847,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -134656,6 +137892,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -135447,9 +138684,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -136038,6 +139277,224 @@ scryfall_id = "bbde4755-7fd0-42b3-a0fd-80a7d6edd950"
 scryfall_id = "53085c6f-b6ef-4846-8d67-40bef9609418"
 scryfall_oracle_id = "48e9147e-59f7-4693-83d7-7f514be871bc"
 preset_id = "98aa3953-ada2-5f4e-8a00-eb7f6b82e9a4"
+
+[[token]]
+id = "98e50d1a-10e5-558f-8c11-78ff144f8c6b"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Agent 13, Sharon Carter",
+    "Air Nomad Legacy",
+    "Alquist Proft, Master Sleuth",
+    "Angelic Sleuth",
+    "Antarctic Research Base",
+    "April O'Neil, Live on the Scene",
+    "Armed with Proof",
+    "Auspicious Arrival",
+    "Azula, On the Hunt",
+    "Ballroom",
+    "Billiard Room",
+    "Blink",
+    "Blu, Mansion Prince",
+    "Briarbridge Patrol",
+    "Briarbridge Tracker",
+    "Bygone Bishop",
+    "Byway Courier",
+    "Callous Inspector",
+    "Carnage Interpreter",
+    "Case of the Filched Falcon",
+    "Case of the Pilfered Proof",
+    "Chalk Outline",
+    "Cold Case Cracker",
+    "Confirm Suspicions",
+    "Confront the Unknown",
+    "Conservatory",
+    "Cunning Maneuver",
+    "Curious Inquiry",
+    "Daring Sleuth // Bearer of Overwhelming Truths",
+    "Declaration in Stone",
+    "Deduce",
+    "Dennick, Pious Apprentice // Dennick, Pious Apparition",
+    "Detective's Satchel",
+    "Dining Room",
+    "Disorder in the Court",
+    "Drag the Canal",
+    "Drownyard Explorers",
+    "Duggan, Private Detective",
+    "Eliminate the Impossible",
+    "Elmar, Ulvenwald Informant",
+    "Eloise, Nephalia Sleuth",
+    "Erdwal Illuminator",
+    "Ethereal Investigator",
+    "Evidence Examiner",
+    "Expose Evil",
+    "Ezrim, Agency Chief",
+    "Fae Offering",
+    "Fateful Absence",
+    "Fire Nation Raider",
+    "Fire Nation Warship",
+    "Fleeting Memories",
+    "Flitwing, Lyev Detective",
+    "Floodhound",
+    "Flotsam // Jetsam",
+    "Follow the Bodies",
+    "Foreboding Steamboat",
+    "Forecasting Fortune Teller",
+    "Forensic Gadgeteer",
+    "Foul Play",
+    "Fugitive of the Judoon",
+    "Funnel-Web Recluse",
+    "Gleaming Geardrake",
+    "Gone Missing",
+    "Hall",
+    "Hard Evidence",
+    "Havengul Laboratory // Havengul Mystery",
+    "Heaven Sent",
+    "Hold for Questioning",
+    "Homicide Investigator",
+    "Hostile Investigator",
+    "Hotshot Investigators",
+    "Humble the Brute",
+    "Innocent Bystander",
+    "Innocuous Researcher",
+    "Inquisitor Eisenhorn",
+    "Inquisitor Greyfax",
+    "Jace's Scrutiny",
+    "James, Wandering Dad // Follow Him",
+    "Jet's Brainwashing",
+    "June, Bounty Hunter",
+    "Kellan, Inquisitive Prodigy // Tail the Suspect",
+    "Kitchen",
+    "Knowledge Seeker",
+    "Lavinia, Foil to Conspiracy",
+    "Lazav, Wearer of Faces",
+    "Library",
+    "Lonis, Cryptozoologist",
+    "Lonis, Genetics Expert",
+    "Lord Jyscal Guado",
+    "Lost Days",
+    "Lounge",
+    "Loxodon Eavesdropper",
+    "Madame Vastra",
+    "Magnifying Glass",
+    "Malcolm, the Eyes",
+    "Martha Jones",
+    "Meddling Youths",
+    "Merchant of Truth",
+    "Messenger Hawk",
+    "Mistway Spy",
+    "Morska, Undersea Sleuth",
+    "Nick Valentine, Private Eye",
+    "No Witnesses",
+    "Novice Inspector",
+    "Nyla, Shirshu Sleuth",
+    "Obsessive Pursuit",
+    "Officious Interrogation",
+    "On the Job",
+    "Ongoing Investigation",
+    "Osgood, Operation Double",
+    "Out Cold",
+    "Overencumbered",
+    "Panther Pounce",
+    "Persuasive Interrogators",
+    "Piper Wright, Publick Reporter",
+    "Press for Answers",
+    "Raven Eagle",
+    "Resonance Technician",
+    "Root Out",
+    "Rory Williams",
+    "Sally Sparrow",
+    "Sarah Jane Smith",
+    "Search the Premises",
+    "Secret Passage",
+    "Secrets of the Key",
+    "Serene Sleuth",
+    "Sharp-Eyed Rookie",
+    "Sokka's Sword Training",
+    "Sold Out",
+    "Sophia, Dogged Detective",
+    "Sophina, Spearsage Deserter",
+    "Study",
+    "Survive the Night",
+    "Syndicate Heavy",
+    "Tamiyo Meets the Story Circle",
+    "Tamiyo's Journal",
+    "Tamiyo, Inquisitive Student // Tamiyo, Seasoned Scholar",
+    "Teysa, Opulent Oligarch",
+    "The Chase Is On",
+    "The Fugitive Doctor",
+    "The Mechanist, Aerial Artisan",
+    "The Rani",
+    "The Seventh Doctor",
+    "The Third Doctor",
+    "They Went This Way",
+    "Thijarian Witness",
+    "Thorough Investigation",
+    "Thraben Inspector",
+    "Tireless Tracker",
+    "Tivit, Seller of Secrets",
+    "Tolls of War",
+    "Torch the Witness",
+    "Toxin Analysis",
+    "Trail of Evidence",
+    "Transmutation Font",
+    "True Ancestry",
+    "Ulvenwald Mysteries",
+    "Undercover Crocodelf",
+    "Unshakable Tail",
+    "Wavesifter",
+    "Weirding Wood",
+    "Wernog, Rider's Chaplain",
+    "Wojek Investigator",
+    "Zuko's Exile",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "13"
+released_at = "2024-11-15"
+type_line = "Token Artifact — Clue"
+rules_text = "{2}, Sacrifice this token: Draw a card."
+
+[token.category.PredefinedArtifact]
+kind = "Clue"
+
+[token.body]
+display_name = "Clue"
+core_types = ["Artifact"]
+subtypes = ["Clue"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Merchant of Truth"
+scryfall_oracle_id = "84275aab-f718-4896-b61c-63bf49fb483b"
+scryfall_id = "45cb7d19-0cdb-4e6a-b1ba-59c74306105b"
+
+[[token.source_card_refs]]
+card_name = "Angelic Sleuth"
+scryfall_oracle_id = "2579e9e0-b00f-4a1b-8fce-15d06bb7fe5a"
+scryfall_id = "68905611-fb68-421a-84b6-b41e379a6361"
+
+[[token.source_card_refs]]
+card_name = "Search the Premises"
+scryfall_oracle_id = "0232418d-1c52-4573-b488-c62345ca1c8d"
+scryfall_id = "ec91933d-8da0-4044-87d3-52d509756e7d"
+
+[[token.source_card_refs]]
+card_name = "Fateful Absence"
+scryfall_oracle_id = "35bba442-1aec-4d33-b502-4c580d61644b"
+scryfall_id = "168a41be-fa21-4d09-baf8-af3afd516d9b"
+
+[[token.source_card_refs]]
+card_name = "Wojek Investigator"
+scryfall_oracle_id = "ab41243d-b178-4ebe-a7ac-bea37427be99"
+scryfall_id = "59f11982-7822-4847-ab0f-de2022e750a7"
+
+[token.token_image_ref]
+scryfall_id = "1481e938-7763-4109-b313-2a21053a82df"
+scryfall_oracle_id = "496e1083-c792-40a4-adf4-fec1d559cd5e"
+preset_id = "98e50d1a-10e5-558f-8c11-78ff144f8c6b"
 
 [[token]]
 id = "98f2791c-083f-5f95-a9ee-c6cbcf07a8a8"
@@ -138260,9 +141717,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -138754,6 +142214,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -139753,6 +143214,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -139923,9 +143385,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -140184,9 +143649,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -141216,6 +144684,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -142093,6 +145562,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -143828,6 +147298,106 @@ scryfall_oracle_id = "c39cd31f-c4a2-4ca8-b4f9-b2e6289743bc"
 preset_id = "a2b7eba4-1589-5f59-8f49-c5c1efea9d3d"
 
 [[token]]
+id = "a2da69c3-8afb-5c15-b077-7d18dd32b93c"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Access Denied",
+    "Aspiring Aeronaut",
+    "Aviation Pioneer",
+    "Barbed Spike",
+    "Breya's Apprentice",
+    "Broadcast Rambler",
+    "Camera Launcher",
+    "Depose // Deploy",
+    "Detective's Satchel",
+    "Deviant Skytech",
+    "Dovin, Grand Arbiter",
+    "Efficient Construction",
+    "Etherium Spinner",
+    "Experimental Aviator",
+    "Fairgrounds Patrol",
+    "Filigree Crawler",
+    "Foundry of the Consuls",
+    "Fuss // Bother",
+    "Gadget Technician",
+    "Ghirapur Gearcrafter",
+    "Hangarback Walker",
+    "Harried Dronesmith",
+    "Haunt the Network",
+    "Inspired Sphinx",
+    "Invasion of Kaladesh // Aetherwing, Golden-Scale Flagship",
+    "Launch Mishap",
+    "Loyal Apprentice",
+    "Maverick Thopterist",
+    "Nimble Thopterist",
+    "Pia Nalaar",
+    "Pia Nalaar, Consul of Revival",
+    "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
+    "Rangers' Aetherhive",
+    "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
+    "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
+    "Sai, Master Thopterist",
+    "Stridehangar Automaton",
+    "Surveillance Monitor",
+    "Sweep the Skies",
+    "Tezzeret, Artifice Master",
+    "Thopter Assembly",
+    "Thopter Engineer",
+    "Thopter Fabricator",
+    "Thopter Mechanic",
+    "Thopter Pie Network",
+    "Thopter Shop",
+    "Thopter Spy Network",
+    "Thopter Squadron",
+    "Whirler Rogue",
+    "Whirler Virtuoso",
+    "Whirlermaker",
+]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "14"
+released_at = "2026-10-02"
+type_line = "Token Artifact Creature — Thopter"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Thopter"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Thopter"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Saheeli, Jewel of Avishkar"
+scryfall_oracle_id = "83705258-1f42-41db-a32e-de99ffd759eb"
+scryfall_id = "28d84ef6-e190-46d4-882d-1cea5e111e2a"
+
+[[token.source_card_refs]]
+card_name = "Pia, Determined Rebuilder"
+scryfall_oracle_id = "a49c0c64-ea87-44f4-9acf-e7181962aeb2"
+scryfall_id = "dd3faaf4-45ca-4714-8dbe-37102ec131cf"
+
+[[token.source_card_refs]]
+card_name = "Saheeli, Consul of Oversight"
+scryfall_oracle_id = "dfa95c0e-393d-4b22-9de3-45a7efc0ba14"
+scryfall_id = "07572be0-6610-493c-a21e-14b78e9805c9"
+
+[token.token_image_ref]
+scryfall_id = "bfd6132f-c96b-4ce0-ac4d-c46356afc767"
+scryfall_oracle_id = "7c0b6b53-4ddb-4bb5-8a26-0041b2006d3f"
+preset_id = "a2da69c3-8afb-5c15-b077-7d18dd32b93c"
+
+[[token]]
 id = "a2e466d7-a40e-5c78-a6af-9b61b74290a7"
 category = "Creature"
 fidelity = "Full"
@@ -144065,9 +147635,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -144399,6 +147971,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -145505,6 +149078,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -145777,6 +149351,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -146004,6 +149579,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -146098,6 +149674,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -146633,6 +150210,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -146675,6 +150253,48 @@ scryfall_id = "b3770d86-4496-4c06-aab1-2917cfec100e"
 scryfall_id = "1671013a-2c15-44f0-b4bc-057eb5f727db"
 scryfall_oracle_id = "40c64f08-ab2f-4933-8e0e-d1a1c729008f"
 preset_id = "a7aa4057-37c7-5ade-8897-7d6a2cffbef7"
+
+[[token]]
+id = "a7d2dc8c-7a12-5f6f-bd6e-e5ecd4c56eb9"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Blaring Recruiter",
+    "Herald of Anafenza",
+    "Mardu Charm",
+    "Mardu Hordechief",
+    "Najeela, the Blade-Blossom",
+    "Regna, the Redeemer",
+    "Secure the Wastes",
+    "Take Up Arms",
+    "The Cave of Skulls",
+    "The War Games",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "5"
+released_at = "2026-10-02"
+type_line = "Token Creature — Warrior"
+
+[token.body]
+display_name = "Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Warrior"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Secure the Wastes"
+scryfall_oracle_id = "b2347910-d6c6-4681-8316-7ef27056485c"
+scryfall_id = "83a01121-e5cd-45ba-97c2-7bd7d50158e6"
+
+[token.token_image_ref]
+scryfall_id = "2dde64e7-dff3-4495-9649-d4b1e91f1cf3"
+scryfall_oracle_id = "6a880a0f-0a98-4505-9c27-9821be3e4818"
+preset_id = "a7d2dc8c-7a12-5f6f-bd6e-e5ecd4c56eb9"
 
 [[token]]
 id = "a7f12aa2-377c-58bb-b229-43e1ba2a69f5"
@@ -147803,6 +151423,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -147849,9 +151470,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -148743,9 +152366,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -150078,6 +153703,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -150498,9 +154124,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -152308,6 +155936,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -152885,6 +156514,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -153406,6 +157036,11 @@ card_name = "Valentin, Dean of the Vein // Lisette, Dean of the Root"
 face_name = "Lisette, Dean of the Root"
 scryfall_oracle_id = "6e1aa07a-5d9b-4daf-8dc4-c1717360855f"
 scryfall_id = "902bc049-5348-47c3-95ad-d9dc935838cb"
+
+[[token.source_card_refs]]
+card_name = "Pest Infestation"
+scryfall_oracle_id = "1b704798-0c69-4c18-ac7e-42933ce90028"
+scryfall_id = "4a45bf1f-748d-4075-976d-cc355fce1862"
 
 [token.token_image_ref]
 scryfall_id = "1ae25997-391f-45b2-bdc1-d86cf6b69223"
@@ -154976,6 +158611,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -156400,6 +160036,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -156619,6 +160256,11 @@ scryfall_oracle_id = "1e9b0fd6-5aae-401a-8df5-d94ce6442696"
 scryfall_id = "35cd0122-0b38-4aae-84cd-4d5a8e2ae2f5"
 
 [[token.source_card_refs]]
+card_name = "Excavation Technique"
+scryfall_oracle_id = "bcd3e6a1-7b76-408d-9236-3791c3e1064a"
+scryfall_id = "ff1f6e62-eb7b-4d9b-8034-f227f655431f"
+
+[[token.source_card_refs]]
 card_name = "The Reaver Cleaver"
 scryfall_oracle_id = "37a2a31d-51e6-4c07-b4c2-b206ad40eb42"
 scryfall_id = "10e6f41c-cb5a-48ea-9ae6-86249bcce629"
@@ -156633,6 +160275,11 @@ card_name = "Young Red Dragon // Bathe in Gold"
 face_name = "Bathe in Gold"
 scryfall_oracle_id = "2f865ae9-9328-4f6f-924f-d5e0a65aaa96"
 scryfall_id = "2e391516-e04f-4432-aaa2-ee90ee564330"
+
+[[token.source_card_refs]]
+card_name = "Prosperous Innkeeper"
+scryfall_oracle_id = "da785227-cf8a-4d44-9e7c-fc909ea868f2"
+scryfall_id = "ef5793d2-58e7-4da2-9777-8db45abc09c0"
 
 [[token.source_card_refs]]
 card_name = "Xorn"
@@ -161002,6 +164649,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -163188,6 +166836,121 @@ scryfall_oracle_id = "c02feaa1-8540-4948-b92f-01a719218c2b"
 preset_id = "b9aa07f8-d31a-58af-b034-082736e07773"
 
 [[token]]
+id = "b9bd9f4f-7ce0-54a7-a53c-ae0794f5c63d"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+source_card_names = [
+    "Aerid Konstrari",
+    "Heartwood Crafter",
+    "Heartwood Crafter // Soul Tether",
+    "Hungering Puppetbeast",
+    "Konstrari Improviser",
+    "Konstrari Improviser // Soul Tether",
+    "Soul Tether",
+    "Tenured Tethermage",
+    "Woodwork Prodigy",
+    "Woodwork Prodigy // Soul Tether",
+]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "11"
+released_at = "2026-10-02"
+type_line = "Token Artifact — Heartwood"
+rules_text = "{T}: Add {R} or {G}."
+
+[token.body]
+display_name = "Heartwood"
+core_types = ["Artifact"]
+subtypes = ["Heartwood"]
+supertypes = []
+colors = [
+    "Green",
+    "Red",
+]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Heartwood Crafter // Soul Tether"
+face_name = "Soul Tether"
+scryfall_oracle_id = "c8b3a070-408e-4a8f-8597-6476eeec0a5f"
+scryfall_id = "910a1f41-17fd-4ab0-9597-7151e79dc760"
+
+[[token.source_card_refs]]
+card_name = "Tenured Tethermage"
+scryfall_oracle_id = "571cb06d-55b5-46e4-9678-1f74aca73068"
+scryfall_id = "6ae471aa-74c3-416b-a884-bcf1bb2f6004"
+
+[[token.source_card_refs]]
+card_name = "Aerid Konstrari"
+scryfall_oracle_id = "172a8f58-c420-4497-b962-c5853f923667"
+scryfall_id = "f17d2792-b075-4c47-ad38-e7a7eaee5f8c"
+
+[[token.source_card_refs]]
+card_name = "Hungering Puppetbeast"
+scryfall_oracle_id = "690ae865-87bd-46b2-8e65-c53bd80c1a18"
+scryfall_id = "3cee6c29-e9ab-4e86-8fc9-9b9c287ffdfd"
+
+[[token.source_card_refs]]
+card_name = "Konstrari Improviser // Soul Tether"
+face_name = "Soul Tether"
+scryfall_oracle_id = "bad2e3b2-ad47-4e17-b35e-0fcc13e82937"
+scryfall_id = "42e28bd2-486b-45d4-8840-6e33c19c2d57"
+
+[[token.source_card_refs]]
+card_name = "Hungering Puppetbeast"
+scryfall_oracle_id = "690ae865-87bd-46b2-8e65-c53bd80c1a18"
+scryfall_id = "3db2da7a-8088-4117-916b-f9c905d1b45b"
+
+[[token.source_card_refs]]
+card_name = "Woodwork Prodigy // Soul Tether"
+face_name = "Woodwork Prodigy"
+scryfall_oracle_id = "f3ed157f-a09b-405f-aec4-0e7a81d80fc8"
+scryfall_id = "7d17f7e3-7b63-4674-9024-4fd1827f40ec"
+
+[[token.source_card_refs]]
+card_name = "Woodwork Prodigy // Soul Tether"
+face_name = "Soul Tether"
+scryfall_oracle_id = "f3ed157f-a09b-405f-aec4-0e7a81d80fc8"
+scryfall_id = "7d17f7e3-7b63-4674-9024-4fd1827f40ec"
+
+[[token.source_card_refs]]
+card_name = "Konstrari Improviser // Soul Tether"
+face_name = "Konstrari Improviser"
+scryfall_oracle_id = "bad2e3b2-ad47-4e17-b35e-0fcc13e82937"
+scryfall_id = "42e28bd2-486b-45d4-8840-6e33c19c2d57"
+
+[[token.source_card_refs]]
+card_name = "Tenured Tethermage"
+scryfall_oracle_id = "571cb06d-55b5-46e4-9678-1f74aca73068"
+scryfall_id = "1703306d-6a3d-4ab8-bf58-a9992236ef0f"
+
+[[token.source_card_refs]]
+card_name = "Heartwood Crafter // Soul Tether"
+face_name = "Heartwood Crafter"
+scryfall_oracle_id = "c8b3a070-408e-4a8f-8597-6476eeec0a5f"
+scryfall_id = "910a1f41-17fd-4ab0-9597-7151e79dc760"
+
+[[token.source_card_refs]]
+card_name = "Aerid Konstrari"
+scryfall_oracle_id = "172a8f58-c420-4497-b962-c5853f923667"
+scryfall_id = "d0b12e0f-de6e-4cc3-ad04-b2c4ee556fd3"
+
+[[token.source_card_refs]]
+card_name = "Aerid Konstrari"
+scryfall_oracle_id = "172a8f58-c420-4497-b962-c5853f923667"
+scryfall_id = "dc29f777-a9ac-488f-b36a-51b4a4fabe73"
+
+[[token.source_card_refs]]
+card_name = "Aerid Konstrari"
+scryfall_oracle_id = "172a8f58-c420-4497-b962-c5853f923667"
+scryfall_id = "66dcd789-d405-4fa6-855f-61064e2e4635"
+
+[token.token_image_ref]
+scryfall_id = "eb4bf635-04d7-4994-9f70-4ff573a767e7"
+scryfall_oracle_id = "ed1d8118-b182-413b-99ba-52844d35a35b"
+preset_id = "b9bd9f4f-7ce0-54a7-a53c-ae0794f5c63d"
+
+[[token]]
 id = "b9e5620b-de9f-5422-b5b1-6c9647b9b607"
 category = "Creature"
 fidelity = "Full"
@@ -163931,6 +167694,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -164520,9 +168284,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -165696,6 +169463,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -166283,6 +170051,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -167535,9 +171304,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -168401,6 +172173,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -169331,6 +173104,57 @@ scryfall_oracle_id = "46a55586-cc9a-443c-b458-e628afc3c587"
 preset_id = "c090975b-b3b6-541d-9da2-a5148e4afc79"
 
 [[token]]
+id = "c0b05951-068f-59bb-a368-db54ef7c7e12"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Genesis Chamber",
+    "Master's Call",
+    "Memnarch, the Warden",
+    "Mirrodin Besieged",
+    "Myr Battlesphere",
+    "Myr Incubator",
+    "Myr Matrix",
+    "Myr Turbine",
+    "Myrsmith",
+    "Origin Spellbomb",
+    "Urtet, Remnant of Memnarch",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "15"
+released_at = "2026-10-02"
+type_line = "Token Artifact Creature — Myr"
+
+[token.body]
+display_name = "Myr"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Myr"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Memnarch, the Warden"
+scryfall_oracle_id = "f2630b02-fb48-4167-8a47-8284f7d4c484"
+scryfall_id = "60d05210-c2b1-4248-a470-e0f8123d33f8"
+
+[[token.source_card_refs]]
+card_name = "Memnarch, the Warden"
+scryfall_oracle_id = "f2630b02-fb48-4167-8a47-8284f7d4c484"
+scryfall_id = "264ff4ea-8dd3-4a57-9829-8f127956b108"
+
+[token.token_image_ref]
+scryfall_id = "e41f83c6-c20f-455a-b630-5fad99fa54ad"
+scryfall_oracle_id = "bf690282-125f-431c-a363-39f6772324c8"
+preset_id = "c0b05951-068f-59bb-a368-db54ef7c7e12"
+
+[[token]]
 id = "c0bd925a-c06e-5680-a5c6-1d1e7a9df599"
 category = "Creature"
 fidelity = "Full"
@@ -169669,6 +173493,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -170101,6 +173926,16 @@ card_name = "Legion's Landing // Adanto, the First Fort"
 face_name = "Adanto, the First Fort"
 scryfall_oracle_id = "f7d8b91b-6541-4d3e-af51-7e000eac69c1"
 scryfall_id = "14a41e7e-9f68-4449-9e2c-4c862036bce5"
+
+[[token.source_card_refs]]
+card_name = "Elenda's Hierophant"
+scryfall_oracle_id = "cb99c675-adc5-4dad-8be8-524f5f921213"
+scryfall_id = "a0b21a6d-5f3c-41e3-b994-42a6a7af538f"
+
+[[token.source_card_refs]]
+card_name = "Ghalta and Mavren"
+scryfall_oracle_id = "756042c5-e444-45d7-8dc6-ae7c83c98438"
+scryfall_id = "05e1189b-837d-4c1f-85a2-35d229c4dee8"
 
 [token.token_image_ref]
 scryfall_id = "1c9ace77-f1e7-4abf-beb3-369febda9394"
@@ -171419,9 +175254,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -171899,6 +175737,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -172223,9 +176062,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -173884,6 +177725,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -176101,6 +179943,55 @@ scryfall_oracle_id = "ec6df381-5ea7-4c68-8416-093b107f0784"
 preset_id = "c74d48b9-cea6-56a2-a18d-f36f3918bac3"
 
 [[token]]
+id = "c770e27a-6846-59be-82f0-b2b61dd95d9f"
+fidelity = "Full"
+source_card_names = ["Ginger, Queen of Sweets"]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "12"
+released_at = "2026-10-02"
+type_line = "Token Artifact Creature — Food Golem"
+rules_text = """
+Haste
+{1}: This token can't be blocked this turn except by creatures with haste.
+{2}, {T}, Sacrifice this token: You gain 3 life.
+(This token's mana cost is {1}.)"""
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Gingerbrute Token"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Food",
+    "Golem",
+]
+supertypes = []
+colors = []
+keywords = ["Haste"]
+
+[[token.source_card_refs]]
+card_name = "Ginger, Queen of Sweets"
+scryfall_oracle_id = "5ea93956-085d-409b-bd95-dd669fa69eeb"
+scryfall_id = "f4ff6bf9-89a9-4c2a-84a2-d4ceb7168adf"
+
+[[token.source_card_refs]]
+card_name = "Ginger, Queen of Sweets"
+scryfall_oracle_id = "5ea93956-085d-409b-bd95-dd669fa69eeb"
+scryfall_id = "321e0ec3-e2d7-4bd8-98df-8fec88e365c0"
+
+[token.token_image_ref]
+scryfall_id = "dc2dff97-a68b-497f-a004-1e14ba5116ea"
+scryfall_oracle_id = "b00e75f4-65fc-4f50-a564-6dabd10d360b"
+preset_id = "c770e27a-6846-59be-82f0-b2b61dd95d9f"
+
+[[token]]
 id = "c799cc36-8f2b-5f7e-b81b-9a7c853afae9"
 category = "Creature"
 fidelity = "Full"
@@ -176453,6 +180344,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -176973,6 +180865,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -177175,6 +181068,32 @@ keywords = ["Flying"]
 scryfall_id = "bab52920-9d67-4cd4-9015-6e645ff9764f"
 scryfall_oracle_id = "8af831ee-5487-41d8-9fa6-828a05d5cd9d"
 preset_id = "c8ed3fa4-d351-5519-8864-725442d760a3"
+
+[[token]]
+id = "c949cdeb-84a4-564f-b8a0-7f0c8d97cf41"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Phyrexian Germ"]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "4"
+released_at = "2024-11-15"
+type_line = "Token Creature — Germ"
+
+[token.body]
+display_name = "Germ"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Germ"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "53c05e53-84c7-4796-ae02-d778faa5afa6"
+scryfall_oracle_id = "bb549594-35f6-4ac6-9f1f-cfb35784d99e"
+preset_id = "c949cdeb-84a4-564f-b8a0-7f0c8d97cf41"
 
 [[token]]
 id = "c94a7b9a-270f-5e20-9830-d60600df3c89"
@@ -181984,6 +185903,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -183683,6 +187603,64 @@ scryfall_oracle_id = "c8790543-9399-4312-9b15-aa8a45c8fec7"
 preset_id = "d01a56cc-e672-511b-9b09-16003a1e6d58"
 
 [[token]]
+id = "d0237757-8e22-55f0-8137-f66f87792269"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Boss's Chauffeur",
+    "Cabaretti Charm",
+    "Caldaia Guardian",
+    "Citizen's Crowbar",
+    "Courier's Briefcase",
+    "Darling of the Masses",
+    "Exhibition Magician",
+    "Grand Crescendo",
+    "Halo Fountain",
+    "Indulge // Excess",
+    "Kitt Kanto, Mayhem Diva",
+    "Luxurious Libation",
+    "Master of Ceremonies",
+    "Origin of the Hulk",
+    "Phabine, Boss's Confidant",
+    "Prosperous Partnership",
+    "Rabble Rousing",
+    "Rakish Revelers",
+    "Rope Line Attendant",
+    "Sanctuary Warden",
+    "Scepter of Celebration",
+    "Stimulus Package",
+    "Warm Welcome",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "11"
+released_at = "2026-10-02"
+type_line = "Token Creature — Citizen"
+
+[token.body]
+display_name = "Citizen"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Citizen"]
+supertypes = []
+colors = [
+    "Green",
+    "White",
+]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "a60834b0-38ab-40c9-9fd9-db3a23b13076"
+
+[token.token_image_ref]
+scryfall_id = "b7171de9-476d-4bfa-8cc0-b4fbc168cf4d"
+scryfall_oracle_id = "ffbc4833-01db-45f8-b8b4-c2e2c8235d0c"
+preset_id = "d0237757-8e22-55f0-8137-f66f87792269"
+
+[[token]]
 id = "d027dcd5-c331-5be4-a6c8-0e70ea236de8"
 category = "Creature"
 fidelity = "Full"
@@ -184431,9 +188409,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -184631,6 +188612,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -184709,9 +188691,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -186041,6 +190025,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -190139,6 +194124,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -191649,6 +195635,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -192772,9 +196759,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -195272,6 +199262,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -196533,6 +200524,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -197271,6 +201263,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -198844,6 +202837,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -198909,9 +202903,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -199071,9 +203068,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -199785,6 +203784,37 @@ scryfall_oracle_id = "ebddf9b8-fd1a-4a6b-bec8-3a63485e36c0"
 preset_id = "e09a13eb-a5e7-582f-ab46-459d09300718"
 
 [[token]]
+id = "e111ef12-32a1-5790-8106-8fbfa4572824"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Jiang Yanggu, Never Alone"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "10"
+released_at = "2026-10-02"
+type_line = "Token Legendary Creature — Dog"
+
+[token.body]
+display_name = "Mowu"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Dog"]
+supertypes = ["Legendary"]
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Jiang Yanggu, Never Alone"
+scryfall_oracle_id = "4ba661d7-1cb8-4fec-bfaa-5f2797235fcf"
+scryfall_id = "f5a0bb3e-8119-4739-8684-e61d1d607dcb"
+
+[token.token_image_ref]
+scryfall_id = "5868190d-18f6-43b6-af83-9e0ef585687d"
+scryfall_oracle_id = "78ef9d88-f629-4db4-95dd-f8ab7985dade"
+preset_id = "e111ef12-32a1-5790-8106-8fbfa4572824"
+
+[[token]]
 id = "e1298968-b8ac-529f-b963-afef12011187"
 category = "Creature"
 fidelity = "Full"
@@ -200405,6 +204435,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -200671,6 +204702,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -204001,9 +208033,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -205168,6 +209203,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -206317,9 +210353,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -206875,6 +210914,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -207958,6 +211998,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -210364,6 +214405,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -210522,6 +214564,51 @@ scryfall_id = "a9ee50d4-c878-457b-964d-29c039ce9852"
 scryfall_id = "100c0127-49dd-4a78-9c88-1881e7923674"
 scryfall_oracle_id = "ff86d8fc-5242-405e-b5e3-f9ff73296794"
 preset_id = "ee795bc4-13de-5a15-a292-714c3056d705"
+
+[[token]]
+id = "ee966606-98ef-58e7-87cc-5d59cc051683"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Broodmate Dragon",
+    "Descent of the Dragons",
+    "Dragon Cultist",
+    "Dragon Trainer",
+    "Dragon Whisperer",
+    "Dragonback Assault",
+    "Rith, Liberated Primeval",
+    "Rohgahh, Kher Keep Overlord",
+    "Sarkhan Unbroken",
+    "Sarkhan Vol",
+    "Sarkhan the Masterless",
+    "The Elder Dragon War",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "7"
+released_at = "2024-11-15"
+type_line = "Token Creature — Dragon"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Dragon"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "The Elder Dragon War"
+scryfall_oracle_id = "4945f03b-ff99-4923-b62d-3cdb60275ef1"
+scryfall_id = "670bfb28-1ac7-468d-ba38-728e3f688085"
+
+[token.token_image_ref]
+scryfall_id = "7fc0760c-495a-4737-8d9e-4110344af99e"
+scryfall_oracle_id = "c8790543-9399-4312-9b15-aa8a45c8fec7"
+preset_id = "ee966606-98ef-58e7-87cc-5d59cc051683"
 
 [[token]]
 id = "ee98a86d-1691-56eb-ab6f-337e3ec7cd1b"
@@ -210738,7 +214825,7 @@ toughness = 2
 core_types = ["Creature"]
 subtypes = ["Dwarf"]
 supertypes = []
-colors = []
+colors = ["Red"]
 keywords = []
 
 [[token.source_card_refs]]
@@ -210814,6 +214901,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -210869,6 +214957,7 @@ source_card_names = [
     "Battle Screech",
     "Beck",
     "Beck // Call",
+    "Blustering Barnyard",
     "Call",
     "Emeria Angel",
     "Eyes in the Skies",
@@ -211388,6 +215477,7 @@ fidelity = "Full"
 source_card_names = [
     "Genesis Chamber",
     "Master's Call",
+    "Memnarch, the Warden",
     "Mirrodin Besieged",
     "Myr Battlesphere",
     "Myr Incubator",
@@ -211926,6 +216016,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -212446,6 +216537,40 @@ scryfall_oracle_id = "349852d6-1697-48cf-86a4-c20a2aabf0fc"
 preset_id = "f021ed7e-996c-5af2-94a2-9d707a276482"
 
 [[token]]
+id = "f045f6be-16cb-5db5-af54-2c0e9d9e11a5"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Ezuri's Predation"]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "11"
+released_at = "2024-11-15"
+type_line = "Token Creature — Phyrexian Beast"
+
+[token.body]
+display_name = "Phyrexian Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Beast",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Ezuri's Predation"
+scryfall_oracle_id = "d0dd425b-fdba-41b4-b9e6-f5161610bd7e"
+scryfall_id = "d43ef6eb-99ed-45a6-aee1-e87d3780d094"
+
+[token.token_image_ref]
+scryfall_id = "11bafc20-499d-42ab-a2d4-8cd656008994"
+scryfall_oracle_id = "693e57f0-2eef-44b1-9595-156398e47fc4"
+preset_id = "f045f6be-16cb-5db5-af54-2c0e9d9e11a5"
+
+[[token]]
 id = "f076dc42-764a-5c30-b9a0-517012d2fe24"
 category = "Creature"
 fidelity = "Full"
@@ -212454,6 +216579,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -212993,6 +217119,52 @@ scryfall_oracle_id = "9249c5ac-e870-4df3-8854-12f4aff4aa5c"
 preset_id = "f11ebafa-5f5f-5ae3-9d32-a18e812e74b9"
 
 [[token]]
+id = "f1222d29-6361-5636-9c92-09be5f84fcd0"
+fidelity = "PartialMissingAbilities"
+source_card_names = [
+    "Brackish Blunder",
+    "Cartographer's Companion",
+    "Fanatical Offering",
+    "Get Lost",
+    "Kellan, Daring Traveler // Journey On",
+    "Landlore Navigator",
+    "Restless Anchorage",
+    "Sentinel of the Nameless City",
+    "Spyglass Siren",
+    "Storm Fleet Negotiator",
+    "Topography Tracker",
+    "Waterwind Scout",
+    "Worldwalker Helm",
+]
+set_code = "FRC"
+set_name = "Reality Fracture Commander"
+collector_number = "14"
+released_at = "2026-10-02"
+type_line = "Token Artifact — Map"
+rules_text = "{1}, {T}, Sacrifice this artifact: Target creature you control explores. Activate only as a sorcery. (Reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on that creature, then put the card back or put it into your graveyard.)"
+
+[token.category.PredefinedArtifact]
+kind = "Map"
+
+[token.body]
+display_name = "Map"
+core_types = ["Artifact"]
+subtypes = ["Map"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Restless Anchorage"
+scryfall_oracle_id = "91320daf-f69c-4350-b0fc-4bb37a6904b1"
+scryfall_id = "109900a9-6dcb-4f89-b84c-0ce0a0175e8f"
+
+[token.token_image_ref]
+scryfall_id = "91613970-c25c-4959-b5b0-b6e2a7657634"
+scryfall_oracle_id = "c050f054-1ccf-4819-bc30-a928aed60c56"
+preset_id = "f1222d29-6361-5636-9c92-09be5f84fcd0"
+
+[[token]]
 id = "f1369647-2863-5cc6-91b4-00d9c735e19e"
 fidelity = "Full"
 source_card_names = [
@@ -213530,9 +217702,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -213849,9 +218024,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -214017,9 +218195,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -214807,6 +218988,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -215062,6 +219244,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -215126,6 +219309,44 @@ scryfall_id = "00717f7c-0778-4a02-b6c0-b3c3f07e75a9"
 scryfall_id = "c63967fe-62da-4c27-9aa7-67adc77b2baf"
 scryfall_oracle_id = "0de5cdb7-b534-4ba5-b10b-b70fd247b5d8"
 preset_id = "f367ee54-0476-5901-85bf-feba39398f23"
+
+[[token]]
+id = "f377b0b5-82a2-5686-9f31-5f00d215e701"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Bladewing, Deathless Tyrant",
+    "Josu Vess, Lich Knight",
+]
+set_code = "FDC"
+set_name = "Foundations Commander"
+collector_number = "6"
+released_at = "2024-11-15"
+type_line = "Token Creature — Zombie Knight"
+rules_text = "Menace (This creature can't be blocked except by two or more creatures.)"
+
+[token.body]
+display_name = "Zombie Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Knight",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Menace"]
+
+[[token.source_card_refs]]
+card_name = "Josu Vess, Lich Knight"
+scryfall_oracle_id = "974a46f9-aa84-4b34-bee5-c635166e5841"
+scryfall_id = "1f7bcaf9-4e36-4f23-b63f-f70fe5c9dd6f"
+
+[token.token_image_ref]
+scryfall_id = "af43624d-90ae-4350-9fce-ca1c5a4cf4ff"
+scryfall_oracle_id = "68a1cfb5-89d8-478c-b6e8-0706677f3217"
+preset_id = "f377b0b5-82a2-5686-9f31-5f00d215e701"
 
 [[token]]
 id = "f378381d-6f5c-57f2-9abb-cb4fab793b2f"
@@ -215990,6 +220211,157 @@ scryfall_id = "2c1392c5-91a5-4e6e-803d-ed032e4d594b"
 scryfall_id = "d7cd1de1-9657-4262-be11-8279b3408e54"
 scryfall_oracle_id = "30272edf-097c-4918-84d2-9fa6c42dbe0a"
 preset_id = "f4991ff1-b597-5f15-9a8e-9724ae5ee3fe"
+
+[[token]]
+id = "f49db4a6-1bb9-526c-ad41-826c7cfa2a88"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Ajani Unrelenting",
+    "Command the Stage",
+    "Fatehold Chronologist",
+    "Fatehold Chronologist // Peer Review",
+    "Germinate Recruits",
+    "Heartstring Puller",
+    "Hexhaven Battalion",
+    "Ingris Stingerquill",
+    "Peer Review",
+    "Prudent Fateseer",
+    "Prudent Fateseer // Peer Review",
+    "Recursive Recruitment",
+    "Semester Foreseer",
+    "Semester Foreseer // Peer Review",
+    "Stingerquill Charm",
+]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "1"
+released_at = "2026-10-02"
+type_line = "Token Creature — Wizard Soldier"
+
+[token.body]
+display_name = "Cadet"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Wizard",
+    "Soldier",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Germinate Recruits"
+scryfall_oracle_id = "2c3a1313-a66e-4317-9732-e4ff9288b0db"
+scryfall_id = "1b5d7d19-b32a-4786-ae9a-00da5e6658ad"
+
+[[token.source_card_refs]]
+card_name = "Ingris Stingerquill"
+scryfall_oracle_id = "bda098cb-31ec-41a1-a9d7-122877cc69d2"
+scryfall_id = "a0686b23-2220-405b-8bc5-980f18af5fef"
+
+[[token.source_card_refs]]
+card_name = "Recursive Recruitment"
+scryfall_oracle_id = "b73e35b0-b8c9-471a-bdff-f7dc8f453d7a"
+scryfall_id = "68fddb6a-86d4-4ebb-907d-fdcaadebc4b3"
+
+[[token.source_card_refs]]
+card_name = "Heartstring Puller"
+scryfall_oracle_id = "2cdcf65c-03d2-416f-8a3f-0322f75e8595"
+scryfall_id = "cbfe3354-7ced-4773-9a4e-a937ae9f94f8"
+
+[[token.source_card_refs]]
+card_name = "Prudent Fateseer // Peer Review"
+face_name = "Prudent Fateseer"
+scryfall_oracle_id = "63f67baa-3f37-41b8-9ee6-3c37f828917d"
+scryfall_id = "6c1c790b-9e0e-4964-9ea3-554843907f06"
+
+[[token.source_card_refs]]
+card_name = "Germinate Recruits"
+scryfall_oracle_id = "2c3a1313-a66e-4317-9732-e4ff9288b0db"
+scryfall_id = "dcb1b131-fee7-455f-a6e7-b94471288ed7"
+
+[[token.source_card_refs]]
+card_name = "Hexhaven Battalion"
+scryfall_oracle_id = "158823ed-6015-437a-82b0-8dadb1e9aab2"
+scryfall_id = "3b6ac80e-c726-4bd0-893a-e666041a04a6"
+
+[[token.source_card_refs]]
+card_name = "Fatehold Chronologist // Peer Review"
+face_name = "Fatehold Chronologist"
+scryfall_oracle_id = "1063822f-47d3-42e9-8a21-f62b12609fe1"
+scryfall_id = "29e7ec16-0c16-48aa-8e09-ce6e0d5bd40b"
+
+[[token.source_card_refs]]
+card_name = "Semester Foreseer // Peer Review"
+face_name = "Peer Review"
+scryfall_oracle_id = "21b8d59f-a90d-44ff-a2e3-9f439ac3e14a"
+scryfall_id = "7e5a640b-fd88-4b5a-9dfc-1d8f5a5cef41"
+
+[[token.source_card_refs]]
+card_name = "Command the Stage"
+scryfall_oracle_id = "13bfc51f-d079-40ef-a4ba-47d06d3150a3"
+scryfall_id = "f3307da2-6dad-4ef2-9614-a7d34f38088e"
+
+[[token.source_card_refs]]
+card_name = "Stingerquill Charm"
+scryfall_oracle_id = "987aadac-d6a6-4e50-9468-9e8e53cc5529"
+scryfall_id = "81733ff7-e611-43ee-bf38-6bb700676017"
+
+[[token.source_card_refs]]
+card_name = "Fatehold Chronologist // Peer Review"
+face_name = "Peer Review"
+scryfall_oracle_id = "1063822f-47d3-42e9-8a21-f62b12609fe1"
+scryfall_id = "29e7ec16-0c16-48aa-8e09-ce6e0d5bd40b"
+
+[[token.source_card_refs]]
+card_name = "Ingris Stingerquill"
+scryfall_oracle_id = "bda098cb-31ec-41a1-a9d7-122877cc69d2"
+scryfall_id = "6471b135-33a8-4005-9a07-ebb74e0bf145"
+
+[[token.source_card_refs]]
+card_name = "Ajani Unrelenting"
+scryfall_oracle_id = "71620e92-45a4-49cb-94d5-348013ecf886"
+scryfall_id = "bc3c096f-7f6c-474c-a2c8-75d3e6ddd6f5"
+
+[[token.source_card_refs]]
+card_name = "Ajani Unrelenting"
+scryfall_oracle_id = "71620e92-45a4-49cb-94d5-348013ecf886"
+scryfall_id = "2b293d8f-7877-4212-af6b-e898d759d013"
+
+[[token.source_card_refs]]
+card_name = "Ingris Stingerquill"
+scryfall_oracle_id = "bda098cb-31ec-41a1-a9d7-122877cc69d2"
+scryfall_id = "164a17bc-789b-437f-9798-1854b5cd3dda"
+
+[[token.source_card_refs]]
+card_name = "Semester Foreseer // Peer Review"
+face_name = "Semester Foreseer"
+scryfall_oracle_id = "21b8d59f-a90d-44ff-a2e3-9f439ac3e14a"
+scryfall_id = "7e5a640b-fd88-4b5a-9dfc-1d8f5a5cef41"
+
+[[token.source_card_refs]]
+card_name = "Ingris Stingerquill"
+scryfall_oracle_id = "bda098cb-31ec-41a1-a9d7-122877cc69d2"
+scryfall_id = "480c8ceb-41df-4f83-a6b3-f7f8518ff602"
+
+[[token.source_card_refs]]
+card_name = "Prudent Fateseer // Peer Review"
+face_name = "Peer Review"
+scryfall_oracle_id = "63f67baa-3f37-41b8-9ee6-3c37f828917d"
+scryfall_id = "6c1c790b-9e0e-4964-9ea3-554843907f06"
+
+[[token.source_card_refs]]
+card_name = "Stingerquill Charm"
+scryfall_oracle_id = "987aadac-d6a6-4e50-9468-9e8e53cc5529"
+scryfall_id = "7c9013bc-bc85-49b2-ad9b-745b97d6775d"
+
+[token.token_image_ref]
+scryfall_id = "8f4534d8-2783-484f-8ebf-a47b1cc4c6df"
+scryfall_oracle_id = "2d321161-65cd-43ed-8285-551e3d4989e4"
+preset_id = "f49db4a6-1bb9-526c-ad41-826c7cfa2a88"
 
 [[token]]
 id = "f4a52681-29e7-5f31-89ee-8898b454d344"
@@ -217076,9 +221448,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -219728,6 +224102,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -220317,6 +224692,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -221256,9 +225632,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -221479,6 +225858,7 @@ source_card_names = [
     "Invocation of Saint Traft",
     "Luminarch Ascension",
     "Moonsilver Spear",
+    "Ob Nixilis, the Ascended",
     "Saint Traft and Rem Karolus",
     "Seraphic Greatsword",
     "Sigil of the Empty Throne",
@@ -222528,6 +226908,11 @@ face_name = "Rescue the Foal"
 scryfall_oracle_id = "e71863a7-0de1-4ab5-95e8-c39e6810d899"
 scryfall_id = "d32dcd09-8542-4135-8955-e29ee63e3589"
 
+[[token.source_card_refs]]
+card_name = "Storm Herd"
+scryfall_oracle_id = "30aa362b-7ab1-486e-9802-1171e0dc2416"
+scryfall_id = "e4a25752-9155-44be-a7eb-865755c2f915"
+
 [token.token_image_ref]
 scryfall_id = "ebd8f43d-7e54-46d4-9fe9-ac818a9fd91f"
 scryfall_oracle_id = "251085b8-4bca-4fcd-92a0-006541be827e"
@@ -223226,6 +227611,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -223768,6 +228154,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -224516,9 +228903,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -225797,6 +230187,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -226289,6 +230680,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -226335,9 +230727,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -226562,6 +230956,7 @@ source_card_names = [
     "Akim, the Soaring Wind",
     "Battle Screech",
     "Beck // Call",
+    "Blustering Barnyard",
     "Emeria Angel",
     "Eyes in the Skies",
     "Falcon and Redwing",
@@ -227560,6 +231955,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -227855,9 +232251,12 @@ source_card_names = [
     "Pia Nalaar",
     "Pia Nalaar, Consul of Revival",
     "Pia and Kiran Nalaar",
+    "Pia, Determined Rebuilder",
     "Rangers' Aetherhive",
     "Retrofitter Foundry",
+    "Saheeli, Consul of Oversight",
     "Saheeli, Filigree Master",
+    "Saheeli, Jewel of Avishkar",
     "Sai, Master Thopterist",
     "Stridehangar Automaton",
     "Surveillance Monitor",
@@ -228396,6 +232795,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -228928,6 +233328,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",
@@ -229284,9 +233685,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -229387,9 +233790,11 @@ source_card_names = [
     "Day of the Dragons",
     "Death by Dragons",
     "Draconic Disciple",
+    "Draconic Visitor",
     "Dragon Roost",
     "Dragonkin Berserker",
     "Dragonmaster Outcast",
+    "Kiora of Fire and Ashes",
     "Lathliss, Dragon Queen",
     "Look Skyward and Despair",
     "Loot Dispute",
@@ -230316,6 +234721,7 @@ source_card_names = [
     "Visions of Ruin",
     "Volatile Fault",
     "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
     "Wanted Scoundrels",
     "Warren Soultrader",
     "Widespread Thieving",

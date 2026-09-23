@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} empate)",
     "draws_other": " ({{count}} empates)",
     "main": "Principal ({{count}}, mín. {{min}})",
+    "mainNoMinimum": "Principal ({{count}})",
     "sideboard": "Banquillo ({{count}})",
     "sideboardCapped": "Banquillo ({{count}}/{{max}})",
     "moveFromSideboard": "Mueve cartas del banquillo.",
@@ -96,6 +97,9 @@
     "message": "Tu partida no aparecerá públicamente en la lista. Aún puedes hospedar por P2P — simplemente comparte el código de la sala directamente con tu oponente.",
     "continueWithoutLobby": "Continuar sin sala de espera"
   },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Este servidor de salas es demasiado antiguo para listar partidas en el formato seleccionado (necesita el protocolo de lobby {{needed}})."
+  },
   "joinErrorDialog": {
     "dismiss": "Descartar"
   },
@@ -104,7 +108,8 @@
     "versionRequired": "Este host requiere el protocolo de conexión v{{version}}. Actualiza ambas ventanas e inténtalo de nuevo.",
     "versionMismatch": "El protocolo de conexión no coincide: tu cliente envió v{{guestVersion}}, pero el host usa v{{hostVersion}}. Actualiza ambas ventanas.",
     "malformedAuthority": "El host rechazó una autorización de conexión no válida. Vuelve a unirte con un código de sala nuevo.",
-    "frameUndecodable": "El host envió un mensaje que este cliente no pudo leer. Actualiza ambas ventanas e inténtalo de nuevo."
+    "frameUndecodable": "El host envió un mensaje que este cliente no pudo leer. Actualiza ambas ventanas e inténtalo de nuevo.",
+    "hostDisconnectedBeforeSetup": "La conexión con el host se cerró antes de completar la configuración."
   },
   "serverOfflinePrompt": {
     "title": "Emparejamiento inaccesible",
@@ -275,7 +280,11 @@
     "loadingCustomFormat": "Cargando formato…",
     "noSavedCustomFormats": "Todavía no hay formatos personalizados guardados.",
     "customFormatResolveFailed": "No se pudo cargar ese formato guardado.",
-    "customFormatHostingUnavailable": "Hospedar con un formato personalizado aún no es compatible — no se puede comprobar la legalidad del mazo para él. Por ahora, guárdalo y solo previsualízalo."
+    "customFormatHostingUnavailable": "Hospedar con un formato personalizado aún no es compatible — no se puede comprobar la legalidad del mazo para él. Por ahora, guárdalo y solo previsualízalo.",
+    "botGameNotice": "Organizando la partida de Discord {{code}}. La conexión y la privacidad las define la publicación de Discord.",
+    "botSeedIgnored": "Algunos ajustes de la publicación de Discord no se pueden usar aquí — revisa el formato y el número de jugadores.",
+    "botP2PNotice": "Tu dispositivo ejecuta la partida. Mantén la aplicación abierta y conectada.",
+    "botServerNotice": "Un servidor dedicado ejecuta la partida. Puede ralentizarse o desconectarse."
   },
   "page": {
     "deckRejected": "El anfitrión rechazó el mazo.",
@@ -308,7 +317,17 @@
     "pickDeck": "Elegir mazo",
     "anonymous": "Anónimo",
     "joining": "Uniéndose",
-    "joinNeedsServer": "Elige un servidor antes de unirte a una partida."
+    "joinNeedsServer": "Elige un servidor antes de unirte a una partida.",
+    "invalidGameLink": "Este enlace de partida no es válido o está incompleto.",
+    "waitingForHostTitle": "Esperando al anfitrión…",
+    "waitingForHostMessage": "El anfitrión aún no ha abierto esta partida, o ya se ha cerrado. Vuelve a intentarlo cuando el anfitrión haya abierto su enlace.",
+    "botLinkBrokerUnreachable": "No se pudo conectar con el servidor de sala para abrir esta partida de Discord. Revisa tu conexión y vuelve a abrir tu enlace de anfitrión.",
+    "updatingTitle": "Actualizando a la última versión…",
+    "updatingMessage": "Hay una versión más reciente de phase.rs. La página se recargará cuando esté lista.",
+    "refreshAfterGame": "Termina tu partida actual y luego actualiza para obtener la nueva versión.",
+    "updateFailedTitle": "No se pudo actualizar automáticamente",
+    "updateFailedMessage": "Actualiza para obtener la última versión o continúa con esta. Los jugadores con versiones distintas no pueden unirse a la misma partida.",
+    "continueAnyway": "Continuar de todos modos"
   },
   "draftLobbyPanel": {
     "draftPod": "Pod de draft",
@@ -324,5 +343,20 @@
     "checkingLegality": "Comprobando la legalidad del mazo…",
     "legal": "✓ Legal en {{format}}",
     "notLegal": "No es legal en {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Este servidor aún no admite partidas de Discord.",
+    "codeInUse": "El código de esta partida todavía lo ocupa una sala anterior. Espera unos minutos y vuelve a abrir tu enlace de anfitrión desde Discord. Si sigue ocurriendo, inicia un nuevo /lfg."
+  },
+  "openDesktop": {
+    "title": "Abriendo la aplicación de escritorio de phase.rs…",
+    "invalid": "Este enlace no se puede abrir en la aplicación de escritorio.",
+    "openApp": "Abrir la aplicación de escritorio",
+    "continueInBrowser": "¿No se abrió? Continuar en el navegador",
+    "getDesktopApp": "Obtener la aplicación de escritorio"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Partida en curso",
+    "gameInProgressBody": "Termina o abandona tu partida actual y vuelve a abrir el enlace."
   }
 }

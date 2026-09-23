@@ -1560,6 +1560,12 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // needs it to remap a `"that creature"` copy-token anaphor to the
         // enchanted host (Springheart Nantuko's landfall trigger).
         host_self_reference: ctx.host_self_reference.clone(),
+        // CR 109.1 + CR 205.2 + CR 701.41a: a trigger body is still the enclosing
+        // card's text, so the card's printed core types travel with it. Without
+        // this, `support N` inside an ETB trigger would read an empty type list
+        // and take the non-creature branch of its CR 701.41a expansion on every
+        // creature that has it.
+        source_core_types: ctx.source_core_types.clone(),
         // CR 701.42a: stage the meld partner so the effect-clause combinator can
         // stamp `Effect::Meld { source, partner, .. }` (the context carries the
         // source name; the gate carried the partner name).

@@ -563,9 +563,9 @@ fn optional_decline_search_ordering_outcomes(
         return vec![incoming];
     };
     incoming.selected_targets_bound = incoming.selected_targets_bound
-        && super::can_inherit_parent_targets(branch)
+        && super::can_inherit_parent_targets(&branch)
         && super::effect_refs_parent_target(&branch.effect);
-    search_ordering_outcomes(branch, incoming)
+    search_ordering_outcomes(&branch, incoming)
 }
 
 fn continue_search_ordering(

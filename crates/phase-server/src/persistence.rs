@@ -74,6 +74,13 @@ pub enum PrepareFullTerminalDisposition {
     AlreadyPrepared,
 }
 
+/// Every payload column a retire must null, as one SQL fragment. `session_json`
+/// stays in the list because a row an earlier build wrote carries its payload
+/// there, and a retire must clear whatever the row actually holds. A future
+/// payload column joins them in one edit rather than one per statement.
+const CLEAR_PAYLOAD_COLUMNS: &str =
+    "session_json = NULL, session_state_json = NULL, deck_pools_json = NULL";
+
 impl GameDb {
     pub fn is_single_user(&self) -> bool {
         self.retention == SessionRetention::SingleUser
@@ -237,17 +244,19 @@ impl GameDb {
             params![game_code, generation],
         )?;
         tx.execute(
-            "INSERT INTO game_sessions
-                (game_code, generation, mutation_revision, activation_epoch, retired, session_json, updated_at)
-             VALUES (?1, ?2, 0, NULL, 0, NULL, ?3)
-             ON CONFLICT(game_code) DO UPDATE SET
-                generation = excluded.generation,
-                mutation_revision = 0,
-                activation_epoch = NULL,
-                retired = 0,
-                session_json = NULL,
-                updated_at = excluded.updated_at
-             WHERE game_sessions.retired = 1",
+            &format!(
+                "INSERT INTO game_sessions
+                    (game_code, generation, mutation_revision, activation_epoch, retired, updated_at)
+                 VALUES (?1, ?2, 0, NULL, 0, ?3)
+                 ON CONFLICT(game_code) DO UPDATE SET
+                    generation = excluded.generation,
+                    mutation_revision = 0,
+                    activation_epoch = NULL,
+                    retired = 0,
+                    {CLEAR_PAYLOAD_COLUMNS},
+                    updated_at = excluded.updated_at
+                 WHERE game_sessions.retired = 1"
+            ),
             params![game_code, generation, now],
         )?;
         tx.commit()?;
@@ -314,28 +323,40 @@ impl GameDb {
             }
         }
 
+        // The dynamic payload and the pools are two columns of one upsert in
+        // one transaction, so they cannot diverge on a production write.
+        // `session_json` is not bound *and* is nulled on conflict, so the
+        // statement itself — not an argument about its callers — is what makes
+        // every row this build writes carry it NULL. That is what moves the
+        // payload out from under an older reader; a row an earlier build wrote
+        // arrives here still carrying one, and is exactly the row that reader
+        // would otherwise restore subtly wrong.
         let changed = tx.execute(
             "INSERT INTO game_sessions
-                (game_code, generation, mutation_revision, activation_epoch, retired, session_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)
+                (game_code, generation, mutation_revision, activation_epoch, retired,
+                 session_state_json, deck_pools_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
              ON CONFLICT(game_code) DO UPDATE SET
                 generation = excluded.generation,
                 mutation_revision = excluded.mutation_revision,
                 activation_epoch = excluded.activation_epoch,
                 retired = 0,
-                session_json = excluded.session_json,
+                session_json = NULL,
+                session_state_json = excluded.session_state_json,
+                deck_pools_json = excluded.deck_pools_json,
                 updated_at = excluded.updated_at
              WHERE excluded.generation > game_sessions.generation
                 OR (excluded.generation = game_sessions.generation
                     AND game_sessions.retired = 0
                     AND (excluded.mutation_revision > game_sessions.mutation_revision
-                        OR game_sessions.session_json IS NULL))",
+                        OR game_sessions.session_state_json IS NULL))",
             params![
                 snapshot.key.game_code,
                 snapshot.key.generation,
                 snapshot.mutation_revision,
                 snapshot.activation_epoch,
                 json,
+                snapshot.deck_pools_json.as_ref(),
                 now,
             ],
         )?;
@@ -393,23 +414,30 @@ impl GameDb {
         }
 
         tx.execute(
-            "UPDATE game_sessions
-             SET retired = 1, session_json = NULL, updated_at = ?1
-             WHERE (game_code, generation) IN (
-                 SELECT game_code, generation FROM full_active_session WHERE slot = 1
-             ) AND retired = 0",
+            &format!(
+                "UPDATE game_sessions
+                 SET retired = 1, {CLEAR_PAYLOAD_COLUMNS}, updated_at = ?1
+                 WHERE (game_code, generation) IN (
+                     SELECT game_code, generation FROM full_active_session WHERE slot = 1
+                 ) AND retired = 0"
+            ),
             params![now],
         )?;
+        // Same structural clear as `save_full_session`: this build never leaves
+        // a payload where an older reader looks for one.
         tx.execute(
             "INSERT INTO game_sessions
-                (game_code, generation, mutation_revision, activation_epoch, retired, session_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)
+                (game_code, generation, mutation_revision, activation_epoch, retired,
+                 session_state_json, deck_pools_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
              ON CONFLICT(game_code) DO UPDATE SET
                 generation = excluded.generation,
                 mutation_revision = excluded.mutation_revision,
                 activation_epoch = excluded.activation_epoch,
                 retired = 0,
-                session_json = excluded.session_json,
+                session_json = NULL,
+                session_state_json = excluded.session_state_json,
+                deck_pools_json = excluded.deck_pools_json,
                 updated_at = excluded.updated_at
              WHERE excluded.generation >= game_sessions.generation",
             params![
@@ -418,6 +446,7 @@ impl GameDb {
                 snapshot.mutation_revision,
                 next_epoch,
                 json,
+                snapshot.deck_pools_json.as_ref(),
                 now,
             ],
         )?;
@@ -472,7 +501,7 @@ impl GameDb {
 
         let row = tx
             .query_row(
-                "SELECT retired, session_json FROM game_sessions
+                "SELECT retired, session_state_json FROM game_sessions
                  WHERE game_code = ?1 AND generation = ?2",
                 params![key.game_code, key.generation],
                 |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
@@ -498,9 +527,11 @@ impl GameDb {
         }
 
         tx.execute(
-            "UPDATE game_sessions
-             SET retired = 1, session_json = NULL, updated_at = ?1
-             WHERE game_code = ?2 AND generation = ?3 AND retired = 0",
+            &format!(
+                "UPDATE game_sessions
+                 SET retired = 1, {CLEAR_PAYLOAD_COLUMNS}, updated_at = ?1
+                 WHERE game_code = ?2 AND generation = ?3 AND retired = 0"
+            ),
             params![now, key.game_code, key.generation],
         )?;
         if activation_epoch.is_some() {
@@ -514,9 +545,17 @@ impl GameDb {
     /// SQLite to fence stale writers but are never reconstructed at startup.
     pub fn load_active_full_sessions(&self) -> rusqlite::Result<Vec<FullPersistSnapshot>> {
         let conn = self.conn.lock().unwrap();
+        // One read shape. The `WHERE` drops the rows an earlier build wrote
+        // before they are decoded; `count_legacy_full_sessions` reports how
+        // many it dropped, so "restored nothing" stays distinguishable from
+        // "there was nothing to restore". Both payload columns are
+        // written by one statement, so a row carrying one without the other has
+        // no production producer; it is read as absent and skipped per row,
+        // like the decode failure below, rather than failing the whole restore.
         let mut stmt = conn.prepare(
-            "SELECT game_code, generation, mutation_revision, activation_epoch, session_json
-             FROM game_sessions WHERE retired = 0 AND session_json IS NOT NULL",
+            "SELECT game_code, generation, mutation_revision, activation_epoch,
+                    session_state_json, deck_pools_json
+             FROM game_sessions WHERE retired = 0 AND session_state_json IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -525,12 +564,20 @@ impl GameDb {
                 row.get::<_, u64>(2)?,
                 row.get::<_, Option<u64>>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?;
         let mut snapshots = Vec::new();
         for row in rows {
-            let (game_code, generation, mutation_revision, activation_epoch, json) = row?;
-            match serde_json::from_str(&json) {
+            let (game_code, generation, mutation_revision, activation_epoch, json, pools) = row?;
+            let Some(pools) = pools else {
+                error!("Skipped Full session row {game_code}: deck_pools_json is NULL");
+                continue;
+            };
+            match serde_json::from_str(&json).and_then(|mut persisted: PersistedSession| {
+                persisted.deck_pools = serde_json::from_str(&pools)?;
+                Ok(persisted)
+            }) {
                 Ok(persisted) => snapshots.push(FullPersistSnapshot {
                     key: FullSessionKey {
                         game_code,
@@ -539,11 +586,30 @@ impl GameDb {
                     mutation_revision,
                     activation_epoch,
                     persisted,
+                    // The column's own string, carried so the restore owner can
+                    // seed the rebuilt session's encoding cache with it
+                    // (`GameSession::seed_deck_pools_encoding`) instead of
+                    // re-serializing pools it just decoded.
+                    deck_pools_json: pools.into(),
                 }),
-                Err(error) => error!("Failed to deserialize Full session row: {error}"),
+                Err(error) => error!("Failed to deserialize Full session row {game_code}: {error}"),
             }
         }
         Ok(snapshots)
+    }
+
+    /// Counts the live rows an earlier build wrote — payload in `session_json`,
+    /// no `session_state_json`. `load_active_full_sessions` drops these in its
+    /// `WHERE`, so without this count an upgrade that can restore none of its
+    /// games looks exactly like a boot with no games to restore.
+    pub fn count_legacy_full_sessions(&self) -> rusqlite::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM game_sessions
+             WHERE retired = 0 AND session_state_json IS NULL AND session_json IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
     }
 
     /// Atomically records one immutable Full terminal artifact, creates one
@@ -640,9 +706,11 @@ impl GameDb {
             )?;
         }
         tx.execute(
-            "UPDATE game_sessions
-             SET retired = 1, session_json = NULL, updated_at = ?1
-             WHERE game_code = ?2 AND generation = ?3 AND retired = 0",
+            &format!(
+                "UPDATE game_sessions
+                 SET retired = 1, {CLEAR_PAYLOAD_COLUMNS}, updated_at = ?1
+                 WHERE game_code = ?2 AND generation = ?3 AND retired = 0"
+            ),
             params![now, artifact.key.game_code, artifact.key.generation],
         )?;
         tx.execute(
@@ -869,6 +937,20 @@ impl GameDb {
         }
     }
 
+    /// Whether any ranked result is recorded under `game_code`.
+    ///
+    /// [`Self::save_ranked_result_idempotent`] treats existing rows under a code
+    /// as a retry of the same game, so a ranked game must not be created under a
+    /// code that has them: its result would be refused or replayed, never rated.
+    pub fn ranked_history_exists(&self, game_code: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ranked_match_history WHERE game_code = ?1)",
+            params![game_code],
+            |row| row.get(0),
+        )
+    }
+
     /// Records one ranked result exactly once per game. A retry returns the
     /// original receipt instead of applying a second rating change.
     pub fn save_ranked_result_idempotent(
@@ -998,6 +1080,8 @@ fn create_full_game_session_schema(conn: &Connection) -> rusqlite::Result<()> {
              activation_epoch INTEGER,
              retired INTEGER NOT NULL DEFAULT 0,
              session_json TEXT,
+             session_state_json TEXT,
+             deck_pools_json TEXT,
              updated_at INTEGER NOT NULL
          );
          CREATE TABLE IF NOT EXISTS full_generation_high_water (
@@ -1037,7 +1121,24 @@ fn create_full_game_session_schema(conn: &Connection) -> rusqlite::Result<()> {
              player_id INTEGER NOT NULL,
              created_at INTEGER NOT NULL
          );",
-    )
+    )?;
+    // Every `migrate_game_sessions` exit converges here, so a fresh database
+    // gets the split payload columns through the `CREATE` above and an
+    // already-migrated one gets them here — by construction, not by
+    // inspecting which exit ran.
+    let mut statement = conn.prepare("PRAGMA table_info(game_sessions)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for column in ["session_state_json", "deck_pools_json"] {
+        if !columns.iter().any(|existing| existing == column) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE game_sessions ADD COLUMN {column} TEXT;"
+            ))?;
+        }
+    }
+    Ok(())
 }
 
 fn current_terminal_delivery(
@@ -1234,7 +1335,9 @@ mod tests {
                 ranked: false,
                 booster_pack_pool: None,
                 lobby_meta: None,
+                deck_pools: Vec::new(),
             },
+            deck_pools_json: "[]".into(),
         }
     }
 
@@ -1246,7 +1349,7 @@ mod tests {
         let mut mgr = SessionManager::new();
         let (code, _token) = mgr.create_game(Default::default(), None);
         let key = db.create_full_session_key(&code).expect("full key");
-        let session = mgr.sessions.get_mut(&code).expect("session");
+        let session = mgr.session_exclusive(&code).expect("session");
         session.full_runtime = Some(FullRuntime {
             key,
             activation_epoch: None,
@@ -1260,12 +1363,544 @@ mod tests {
         code: &str,
     ) -> FullPersistDisposition {
         let snapshot = mgr
-            .sessions
-            .get(code)
+            .try_session(code)
             .expect("session")
             .full_persist_snapshot()
             .expect("a runtime-bound session has a snapshot");
         db.save_full_session(&snapshot).expect("save")
+    }
+
+    /// One deck pool holding one named entry — the shape
+    /// `load_and_hydrate_decks` leaves on a started session.
+    fn pool_named(name: &str) -> engine::types::game_state::PlayerDeckPool {
+        let card = engine::types::card::CardFace {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let entries = std::sync::Arc::new(vec![engine::game::deck_loading::DeckEntry {
+            card,
+            count: 1,
+        }]);
+        engine::types::game_state::PlayerDeckPool {
+            player: engine::types::player::PlayerId(0),
+            registered_main: std::sync::Arc::clone(&entries),
+            current_main: entries,
+            ..Default::default()
+        }
+    }
+
+    fn pool_names(pools: &[engine::types::game_state::PlayerDeckPool]) -> Vec<String> {
+        pools
+            .iter()
+            .flat_map(|pool| pool.current_main.iter())
+            .map(|entry| entry.card.name.clone())
+            .collect()
+    }
+
+    /// Seeds the row shape an earlier build wrote: payload in `session_json`,
+    /// both new columns absent. Shape-faithful only — nothing should assert on
+    /// the payload's interior.
+    fn insert_legacy_row(db: &GameDb, game_code: &str) {
+        let legacy = serde_json::to_string(&full_snapshot(game_code, 1, 1, None, false).persisted)
+            .expect("a legacy payload serializes");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO game_sessions
+                    (game_code, generation, mutation_revision, activation_epoch, retired,
+                     session_json, updated_at)
+                 VALUES (?1, 1, 1, NULL, 0, ?2, 0)",
+                params![game_code, legacy],
+            )
+            .expect("seed a pre-change row");
+    }
+
+    /// The half-written shape no production writer produces: the mutation
+    /// payload bound without its pools column.
+    fn insert_pool_less_row(db: &GameDb, game_code: &str) {
+        let payload = serde_json::to_string(&full_snapshot(game_code, 1, 1, None, false).persisted)
+            .expect("a payload serializes");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO game_sessions
+                    (game_code, generation, mutation_revision, activation_epoch, retired,
+                     session_state_json, deck_pools_json, updated_at)
+                 VALUES (?1, 1, 1, NULL, 0, ?2, NULL, 0)",
+                params![game_code, payload],
+            )
+            .expect("seed a pools-less row");
+    }
+
+    fn column<T: rusqlite::types::FromSql>(db: &GameDb, column: &str, game_code: &str) -> T {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!("SELECT {column} FROM game_sessions WHERE game_code = ?1"),
+                params![game_code],
+                |row| row.get::<_, T>(0),
+            )
+            .expect("the row exists")
+    }
+
+    /// Row 9 legs (a), (b) and (c): the shape this build writes restores from
+    /// its own two columns, the dynamic payload no longer carries the pools,
+    /// and the shape an earlier build left behind is not restored at all.
+    #[test]
+    fn a_row_this_build_writes_restores_from_its_own_two_columns() {
+        let db = test_db();
+        let (mut mgr, code) = seeded_full_session(&db);
+        mgr.session_exclusive(&code)
+            .expect("session")
+            .state
+            .deck_pools = vec![pool_named("Forest")];
+        let live = pool_names(&mgr.try_session(&code).expect("session").state.deck_pools);
+        assert_eq!(
+            live,
+            vec!["Forest".to_string()],
+            "reach guard: the fixture must carry pools for the split to move"
+        );
+
+        let snapshot = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot");
+        assert_eq!(
+            db.save_full_session(&snapshot).expect("save"),
+            FullPersistDisposition::Applied
+        );
+        insert_legacy_row(&db, "LEGACY");
+
+        let loaded = db.load_active_full_sessions().expect("read back");
+
+        // (a) the round trip.
+        let restored = loaded
+            .iter()
+            .find(|snapshot| snapshot.key.game_code == code)
+            .expect("this build's own row is returned");
+        assert_eq!(
+            pool_names(&restored.persisted.deck_pools),
+            live,
+            "the pools must come back name-for-name from their own column"
+        );
+
+        // (c) the compatibility break, with (a)'s row as its positive control
+        // in the same call.
+        assert!(
+            !loaded
+                .iter()
+                .any(|snapshot| snapshot.key.game_code == "LEGACY"),
+            "a row carrying only session_json is never restored"
+        );
+        assert_eq!(
+            column::<Option<String>>(&db, "session_json", &code),
+            None,
+            "this build binds no payload to session_json"
+        );
+
+        // (b) the lift: the dynamic payload's own pools are empty.
+        let payload: serde_json::Value =
+            serde_json::from_str(&column::<String>(&db, "session_state_json", &code))
+                .expect("the stored payload decodes");
+        assert_eq!(
+            payload["state"]["state"]["deck_pools"],
+            serde_json::json!([]),
+            "the mutation-time payload must not carry the pools"
+        );
+    }
+
+    /// A row whose pools column is NULL is skipped like a payload that fails
+    /// to decode, not propagated out of the reader — one such row must not
+    /// cost the boot every other game.
+    #[test]
+    fn a_row_missing_its_pools_column_is_skipped_not_fatal() {
+        let db = test_db();
+        let (mgr, code) = seeded_full_session(&db);
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+        insert_pool_less_row(&db, "NOPOOLS");
+
+        let loaded = db
+            .load_active_full_sessions()
+            .expect("one unreadable row must not fail the whole restore");
+
+        assert!(
+            loaded.iter().any(|snapshot| snapshot.key.game_code == code),
+            "the production-written row is still restored"
+        );
+        assert!(
+            !loaded
+                .iter()
+                .any(|snapshot| snapshot.key.game_code == "NOPOOLS"),
+            "the row with no pools column is not restored"
+        );
+    }
+
+    /// The count that makes the compatibility break visible in a boot log.
+    /// It must be the reader's drop set and nothing else: this build's own
+    /// saved row, a key claimed but never saved and a tombstone are all live
+    /// in the same table, and a row the reader's `WHERE` lets through is
+    /// reported by the reader itself. Counting any of them would announce
+    /// healthy, finished or already-reported games as lost.
+    #[test]
+    fn only_live_rows_an_earlier_build_wrote_are_counted() {
+        let db = test_db();
+        let (mgr, code) = seeded_full_session(&db);
+        assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
+        let (_unsaved, placeholder) = seeded_full_session(&db);
+        insert_legacy_row(&db, "LEGACY");
+        insert_legacy_row(&db, "TOMBSTONE");
+        insert_legacy_row(&db, "BOTHCOLS");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE game_sessions SET retired = 1 WHERE game_code = ?1",
+                params!["TOMBSTONE"],
+            )
+            .expect("retire the legacy row");
+            conn.execute(
+                "UPDATE game_sessions SET session_state_json = session_json WHERE game_code = ?1",
+                params!["BOTHCOLS"],
+            )
+            .expect("give the legacy row a column this build reads");
+        }
+
+        assert_eq!(
+            db.count_legacy_full_sessions().expect("count"),
+            1,
+            "only the live row this build's reader drops counts, not {code}, \
+             {placeholder}, the tombstone or the row carrying both columns"
+        );
+
+        let restored: Vec<String> = db
+            .load_active_full_sessions()
+            .expect("read back")
+            .into_iter()
+            .map(|snapshot| snapshot.key.game_code)
+            .collect();
+        assert_eq!(
+            restored,
+            vec![code],
+            "reach guard: the reader drops the counted row and keeps its own"
+        );
+    }
+
+    /// Row 10 leg (a): the same-generation revision-monotonicity guard. Left
+    /// keyed on `session_json` the disjunct is vacuously true for every row
+    /// this build writes, and an out-of-order persist clobbers a newer one.
+    #[test]
+    fn an_out_of_order_same_generation_persist_is_refused() {
+        let db = test_db();
+        let (mgr, code) = seeded_full_session(&db);
+        let key = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_runtime
+            .as_ref()
+            .expect("seeded runtime")
+            .key
+            .clone();
+
+        let at = |revision: u64| FullPersistSnapshot {
+            key: key.clone(),
+            mutation_revision: revision,
+            activation_epoch: None,
+            persisted: full_snapshot(&code, key.generation, revision, None, false).persisted,
+            deck_pools_json: "[]".into(),
+        };
+
+        assert_eq!(
+            db.save_full_session(&at(5)).expect("save"),
+            FullPersistDisposition::Applied
+        );
+        assert_eq!(
+            db.save_full_session(&at(3)).expect("save"),
+            FullPersistDisposition::SupersededOrRetired,
+            "an older revision must not overwrite a newer one"
+        );
+        // Positive control: a genuinely newer revision still applies.
+        assert_eq!(
+            db.save_full_session(&at(6)).expect("save"),
+            FullPersistDisposition::Applied
+        );
+    }
+
+    /// Row 10 leg (b): the started-game guard on the unstarted retire path.
+    /// Left keyed on `session_json` the `if let Some(json)` arm never enters
+    /// and a started game retires as if it had never begun.
+    #[test]
+    fn retiring_a_started_game_through_the_unstarted_path_is_refused() {
+        let db = test_db();
+        let (mgr, code) = seeded_full_session(&db);
+        let key = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_runtime
+            .as_ref()
+            .expect("seeded runtime")
+            .key
+            .clone();
+
+        // Positive control: an unstarted row retires.
+        assert_eq!(
+            db.save_full_session(&FullPersistSnapshot {
+                key: key.clone(),
+                mutation_revision: 1,
+                activation_epoch: None,
+                persisted: full_snapshot(&code, key.generation, 1, None, false).persisted,
+                deck_pools_json: "[]".into(),
+            })
+            .expect("save"),
+            FullPersistDisposition::Applied
+        );
+        assert_eq!(
+            db.retire_unstarted_full_session(&key, None)
+                .expect("retire"),
+            FullPersistDisposition::Applied
+        );
+
+        let started_key = db
+            .create_full_session_key(&code)
+            .expect("a retired row allows a fresh generation");
+        assert_eq!(
+            db.save_full_session(&FullPersistSnapshot {
+                key: started_key.clone(),
+                mutation_revision: 1,
+                activation_epoch: None,
+                persisted: full_snapshot(&code, started_key.generation, 1, None, true).persisted,
+                deck_pools_json: "[]".into(),
+            })
+            .expect("save"),
+            FullPersistDisposition::Applied
+        );
+        assert!(
+            db.retire_unstarted_full_session(&started_key, None)
+                .is_err(),
+            "a started game must not retire through the unstarted path"
+        );
+    }
+
+    /// The compatibility break's central invariant — every row this build
+    /// writes carries `session_json` NULL — held by the statements rather than
+    /// by the fact that neither writer binds the column. Each writer's upsert
+    /// meets a row an older build wrote, which is the one row shape an older
+    /// reader would otherwise restore subtly wrong.
+    #[test]
+    fn both_writers_null_an_older_builds_payload_on_conflict() {
+        let db = test_db();
+        insert_legacy_row(&db, "LEGACY");
+        assert!(
+            column::<Option<String>>(&db, "session_json", "LEGACY").is_some(),
+            "reach guard: the seeded row must really carry a legacy payload"
+        );
+        assert_eq!(
+            db.save_full_session(&full_snapshot("LEGACY", 1, 2, None, false))
+                .expect("save"),
+            FullPersistDisposition::Applied,
+            "reach guard: the write must reach the conflict path, not be refused"
+        );
+        assert_eq!(
+            column::<Option<String>>(&db, "session_json", "LEGACY"),
+            None,
+            "the upsert must null the column an older reader selects on"
+        );
+        assert!(
+            column::<Option<String>>(&db, "session_state_json", "LEGACY").is_some(),
+            "positive control: the columns this build does write stay populated"
+        );
+
+        // The sibling statement, on its own retention mode.
+        let file = NamedTempFile::new().unwrap();
+        let solo = GameDb::open(file.path(), SessionRetention::SingleUser).unwrap();
+        insert_legacy_row(&solo, "SOLO_L");
+        assert!(
+            column::<Option<String>>(&solo, "session_json", "SOLO_L").is_some(),
+            "reach guard: the seeded row must really carry a legacy payload"
+        );
+        let (_epoch, result) = solo
+            .activate_single_user_session(&full_snapshot("SOLO_L", 1, 2, None, false))
+            .expect("activate");
+        assert_eq!(
+            result,
+            FullPersistDisposition::Applied,
+            "reach guard: the activation must reach the conflict path"
+        );
+        assert_eq!(
+            column::<Option<String>>(&solo, "session_json", "SOLO_L"),
+            None,
+            "the activation upsert must null it too"
+        );
+        assert!(
+            column::<Option<String>>(&solo, "session_state_json", "SOLO_L").is_some(),
+            "positive control: the activation wrote its own payload column"
+        );
+    }
+
+    /// Row 11: a retire clears every payload column, whichever one the row
+    /// actually carries — and an ordinary save is refused by the same class,
+    /// because it must leave the two written columns populated.
+    #[test]
+    fn every_retire_clears_every_payload_column() {
+        let db = test_db();
+        let (mut mgr, code) = seeded_full_session(&db);
+        mgr.session_exclusive(&code)
+            .expect("session")
+            .state
+            .deck_pools = vec![pool_named("Forest")];
+        let key = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_runtime
+            .as_ref()
+            .expect("seeded runtime")
+            .key
+            .clone();
+        let snapshot = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot");
+        assert_eq!(
+            db.save_full_session(&snapshot).expect("save"),
+            FullPersistDisposition::Applied
+        );
+
+        // The admitted member at the other end of the class: an ordinary save
+        // is not a retire and must leave both written columns populated.
+        assert!(column::<Option<String>>(&db, "session_state_json", &code).is_some());
+        assert!(column::<Option<String>>(&db, "deck_pools_json", &code).is_some());
+
+        assert_eq!(
+            db.retire_unstarted_full_session(&key, None)
+                .expect("retire"),
+            FullPersistDisposition::Applied
+        );
+        assert_eq!(column::<Option<String>>(&db, "session_json", &code), None);
+        assert_eq!(
+            column::<Option<String>>(&db, "session_state_json", &code),
+            None
+        );
+        assert_eq!(
+            column::<Option<String>>(&db, "deck_pools_json", &code),
+            None
+        );
+
+        // The other end of the class: `create_full_session_key`'s clear takes
+        // the same fragment, and a legacy row's payload lives in the column it
+        // is the only statement able to reach.
+        insert_legacy_row(&db, "LEGACY");
+        assert!(column::<Option<String>>(&db, "session_json", "LEGACY").is_some());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE game_sessions SET retired = 1 WHERE game_code = 'LEGACY'",
+                [],
+            )
+            .expect("retire the legacy row so the key upsert fires");
+        db.create_full_session_key("LEGACY")
+            .expect("a retired row allows a fresh generation");
+        assert_eq!(
+            column::<Option<String>>(&db, "session_json", "LEGACY"),
+            None
+        );
+    }
+
+    /// Row 13: the new columns reach a database an earlier build created.
+    /// Every other test here opens a fresh tempfile, which is exactly the
+    /// population that cannot see this defect.
+    #[test]
+    fn the_new_columns_reach_an_already_migrated_database() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let conn = Connection::open(file.path()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE game_sessions (
+                     game_code TEXT PRIMARY KEY,
+                     generation INTEGER NOT NULL DEFAULT 0,
+                     mutation_revision INTEGER NOT NULL DEFAULT 0,
+                     activation_epoch INTEGER,
+                     retired INTEGER NOT NULL DEFAULT 0,
+                     session_json TEXT,
+                     updated_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("build the pre-column schema");
+            let columns: Vec<String> = conn
+                .prepare("PRAGMA table_info(game_sessions)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            // Reach guard: a fixture that silently already had them would make
+            // the assertions below pass without the migration running.
+            assert!(
+                !columns.iter().any(|column| column == "session_state_json")
+                    && !columns.iter().any(|column| column == "deck_pools_json"),
+                "fixture premise: the pre-column schema has neither column, got {columns:?}"
+            );
+        }
+
+        let db = GameDb::open(file.path(), SessionRetention::Multiplayer)
+            .expect("the production open migrates an existing database");
+        insert_legacy_row(&db, "LEGACY");
+        let columns: Vec<String> = db
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("PRAGMA table_info(game_sessions)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            columns.iter().any(|column| column == "session_state_json")
+                && columns.iter().any(|column| column == "deck_pools_json"),
+            "both columns must reach an already-migrated database, got {columns:?}"
+        );
+
+        let (mut mgr, code) = seeded_full_session(&db);
+        mgr.session_exclusive(&code)
+            .expect("session")
+            .state
+            .deck_pools = vec![pool_named("Forest")];
+        let snapshot = mgr
+            .try_session(&code)
+            .expect("session")
+            .full_persist_snapshot()
+            .expect("a runtime-bound session has a snapshot");
+        assert_eq!(
+            db.save_full_session(&snapshot).expect("save"),
+            FullPersistDisposition::Applied
+        );
+
+        let loaded = db.load_active_full_sessions().expect("read back");
+        assert_eq!(
+            pool_names(
+                &loaded
+                    .iter()
+                    .find(|snapshot| snapshot.key.game_code == code)
+                    .expect("the migrated database restores this build's row")
+                    .persisted
+                    .deck_pools
+            ),
+            vec!["Forest".to_string()]
+        );
+        assert!(
+            !loaded
+                .iter()
+                .any(|snapshot| snapshot.key.game_code == "LEGACY"),
+            "the pre-existing legacy row is still not restored"
+        );
+
+        // The admitted member: re-opening a database that already has the
+        // columns must not error.
+        GameDb::open(file.path(), SessionRetention::Multiplayer).expect("a second open is a no-op");
     }
 
     /// The production symptom: a seat edit's snapshot must clear the
@@ -1280,7 +1915,7 @@ mod tests {
         // `SupersededOrRetired` here for an unrelated reason.
         assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
 
-        let session = mgr.sessions.get_mut(&code).expect("session");
+        let session = mgr.session_exclusive(&code).expect("session");
         let seat_state: SeatState = session.seat_state();
         session.apply_seat_delta(
             seat_state,
@@ -1297,8 +1932,12 @@ mod tests {
         let (mut mgr, code) = seeded_full_session(&db);
         assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
 
-        mgr.join_game(&code, Default::default(), None)
+        let (token, _) = mgr
+            .session_exclusive(&code)
+            .expect("session")
+            .join_with_reservation(Default::default(), None, String::new(), None)
             .expect("seat 1 is open");
+        mgr.index_token(token, &code);
 
         assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);
     }
@@ -1455,6 +2094,7 @@ mod tests {
                 mutation_revision: 0,
                 activation_epoch: None,
                 persisted: full_snapshot("KEY001", 1, 0, None, false).persisted,
+                deck_pools_json: "[]".into(),
             })
             .unwrap(),
             FullPersistDisposition::Applied
@@ -1606,6 +2246,37 @@ mod tests {
     }
 
     #[test]
+    fn ranked_history_exists_only_for_a_code_with_saved_results() {
+        let db = test_db();
+        assert_eq!(db.ranked_history_exists("RANK01"), Ok(false));
+
+        db.save_ranked_result_idempotent(&[
+            RatingDelta {
+                player_key: "alice".to_string(),
+                game_code: "RANK01".to_string(),
+                opponent_key: "bob".to_string(),
+                won: true,
+                rating_before: 1200,
+                rating_after: 1212,
+                rating_delta: 12,
+            },
+            RatingDelta {
+                player_key: "bob".to_string(),
+                game_code: "RANK01".to_string(),
+                opponent_key: "alice".to_string(),
+                won: false,
+                rating_before: 1200,
+                rating_after: 1188,
+                rating_delta: -12,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(db.ranked_history_exists("RANK01"), Ok(true));
+        assert_eq!(db.ranked_history_exists("RANK02"), Ok(false));
+    }
+
+    #[test]
     fn multiplayer_save_retains_every_game_session() {
         let db = test_db(); // SessionRetention::Multiplayer
         db.save_session("GAME_A", "a").unwrap();
@@ -1632,6 +2303,26 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, "DRAF01");
         assert!(all[0].1.contains("DRAF01"));
+
+        // `draft_sessions` is a different table and no part of the payload
+        // split reaches it. A round trip cannot see a rename that did: this
+        // suite always opens a fresh database, so DDL and statements would
+        // agree here while a deployed database's `CREATE TABLE IF NOT EXISTS`
+        // no-ops and keeps the old column. Assert the column name itself.
+        let columns: Vec<String> = db
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("PRAGMA table_info(draft_sessions)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            columns.iter().any(|column| column == "session_json"),
+            "the draft table keeps its own payload column, got {columns:?}"
+        );
     }
 
     #[test]

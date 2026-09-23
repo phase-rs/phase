@@ -1921,6 +1921,18 @@ fn subject_anchored_optional_actor(
     }
 }
 
+/// CR 601.2c: a `Pump` whose target is its own declared target instance
+/// ("[up to one] [other] target creature gets +N/+M"), not an inherited anaphor.
+fn declares_pump_target(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Pump {
+            target: TargetFilter::Typed(_),
+            ..
+        }
+    )
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -3486,6 +3498,29 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                 }
             } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
+                // CR 608.2c + CR 601.2c + CR 115.6: a plural anaphor ("those
+                // creatures") after two or more targeted P/T instructions of this
+                // ability names every object those target instances declared, and a
+                // declined "up to one" instance contributes none. No single parent's
+                // targets carry that union, so the grant or pump binds the chain
+                // tracked set the targeted `Pump`s publish
+                // (`affected_objects_from_events`). A damage or fight consumer keeps
+                // its `ParentTarget` binding.
+                if defs
+                    .iter()
+                    .filter(|def| declares_pump_target(&def.effect))
+                    .count()
+                    >= 2
+                {
+                    for current in &mut current_defs {
+                        if matches!(
+                            &*current.effect,
+                            Effect::GenericEffect { .. } | Effect::Pump { .. }
+                        ) {
+                            rewrite_parent_targets_to_tracked_set(&mut current.effect, false);
+                        }
+                    }
+                }
                 // CR 603.7 + issue #6065: "those creatures gain <keyword>" after a
                 // "draw a card for each <creature filter>" clause (Inspiring Call).
                 // Draw publishes no tracked set (its target is the drawing player),
@@ -4401,6 +4436,87 @@ mod arena_tests {
                 target: TargetFilter::Controller,
             },
         )
+    }
+
+    /// The anaphoric grant of a two-targeted-`Pump` chain, as the stamp leaves it.
+    fn p6_anaphor_grant_affected(text: &str) -> Vec<Option<TargetFilter>> {
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "P6 Anaphor Probe",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let root = parsed
+            .abilities
+            .first()
+            .unwrap_or_else(|| panic!("one spell chain expected: {text}"));
+        let mut node = Some(root);
+        let mut pumps = 0usize;
+        while let Some(def) = node {
+            match &*def.effect {
+                Effect::Pump {
+                    target: TargetFilter::Typed(_),
+                    ..
+                } => pumps += 1,
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => {
+                    assert_eq!(
+                        pumps, 2,
+                        "REACH GUARD: the chain must reach the grant with TWO declared \
+                         targeted pumps before it, or the stamp's gate is not the thing \
+                         under test: {text}"
+                    );
+                    return static_abilities
+                        .iter()
+                        .map(|static_def| static_def.affected.clone())
+                        .collect();
+                }
+                _ => {}
+            }
+            node = def.sub_ability.as_deref();
+        }
+        panic!("no anaphoric grant in the chain: {text}");
+    }
+
+    /// CR 608.2c + CR 601.2c + CR 115.6 — H-3b.1. U6b's DISCRIMINATING
+    /// building-block row, and the one no U6a row can supply: both conjuncts
+    /// already split at PHASE_BASE through the pre-existing verb-only arm, so
+    /// this row moves on the STAMP alone.
+    ///
+    /// A PLURAL anaphor after two or more targeted P/T instructions names every
+    /// object those instances declared. No single parent's targets carry that
+    /// union, so the grant binds the chain tracked set.
+    ///
+    /// PAIR: M-3 (revert the stamp).
+    #[test]
+    fn plural_anaphor_after_two_targeted_pumps_binds_tracked_set() {
+        assert_eq!(
+            p6_anaphor_grant_affected(
+                "Target creature you control gets +1/+1 and target creature an opponent controls gets +1/+1. Those creatures gain trample until end of turn."
+            ),
+            vec![Some(TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0)
+            })],
+        );
+    }
+
+    /// CR 608.2c — H-3b.2, HOSTILE NEIGHBOUR. GREEN AT BASE. A SINGULAR
+    /// anaphor over the same two-pump chain names one object, so it keeps its
+    /// `ParentTarget` binding and must not be swept into the tracked set.
+    ///
+    /// PAIR: `plural_anaphor_after_two_targeted_pumps_binds_tracked_set`
+    /// (H-3b.1, red at base on the same stamp) + M-9 (hoist the stamp above
+    /// the pronoun branch so it also fires on the singular path).
+    #[test]
+    fn singular_anaphor_after_two_targeted_pumps_keeps_parent_target() {
+        assert_eq!(
+            p6_anaphor_grant_affected(
+                "Target creature you control gets +1/+1 and target creature an opponent controls gets +1/+1. It gains trample until end of turn."
+            ),
+            vec![Some(TargetFilter::ParentTarget)],
+        );
     }
 
     /// The mirror assert's IDENTITY check (`order[i]` names the def actually at
