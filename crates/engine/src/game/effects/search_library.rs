@@ -2057,6 +2057,145 @@ mod tests {
         )));
     }
 
+    /// CR 701.23a + CR 406.3: a caster searching an opponent's library is the
+    /// only player who learns the selected card when the continuation exiles it
+    /// face down. The library owner and a third-party spectator must receive
+    /// neither the hidden-search witness nor the identity-bearing zone record.
+    #[test]
+    fn cross_owner_search_library_face_down_exile_is_visible_only_to_searcher() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::types::ability::{AbilityKind, ControllerRef, Effect};
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let found = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(1),
+            "Opponent Hidden Creature".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&found).unwrap().card_types.core_types = vec![CoreType::Creature];
+
+        let mut exile_step = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(105),
+            PlayerId(0),
+        );
+        exile_step.context.face_down_in_exile = true;
+        let search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(105),
+            PlayerId(0),
+        )
+        .kind(AbilityKind::Spell)
+        .sub_ability(exile_step);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                ref cards,
+                ..
+            } if cards.as_slice() == [found]
+        ));
+
+        let selection = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .unwrap();
+        events.extend(selection.events);
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(state.objects[&found].face_down);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                audience,
+                ..
+            } if audience == &[PlayerId(0)]
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found
+                && record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.face_down)
+        )));
+
+        let searcher_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let owner_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        let spectator_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(2));
+        assert!(searcher_view
+            .iter()
+            .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
+        for view in [&owner_view, &spectator_view] {
+            assert!(!view
+                .iter()
+                .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+            assert!(!view.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == found
+            )));
+        }
+    }
+
     #[test]
     fn beseech_bargained_accept_grants_cast_without_hand_fallback() {
         use crate::game::ability_utils::build_resolved_from_def;

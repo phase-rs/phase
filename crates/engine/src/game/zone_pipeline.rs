@@ -4708,7 +4708,8 @@ mod w3_library_placement_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ReplacementDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        SearchSelectionConstraint, TargetFilter,
     };
     use crate::types::identifiers::CardId;
     use crate::types::replacements::ReplacementEvent;
@@ -4751,6 +4752,394 @@ mod w3_library_placement_tests {
                 .destination_zone(Zone::Library),
         );
         source
+    }
+
+    fn optional_zone_redirect(from: Zone, to: Zone) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: to,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+            .destination_zone(from)
+    }
+
+    fn face_down_self_search(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        let mut exile_step = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        exile_step.context.face_down_in_exile = true;
+        ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![],
+            source,
+            controller,
+        )
+        .sub_ability(exile_step)
+    }
+
+    #[test]
+    fn face_down_exile_single_replacement_enters_battlefield_face_up_and_public() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let redirect_source = create_object(
+            &mut state,
+            CardId(90100),
+            PlayerId(0),
+            "Exile to Battlefield Redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&redirect_source)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Exile, Zone::Battlefield));
+
+        let card = create_object(
+            &mut state,
+            CardId(90101),
+            PlayerId(0),
+            "Printed Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&card).unwrap();
+            obj.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(4);
+            obj.base_power = Some(4);
+            obj.toughness = Some(5);
+            obj.base_toughness = Some(5);
+        }
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card, Zone::Exile, redirect_source).face_down_in_exile(),
+            &mut events,
+        );
+        let ZoneMoveResult::NeedsChoice(chooser) = result else {
+            panic!("expected the face-down exile redirect to park for a choice");
+        };
+        state.priority_player = chooser;
+        let resumed = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept the Exile-to-Battlefield replacement");
+        events.extend(resumed.events);
+
+        let obj = state.objects.get(&card).unwrap();
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(
+            !obj.face_down,
+            "the replacement destination is public Battlefield"
+        );
+        assert_eq!(obj.name, "Printed Creature");
+        assert_eq!(obj.power, Some(4));
+        assert_eq!(obj.toughness, Some(5));
+        assert!(obj.face_down_cause.is_none());
+
+        let public_record = events.iter().find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Graveyard),
+                to: Zone::Battlefield,
+                record,
+            } if *object_id == card => Some(record),
+            _ => None,
+        });
+        assert!(
+            public_record.is_some(),
+            "the settled replacement must emit a public event"
+        );
+        assert!(public_record.is_some_and(|record| {
+            record
+                .trigger_source_context
+                .as_ref()
+                .is_none_or(|context| !context.face_down)
+        }));
+        let opponent_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(opponent_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Graveyard),
+                to: Zone::Battlefield,
+                ..
+            } if *object_id == card
+        )));
+    }
+
+    #[test]
+    fn face_down_exile_chained_away_and_back_keeps_exact_hidden_authority() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::{apply, apply_as_current};
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let first_redirect = create_object(
+            &mut state,
+            CardId(90110),
+            PlayerId(0),
+            "Exile to Graveyard Redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&first_redirect)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Exile, Zone::Graveyard));
+        let second_redirect = create_object(
+            &mut state,
+            CardId(90111),
+            PlayerId(0),
+            "Graveyard to Exile Redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&second_redirect)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Graveyard, Zone::Exile));
+        let card = create_object(
+            &mut state,
+            CardId(90112),
+            PlayerId(0),
+            "Hidden Away And Back".to_string(),
+            Zone::Library,
+        );
+
+        let search = face_down_self_search(first_redirect, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search, &mut events, 0).unwrap();
+        let selection = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![card] },
+        )
+        .unwrap();
+        events.extend(selection.events);
+
+        let first_chooser = match &state.waiting_for {
+            WaitingFor::ReplacementChoice { player, .. } => *player,
+            other => panic!("expected first replacement choice, got {other:?}"),
+        };
+        state.priority_player = first_chooser;
+        let first_resume = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Exile-to-Graveyard replacement");
+        events.extend(first_resume.events);
+
+        let second_chooser = match &state.waiting_for {
+            WaitingFor::ReplacementChoice { player, .. } => *player,
+            other => panic!("expected second replacement choice, got {other:?}"),
+        };
+        state.priority_player = second_chooser;
+        let second_resume =
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept Graveyard-to-Exile replacement");
+        events.extend(second_resume.events);
+
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
+        assert!(state.objects[&card].face_down);
+        let hidden_record = events.iter().find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == card => Some(record),
+            _ => None,
+        });
+        assert!(
+            hidden_record.is_some(),
+            "the final Exile event must be recorded"
+        );
+        assert!(hidden_record.is_some_and(|record| {
+            record
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|context| context.face_down)
+        }));
+
+        let authorized =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let unauthorized =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(authorized.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == card
+        )));
+        assert!(!unauthorized.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == card
+        )));
+        assert!(!unauthorized
+            .iter()
+            .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+    }
+
+    #[test]
+    fn face_down_exile_chained_battlefield_replacements_preserve_printed_face() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::{apply, apply_as_current};
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let first_redirect = create_object(
+            &mut state,
+            CardId(90120),
+            PlayerId(0),
+            "Exile to Battlefield Redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&first_redirect)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Exile, Zone::Battlefield));
+        let second_redirect = create_object(
+            &mut state,
+            CardId(90121),
+            PlayerId(0),
+            "Battlefield Replacement".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&second_redirect)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Battlefield, Zone::Battlefield));
+        let card = create_object(
+            &mut state,
+            CardId(90122),
+            PlayerId(0),
+            "Printed Battlefield Creature".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&card).unwrap();
+            obj.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(6);
+            obj.base_power = Some(6);
+            obj.toughness = Some(7);
+            obj.base_toughness = Some(7);
+        }
+
+        let search = face_down_self_search(first_redirect, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search, &mut events, 0).unwrap();
+        let selection = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![card] },
+        )
+        .unwrap();
+        events.extend(selection.events);
+
+        for _ in 0..2 {
+            let chooser = match &state.waiting_for {
+                WaitingFor::ReplacementChoice { player, .. } => *player,
+                other => panic!("expected chained replacement choice, got {other:?}"),
+            };
+            state.priority_player = chooser;
+            let resumed = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept chained Battlefield replacement");
+            events.extend(resumed.events);
+        }
+
+        let obj = state.objects.get(&card).unwrap();
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(!obj.face_down);
+        assert!(obj.face_down_cause.is_none());
+        assert_eq!(obj.name, "Printed Battlefield Creature");
+        assert_eq!(obj.power, Some(6));
+        assert_eq!(obj.toughness, Some(7));
+        let public_record = events.iter().find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                record,
+            } if *object_id == card => Some(record),
+            _ => None,
+        });
+        assert!(public_record.is_some());
+        assert!(public_record.is_some_and(|record| {
+            record
+                .trigger_source_context
+                .as_ref()
+                .is_none_or(|context| !context.face_down)
+        }));
+        let opponent_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(opponent_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                ..
+            } if *object_id == card
+        )));
+        assert!(!opponent_view
+            .iter()
+            .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
     }
 
     /// W3 (CR 614.6): a NON-EXEMPT library placement now runs the replacement
