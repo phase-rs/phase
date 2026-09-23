@@ -50,7 +50,7 @@ const P2: PlayerId = PlayerId(2);
 const P3: PlayerId = PlayerId(3);
 
 const KYNAIOS_STYLE_NESTED_LAND_ORACLE: &str =
-    "At the beginning of your end step, draw a card. Then each player may put a land card from their hand onto the battlefield. Then each opponent who didn't put a card onto the battlefield this way draws a card.";
+    "At the beginning of your end step, draw a card. Each player may put a land card from their hand onto the battlefield, then each opponent who didn't draws a card.";
 
 fn begin(state: &mut GameState) -> u64 {
     apply(
@@ -306,6 +306,7 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
         8,
         KYNAIOS_STYLE_NESTED_LAND_ORACLE,
     );
+    let mut land_ids = BTreeMap::new();
     for (player, library_name) in [
         (P0, "P0 draw"),
         (P1, "P1 draw"),
@@ -313,7 +314,8 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
         (P3, "P3 draw"),
     ] {
         scenario.with_library_top(player, &[library_name]);
-        scenario.add_land_to_hand(player, "Plains");
+        let land = scenario.add_land_to_hand(player, "Plains").id();
+        land_ids.insert(player, land);
     }
 
     let mut runner = scenario.build();
@@ -359,7 +361,8 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
         );
     }
 
-    let mut saw_land_choice = false;
+    let mut land_choice_players = BTreeSet::new();
+    let mut land_placements = BTreeSet::new();
     let mut crossed_turn_boundary = false;
     for _ in 0..160 {
         if runner.state().turn_number != starting_turn {
@@ -396,12 +399,27 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
             WaitingFor::OptionalEffectChoice { .. } => runner
                 .act(GameAction::DecideOptionalEffect { accept: true })
                 .expect("each player accepts the offered land choice"),
-            WaitingFor::EffectZoneChoice { cards, .. } => {
-                saw_land_choice = true;
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                let expected_land = *land_ids
+                    .get(&player)
+                    .expect("each land choice must belong to a known participant");
+                assert_eq!(
+                    cards,
+                    vec![expected_land],
+                    "each participant must receive its own independent land choice"
+                );
                 let card = cards.first().copied().expect("land choice offers a card");
-                runner
+                let result = runner
                     .act(GameAction::SelectCards { cards: vec![card] })
-                    .expect("each player selects the offered land through apply")
+                    .expect("each player selects the offered land through apply");
+                assert_eq!(
+                    runner.state().objects[&expected_land].zone,
+                    Zone::Battlefield,
+                    "participant {player:?}'s selected land must enter the battlefield"
+                );
+                land_choice_players.insert(player);
+                land_placements.insert(player);
+                result
             }
             WaitingFor::OrderTriggers { triggers, .. } => runner
                 .act(GameAction::OrderTriggers {
@@ -413,9 +431,14 @@ fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
         events.extend(result.events);
     }
 
-    assert!(
-        saw_land_choice,
-        "the fixture must exercise a nested land choice"
+    let expected_players = BTreeSet::from([P0, P1, P2, P3]);
+    assert_eq!(
+        land_choice_players, expected_players,
+        "the Oracle text must fan out one land choice to every player"
+    );
+    assert_eq!(
+        land_placements, expected_players,
+        "every participant's selected land must be placed independently"
     );
     assert!(
         crossed_turn_boundary,
