@@ -4024,6 +4024,14 @@ pub enum Duration {
     /// CR 610.3: The exiled object returns to its previous zone immediately
     /// after an opponent of the source's controller becomes the monarch.
     UntilOpponentBecomesMonarch,
+    /// CR 611.2a + CR 601.2i: the effect lasts until the stated event occurs
+    /// ("until a player casts a creature spell"); for a spell-cast event, that
+    /// is the moment the spell becomes cast. The payload describes the event
+    /// only; it is not a triggered or delayed triggered ability (CR 603.2,
+    /// CR 603.7), so nothing goes on the stack when the effect ends.
+    UntilEvent {
+        event: Box<TriggerDefinition>,
+    },
     Permanent,
 }
 
@@ -4049,6 +4057,7 @@ impl Duration {
             | Self::UntilNextStepOf { .. }
             | Self::ForAsLongAs { .. }
             | Self::UntilSourceExilesAnotherCard
+            | Self::UntilEvent { .. }
             | Self::Permanent => None,
         }
     }
@@ -4083,6 +4092,7 @@ impl Duration {
             | Self::ForAsLongAs { .. }
             | Self::UntilSourceExilesAnotherCard
             | Self::UntilOpponentBecomesMonarch
+            | Self::UntilEvent { .. }
             | Self::Permanent => false,
         }
     }

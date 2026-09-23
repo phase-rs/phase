@@ -210,6 +210,11 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 78 — Duration::UntilEvent (the event-deadline duration) and
+ *      TransientContinuousEffect's duration_event_source are new in serialized
+ *      GameState. This client hands server frames to JSON.parse, so a v77
+ *      client would take the new shape with no decode error; the exact-match
+ *      version check at connect refuses the pairing instead.
  * 77 — Prospective: no GameState or GameAction shape change lands in this
  *      bump. Moved ahead of new GameFormat variants — see PROTOCOL_VERSION's
  *      own `/// 77` entry in
@@ -537,7 +542,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 77;
+export const PROTOCOL_VERSION = 78;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

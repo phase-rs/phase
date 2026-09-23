@@ -7,9 +7,9 @@
 //! ("until your next end step", "until the next end step", "until your next
 //! upkeep", "until its controller's next untap step"), "until ~/this creature
 //! leaves the battlefield", "until you exile another card with ~/this
-//! ability", "for the rest of the game", "for as long as [condition]", "this
-//! turn", "this/that combat", and the "during target opponent's/player's next
-//! turn" WINDOW (Gideon Jura).
+//! ability", "until a player casts <a|an> <filter> spell", "for the rest of
+//! the game", "for as long as [condition]", "this turn", "this/that combat",
+//! and the "during target opponent's/player's next turn" WINDOW (Gideon Jura).
 //!
 //! A phrase added here is taken away from every clause-level grammar that owned
 //! it, because the positional wrappers below run first — see
@@ -25,17 +25,20 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::{eof, map, opt, rest, value, verify};
+use nom::combinator::{eof, map, opt, recognize, rest, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::condition::{parse_inner_condition, parse_recipient_has_counters};
+use super::context::ParseContext;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::scan_contains;
+use crate::parser::oracle_trigger::parse_trigger_condition;
 use crate::types::ability::{
     ControllerRef, Duration, ObjectScope, PlayerScope, StaticCondition, TargetFilter,
 };
 use crate::types::phase::Phase;
+use crate::types::triggers::TriggerMode;
 
 /// Parse a duration phrase from Oracle text.
 ///
@@ -214,8 +217,37 @@ fn parse_until_body(input: &str) -> OracleResult<'_, Duration> {
             Duration::UntilSourceExilesAnotherCard,
             parse_until_source_exiles_another_card_body,
         ),
+        // CR 611.2a + CR 601.2i: an event deadline, "until a player casts
+        // <a|an> <filter> spell", which ends when such a spell becomes cast.
+        parse_until_player_casts_spell,
     ))
     .parse(input)
+}
+
+/// CR 611.2a + CR 601.2i: "a player casts <a|an> <filter> spell". The span is
+/// read by the trigger parser, so the deadline's event is the same `SpellCast`
+/// description a "whenever a player casts …" trigger carries, with the same
+/// spell filter. Any other subject, or a span the trigger parser does not read
+/// as a bare spell-cast event, declines.
+fn parse_until_player_casts_spell(input: &str) -> OracleResult<'_, Duration> {
+    let (rest, event_text) = recognize((
+        tag("a player"),
+        tag(" casts "),
+        alt((tag("a "), tag("an "))),
+        take_until("spell"),
+        tag("spell"),
+    ))
+    .parse(input)?;
+    let (mode, event) = parse_trigger_condition(event_text, &mut ParseContext::default());
+    if mode != TriggerMode::SpellCast || event.execute.is_some() {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        rest,
+        Duration::UntilEvent {
+            event: Box::new(event),
+        },
+    ))
 }
 
 pub(crate) fn parse_until_source_exiles_another_card_body(input: &str) -> OracleResult<'_, ()> {
@@ -756,7 +788,12 @@ pub fn parse_cast_snapshot_suffix(input: &str) -> OracleResult<'_, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::StaticCondition;
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{
+        AbilityKind, Comparator, FilterProp, OriginConstraint, StaticCondition, TriggerDefinition,
+        TypeFilter, TypedFilter,
+    };
+    use crate::types::mana::ManaColor;
 
     #[test]
     fn test_parse_duration_end_of_turn() {
@@ -1363,5 +1400,156 @@ mod tests {
                 condition: StaticCondition::SourceIsTapped,
             },
         );
+    }
+
+    /// The spell-cast event an "until a player casts …" deadline carries.
+    fn spell_cast_event(duration: &Duration) -> &TriggerDefinition {
+        let Duration::UntilEvent { event } = duration else {
+            panic!("expected an event deadline, got {duration:?}");
+        };
+        assert_eq!(event.mode, TriggerMode::SpellCast);
+        assert_eq!(event.spell_cast_origin, OriginConstraint::Any);
+        assert_eq!(event.valid_target, None);
+        assert!(event.execute.is_none(), "the event describes no effect");
+        event
+    }
+
+    fn clause_duration(text: &str) -> Option<Duration> {
+        parse_effect_chain(text, AbilityKind::Spell).duration
+    }
+
+    /// A-1 (CR 611.2a + CR 601.2i): "until a player casts a creature spell" is
+    /// an event deadline whose event is the creature-spell cast, read alone,
+    /// trailing a clause, and leading one.
+    #[test]
+    fn until_a_player_casts_a_creature_spell_is_an_event_deadline() {
+        let creature = Some(TargetFilter::Typed(TypedFilter::creature()));
+
+        let (rest, duration) = parse_duration("until a player casts a creature spell").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(spell_cast_event(&duration).valid_card, creature);
+
+        for text in [
+            "Target creature becomes an enchantment until a player casts a creature spell.",
+            "Until a player casts a creature spell, target creature loses all abilities.",
+        ] {
+            let duration = clause_duration(text).unwrap_or_else(|| panic!("{text}: no duration"));
+            assert_eq!(spell_cast_event(&duration).valid_card, creature, "{text}");
+        }
+    }
+
+    /// A-2: the deadline's spell filter is the trigger parser's filter for the
+    /// same words, so the class is every pre-noun filter that grammar reads.
+    #[test]
+    fn until_a_player_casts_reads_the_spell_filter() {
+        let typed = |types: Vec<TypeFilter>, properties: Vec<FilterProp>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                properties,
+                ..TypedFilter::default()
+            })
+        };
+        let cases = [
+            (
+                "an instant or sorcery spell",
+                Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            ),
+            (
+                "a noncreature spell",
+                Some(typed(
+                    vec![
+                        TypeFilter::Card,
+                        TypeFilter::Non(Box::new(TypeFilter::Creature)),
+                    ],
+                    vec![],
+                )),
+            ),
+            (
+                "a red spell",
+                Some(typed(
+                    vec![TypeFilter::Card],
+                    vec![FilterProp::HasColor {
+                        color: ManaColor::Red,
+                    }],
+                )),
+            ),
+            ("a spell", None),
+            (
+                "an artifact spell",
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))),
+            ),
+            (
+                "a multicolored spell",
+                Some(typed(
+                    vec![],
+                    vec![FilterProp::ColorCount {
+                        comparator: Comparator::GE,
+                        count: 2,
+                    }],
+                )),
+            ),
+        ];
+        for (spell, filter) in cases {
+            let text = format!("until a player casts {spell}");
+            let (rest, duration) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "{spell}");
+            assert_eq!(spell_cast_event(&duration).valid_card, filter, "{spell}");
+        }
+    }
+
+    /// A-3: the neighbouring "until …" phrases keep their readings.
+    #[test]
+    fn until_body_keeps_its_other_phrases() {
+        for (text, expected) in [
+            ("until end of turn", Duration::UntilEndOfTurn),
+            (
+                "until ~ leaves the battlefield",
+                Duration::UntilHostLeavesPlay,
+            ),
+            (
+                "until you exile another card with ~",
+                Duration::UntilSourceExilesAnotherCard,
+            ),
+        ] {
+            assert_eq!(parse_duration(text).unwrap(), ("", expected), "{text}");
+        }
+        assert!(
+            parse_duration("until this enchantment leaves the battlefield").is_err(),
+            "the host arm reads only ~ and \"this creature\""
+        );
+    }
+
+    /// A-4: other subjects and other events are not spell-cast deadlines
+    /// (CR 109.5: "an opponent" would be read against the source's current
+    /// controller), and a filter the grammar reads only in part declines at the
+    /// clause rather than widening the deadline. A-1 is the positive pairing.
+    #[test]
+    fn until_a_player_casts_declines_other_subjects_and_events() {
+        for text in [
+            "until an opponent casts a creature spell",
+            "until they cast them for the first time",
+            "until this card is cast from exile",
+        ] {
+            assert!(
+                !matches!(parse_duration(text), Ok((_, Duration::UntilEvent { .. }))),
+                "{text}"
+            );
+        }
+        for text in [
+            "Target creature loses all abilities until a player casts creature spells.",
+            "Target creature loses all abilities until a player casts a creature spellbook.",
+            "Target creature loses all abilities until a player casts a spell with mana value 4 or greater.",
+            "Until a player casts a creature spells, target creature loses all abilities.",
+        ] {
+            assert!(
+                !matches!(clause_duration(text), Some(Duration::UntilEvent { .. })),
+                "{text}"
+            );
+        }
     }
 }

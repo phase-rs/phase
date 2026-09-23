@@ -2125,6 +2125,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
 fn legacy_duration(x: &Duration) -> bool {
     match x {
         Duration::ForAsLongAs { condition } => legacy_static_condition(condition),
+        Duration::UntilEvent { event } => legacy_trigger_definition(event),
         Duration::UntilEndOfTurn
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
@@ -4469,6 +4470,10 @@ fn rw_duration(x: &Duration) -> RwProfile {
         | Duration::WhileHostOnBattlefield
         | Duration::UntilSourceExilesAnotherCard
         | Duration::UntilOpponentBecomesMonarch
+        // CR 611.2a: the event payload is a `TriggerDefinition`, which this
+        // module has no read/write walker for (delayed-trigger conditions are
+        // not walked either).
+        | Duration::UntilEvent { .. }
         | Duration::Permanent => RwProfile::empty(),
         Duration::UntilNextTurnOf { player, .. }
         | Duration::UntilEndOfNextTurnOf { player, .. }

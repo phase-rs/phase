@@ -3315,21 +3315,18 @@ mod tests {
         }
     }
 
-    /// Prospective: no `GameState` or `GameAction` shape changes land in
-    /// this bump. Moved ahead of new `GameFormat` variants — see `PROTOCOL_VERSION`'s own `/// 77` entry in
-    /// `crates/lobby-broker/src/protocol.rs`. A v76 peer is refused anyway:
-    /// full-game sessions are exact-match on both ends (see
-    /// `full_game_floor_is_current_only_not_a_rollout_window` below), so
-    /// admitting one is a rollout-window regression independent of whether
-    /// THIS particular bump changed any wire shape.
+    /// `Duration::UntilEvent` and `TransientContinuousEffect`'s
+    /// `duration_event_source` are new in serialized full-game state; a v77
+    /// peer cannot parse the new duration tag, so it must be refused before it
+    /// receives v78 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_77_ahead_of_freeform_format_names() {
-        assert_eq!(PROTOCOL_VERSION, 77);
+    fn protocol_version_is_78_for_event_deadline_duration() {
+        assert_eq!(PROTOCOL_VERSION, 78);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3337,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_77_ahead_of_freeform_format_names` stays
+    /// `protocol_version_is_78_for_event_deadline_duration` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

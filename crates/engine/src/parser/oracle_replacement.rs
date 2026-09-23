@@ -7090,6 +7090,9 @@ fn parse_graveyard_redirect_replacement(
         | Some(Duration::UntilSourceExilesAnotherCard)
         | Some(Duration::UntilOpponentBecomesMonarch)
         | Some(Duration::Permanent) => {}
+        // CR 611.2a + CR 601.2i: no replacement expiry ends at a spell-cast
+        // event, so the definition is declined rather than left unbounded.
+        Some(Duration::UntilEvent { .. }) => return None,
     }
 
     Some(def)
@@ -12288,6 +12291,9 @@ fn stated_clause_expiry(clause_lower: &str, window_anchor: &str) -> StatedClause
         | Some(Duration::ForAsLongAs { .. })
         | Some(Duration::UntilSourceExilesAnotherCard)
         | Some(Duration::UntilOpponentBecomesMonarch) => StatedClauseExpiry::Durable,
+        // CR 611.2a + CR 601.2i: no replacement expiry ends at a spell-cast
+        // event, so the clause is unsupported rather than durable.
+        Some(Duration::UntilEvent { .. }) => StatedClauseExpiry::Unsupported,
         // CR 604.2: an explicitly permanent window is the printed-static case —
         // no expiry, and the definition must survive every cleanup step.
         Some(Duration::Permanent) => StatedClauseExpiry::Durable,

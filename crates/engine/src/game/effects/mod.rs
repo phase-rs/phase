@@ -4303,7 +4303,8 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
         | Duration::WhileControllingHost
         | Duration::ForAsLongAs { condition: _ }
         | Duration::UntilSourceExilesAnotherCard
-        | Duration::UntilOpponentBecomesMonarch => false,
+        | Duration::UntilOpponentBecomesMonarch
+        | Duration::UntilEvent { .. } => false,
     }
 }
 

@@ -4150,6 +4150,9 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes {
         Duration::WhileHostOnBattlefield => Axes::NONE,
         Duration::UntilSourceExilesAnotherCard => Axes::NONE,
         Duration::UntilOpponentBecomesMonarch => Axes::NONE,
+        // CR 611.2a: the event is a trigger description, scanned as the
+        // `WhenNextEvent` delayed-trigger payload is.
+        Duration::UntilEvent { event } => scan_trigger_definition(event, mode),
         Duration::UntilNextStepOf { player, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_scope(player));
