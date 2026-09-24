@@ -1225,6 +1225,14 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             state.waiting_for.acting_players().contains(searcher)
                 && turn_control::authorized_submitter_for_player(state, *searcher) == viewer
         });
+    if let Some(crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+        hidden_search_audiences,
+        ..
+    }) = filtered.pending_library_search_delivery.as_mut()
+    {
+        hidden_search_audiences.clear();
+    }
+    filtered.completed_hidden_search_audiences.clear();
     let private_look_visible = privately_looked_at_ids(state, viewer, &can_view_private_for_player);
 
     // CR 400.2 + CR 406.3 + CR 708.5: ONE identity decision per object, taken by the
@@ -1831,12 +1839,38 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // the generic batch tail and the typed search-specific continuation unless
     // this viewer may inspect every searcher's private choice.
     if let Some(pending) = filtered.active_batch_delivery_mut() {
+        if let Some(
+            crate::types::game_state::BatchCompletion::SearchPartitionPrimaryDelivered {
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+                        hidden_search_audiences,
+                        ..
+                    },
+                ..
+            }
+            | crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+                        hidden_search_audiences,
+                        ..
+                    },
+            },
+        ) = pending.completion.as_mut()
+        {
+            hidden_search_audiences.clear();
+        }
         match pending.completion.as_mut() {
             Some(crate::types::game_state::BatchCompletion::SearchPartitionPrimaryDelivered {
                 rest_ids,
-                resume: crate::types::game_state::LibrarySearchDeliveryResume::Standard { searcher },
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+                        searcher,
+                        hidden_search_audiences,
+                        ..
+                    },
                 ..
             }) if !can_view_private_for_player(*searcher) => {
+                hidden_search_audiences.clear();
                 pending.remaining.fill(ObjectId(0));
                 pending.attempted.fill(ObjectId(0));
                 for request in &mut pending.requests {
@@ -1845,8 +1879,14 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 rest_ids.fill(ObjectId(0));
             }
             Some(crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
-                resume: crate::types::game_state::LibrarySearchDeliveryResume::Standard { searcher },
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+                        searcher,
+                        hidden_search_audiences,
+                        ..
+                    },
             }) if !can_view_private_for_player(*searcher) => {
+                hidden_search_audiences.clear();
                 pending.remaining.fill(ObjectId(0));
                 pending.attempted.fill(ObjectId(0));
                 for request in &mut pending.requests {
@@ -2394,6 +2434,12 @@ fn hidden_search_audiences(state: &GameState, events: &[GameEvent]) -> HiddenSea
                 .extend(search.learned_audience().iter().copied());
         }
     }
+    for entry in &state.completed_hidden_search_audiences {
+        audiences
+            .entry(entry.identity)
+            .or_default()
+            .extend(entry.audience.iter().copied());
+    }
 
     let mut prior_zone_changes: HashMap<ObjectId, ZoneChangeLineage> = HashMap::new();
     for event in events {
@@ -2574,6 +2620,7 @@ fn event_visible_to_viewer(
         GameEvent::ZoneChanged {
             object_id,
             from: Some(Zone::Exile),
+            to,
             record,
             ..
         } if record
@@ -2581,16 +2628,52 @@ fn event_visible_to_viewer(
             .as_ref()
             .is_some_and(|context| context.face_down) =>
         {
-            match record
+            // Once a hidden-search card arrives face-up in a public zone, the
+            // departure is public even when its source incarnation was learned
+            // by only part of the table. Face-down Battlefield/Stack entries
+            // remain audience-gated below.
+            if to.is_public()
+                && state
+                    .objects
+                    .get(object_id)
+                    .is_none_or(|object| !object.face_down)
+            {
+                return true;
+            }
+            let Some(audience) = record
                 .trigger_source_context()
                 .map(|context| context.identity.reference)
                 .and_then(|identity| hidden_search_viewers.get(&identity))
-            {
-                Some(audience) => audience.contains(&viewer),
+            else {
                 // A face-down Exile departure without hidden-search audience
                 // evidence is an ordinary public face-down Exile move
                 // (foretell/hideaway), not a hidden-search event.
-                None => true,
+                return true;
+            };
+            if audience.contains(&viewer) {
+                return true;
+            }
+            match to {
+                Zone::Hand | Zone::Library => can_view_private_for_player(record.owner),
+                Zone::Battlefield | Zone::Stack => {
+                    state.objects.get(object_id).is_some_and(|obj| {
+                        can_view_private_for_player(obj.controller)
+                            || viewer_may_look_at_face_down(
+                                state,
+                                *object_id,
+                                &can_view_private_for_player,
+                            )
+                    })
+                }
+                Zone::Exile => state.objects.get(object_id).is_some_and(|obj| {
+                    face_down_exile_visible_to_viewer(
+                        state,
+                        *object_id,
+                        obj,
+                        &can_view_private_for_player,
+                    )
+                }),
+                _ => true,
             }
         }
         _ => true,
@@ -3861,6 +3944,58 @@ mod tests {
                     GameEvent::ZoneChanged { object_id, .. } if *object_id == card
                 )),
                 "ordinary face-down Exile departure must remain public without hidden-search evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_search_face_down_exile_departure_to_public_zone_is_public() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(706),
+            PlayerId(1),
+            "Hidden Search Public Departure".to_string(),
+            Zone::Graveyard,
+        );
+        let identity = ObjectIncarnationRef::from_object(&state.objects[&card]);
+        let mut record =
+            state.objects[&card].snapshot_for_zone_change(card, Some(Zone::Exile), Zone::Graveyard);
+        record
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        state.completed_hidden_search_audiences.push(
+            crate::types::game_state::HiddenSearchAudience {
+                identity: record
+                    .trigger_source_context()
+                    .expect("source identity remains exact")
+                    .identity
+                    .reference,
+                audience: vec![PlayerId(0)],
+            },
+        );
+        assert_eq!(
+            identity,
+            record
+                .trigger_source_context()
+                .expect("source identity remains exact")
+                .identity
+                .reference
+        );
+        let event = GameEvent::ZoneChanged {
+            object_id: card,
+            from: Some(Zone::Exile),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        };
+
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(u8::MAX)] {
+            assert_eq!(
+                filter_events_for_viewer(std::slice::from_ref(&event), &state, viewer),
+                vec![event.clone()],
+                "a face-up public destination must not inherit audience-only filtering"
             );
         }
     }
@@ -7910,6 +8045,7 @@ mod tests {
         ];
 
         let viewer_events = filter_events_for_viewer(&events, &state, PlayerId(0));
+        let opponent_events = filter_events_for_viewer(&events, &state, PlayerId(1));
         assert!(viewer_events.iter().any(|event| matches!(
             event,
             GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
@@ -7933,6 +8069,18 @@ mod tests {
                     .trigger_source_context
                     .as_ref()
                     .is_some_and(|context| context.identity.reference == identity_c)
+        )));
+        assert!(!opponent_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                record,
+                from: Some(Zone::Exile),
+                to: Zone::Hand,
+                ..
+            } if record
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|context| context.identity.reference == identity_b)
         )));
     }
 

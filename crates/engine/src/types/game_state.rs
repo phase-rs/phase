@@ -3791,6 +3791,16 @@ pub struct PendingZoneChangeDelivery {
     pub face_down_in_exile: crate::types::ability::ExileConcealment,
 }
 
+/// Exact-incarnation audience provenance retained across one completed search
+/// delivery action. This is an engine-only carrier: event filtering consumes it
+/// by the exact source incarnation, while viewer projections redact it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenSearchAudience {
+    pub identity: ObjectIncarnationRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audience: Vec<PlayerId>,
+}
+
 impl PendingZoneChangeDelivery {
     pub fn new(member: ObjectIncarnationRef, expected_event: ProposedEvent) -> Self {
         let face_down_in_exile = match &expected_event {
@@ -5950,6 +5960,18 @@ pub(crate) fn settle_dig_delivery_outcome(
     }
 }
 
+impl BatchCompletion {
+    pub(crate) fn hidden_search_audiences(&self) -> Option<&[HiddenSearchAudience]> {
+        match self {
+            Self::LibrarySearchDeliverySettled { resume }
+            | Self::SearchPartitionPrimaryDelivered { resume, .. } => {
+                Some(resume.hidden_search_audiences())
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
     /// CR 303.4g + CR 614.1 + CR 616.1: A return-as-Aura host had no legal
@@ -6363,6 +6385,11 @@ pub struct PendingResolutionCompletion {
 pub enum LibrarySearchDeliveryResume {
     Standard {
         searcher: PlayerId,
+        /// Exact search incarnations and the viewers who learned them. The
+        /// carrier survives the replacement-resume action boundary so cleanup
+        /// cannot discard the audience before event filtering runs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hidden_search_audiences: Vec<HiddenSearchAudience>,
     },
     Scoped {
         player: PlayerId,
@@ -6481,6 +6508,18 @@ impl PendingEffectResolved {
                 PendingEffectResolutionEvent::Suppress
             )
             && self.player_action.is_none()
+    }
+}
+
+impl LibrarySearchDeliveryResume {
+    pub(crate) fn hidden_search_audiences(&self) -> &[HiddenSearchAudience] {
+        match self {
+            Self::Standard {
+                hidden_search_audiences,
+                ..
+            } => hidden_search_audiences,
+            Self::Scoped { .. } => &[],
+        }
     }
 }
 
@@ -19719,6 +19758,11 @@ declare_game_state! {
     /// ChangeZone drain consumes the same value after its final member lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_library_search_delivery: Option<LibrarySearchDeliveryResume>,
+    /// Exact-incarnation audience provenance from a search delivery that
+    /// settled in the current action. It is cleared at the next outer action
+    /// boundary and never appears in a viewer projection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) completed_hidden_search_audiences: Vec<HiddenSearchAudience>,
     /// CR 616.1: search-found replacement batch parked across a choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
@@ -24036,6 +24080,57 @@ impl GameState {
             .map(|subject| subject.snapshot)
     }
 
+    /// Clears the event-filtering sidecar at the next outer action boundary.
+    pub(crate) fn clear_completed_hidden_search_audiences(&mut self) {
+        self.completed_hidden_search_audiences.clear();
+    }
+
+    pub(crate) fn record_completed_hidden_search_audience(
+        &mut self,
+        identity: ObjectIncarnationRef,
+        audience: &[PlayerId],
+    ) {
+        if audience.is_empty() {
+            return;
+        }
+        let entry = self
+            .completed_hidden_search_audiences
+            .iter_mut()
+            .find(|entry| entry.identity == identity);
+        let Some(entry) = entry else {
+            let mut audience = audience.to_vec();
+            audience.sort_unstable();
+            audience.dedup();
+            self.completed_hidden_search_audiences
+                .push(HiddenSearchAudience { identity, audience });
+            return;
+        };
+        entry.audience.extend(audience.iter().copied());
+        entry.audience.sort_unstable();
+        entry.audience.dedup();
+    }
+
+    pub(crate) fn record_completed_hidden_search_audiences_for_events(
+        &mut self,
+        entries: &[HiddenSearchAudience],
+        events: &[GameEvent],
+    ) {
+        for event in events {
+            let GameEvent::ZoneChanged { record, .. } = event else {
+                continue;
+            };
+            let Some(source) = record
+                .trigger_source_context()
+                .map(|context| context.identity.reference)
+            else {
+                continue;
+            };
+            for entry in entries.iter().filter(|entry| entry.identity == source) {
+                self.record_completed_hidden_search_audience(source, &entry.audience);
+            }
+        }
+    }
+
     /// Builds the exact paused-delivery key from the replacement record before
     /// that record is consumed. Only a `ZoneChange` can belong to either
     /// logical zone-change owner.
@@ -25355,6 +25450,7 @@ impl GameState {
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
+            completed_hidden_search_audiences: Vec::new(),
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
@@ -27737,6 +27833,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
         pending_library_search_delivery: _,
+        completed_hidden_search_audiences: _,
         pending_search_found_batch: _,
         pending_die_roll_instruction: _,
         post_replacement_token_substitution_count: _,
@@ -27965,6 +28062,8 @@ impl PartialEq for GameState {
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
             && self.pending_library_search_delivery == other.pending_library_search_delivery
+            && self.completed_hidden_search_audiences
+                == other.completed_hidden_search_audiences
             && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_die_roll_instruction == other.pending_die_roll_instruction
             && self.pending_cost_move_resume == other.pending_cost_move_resume

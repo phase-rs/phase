@@ -1158,6 +1158,28 @@ fn continuation_exiles_found_set(chain: &ResolvedAbility) -> bool {
     false
 }
 
+fn hidden_search_audiences_for_search(
+    state: &GameState,
+    searcher: crate::types::player::PlayerId,
+) -> Vec<crate::types::game_state::HiddenSearchAudience> {
+    state
+        .active_library_searches
+        .get(&searcher)
+        .map(|search| {
+            search
+                .looked_at()
+                .iter()
+                .map(
+                    |(_, _, identity)| crate::types::game_state::HiddenSearchAudience {
+                        identity: *identity,
+                        audience: search.learned_audience().to_vec(),
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Finalize the ordinary (non-partitioned) SearchChoice continuation. This is
 /// the single authority for both the synchronous selection path and a
 /// SearchFound batch resumed after one or more nested replacement pauses.
@@ -1244,8 +1266,12 @@ fn finalize_standard_search_selection(
         propagate_targets_through_search_shuffle(&mut continuation.pending.chain, &targets);
     }
     if has_delivery {
+        let hidden_search_audiences = hidden_search_audiences_for_search(state, player);
         state.pending_library_search_delivery = Some(
-            crate::types::game_state::LibrarySearchDeliveryResume::Standard { searcher: player },
+            crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+                searcher: player,
+                hidden_search_audiences,
+            },
         );
     } else {
         // CR 701.23a + CR 701.24a: no leading found-card movement belongs to
@@ -1325,6 +1351,9 @@ fn apply_search_partition(
                     source_id,
                     resume: crate::types::game_state::LibrarySearchDeliveryResume::Standard {
                         searcher: controller,
+                        hidden_search_audiences: hidden_search_audiences_for_search(
+                            state, controller,
+                        ),
                     },
                 },
             ),
@@ -9443,7 +9472,14 @@ pub(crate) fn run_batch_completion(
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::LibrarySearchDeliverySettled { resume } => match resume {
-            crate::types::game_state::LibrarySearchDeliveryResume::Standard { searcher } => {
+            crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+                searcher,
+                hidden_search_audiences,
+            } => {
+                state.record_completed_hidden_search_audiences_for_events(
+                    &hidden_search_audiences,
+                    events,
+                );
                 state.active_library_searches.remove(&searcher);
                 state.active_search_decision_controls.remove(&searcher);
                 crate::game::zone_pipeline::BatchMoveResult::Done
@@ -10090,6 +10126,8 @@ mod tests {
             source,
             player,
         );
+        let mut delivery = delivery;
+        delivery.context.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         state.park_ability_continuation(PendingContinuation::new(Box::new(delivery), &state));
         (state, found)
     }
@@ -10123,7 +10161,7 @@ mod tests {
         assert!(state.active_library_searches.get(&PlayerId(0)).is_some());
         assert!(state.pending_library_search_delivery.is_some());
 
-        super::super::engine::apply_as_current(
+        let resumed = super::super::engine::apply_as_current(
             &mut state,
             GameAction::ChooseReplacement { index: 1 },
         )
@@ -10132,6 +10170,33 @@ mod tests {
         assert_eq!(state.objects[&found].zone, Zone::Exile);
         assert!(state.active_library_searches.is_empty());
         assert!(state.pending_library_search_delivery.is_none());
+        let p0 =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(0));
+        let p1 =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(1));
+        let spectator =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(2));
+        let is_hidden_delivery = |event: &GameEvent| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Exile,
+                    record,
+                } if *object_id == found
+                    && record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_some_and(|context| context.face_down)
+            )
+        };
+        assert!(
+            p0.iter().any(is_hidden_delivery),
+            "the search audience must retain the resumed private delivery"
+        );
+        assert!(!p1.iter().any(is_hidden_delivery));
+        assert!(!spectator.iter().any(is_hidden_delivery));
     }
 
     #[test]

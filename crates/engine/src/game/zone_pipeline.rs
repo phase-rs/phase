@@ -1589,7 +1589,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 .map(ZoneMoveRequest::from_pending)
                 .collect()
         };
-        if let Some(paused_current) = paused_current {
+        if let Some(ref paused_current) = paused_current {
             crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                 state,
                 &mut logical_zone_change_group,
@@ -1639,6 +1639,19 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     .expect("settled batch delivery frame must exist");
                 // CR 603.10a + CR 616.1: logical settlement has completed before
                 // the one post-batch cleanup can run.
+                if let (Some(paused), Some(audiences)) = (
+                    paused_current.as_ref(),
+                    completion
+                        .as_ref()
+                        .and_then(|completion| completion.hidden_search_audiences()),
+                ) {
+                    for entry in audiences {
+                        state.record_completed_hidden_search_audience(
+                            paused.member,
+                            &entry.audience,
+                        );
+                    }
+                }
                 if let Some(mut completion) = completion {
                     // The parked/settled result is deliberately unused here: the
                     // drain's callers are state-mediated (engine_replacement

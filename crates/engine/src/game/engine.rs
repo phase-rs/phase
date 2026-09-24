@@ -1467,6 +1467,10 @@ fn apply_action_boundary_core(
     let recovered_terminal_rest_boundary = sweep_and_recover_priority_boundary_rest(state);
     let recovered_stale_priority_pass =
         recovered_terminal_rest_boundary && matches!(&action, GameAction::PassPriority);
+    // A completed hidden-search audience is an event-filtering sidecar for the
+    // immediately preceding action. Drop it before a new outer action starts;
+    // the active search itself remains the sole authority during the prompt.
+    state.clear_completed_hidden_search_audiences();
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
