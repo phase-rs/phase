@@ -8045,7 +8045,8 @@ mod tests {
         ];
 
         let viewer_events = filter_events_for_viewer(&events, &state, PlayerId(0));
-        let opponent_events = filter_events_for_viewer(&events, &state, PlayerId(1));
+        let owner_events = filter_events_for_viewer(&events, &state, PlayerId(1));
+        let spectator_events = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
         assert!(viewer_events.iter().any(|event| matches!(
             event,
             GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
@@ -8070,7 +8071,19 @@ mod tests {
                     .as_ref()
                     .is_some_and(|context| context.identity.reference == identity_c)
         )));
-        assert!(!opponent_events.iter().any(|event| matches!(
+        assert!(owner_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                record,
+                from: Some(Zone::Exile),
+                to: Zone::Hand,
+                ..
+            } if record
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|context| context.identity.reference == identity_b)
+        )));
+        assert!(!spectator_events.iter().any(|event| matches!(
             event,
             GameEvent::ZoneChanged {
                 record,
