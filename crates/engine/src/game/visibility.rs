@@ -1239,7 +1239,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         hidden_search_audiences.clear();
     }
     filtered.completed_hidden_search_audiences.clear();
-    filtered.zone_change_library_knowledge_stamps.clear();
+    filtered
+        .product_knowledge_state
+        .zone_change_library_knowledge_stamps
+        .clear();
     let private_look_visible = privately_looked_at_ids(state, viewer, &can_view_private_for_player);
 
     // CR 400.2 + CR 406.3 + CR 708.5: ONE identity decision per object, taken by the
