@@ -34095,7 +34095,10 @@ preset_id = "26267b64-a6ea-55d8-b205-659e428549a5"
 id = "26517544-cac2-5bd2-acce-41bef38f9055"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
-source_card_names = ["Ajani, Strength of the Pride"]
+source_card_names = [
+    "Ajani Resolute",
+    "Ajani, Strength of the Pride",
+]
 set_code = "PLST"
 set_name = "The List"
 collector_number = "TM20-1"
@@ -72734,7 +72737,10 @@ preset_id = "5397ff78-48b1-5ef4-8977-66f56e81351d"
 id = "53988e4b-3d74-596f-995d-60cf887ba60b"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
-source_card_names = ["Ajani, Strength of the Pride"]
+source_card_names = [
+    "Ajani Resolute",
+    "Ajani, Strength of the Pride",
+]
 set_code = "M20"
 set_name = "Core Set 2020"
 collector_number = "1"
@@ -86852,9 +86858,11 @@ source_card_names = [
     "Avatar of Burgeoning Echoes",
     "Campus Crier",
     "Countersculpt",
+    "Fatehold Charm",
     "Hexhaven Battalion",
     "Inspired Tethermage",
     "Jace's Machinations",
+    "Jace, Reality Sculptor",
     "Keeper of the Quiet Hour",
     "Mindseeker Oculus",
     "No Admittance",
@@ -86863,9 +86871,11 @@ source_card_names = [
     "Protege's Awakening",
     "Repurposed Enforcer",
     "Rewrite Regrets",
+    "Sanctum Lurker",
     "Solve for Disappointment",
     "Tam's Resistance",
     "Theorist's Proxy",
+    "Theorist's Sanctum",
     "Violent Echoes",
     "Vraska's Final Mercy",
     "Way of the Cryomancer",
@@ -86938,9 +86948,19 @@ scryfall_oracle_id = "cb27dc83-85ee-4f54-b032-41cd1806d3ac"
 scryfall_id = "50326a2a-7e10-464b-a97e-e880bda0558c"
 
 [[token.source_card_refs]]
+card_name = "Sanctum Lurker"
+scryfall_oracle_id = "3ebd64d2-c178-45a2-a51f-9869754baa0f"
+scryfall_id = "2185c08f-bb4d-49d5-8b6c-c629a48bb61c"
+
+[[token.source_card_refs]]
 card_name = "Rewrite Regrets"
 scryfall_oracle_id = "42565432-3a17-4274-87fc-016ab900e313"
 scryfall_id = "453cfde7-c460-4b55-9472-b714e16f24bb"
+
+[[token.source_card_refs]]
+card_name = "Theorist's Sanctum"
+scryfall_oracle_id = "37513bd8-7303-4ac6-a7a7-224184faf758"
+scryfall_id = "22db5bba-46c9-4a26-821d-303ddb386ea4"
 
 [[token.source_card_refs]]
 card_name = "Tam's Resistance"
@@ -86953,9 +86973,19 @@ scryfall_oracle_id = "f3087daa-d2ff-4227-abff-3398da6297af"
 scryfall_id = "a0ff9689-ea49-4fff-b37c-4abbaeb0f73d"
 
 [[token.source_card_refs]]
+card_name = "Jace, Reality Sculptor"
+scryfall_oracle_id = "bf0e9e00-fba5-448a-9052-ae730aea4bf8"
+scryfall_id = "dafe1979-fda7-4164-a362-b9f789f25710"
+
+[[token.source_card_refs]]
 card_name = "Repurposed Enforcer"
 scryfall_oracle_id = "b775a404-ec0a-47ff-bb9d-eae2273d945b"
 scryfall_id = "ac0bd1be-36cb-483f-9c47-2714e534cb6c"
+
+[[token.source_card_refs]]
+card_name = "Theorist's Sanctum"
+scryfall_oracle_id = "37513bd8-7303-4ac6-a7a7-224184faf758"
+scryfall_id = "e8f607b3-f37c-49e7-8eb8-a14b2153f30e"
 
 [[token.source_card_refs]]
 card_name = "Vraska's Final Mercy"
@@ -87033,6 +87063,11 @@ scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
 scryfall_id = "f28b1518-8347-4385-9f34-a9c48818c770"
 
 [[token.source_card_refs]]
+card_name = "Sanctum Lurker"
+scryfall_oracle_id = "3ebd64d2-c178-45a2-a51f-9869754baa0f"
+scryfall_id = "02b1bf77-f78b-4a48-8ff8-a0d3b0aeafaa"
+
+[[token.source_card_refs]]
 card_name = "Way of the Mentor"
 scryfall_oracle_id = "ce924285-f4c5-44e6-909b-f5f7d302ebaf"
 scryfall_id = "1a59d5b1-12d6-486b-bd29-ca371359addd"
@@ -87073,6 +87108,16 @@ scryfall_oracle_id = "68d3f547-674a-4d8a-b02f-01bc2f161916"
 scryfall_id = "c1a00020-7c14-4503-a057-5763704bb83e"
 
 [[token.source_card_refs]]
+card_name = "Jace, Reality Sculptor"
+scryfall_oracle_id = "bf0e9e00-fba5-448a-9052-ae730aea4bf8"
+scryfall_id = "74087795-0b38-4fd2-9841-147583baca41"
+
+[[token.source_card_refs]]
+card_name = "Fatehold Charm"
+scryfall_oracle_id = "313aee0e-4090-4589-b323-a4edbda21c68"
+scryfall_id = "cfc54011-647e-4428-bcdb-59400e1da49d"
+
+[[token.source_card_refs]]
 card_name = "Overwrite the Multiverse"
 scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
 scryfall_id = "c4554f5b-791b-48f6-bf54-ad28699e1beb"
@@ -87081,6 +87126,11 @@ scryfall_id = "c4554f5b-791b-48f6-bf54-ad28699e1beb"
 card_name = "Overwrite the Multiverse"
 scryfall_oracle_id = "d0372cde-bf30-4a1b-93bb-9ff4ac1c116d"
 scryfall_id = "c318cd29-89db-4643-b3ef-5ff8492f5c1a"
+
+[[token.source_card_refs]]
+card_name = "Fatehold Charm"
+scryfall_oracle_id = "313aee0e-4090-4589-b323-a4edbda21c68"
+scryfall_id = "a2008313-659e-4132-85a2-e7b7be93bcdc"
 
 [[token.source_card_refs]]
 card_name = "Theorist's Proxy"
@@ -118614,7 +118664,10 @@ preset_id = "840111a4-9785-54fb-afed-e66da65b9b99"
 id = "843ed1fd-d928-5565-b515-be85a737fa82"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
-source_card_names = ["Ajani, Strength of the Pride"]
+source_card_names = [
+    "Ajani Resolute",
+    "Ajani, Strength of the Pride",
+]
 set_code = "FRA"
 set_name = "Reality Fracture"
 collector_number = "2"
@@ -118634,6 +118687,16 @@ subtypes = [
 supertypes = []
 colors = ["White"]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Ajani Resolute"
+scryfall_oracle_id = "0d60c095-4c6c-4618-8ef3-508f3d454efa"
+scryfall_id = "96aec358-5f18-44c7-8223-a41c9d583961"
+
+[[token.source_card_refs]]
+card_name = "Ajani Resolute"
+scryfall_oracle_id = "0d60c095-4c6c-4618-8ef3-508f3d454efa"
+scryfall_id = "a5e1a7dd-8c49-4435-935c-bcc78704082b"
 
 [token.token_image_ref]
 scryfall_id = "7801c326-d740-4cec-9268-05348ace8302"
@@ -164845,7 +164908,6 @@ id = "b73ea419-17f3-538f-a806-124a03513cf3"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "A-Cori-Steel Cutter",
     "Aligned Heart",
     "Cori-Steel Cutter",
     "Elsha, Threefold Master",
@@ -190395,7 +190457,6 @@ id = "d3c827e3-efe9-5af9-8ca1-96d6a39f50e7"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "A-Cori-Steel Cutter",
     "Aligned Heart",
     "Cori-Steel Cutter",
     "Elsha, Threefold Master",
@@ -206433,7 +206494,6 @@ id = "e4440487-4f32-5ed9-b485-0e34a2258f79"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "A-Cori-Steel Cutter",
     "Aligned Heart",
     "Cori-Steel Cutter",
     "Elsha, Threefold Master",
@@ -220219,6 +220279,7 @@ fidelity = "Full"
 source_card_names = [
     "Ajani Unrelenting",
     "Command the Stage",
+    "Craftwork Crusher",
     "Fatehold Chronologist",
     "Fatehold Chronologist // Peer Review",
     "Germinate Recruits",
@@ -220232,6 +220293,7 @@ source_card_names = [
     "Semester Foreseer",
     "Semester Foreseer // Peer Review",
     "Stingerquill Charm",
+    "Way of the Healer",
 ]
 set_code = "FRA"
 set_name = "Reality Fracture"
@@ -220261,6 +220323,11 @@ scryfall_id = "1b5d7d19-b32a-4786-ae9a-00da5e6658ad"
 card_name = "Ingris Stingerquill"
 scryfall_oracle_id = "bda098cb-31ec-41a1-a9d7-122877cc69d2"
 scryfall_id = "a0686b23-2220-405b-8bc5-980f18af5fef"
+
+[[token.source_card_refs]]
+card_name = "Way of the Healer"
+scryfall_oracle_id = "cb27dc83-85ee-4f54-b032-41cd1806d3ac"
+scryfall_id = "50326a2a-7e10-464b-a97e-e880bda0558c"
 
 [[token.source_card_refs]]
 card_name = "Recursive Recruitment"
@@ -220341,6 +220408,11 @@ card_name = "Semester Foreseer // Peer Review"
 face_name = "Semester Foreseer"
 scryfall_oracle_id = "21b8d59f-a90d-44ff-a2e3-9f439ac3e14a"
 scryfall_id = "7e5a640b-fd88-4b5a-9dfc-1d8f5a5cef41"
+
+[[token.source_card_refs]]
+card_name = "Craftwork Crusher"
+scryfall_oracle_id = "d25284b9-50e4-4dcb-9aaf-6f6478c4a90a"
+scryfall_id = "03f9839c-aa07-4ee7-847b-091e47ab80c4"
 
 [[token.source_card_refs]]
 card_name = "Ingris Stingerquill"
@@ -222195,7 +222267,6 @@ id = "f675da35-e696-5a98-b8f9-3ae29c46c8db"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "A-Cori-Steel Cutter",
     "Aligned Heart",
     "Cori-Steel Cutter",
     "Elsha, Threefold Master",
@@ -224870,7 +224941,6 @@ id = "f8052c87-e8c0-5b14-a382-60686eee82a6"
 category = "Creature"
 fidelity = "Full"
 source_card_names = [
-    "A-Cori-Steel Cutter",
     "Aligned Heart",
     "Cori-Steel Cutter",
     "Elsha, Threefold Master",
@@ -224904,11 +224974,6 @@ scryfall_id = "836c9684-06bf-45c8-8706-449def571e66"
 card_name = "Rally the Monastery"
 scryfall_oracle_id = "3f6101a5-3038-45b0-8302-b2e4127b9510"
 scryfall_id = "db2f80a1-a9e6-4efa-9a8a-cb473e502dce"
-
-[[token.source_card_refs]]
-card_name = "A-Cori-Steel Cutter"
-scryfall_oracle_id = "94ab54a2-a89d-4d70-90bd-95b9f4c61cf4"
-scryfall_id = "058da414-1f05-45a0-8938-2fbc1050e17e"
 
 [[token.source_card_refs]]
 card_name = "Elsha, Threefold Master"
