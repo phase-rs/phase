@@ -188,11 +188,8 @@ pub(crate) struct ProductKnowledgeState {
     /// occurrences. This sidecar is kept beside the boxed knowledge state
     /// solely to keep the hot `GameState` stack footprint unchanged; it is
     /// not durable ProductKnowledge authority and is redacted from viewers.
-    #[serde(
-        default,
-        skip_serializing_if = "zone_change_library_knowledge_stamps_is_empty"
-    )]
-    pub(crate) zone_change_library_knowledge_stamps: Box<Vec<ZoneChangeLibraryKnowledgeStamp>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) zone_change_library_knowledge_stamps: Vec<ZoneChangeLibraryKnowledgeStamp>,
 }
 
 /// Serde module for `HashMap<(ObjectId, usize), u32>` — JSON requires string keys,
@@ -3837,12 +3834,6 @@ pub(crate) struct ZoneChangeLibraryKnowledgeStamp {
     pub(crate) source: Option<LibraryKnowledgeStamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) destination: Option<LibraryKnowledgeStamp>,
-}
-
-fn zone_change_library_knowledge_stamps_is_empty(
-    value: &Box<Vec<ZoneChangeLibraryKnowledgeStamp>>,
-) -> bool {
-    value.is_empty()
 }
 
 impl PendingZoneChangeDelivery {

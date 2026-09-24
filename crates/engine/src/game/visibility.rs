@@ -2477,44 +2477,47 @@ fn hidden_search_audiences(state: &GameState, events: &[GameEvent]) -> Vec<Hidde
                 record,
                 ..
             } => {
-                let Some(source) = record
+                if let Some(source) = record
                     .trigger_source_context()
                     .map(|context| context.identity.reference)
-                else {
-                    // A context-free legacy/synthetic record cannot prove an
-                    // incarnation edge. Do not carry hidden knowledge across it.
-                    prior_zone_changes.remove(object_id);
-                    continue;
-                };
-
-                if let Some(previous) = prior_zone_changes.get(object_id) {
-                    let exact_successor = previous.source.object_id == source.object_id
-                        && previous.source.incarnation.checked_add(1) == Some(source.incarnation);
-                    let adjacent = *from == Some(previous.to);
-                    let crosses_library =
-                        previous.to == Zone::Library && *from == Some(Zone::Library);
-                    let library_boundary_matches = !crosses_library
-                        || previous.destination_library_stamp.is_some()
-                            && previous.destination_library_stamp
-                                == state.library_knowledge_stamp_for_zone_change(record, true);
-                    if exact_successor && adjacent && library_boundary_matches {
-                        let inherited = audiences.get(&previous.source).cloned();
-                        if let Some(inherited) = inherited {
-                            audiences.entry(source).or_default().extend(inherited);
+                {
+                    if let Some(previous) = prior_zone_changes.get(object_id) {
+                        let exact_successor = previous.source.object_id == source.object_id
+                            && previous.source.incarnation.checked_add(1)
+                                == Some(source.incarnation);
+                        let adjacent = *from == Some(previous.to);
+                        let crosses_library =
+                            previous.to == Zone::Library && *from == Some(Zone::Library);
+                        let library_boundary_matches = !crosses_library
+                            || previous.destination_library_stamp.is_some()
+                                && previous.destination_library_stamp
+                                    == state.library_knowledge_stamp_for_zone_change(record, true);
+                        if exact_successor && adjacent && library_boundary_matches {
+                            let inherited = audiences.get(&previous.source).cloned();
+                            if let Some(inherited) = inherited {
+                                audiences.entry(source).or_default().extend(inherited);
+                            }
                         }
                     }
-                }
 
-                prior_zone_changes.insert(
-                    *object_id,
-                    ZoneChangeLineage {
-                        source,
-                        to: *to,
-                        destination_library_stamp: (*to == Zone::Library)
-                            .then(|| state.library_knowledge_stamp_for_zone_change(record, false))
-                            .flatten(),
-                    },
-                );
+                    prior_zone_changes.insert(
+                        *object_id,
+                        ZoneChangeLineage {
+                            source,
+                            to: *to,
+                            destination_library_stamp: (*to == Zone::Library)
+                                .then(|| {
+                                    state.library_knowledge_stamp_for_zone_change(record, false)
+                                })
+                                .flatten(),
+                        },
+                    );
+                } else {
+                    // A context-free legacy/synthetic record cannot prove an
+                    // incarnation edge. Do not carry hidden knowledge across it,
+                    // but still append this event's snapshot below.
+                    prior_zone_changes.remove(object_id);
+                }
             }
             _ => {}
         }
@@ -8013,6 +8016,73 @@ mod tests {
             event,
             GameEvent::ZoneChanged { object_id, .. } if *object_id == first
         )));
+    }
+
+    #[test]
+    fn context_free_zone_change_keeps_hidden_search_snapshots_aligned() {
+        let mut state = GameState::new_two_player(7);
+        let hidden = create_object(
+            &mut state,
+            CardId(106),
+            PlayerId(1),
+            "Hidden Search Card".to_string(),
+            Zone::Library,
+        );
+        let public_id = ObjectId(99);
+        let mut public_record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            public_id,
+            Some(Zone::Hand),
+            Zone::Graveyard,
+        );
+        public_record.name = "Public Legacy Event".to_string();
+        public_record.owner = PlayerId(1);
+
+        let mut hidden_record = state.objects[&hidden].snapshot_for_zone_change(
+            hidden,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        hidden_record
+            .trigger_source_context
+            .as_mut()
+            .expect("library snapshot carries source context")
+            .face_down = true;
+
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: public_id,
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record: Box::new(public_record),
+            },
+            GameEvent::ZoneChanged {
+                object_id: hidden,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record: Box::new(hidden_record),
+            },
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                cards: vec![capture_library_search_card_view(&state.objects[&hidden])],
+                audience: vec![PlayerId(0)],
+            },
+        ];
+
+        let visible = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert!(matches!(
+            visible.first(),
+            Some(GameEvent::ZoneChanged { object_id, .. }) if *object_id == public_id
+        ));
+        assert!(!visible.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, .. } if *object_id == hidden
+        )));
+        assert!(visible.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed { audience, .. }
+                if audience.as_slice() == [PlayerId(0)]
+        )));
+        assert_eq!(visible.len(), 2);
     }
 
     #[test]
