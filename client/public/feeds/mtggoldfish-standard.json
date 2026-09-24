@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-09-22T00:00:00Z",
+  "updated": "2026-09-24T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -999,8 +999,8 @@
       "name": "Boros Dragons",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "R"
+        "R",
+        "W"
       ],
       "tags": [
         "metagame"
@@ -1008,51 +1008,7 @@
       "main": [
         {
           "count": 4,
-          "name": "Maelstrom of the Spirit Dragon"
-        },
-        {
-          "count": 2,
-          "name": "Get Lost"
-        },
-        {
-          "count": 4,
-          "name": "Clarion Conqueror"
-        },
-        {
-          "count": 4,
-          "name": "Inspiring Vantage"
-        },
-        {
-          "count": 4,
-          "name": "Magmatic Hellkite"
-        },
-        {
-          "count": 4,
-          "name": "Momo, Friendly Flier"
-        },
-        {
-          "count": 4,
-          "name": "Nova Hellkite"
-        },
-        {
-          "count": 4,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Sarkhan, Dragon Ascendant"
-        },
-        {
-          "count": 4,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
+          "name": "Voice of Victory"
         },
         {
           "count": 4,
@@ -1064,33 +1020,85 @@
         },
         {
           "count": 2,
-          "name": "Twinmaw Stormbrood"
+          "name": "Erode"
         },
         {
           "count": 4,
-          "name": "Voice of Victory"
+          "name": "Sarkhan, Dragon Ascendant"
         },
         {
           "count": 4,
-          "name": "Burst Lightning"
+          "name": "Maelstrom of the Spirit Dragon"
+        },
+        {
+          "count": 4,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 4,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Momo, Friendly Flier"
+        },
+        {
+          "count": 4,
+          "name": "Nova Hellkite"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Magmatic Hellkite"
+        },
+        {
+          "count": 4,
+          "name": "Inspiring Vantage"
+        },
+        {
+          "count": 4,
+          "name": "Clarion Conqueror"
         },
         {
           "count": 2,
           "name": "Cavern of Souls"
+        },
+        {
+          "count": 2,
+          "name": "Twinmaw Stormbrood"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
         }
       ],
       "sideboard": [
+        {
+          "count": 3,
+          "name": "Rest in Peace"
+        },
         {
           "count": 2,
           "name": "Pyroclasm"
         },
         {
           "count": 1,
-          "name": "Desolation of Smaug"
+          "name": "Magda, the Hoardmaster"
         },
         {
-          "count": 3,
-          "name": "Rest in Peace"
+          "count": 1,
+          "name": "Get Lost"
+        },
+        {
+          "count": 2,
+          "name": "Boros Charm"
         },
         {
           "count": 4,
@@ -1098,11 +1106,7 @@
         },
         {
           "count": 1,
-          "name": "Get Lost"
-        },
-        {
-          "count": 3,
-          "name": "Dawn's Truce"
+          "name": "Split Up"
         },
         {
           "count": 1,
@@ -1218,11 +1222,10 @@
       ]
     },
     {
-      "name": "Mardu Discard",
+      "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "R",
+        "U",
         "W"
       ],
       "tags": [
@@ -1231,129 +1234,129 @@
       "main": [
         {
           "count": 4,
-          "name": "Bloodghast"
+          "name": "Bender's Waterskin"
         },
         {
           "count": 4,
-          "name": "Hardened Academic"
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Ideation"
         },
         {
           "count": 4,
-          "name": "Iron-Shield Elf"
+          "name": "Opt"
+        },
+        {
+          "count": 3,
+          "name": "Plains"
         },
         {
           "count": 4,
-          "name": "Marauding Mako"
+          "name": "Floodfarm Verge"
         },
         {
-          "count": 4,
-          "name": "Moonshadow"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Erode"
         },
         {
           "count": 4,
-          "name": "Practiced Offense"
+          "name": "Emeritus of Truce"
         },
         {
           "count": 4,
-          "name": "Cool but Rude"
+          "name": "No More Lies"
         },
         {
           "count": 4,
-          "name": "Blood Crypt"
+          "name": "Three Steps Ahead"
         },
         {
           "count": 4,
-          "name": "Starting Town"
+          "name": "Seam Rip"
         },
         {
           "count": 3,
-          "name": "Godless Shrine"
+          "name": "Skycoach Waypoint"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
         },
         {
           "count": 3,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 2,
-          "name": "Blazemire Verge"
-        },
-        {
-          "count": 2,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 2,
-          "name": "Inspiring Vantage"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
+          "name": "Emeritus of Ideation"
         },
         {
           "count": 1,
-          "name": "Casey Jones, Vigilante"
+          "name": "Petrified Hamlet"
         },
         {
           "count": 1,
-          "name": "Carnage, Crimson Chaos"
+          "name": "Demolition Field"
         },
         {
           "count": 2,
-          "name": "Burst Lightning"
+          "name": "Ugin, Eye of the Storms"
+        },
+        {
+          "count": 4,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 1,
+          "name": "Day of Judgment"
+        },
+        {
+          "count": 1,
+          "name": "Day of Judgment"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Kuruk"
         },
         {
           "count": 2,
-          "name": "Tersa Lightshatter"
-        },
-        {
-          "count": 1,
-          "name": "Inti, Seneschal of the Sun"
-        },
-        {
-          "count": 1,
-          "name": "Cecil, Dark Knight"
+          "name": "Get Lost"
         }
       ],
       "sideboard": [
         {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
           "count": 2,
-          "name": "Strategic Betrayal"
+          "name": "Annul"
+        },
+        {
+          "count": 2,
+          "name": "Doorkeeper Thrull"
+        },
+        {
+          "count": 2,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 2,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 2,
+          "name": "Sleep Magic"
         },
         {
           "count": 1,
-          "name": "Pyrrhic Strike"
-        },
-        {
-          "count": 2,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 2,
-          "name": "The Queen of Dale"
-        },
-        {
-          "count": 2,
-          "name": "Voice of Victory"
+          "name": "Negate"
         },
         {
           "count": 1,
-          "name": "Bilbo's Gambit"
-        },
-        {
-          "count": 1,
-          "name": "Erode"
+          "name": "The Legend of Kuruk"
         },
         {
           "count": 2,
-          "name": "Lorehold Charm"
+          "name": "Sage of the Skies"
         }
       ]
     }
