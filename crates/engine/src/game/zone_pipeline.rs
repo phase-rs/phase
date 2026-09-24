@@ -1639,7 +1639,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     .expect("settled batch delivery frame must exist");
                 // CR 603.10a + CR 616.1: logical settlement has completed before
                 // the one post-batch cleanup can run.
-                if let (Some(paused), Some(audiences)) = (
+                if let (Some(_), Some(audiences)) = (
                     paused_current.as_ref(),
                     completion
                         .as_ref()
@@ -1647,7 +1647,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 ) {
                     for entry in audiences {
                         state.record_completed_hidden_search_audience(
-                            paused.member,
+                            entry.identity,
                             &entry.audience,
                         );
                     }
@@ -1681,6 +1681,101 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 reparking.deferred_events = deferred_events;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod paused_search_audience_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::game_state::{
+        HiddenSearchAudience, LibrarySearchDeliveryResume, PendingBatchDeliveries,
+        PendingZoneChangeDelivery,
+    };
+    use crate::types::identifiers::CardId;
+
+    #[test]
+    fn paused_batch_settlement_preserves_exact_search_audience_identity() {
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(91001),
+            PlayerId(0),
+            "Paused search member".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(91002),
+            PlayerId(0),
+            "Other searched card".to_string(),
+            Zone::Graveyard,
+        );
+        let identity_a = ObjectIncarnationRef::from_object(&state.objects[&first]);
+        let identity_b = ObjectIncarnationRef::from_object(&state.objects[&second]);
+
+        let mut paused = PendingZoneChangeDelivery::new(
+            identity_a,
+            ProposedEvent::zone_change(first, Zone::Graveyard, Zone::Hand, None),
+        );
+        paused.terminal_completion = Some(ZoneMoveCompletion::Remained);
+
+        let completion = BatchCompletion::LibrarySearchDeliverySettled {
+            resume: LibrarySearchDeliveryResume::Standard {
+                searcher: PlayerId(0),
+                hidden_search_audiences: vec![
+                    HiddenSearchAudience {
+                        identity: identity_a,
+                        audience: vec![PlayerId(0)],
+                    },
+                    HiddenSearchAudience {
+                        identity: identity_b,
+                        audience: vec![PlayerId(1)],
+                    },
+                ],
+            },
+        };
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
+        state.push_batch_delivery(PendingBatchDeliveries {
+            logical_zone_change_group,
+            paused_current: Some(paused),
+            remaining: Vec::new(),
+            destination: Zone::Hand,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: Some(completion),
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+
+        drain_pending_batch_deliveries(&mut state, &mut Vec::new());
+
+        assert_eq!(
+            state.completed_hidden_search_audiences,
+            vec![
+                HiddenSearchAudience {
+                    identity: identity_a,
+                    audience: vec![PlayerId(0)],
+                },
+                HiddenSearchAudience {
+                    identity: identity_b,
+                    audience: vec![PlayerId(1)],
+                },
+            ],
+            "paused settlement must retain each searched incarnation's own audience"
+        );
+        assert!(
+            state.completed_hidden_search_audiences.iter().all(|entry| {
+                !(entry.identity == identity_a && entry.audience.contains(&PlayerId(1)))
+            }),
+            "the paused member must not absorb the other search entry's audience"
+        );
     }
 }
 
