@@ -22315,6 +22315,61 @@ const _: fn() = || {
     assert_send_sync::<GameState>();
 };
 
+#[derive(Clone, Copy)]
+struct PausedExileOccurrence {
+    ledger_index: usize,
+    recorded_turn_number: u32,
+}
+
+/// Finds the terminal zone-change event for one paused delivery and annotates
+/// that event's own record. The delivery slice is the only event history this
+/// helper may inspect: a later same-id incarnation in global state is not a
+/// valid fallback. A final move out of Exile also prevents an earlier Exile
+/// event in the same slice from being treated as the settled destination.
+fn annotate_paused_exile_event(
+    delivery_events: &mut [GameEvent],
+    member: ObjectIncarnationRef,
+) -> Option<PausedExileOccurrence> {
+    let (_, event) = delivery_events
+        .iter_mut()
+        .enumerate()
+        .rev()
+        .find(|(_, event)| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == member.object_id
+            )
+        })?;
+    let GameEvent::ZoneChanged {
+        object_id,
+        to,
+        record,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if *object_id != member.object_id
+        || *to != Zone::Exile
+        || record.object_id != member.object_id
+        || record.to_zone != Zone::Exile
+        || record
+            .trigger_source_context()
+            .is_some_and(|context| context.identity.reference != member)
+    {
+        return None;
+    }
+
+    let occurrence = PausedExileOccurrence {
+        ledger_index: record.turn_zone_change_index,
+        recorded_turn_number: record.recorded_turn_number,
+    };
+    if let Some(context) = record.trigger_source_context.as_mut() {
+        context.face_down = true;
+    }
+    Some(occurrence)
+}
+
 impl GameState {
     /// Returns the active continuation only when its typed frame is the stack
     /// top. A buried continuation is an invalid nesting dependency, not a
@@ -23996,6 +24051,49 @@ impl GameState {
         Some(PendingZoneChangeDelivery::new(member, expected_event))
     }
 
+    /// Applies concealment to the exact ledger row named by a paused delivery's
+    /// event record. Any mismatch fails closed; this helper never searches for a
+    /// different row by object id or destination.
+    fn apply_exact_paused_exile_concealment(
+        &mut self,
+        member: ObjectIncarnationRef,
+        occurrence: PausedExileOccurrence,
+    ) -> bool {
+        let current_turn = self.turn_number;
+        let valid = self
+            .zone_changes_this_turn
+            .get(occurrence.ledger_index)
+            .is_some_and(|record| {
+                record.turn_zone_change_index == occurrence.ledger_index
+                    && record.recorded_turn_number == occurrence.recorded_turn_number
+                    && record.recorded_turn_number == current_turn
+                    && record.object_id == member.object_id
+                    && record.to_zone == Zone::Exile
+                    && record
+                        .trigger_source_context()
+                        .is_none_or(|context| context.identity.reference == member)
+                    && self
+                        .objects
+                        .get(&member.object_id)
+                        .is_some_and(|object| object.zone == Zone::Exile)
+            });
+        if !valid {
+            return false;
+        }
+
+        if let Some(record) = self.zone_changes_this_turn.get_mut(occurrence.ledger_index) {
+            if let Some(context) = record.trigger_source_context.as_mut() {
+                context.face_down = true;
+            }
+        }
+        let object = self
+            .objects
+            .get_mut(&member.object_id)
+            .expect("validated settled paused pile member exists");
+        object.face_down = true;
+        true
+    }
+
     /// Appends one explicitly-bounded resumed-delivery slice to its sole
     /// matching logical owner. Callers retain the key captured before the
     /// replacement record was consumed; this rejects a same-id new incarnation
@@ -24007,114 +24105,52 @@ impl GameState {
         delivery_events: &[GameEvent],
         terminal_completion: ZoneMoveCompletion,
     ) -> bool {
-        let settled_in_exile = delivery_events.iter().any(|event| {
-            matches!(
-                event,
-                GameEvent::ZoneChanged {
-                    object_id,
-                    to: Zone::Exile,
-                    ..
-                } if *object_id == member.object_id
-            )
-        });
-        let mut conceal = false;
+        let mut occurrence = None;
         let matched = if let Some(paused) = self
             .active_change_zone_frame_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            conceal = paused.face_down_in_exile.is_face_down() && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
-            if conceal {
-                if let Some(GameEvent::ZoneChanged { record, .. }) =
-                    paused.delivery_events.iter_mut().rev().find(|event| {
-                        matches!(
-                            event,
-                            GameEvent::ZoneChanged {
-                                object_id,
-                                to: Zone::Exile,
-                                ..
-                            } if *object_id == member.object_id
-                        )
-                    })
-                {
-                    if let Some(context) = record.trigger_source_context.as_mut() {
-                        context.face_down = true;
-                    }
-                }
+            if paused.face_down_in_exile.is_face_down() {
+                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
             }
             true
         } else {
             false
         };
         if matched {
-            if conceal {
-                self.objects
-                    .get_mut(&member.object_id)
-                    .expect("settled paused pile member exists")
-                    .face_down = true;
-                if let Some(record) = self.zone_changes_this_turn.iter_mut().rev().find(|record| {
-                    record.object_id == member.object_id && record.to_zone == Zone::Exile
-                }) {
-                    if let Some(context) = record.trigger_source_context.as_mut() {
-                        context.face_down = true;
-                    }
-                }
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
             }
             return true;
         }
 
-        conceal = false;
+        occurrence = None;
         let matched = if let Some(paused) = self
             .resolution_stack
             .active_batch_delivery_or_post_replacement_child_mut()
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            conceal = paused.face_down_in_exile.is_face_down() && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
-            if conceal {
-                if let Some(GameEvent::ZoneChanged { record, .. }) =
-                    paused.delivery_events.iter_mut().rev().find(|event| {
-                        matches!(
-                            event,
-                            GameEvent::ZoneChanged {
-                                object_id,
-                                to: Zone::Exile,
-                                ..
-                            } if *object_id == member.object_id
-                        )
-                    })
-                {
-                    if let Some(context) = record.trigger_source_context.as_mut() {
-                        context.face_down = true;
-                    }
-                }
+            if paused.face_down_in_exile.is_face_down() {
+                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
             }
             true
         } else {
             false
         };
         if matched {
-            if conceal {
-                self.objects
-                    .get_mut(&member.object_id)
-                    .expect("settled paused pile member exists")
-                    .face_down = true;
-                if let Some(record) = self.zone_changes_this_turn.iter_mut().rev().find(|record| {
-                    record.object_id == member.object_id && record.to_zone == Zone::Exile
-                }) {
-                    if let Some(context) = record.trigger_source_context.as_mut() {
-                        context.face_down = true;
-                    }
-                }
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
             }
             return true;
         }
@@ -30185,6 +30221,143 @@ mod tests {
             ZoneMoveCompletion::Prevented,
             "an explicit replacement outcome remains authoritative over slice inference"
         );
+    }
+
+    #[test]
+    fn paused_face_down_exile_marks_only_the_delivered_occurrence() {
+        let mut state = GameState::new_two_player(42);
+        let object = create_object(
+            &mut state,
+            CardId(7_101),
+            PlayerId(0),
+            "Repeated exile object".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut first_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, object, Zone::Exile, &mut first_events);
+        crate::game::zones::move_to_zone(&mut state, object, Zone::Battlefield, &mut first_events);
+
+        let mut later_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, object, Zone::Exile, &mut later_events);
+        let later_record = later_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == object => Some(record),
+                _ => None,
+            })
+            .expect("the resumed delivery has an authoritative Exile record");
+        let member = later_record
+            .trigger_source_context()
+            .expect("the production zone move carries source identity")
+            .identity
+            .reference;
+        let later_index = later_record.turn_zone_change_index;
+        assert_eq!(state.objects[&object].zone, Zone::Exile);
+        assert_eq!(
+            state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| record.object_id == object && record.to_zone == Zone::Exile)
+                .count(),
+            2,
+            "the fixture must contain two same-id Exile occurrences"
+        );
+
+        // A later same-id occurrence can already be present when the paused
+        // delivery settles. The old reverse `(ObjectId, Exile)` lookup would
+        // mutate this shadow row instead of the event's exact index.
+        let mut later_shadow = (**later_record).clone();
+        later_shadow.turn_zone_change_index = state.zone_changes_this_turn.len();
+        later_shadow
+            .trigger_source_context
+            .as_mut()
+            .expect("the shadow occurrence keeps source identity")
+            .identity
+            .reference = ObjectIncarnationRef::of(object, member.incarnation + 99);
+        state.zone_changes_this_turn.push_back(later_shadow);
+
+        let expected_event =
+            ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Exile, Some(object));
+        let mut paused = PendingZoneChangeDelivery::new(member, expected_event.clone());
+        paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
+        state.push_change_zone_iteration(PendingChangeZoneIteration {
+            logical_zone_change_group,
+            paused_current: Some(paused),
+            remaining: Vec::new(),
+            source_id: object,
+            controller: PlayerId(0),
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            enter_transformed: false,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_under_player: None,
+            enters_attacking: false,
+            enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: Vec::new(),
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::FaceDown,
+            moved_count: None,
+            face_down_profile: None,
+            library_placement: None,
+            enters_modified_if: None,
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZone,
+        });
+
+        assert!(state.capture_paused_zone_change_delivery(
+            member,
+            &expected_event,
+            &later_events,
+            ZoneMoveCompletion::Moved,
+        ));
+        assert!(state.objects[&object].face_down);
+        let exile_records: Vec<_> = state
+            .zone_changes_this_turn
+            .iter()
+            .filter(|record| record.object_id == object && record.to_zone == Zone::Exile)
+            .collect();
+        assert_eq!(exile_records.len(), 3);
+        assert!(
+            !exile_records[0]
+                .trigger_source_context()
+                .expect("first occurrence keeps its source context")
+                .face_down,
+            "the earlier same-id Exile row must remain public"
+        );
+        let later_ledger = state
+            .zone_changes_this_turn
+            .get(later_index)
+            .expect("the exact delivered index remains in the current-turn ledger");
+        assert!(
+            later_ledger
+                .trigger_source_context()
+                .expect("later occurrence keeps its source context")
+                .face_down,
+            "only the exact paused occurrence is concealed"
+        );
+        assert!(
+            !exile_records[2]
+                .trigger_source_context()
+                .expect("the later shadow occurrence keeps its source context")
+                .face_down,
+            "a later same-id Exile row must not be selected by reverse search"
+        );
+        let delivered_event = state
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+            .and_then(|pending| pending.paused_current.as_ref())
+            .and_then(|paused| paused.delivery_events.last())
+            .and_then(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => record.trigger_source_context(),
+                _ => None,
+            })
+            .expect("the paused delivery retains its annotated event record");
+        assert!(delivered_event.face_down);
     }
 
     #[test]
