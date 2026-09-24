@@ -178,6 +178,12 @@ pub(crate) struct ProductKnowledgeState {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub(crate) library_epochs: Vec<u64>,
+    /// Engine-only action-scoped Library boundary generations. Kept beside the
+    /// boxed durable knowledge state so it adds no `GameState` stack footprint;
+    /// it is not serialized and does not participate in product-knowledge
+    /// disclosure semantics.
+    #[serde(skip)]
+    pub(crate) action_library_knowledge_generations: Vec<u64>,
 }
 
 /// Serde module for `HashMap<(ObjectId, usize), u32>` — JSON requires string keys,
@@ -3799,6 +3805,35 @@ pub struct HiddenSearchAudience {
     pub identity: ObjectIncarnationRef,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audience: Vec<PlayerId>,
+}
+
+/// Action-scoped library-knowledge boundary generation captured at one engine
+/// seam. This is event provenance only; durable ProductKnowledge remains the
+/// authority for remembered card identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LibraryKnowledgeStamp {
+    pub(crate) library_owner: PlayerId,
+    pub(crate) boundary_generation: u64,
+}
+
+/// Action-scoped provenance for a zone-change occurrence that touches a
+/// library. The occurrence key is the same `(turn, index)` pair assigned to
+/// `ZoneChangeRecord`; source and destination are both optional for serde
+/// compatibility, though normal production moves have at most one endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ZoneChangeLibraryKnowledgeStamp {
+    pub(crate) recorded_turn_number: u32,
+    pub(crate) turn_zone_change_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<LibraryKnowledgeStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) destination: Option<LibraryKnowledgeStamp>,
+}
+
+fn zone_change_library_knowledge_stamps_is_empty(
+    value: &Box<Vec<ZoneChangeLibraryKnowledgeStamp>>,
+) -> bool {
+    value.is_empty()
 }
 
 impl PendingZoneChangeDelivery {
@@ -7883,6 +7918,26 @@ impl GameState {
 
     pub(crate) fn advance_library_knowledge_epoch(&mut self, owner: PlayerId) {
         let index = owner.0 as usize;
+        if self
+            .product_knowledge_state
+            .action_library_knowledge_generations
+            .len()
+            <= index
+        {
+            self.product_knowledge_state
+                .action_library_knowledge_generations
+                .resize(index + 1, 0);
+        }
+        self.product_knowledge_state
+            .action_library_knowledge_generations[index] = self
+            .product_knowledge_state
+            .action_library_knowledge_generations[index]
+            .wrapping_add(1);
+
+        // ProductKnowledge remains the durable remembered-identity authority.
+        // The action-scoped generation above is intentionally independent of
+        // its canonicalization so ordinary hidden searches still observe every
+        // Library mutation boundary.
         if self.product_knowledge_state.library_epochs.len() <= index {
             self.product_knowledge_state
                 .library_epochs
@@ -7899,9 +7954,17 @@ impl GameState {
         self.canonicalize_library_knowledge_epoch(owner);
     }
 
-    fn library_knowledge_epoch(&self, owner: PlayerId) -> u64 {
+    pub(crate) fn library_knowledge_epoch(&self, owner: PlayerId) -> u64 {
         self.product_knowledge_state
             .library_epochs
+            .get(owner.0 as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn library_knowledge_boundary_generation(&self, owner: PlayerId) -> u64 {
+        self.product_knowledge_state
+            .action_library_knowledge_generations
             .get(owner.0 as usize)
             .copied()
             .unwrap_or_default()
@@ -19763,6 +19826,17 @@ declare_game_state! {
     /// boundary and never appears in a viewer projection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) completed_hidden_search_audiences: Vec<HiddenSearchAudience>,
+    /// Event-time library-knowledge receipts for this action's exact zone
+    /// changes. The value is read from the action-scoped boundary generation at
+    /// `restrictions::record_zone_change`; it is cleared with the sibling
+    /// hidden-search sidecar at the next outer action boundary and redacted from
+    /// every viewer projection.
+    #[serde(
+        default,
+        skip_serializing_if = "zone_change_library_knowledge_stamps_is_empty"
+    )]
+    pub(crate) zone_change_library_knowledge_stamps:
+        Box<Vec<ZoneChangeLibraryKnowledgeStamp>>,
     /// CR 616.1: search-found replacement batch parked across a choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
@@ -24083,6 +24157,68 @@ impl GameState {
     /// Clears the event-filtering sidecar at the next outer action boundary.
     pub(crate) fn clear_completed_hidden_search_audiences(&mut self) {
         self.completed_hidden_search_audiences.clear();
+        self.zone_change_library_knowledge_stamps.clear();
+        self.product_knowledge_state
+            .action_library_knowledge_generations
+            .clear();
+    }
+
+    /// Records the action-scoped library-knowledge boundary generation observed
+    /// at one exact zone-change occurrence. The record has already received its
+    /// stable `(turn, index)` key when this is called.
+    pub(crate) fn record_zone_change_library_knowledge_stamp(&mut self, record: &ZoneChangeRecord) {
+        let source = (record.from_zone == Some(Zone::Library)).then(|| LibraryKnowledgeStamp {
+            library_owner: record.owner,
+            boundary_generation: self.library_knowledge_boundary_generation(record.owner),
+        });
+        let destination = (record.to_zone == Zone::Library).then(|| LibraryKnowledgeStamp {
+            library_owner: record.owner,
+            boundary_generation: self.library_knowledge_boundary_generation(record.owner),
+        });
+        if source.is_none() && destination.is_none() {
+            return;
+        }
+
+        let stamp = ZoneChangeLibraryKnowledgeStamp {
+            recorded_turn_number: record.recorded_turn_number,
+            turn_zone_change_index: record.turn_zone_change_index,
+            source,
+            destination,
+        };
+        if let Some(existing) =
+            self.zone_change_library_knowledge_stamps
+                .iter_mut()
+                .find(|existing| {
+                    existing.recorded_turn_number == stamp.recorded_turn_number
+                        && existing.turn_zone_change_index == stamp.turn_zone_change_index
+                })
+        {
+            *existing = stamp;
+        } else {
+            self.zone_change_library_knowledge_stamps.push(stamp);
+        }
+    }
+
+    /// Reads the event-time receipt for a source or destination library
+    /// endpoint. Missing provenance is intentionally distinguishable from a
+    /// generation of zero so hidden-search lineage can fail closed.
+    pub(crate) fn library_knowledge_stamp_for_zone_change(
+        &self,
+        record: &ZoneChangeRecord,
+        source: bool,
+    ) -> Option<LibraryKnowledgeStamp> {
+        let stamp = self
+            .zone_change_library_knowledge_stamps
+            .iter()
+            .find(|stamp| {
+                stamp.recorded_turn_number == record.recorded_turn_number
+                    && stamp.turn_zone_change_index == record.turn_zone_change_index
+            })?;
+        if source {
+            stamp.source
+        } else {
+            stamp.destination
+        }
     }
 
     pub(crate) fn record_completed_hidden_search_audience(
@@ -25451,6 +25587,7 @@ impl GameState {
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
             completed_hidden_search_audiences: Vec::new(),
+            zone_change_library_knowledge_stamps: Box::new(Vec::new()),
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
@@ -27834,6 +27971,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_scoped_library_search: _,
         pending_library_search_delivery: _,
         completed_hidden_search_audiences: _,
+        zone_change_library_knowledge_stamps: _,
         pending_search_found_batch: _,
         pending_die_roll_instruction: _,
         post_replacement_token_substitution_count: _,
@@ -28064,6 +28202,8 @@ impl PartialEq for GameState {
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.completed_hidden_search_audiences
                 == other.completed_hidden_search_audiences
+            && self.zone_change_library_knowledge_stamps
+                == other.zone_change_library_knowledge_stamps
             && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_die_roll_instruction == other.pending_die_roll_instruction
             && self.pending_cost_move_resume == other.pending_cost_move_resume

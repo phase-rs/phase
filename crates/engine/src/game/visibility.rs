@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use crate::types::action_rejection::ActionRejection;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
-use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
+use crate::types::game_state::{
+    CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
@@ -1075,6 +1077,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // that decision.
     filtered.product_knowledge_state.facts.clear();
     filtered.product_knowledge_state.library_epochs.clear();
+    filtered
+        .product_knowledge_state
+        .action_library_knowledge_generations
+        .clear();
     // The replacement-resume cursor is server authority and can retain private
     // object IDs and last-known snapshots from a cost payment.
     filtered.pending_cost_move_resume = None;
@@ -1233,6 +1239,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         hidden_search_audiences.clear();
     }
     filtered.completed_hidden_search_audiences.clear();
+    filtered.zone_change_library_knowledge_stamps.clear();
     let private_look_visible = privately_looked_at_ids(state, viewer, &can_view_private_for_player);
 
     // CR 400.2 + CR 406.3 + CR 708.5: ONE identity decision per object, taken by the
@@ -2410,6 +2417,7 @@ type HiddenSearchAudiences = HashMap<ObjectIncarnationRef, HashSet<PlayerId>>;
 struct ZoneChangeLineage {
     source: ObjectIncarnationRef,
     to: Zone,
+    destination_library_stamp: Option<LibraryKnowledgeStamp>,
 }
 
 /// Build the event-time hidden-search audience authority without collapsing
@@ -2421,7 +2429,11 @@ struct ZoneChangeLineage {
 /// identity is the authoritative successor incarnation. Only that explicit
 /// zone-change edge may carry the audience forward; a reused id with no such
 /// edge remains unknown and is therefore fail-closed.
-fn hidden_search_audiences(state: &GameState, events: &[GameEvent]) -> HiddenSearchAudiences {
+///
+/// The returned snapshots are aligned with `events`. Keeping one snapshot per
+/// event prevents a later direct search grant for the same exact incarnation
+/// from retroactively authorizing an earlier event in the same action slice.
+fn hidden_search_audiences(state: &GameState, events: &[GameEvent]) -> Vec<HiddenSearchAudiences> {
     let mut audiences = HiddenSearchAudiences::new();
 
     // Active search state is already exact-incarnation keyed. This also covers
@@ -2442,6 +2454,7 @@ fn hidden_search_audiences(state: &GameState, events: &[GameEvent]) -> HiddenSea
     }
 
     let mut prior_zone_changes: HashMap<ObjectId, ZoneChangeLineage> = HashMap::new();
+    let mut snapshots = Vec::with_capacity(events.len());
     for event in events {
         match event {
             GameEvent::HiddenSearchViewed {
@@ -2472,7 +2485,16 @@ fn hidden_search_audiences(state: &GameState, events: &[GameEvent]) -> HiddenSea
                 };
 
                 if let Some(previous) = prior_zone_changes.get(object_id) {
-                    if *from == Some(previous.to) && previous.source.object_id == source.object_id {
+                    let exact_successor = previous.source.object_id == source.object_id
+                        && previous.source.incarnation.checked_add(1) == Some(source.incarnation);
+                    let adjacent = *from == Some(previous.to);
+                    let crosses_library =
+                        previous.to == Zone::Library && *from == Some(Zone::Library);
+                    let library_boundary_matches = !crosses_library
+                        || previous.destination_library_stamp.is_some()
+                            && previous.destination_library_stamp
+                                == state.library_knowledge_stamp_for_zone_change(record, true);
+                    if exact_successor && adjacent && library_boundary_matches {
                         let inherited = audiences.get(&previous.source).cloned();
                         if let Some(inherited) = inherited {
                             audiences.entry(source).or_default().extend(inherited);
@@ -2480,13 +2502,23 @@ fn hidden_search_audiences(state: &GameState, events: &[GameEvent]) -> HiddenSea
                     }
                 }
 
-                prior_zone_changes.insert(*object_id, ZoneChangeLineage { source, to: *to });
+                prior_zone_changes.insert(
+                    *object_id,
+                    ZoneChangeLineage {
+                        source,
+                        to: *to,
+                        destination_library_stamp: (*to == Zone::Library)
+                            .then(|| state.library_knowledge_stamp_for_zone_change(record, false))
+                            .flatten(),
+                    },
+                );
             }
             _ => {}
         }
+        snapshots.push(audiences.clone());
     }
 
-    audiences
+    snapshots
 }
 
 pub fn filter_events_for_viewer(
@@ -2498,8 +2530,11 @@ pub fn filter_events_for_viewer(
     let hidden_search_viewers = hidden_search_audiences(state, events);
     events
         .iter()
-        .filter(|event| event_visible_to_viewer(event, state, viewer, &hidden_search_viewers))
-        .map(|event| match event {
+        .zip(hidden_search_viewers.iter())
+        .filter(|(event, hidden_search_viewers)| {
+            event_visible_to_viewer(event, state, viewer, hidden_search_viewers)
+        })
+        .map(|(event, _)| match event {
             // `CardId` is assigned from the pre-shuffle object sequence when a
             // deck loads. An opponent can use it to recover hidden deck order,
             // including the identity of a face-down spell; only the public
@@ -3014,6 +3049,7 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::counter::CounterType;
+    use crate::types::events::PlayerActionKind;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         ActiveLibrarySearch, AutoMayChoice, CastPaymentMode, CastingVariant, CostResume,
@@ -4997,12 +5033,20 @@ mod tests {
             Zone::Hand,
         );
         state.remember_card_identities([PlayerId(0)], &[card]);
+        state.advance_library_knowledge_epoch(PlayerId(1));
+        assert_eq!(state.library_knowledge_boundary_generation(PlayerId(1)), 1);
 
         let viewer = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(viewer.objects[&card].name, "Known Hand Card");
         assert!(viewer.objects[&card].display_visible_to_viewer);
         assert!(viewer.product_knowledge_state.facts.is_empty());
         assert!(viewer.product_knowledge_state.library_epochs.is_empty());
+        assert!(viewer
+            .product_knowledge_state
+            .action_library_knowledge_generations
+            .is_empty());
+        state.clear_completed_hidden_search_audiences();
+        assert_eq!(state.library_knowledge_boundary_generation(PlayerId(1)), 0);
         let wire = serde_json::to_value(&viewer).expect("viewer state serializes");
         assert_eq!(
             wire["objects"][card.0.to_string()]["display_visible_to_viewer"],
@@ -7970,7 +8014,7 @@ mod tests {
 
     #[test]
     fn hidden_search_audience_follows_exact_zone_lineage_not_reused_object_id() {
-        let mut state = GameState::new_two_player(7);
+        let mut state = GameState::new(FormatConfig::standard(), 3, 7);
         let object_id = create_object(
             &mut state,
             CardId(103),
@@ -7978,6 +8022,41 @@ mod tests {
             "Reused Hidden Card".to_string(),
             Zone::Library,
         );
+        // Keep the library genuinely multi-card so the production shuffle
+        // helper emits the same CR 701.24a boundary as a real game.
+        let _shuffle_witness = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(1),
+            "Shuffle Witness".to_string(),
+            Zone::Library,
+        );
+        let unrelated_id = create_object(
+            &mut state,
+            CardId(105),
+            PlayerId(2),
+            "Unrelated Library Card".to_string(),
+            Zone::Library,
+        );
+        // Ordinary SearchLibrary does not create durable ProductKnowledge.
+        // This guard makes the regression depend on the transient boundary
+        // generation rather than on remembered library facts.
+        assert!(
+            (0..3).all(|viewer| { !state.viewer_knows_card_identity(PlayerId(viewer), object_id) })
+        );
+        let unrelated_generation = state.library_knowledge_boundary_generation(PlayerId(2));
+
+        let mut unrelated_record = state.objects[&unrelated_id].snapshot_for_zone_change(
+            unrelated_id,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        unrelated_record
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut unrelated_record);
 
         let identity_a = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
         let search_view = capture_library_search_card_view(&state.objects[&object_id]);
@@ -7991,6 +8070,7 @@ mod tests {
             .as_mut()
             .expect("zone-change snapshot carries source context")
             .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_a);
 
         state.objects.get_mut(&object_id).unwrap().incarnation += 1;
         let identity_b = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
@@ -8004,21 +8084,85 @@ mod tests {
             .as_mut()
             .expect("zone-change snapshot carries source context")
             .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_b);
 
         state.objects.get_mut(&object_id).unwrap().incarnation += 1;
-        let identity_c = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
-        let mut record_c = state.objects[&object_id].snapshot_for_zone_change(
+        state.advance_library_knowledge_epoch(PlayerId(1));
+        let generation_after_return_to_library =
+            state.library_knowledge_boundary_generation(PlayerId(1));
+        assert_ne!(generation_after_return_to_library, 0);
+        let mut record_c_to_library = state.objects[&object_id].snapshot_for_zone_change(
             object_id,
-            Some(Zone::Library),
-            Zone::Exile,
+            Some(Zone::Hand),
+            Zone::Library,
         );
-        record_c
+        record_c_to_library
             .trigger_source_context
             .as_mut()
             .expect("zone-change snapshot carries source context")
             .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_c_to_library);
+
+        // This is the silent boundary: it advances the action-scoped generation
+        // without emitting a ZoneChanged or ShuffledLibrary event.
+        let generation_before_reorder = state.library_knowledge_boundary_generation(PlayerId(1));
+        crate::game::zones::reorder_within_library(
+            &mut state,
+            PlayerId(1),
+            &[_shuffle_witness],
+            Some(0),
+        );
+        let generation_after_reorder = state.library_knowledge_boundary_generation(PlayerId(1));
+        assert_ne!(generation_before_reorder, generation_after_reorder);
+        assert_eq!(
+            unrelated_generation,
+            state.library_knowledge_boundary_generation(PlayerId(2))
+        );
+        state.objects.get_mut(&object_id).unwrap().incarnation += 1;
+        let identity_d = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
+        let post_reorder_search = capture_library_search_card_view(&state.objects[&object_id]);
+        let mut record_d_to_exile = state.objects[&object_id].snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        record_d_to_exile
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_d_to_exile);
+
+        // Reusing the same ObjectId without a contiguous incarnation edge must
+        // remain isolated from both search audiences.
+        state.objects.get_mut(&object_id).unwrap().incarnation += 1;
+        let identity_e = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
+        let mut record_e = state.objects[&object_id].snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        record_e
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_e);
 
         let events = vec![
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(2),
+                cards: vec![capture_library_search_card_view(
+                    &state.objects[&unrelated_id],
+                )],
+                audience: vec![PlayerId(2)],
+            },
+            GameEvent::ZoneChanged {
+                object_id: unrelated_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record: Box::new(unrelated_record),
+            },
             GameEvent::HiddenSearchViewed {
                 searcher: PlayerId(0),
                 cards: vec![search_view],
@@ -8038,14 +8182,32 @@ mod tests {
             },
             GameEvent::ZoneChanged {
                 object_id,
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record: Box::new(record_c_to_library),
+            },
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(2),
+                cards: vec![post_reorder_search],
+                audience: vec![PlayerId(2)],
+            },
+            GameEvent::ZoneChanged {
+                object_id,
                 from: Some(Zone::Library),
                 to: Zone::Exile,
-                record: Box::new(record_c),
+                record: Box::new(record_d_to_exile),
+            },
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record: Box::new(record_e),
             },
         ];
 
         let viewer_events = filter_events_for_viewer(&events, &state, PlayerId(0));
         let owner_events = filter_events_for_viewer(&events, &state, PlayerId(1));
+        let post_reorder_searcher_events = filter_events_for_viewer(&events, &state, PlayerId(2));
         let spectator_events = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
         assert!(viewer_events.iter().any(|event| matches!(
             event,
@@ -8069,31 +8231,247 @@ mod tests {
                 if record
                     .trigger_source_context
                     .as_ref()
-                    .is_some_and(|context| context.identity.reference == identity_c)
+                    .is_some_and(|context| context.identity.reference == identity_d)
         )));
-        assert!(owner_events.iter().any(|event| matches!(
+        assert!(!viewer_events.iter().any(|event| matches!(
             event,
-            GameEvent::ZoneChanged {
-                record,
-                from: Some(Zone::Exile),
-                to: Zone::Hand,
-                ..
-            } if record
-                .trigger_source_context
-                .as_ref()
-                .is_some_and(|context| context.identity.reference == identity_b)
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_e)
+        )));
+        assert!(post_reorder_searcher_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_d)
+        )));
+        assert!(!post_reorder_searcher_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_e)
+        )));
+        assert!(!owner_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_d)
         )));
         assert!(!spectator_events.iter().any(|event| matches!(
             event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_d)
+        )));
+        assert!(post_reorder_searcher_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id: event_object_id, .. }
+                if *event_object_id == unrelated_id
+        )));
+    }
+
+    #[test]
+    fn hidden_search_audience_rejects_stale_lineage_after_shuffle() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+        let object_id = create_object(
+            &mut state,
+            CardId(106),
+            PlayerId(1),
+            "Shuffled Hidden Card".to_string(),
+            Zone::Library,
+        );
+        let _witness = create_object(
+            &mut state,
+            CardId(107),
+            PlayerId(1),
+            "Shuffle Witness".to_string(),
+            Zone::Library,
+        );
+        // The ordinary hidden search has no durable ProductKnowledge fact;
+        // the production shuffle must be witnessed by the transient seam.
+        assert!(
+            (0..3).all(|viewer| { !state.viewer_knows_card_identity(PlayerId(viewer), object_id) })
+        );
+
+        let identity_a = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
+        let search_view = capture_library_search_card_view(&state.objects[&object_id]);
+        let mut record_a = state.objects[&object_id].snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        record_a
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_a);
+
+        state.objects.get_mut(&object_id).unwrap().incarnation += 1;
+        let identity_b = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
+        let mut record_b = state.objects[&object_id].snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Exile),
+            Zone::Hand,
+        );
+        record_b
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_b);
+
+        state.objects.get_mut(&object_id).unwrap().incarnation += 1;
+        let _identity_c = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
+        state.advance_library_knowledge_epoch(PlayerId(1));
+        let mut record_c_to_library = state.objects[&object_id].snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Hand),
+            Zone::Library,
+        );
+        record_c_to_library
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_c_to_library);
+
+        let generation_before_shuffle = state.library_knowledge_boundary_generation(PlayerId(1));
+        let mut shuffle_events = Vec::new();
+        crate::game::effects::change_zone::shuffle_library(
+            &mut state,
+            PlayerId(1),
+            &mut shuffle_events,
+        );
+        assert_eq!(
+            shuffle_events,
+            vec![GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(1),
+                action: PlayerActionKind::ShuffledLibrary,
+                look_count: None,
+                scry_bottom_count: None,
+                scry_top_count: None,
+            }]
+        );
+        assert_ne!(
+            generation_before_shuffle,
+            state.library_knowledge_boundary_generation(PlayerId(1))
+        );
+
+        state.objects.get_mut(&object_id).unwrap().incarnation += 1;
+        let identity_d = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
+        let post_shuffle_search = capture_library_search_card_view(&state.objects[&object_id]);
+        let mut record_d_to_exile = state.objects[&object_id].snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Library),
+            Zone::Exile,
+        );
+        record_d_to_exile
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        crate::game::restrictions::record_zone_change(&mut state, &mut record_d_to_exile);
+
+        let events = [
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                cards: vec![search_view],
+                audience: vec![PlayerId(0)],
+            },
             GameEvent::ZoneChanged {
-                record,
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record: Box::new(record_a),
+            },
+            GameEvent::ZoneChanged {
+                object_id,
                 from: Some(Zone::Exile),
                 to: Zone::Hand,
-                ..
-            } if record
+                record: Box::new(record_b),
+            },
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record: Box::new(record_c_to_library),
+            },
+            shuffle_events[0].clone(),
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(2),
+                cards: vec![post_shuffle_search],
+                audience: vec![PlayerId(2)],
+            },
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record: Box::new(record_d_to_exile),
+            },
+        ];
+
+        let viewer_events = filter_events_for_viewer(&events, &state, PlayerId(0));
+        let owner_events = filter_events_for_viewer(&events, &state, PlayerId(1));
+        let post_shuffle_searcher_events = filter_events_for_viewer(&events, &state, PlayerId(2));
+        let spectator_events = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
+        assert!(viewer_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_a)
+        )));
+        assert!(viewer_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, from: Some(Zone::Exile), to: Zone::Hand, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_b)
+        )));
+        assert!(!viewer_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_d)
+        )));
+        assert!(post_shuffle_searcher_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity.reference == identity_d)
+        )));
+        assert!(!owner_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
                 .trigger_source_context
                 .as_ref()
-                .is_some_and(|context| context.identity.reference == identity_b)
+                .is_some_and(|context| context.identity.reference == identity_d)
+        )));
+        assert!(!spectator_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { record, to: Zone::Exile, .. }
+                if record
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|context| context.identity.reference == identity_d)
         )));
     }
 
