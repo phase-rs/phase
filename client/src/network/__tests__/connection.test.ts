@@ -67,7 +67,7 @@ vi.mock("peerjs", () => {
 });
 
 import { dialPeer, fetchFreshTurnConfig, safePeerError, PEER_CONNECT_OPTIONS, TURN_CREDENTIALS_URL, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
-import { OFFICIAL_TURN_CREDENTIALS_URL } from "../../config/turnCredentials";
+import { resolveTurnCredentialsUrl } from "../../config/turnCredentials";
 
 import { getDiagnosticHistory } from "../../services/troubleshooting";
 
@@ -308,7 +308,7 @@ describe("joinRoom", () => {
 describe("strict fresh TURN credentials", () => {
   afterEach(() => vi.unstubAllGlobals());
   it("validates servers and forwards abort without caching or exporting secrets", async () => {
-    const configuredEndpoint = OFFICIAL_TURN_CREDENTIALS_URL;
+    const configuredEndpoint = resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL);
     const controller = new AbortController();
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ iceServers: [
       { urls: "stun:example.org:3478" },
