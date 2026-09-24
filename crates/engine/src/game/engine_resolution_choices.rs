@@ -10132,6 +10132,55 @@ mod tests {
         (state, found)
     }
 
+    fn multi_card_standard_delivery_state() -> (GameState, ObjectId, ObjectId) {
+        let (mut state, first) = standard_delivery_state();
+        let second = create_object(
+            &mut state,
+            CardId(90_085),
+            PlayerId(0),
+            "Second standard found card".to_string(),
+            Zone::Library,
+        );
+        state.active_library_searches.insert(
+            crate::types::game_state::ActiveLibrarySearch::try_new(
+                PlayerId(0),
+                PlayerId(0),
+                Some(PlayerId(0)),
+                vec![PlayerId(0)],
+                vec![
+                    (
+                        PlayerId(0),
+                        Zone::Library,
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&first],
+                        ),
+                    ),
+                    (
+                        PlayerId(0),
+                        Zone::Library,
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&second],
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: vec![first, second],
+            count: 2,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
+            split: None,
+        };
+        (state, first, second)
+    }
+
     #[test]
     fn synchronous_standard_delivery_clears_search_after_movement() {
         let (mut state, found) = standard_delivery_state();
@@ -10197,6 +10246,85 @@ mod tests {
         );
         assert!(!p1.iter().any(is_hidden_delivery));
         assert!(!spectator.iter().any(is_hidden_delivery));
+    }
+
+    #[test]
+    fn paused_multi_card_standard_delivery_filters_each_identity_after_resume() {
+        let (mut state, first, second) = multi_card_standard_delivery_state();
+        let expected_identities = [
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&first]),
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&second]),
+        ];
+        let redirect = install_moved_exile_redirect(&mut state, Zone::Hand, true);
+        state.objects[&redirect].replacement_definitions[0].valid_card =
+            Some(TargetFilter::SpecificObject { id: first });
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![first, second],
+            },
+        )
+        .expect("the two-card SearchChoice must pause for the first replacement");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+
+        let resumed = super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("declining the first-card redirect must resume the complete batch");
+
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(state.active_library_searches.is_empty());
+        assert!(state.pending_library_search_delivery.is_none());
+
+        let p0 =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(0));
+        let p1 =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(1));
+        let spectator =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(2));
+        let is_hidden_delivery =
+            |event: &GameEvent, expected: crate::types::identifiers::ObjectIncarnationRef| {
+                matches!(
+                        event,
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from: Some(Zone::Library),
+                        to: Zone::Exile,
+                        record,
+                    } if *object_id == expected.object_id
+                        && record.trigger_source_context().is_some_and(|context| {
+                            context.face_down && context.identity.reference == expected
+                        })
+                )
+            };
+
+        for expected in expected_identities {
+            assert!(
+                resumed
+                    .events
+                    .iter()
+                    .any(|event| is_hidden_delivery(event, expected)),
+                "the resumed action must carry the hidden delivery for {expected:?}"
+            );
+            assert!(
+                p0.iter().any(|event| is_hidden_delivery(event, expected)),
+                "the search audience must retain the resumed private delivery for {expected:?}"
+            );
+            assert!(!p1.iter().any(|event| is_hidden_delivery(event, expected)));
+            assert!(!spectator
+                .iter()
+                .any(|event| is_hidden_delivery(event, expected)));
+        }
     }
 
     #[test]

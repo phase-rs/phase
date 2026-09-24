@@ -22428,11 +22428,12 @@ struct PausedExileOccurrence {
     recorded_turn_number: u32,
 }
 
-/// Finds the terminal zone-change event for one paused delivery and annotates
-/// that event's own record. The delivery slice is the only event history this
-/// helper may inspect: a later same-id incarnation in global state is not a
-/// valid fallback. A final move out of Exile also prevents an earlier Exile
-/// event in the same slice from being treated as the settled destination.
+/// CR 406.3: A card exiled face down cannot be examined unless the instruction
+/// allows it. Finds the terminal zone-change event for one paused delivery and
+/// annotates that event's own record. The delivery slice is the only event
+/// history this helper may inspect: a later same-id incarnation in global state
+/// is not a valid fallback. A final move out of Exile also prevents an earlier
+/// Exile event in the same slice from being treated as the settled destination.
 fn annotate_paused_exile_event(
     delivery_events: &mut [GameEvent],
     member: ObjectIncarnationRef,
@@ -24277,6 +24278,8 @@ impl GameState {
         Some(PendingZoneChangeDelivery::new(member, expected_event))
     }
 
+    /// CR 406.3: Preserve the face-down Exile concealment required for a card
+    /// that may not be examined by players outside the allowed audience.
     /// Applies concealment to the exact ledger row named by a paused delivery's
     /// event record. Any mismatch fails closed; this helper never searches for a
     /// different row by object id or destination.
