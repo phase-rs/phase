@@ -10141,43 +10141,33 @@ mod tests {
             "Second standard found card".to_string(),
             Zone::Library,
         );
-        state.active_library_searches.insert(
-            crate::types::game_state::ActiveLibrarySearch::try_new(
+        state.active_library_searches = Default::default();
+        state.active_search_decision_controls = Default::default();
+        let source = state
+            .objects
+            .values()
+            .find(|object| object.name == "Standard search source")
+            .expect("standard search source exists")
+            .id;
+        effects::search_library::resolve(
+            &mut state,
+            &ResolvedAbility::new(
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones: vec![Zone::Library],
+                },
+                Vec::new(),
+                source,
                 PlayerId(0),
-                PlayerId(0),
-                Some(PlayerId(0)),
-                vec![PlayerId(0)],
-                vec![
-                    (
-                        PlayerId(0),
-                        Zone::Library,
-                        crate::types::identifiers::ObjectIncarnationRef::from_object(
-                            &state.objects[&first],
-                        ),
-                    ),
-                    (
-                        PlayerId(0),
-                        Zone::Library,
-                        crate::types::identifiers::ObjectIncarnationRef::from_object(
-                            &state.objects[&second],
-                        ),
-                    ),
-                ],
-            )
-            .unwrap(),
-        );
-        state.waiting_for = WaitingFor::SearchChoice {
-            player: PlayerId(0),
-            library_owner: Some(PlayerId(0)),
-            cards: vec![first, second],
-            count: 2,
-            reveal: false,
-            up_to: false,
-            allows_partial_find: false,
-            constraint: SearchSelectionConstraint::None,
-            ordering_hint: Default::default(),
-            split: None,
-        };
+            ),
+            &mut Vec::new(),
+        )
+        .expect("ordinary two-card SearchLibrary enters its production choice state");
         (state, first, second)
     }
 
