@@ -10039,8 +10039,8 @@ fn render_ability_descriptions(def: &mut AbilityDefinition, card_name: &str) {
 /// not about `description`.)
 ///
 /// WILDCARD-FREE on purpose, for the same reason
-/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has nine
-/// variants, so the non-descending arm costs seven leaf names — not the ~206
+/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has ten
+/// variants, so the non-descending arm costs eight leaf names — not the ~206
 /// that justify the wildcard in [`render_effect_descriptions`]. A new variant
 /// carrying a `TriggerDefinition` must be a COMPILE ERROR here, not a silent
 /// pass-through.
@@ -10061,10 +10061,11 @@ fn render_delayed_condition_descriptions(
                 render_trigger_descriptions(other, card_name);
             }
         }
-        // The remaining seven conditions are phase gates or object/filter
+        // The remaining eight conditions are phase gates or object/filter
         // matchers with no nested `TriggerDefinition`, hence no description.
         D::AtNextPhase { .. }
         | D::AtNextPhaseForPlayer { .. }
+        | D::AtBeginningOfAddedPhase { .. }
         | D::WhenLeavesPlay { .. }
         | D::WhenDies { .. }
         | D::WhenLeavesPlayFiltered { .. }

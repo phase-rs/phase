@@ -27,6 +27,7 @@ use super::{
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
+use crate::parser::oracle_nom::condition as nom_condition;
 use crate::parser::oracle_nom::enters_under::{bind_control_clause, name_entry_control_antecedent};
 use crate::parser::oracle_nom::filter as nom_filter;
 use crate::parser::oracle_nom::filter::ControlledPermanentsConjunct;
@@ -46,17 +47,17 @@ use crate::types::ability::{
     AttachSelection, BounceSelection, CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission,
     CounterAdjustment, CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp, Duration,
-    Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
-    LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
-    PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
+    Effect, EffectScope, ExtraPhaseAnchor, FaceDownProfile, FilterProp, ForceBlockAttackerRef,
+    GrantedAbilityScope, LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec,
+    ObjectSelectionCardinality, ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope,
+    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope,
+    PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
     StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetChoiceTiming, TargetFilter,
     TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
     ZoneOwner,
 };
 use crate::types::card_type::CoreType;
-use crate::types::phase::Phase;
+use crate::types::phase::{Phase, PhaseGroup};
 use crate::types::player::PlayerCounterKind;
 use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
@@ -11093,45 +11094,178 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
     }
 }
 
-/// CR 500.8 + CR 510.2: Quantity for "<N> additional <step/phase>s". The
-/// scanner advances along word boundaries and tries a single composed
-/// combinator at each position:
-///   `quantifier ~ " additional"` where `quantifier` =
-///     `tag("that many")` → event-bound (`QuantityRef::EventContextAmount`)
-///   | `parse_number`        → literal N (e.g. "two additional combat phases")
-///
-/// Anything else — including the article forms "an"/"a"/"the" already parsed
-/// elsewhere as 1 — falls through to the singular default
-/// `QuantityExpr::Fixed { value: 1 }`. Anchoring on `" additional"` keeps the
-/// helper agnostic to surrounding sentence shapes ("you get that many
-/// additional upkeep steps after this phase", "after this phase, there is an
-/// additional combat phase").
+/// CR 500.8: Quantity for "<N> additional <step/phase>s" — the first
+/// `parse_additional_quantifier` match at a word boundary, anchored on
+/// `" additional"` so the helper is agnostic to the surrounding sentence shape
+/// ("you get that many additional upkeep steps after this phase", "after this
+/// phase, there is an additional combat phase"). No match is the singular
+/// default `QuantityExpr::Fixed { value: 1 }`.
 fn parse_additional_phase_count(lower: &str) -> QuantityExpr {
-    fn count_combinator(input: &str) -> OracleResult<'_, QuantityExpr> {
-        let event_bound = value(
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            },
-            tag("that many"),
-        );
-        let literal = map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
-            value: n as i32,
-        });
-        terminated(alt((event_bound, literal)), tag(" additional")).parse(input)
-    }
+    nom_primitives::scan_at_word_boundaries(lower, parse_additional_quantifier)
+        .unwrap_or(QuantityExpr::Fixed { value: 1 })
+}
 
-    let mut remaining = lower;
-    while !remaining.is_empty() {
-        if let Ok((_rest, qty)) = count_combinator(remaining) {
-            return qty;
-        }
-        // Advance to the next word boundary so the combinator stays anchored
-        // to candidate quantifier positions.
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
+/// CR 500.8: the quantifier of "<N> additional <step/phase>s":
+/// `tag("that many")` → event-bound (`QuantityRef::EventContextAmount`), or
+/// `parse_number` → a literal N, the article "an" included ("an additional
+/// combat phase" → 1), followed by `" additional"`.
+fn parse_additional_quantifier(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let event_bound = value(
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+        tag("that many"),
+    );
+    let literal = map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+        value: n as i32,
+    });
+    terminated(alt((event_bound, literal)), tag(" additional")).parse(input)
+}
+
+/// CR 500.10a: the expletive subject of an added step or phase — "there is",
+/// "there's" or "there are", immediately followed by the added step's or
+/// phase's own quantifier ("there is an additional combat phase", "there are
+/// two additional combat phases"). The sentence names no player who gets it.
+/// A "there is/are" that opens any other clause ("if there are three or more
+/// cards in your hand") is not this subject.
+fn parse_expletive_additional_subject(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((nom_condition::parse_theres, tag("there are"))),
+            tag(" "),
+            peek(parse_additional_quantifier),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 500.10a: who gets an added step or phase. "There is / are" names no
+/// player (`TargetFilter::None`), so the step or phase is added to the turn in
+/// progress. Otherwise the text grants it to a player: "you get" is the
+/// controller, and a player subject ("that player gets", Paradox Haze) is
+/// bound over this default by subject injection.
+fn additional_phase_recipient(lower: &str) -> TargetFilter {
+    match nom_primitives::scan_at_word_boundaries(lower, parse_expletive_additional_subject) {
+        Some(()) => TargetFilter::None,
+        None => TargetFilter::Controller,
     }
-    QuantityExpr::Fixed { value: 1 }
+}
+
+/// CR 500.8 + CR 505.1a: what follows an added combat phase. "Followed by an
+/// additional main phase" adds a main phase after it, which is a postcombat
+/// main phase. That continuation must end the sentence; any other
+/// continuation, including one that goes on past "an additional main phase"
+/// ("… and an additional end step", ", followed by an additional end step", a
+/// second "followed by"), parses as `Some(None)`: the combat arm fails closed
+/// on it rather than dropping the phase or step it names.
+/// `step_or_beginning_anchor` also scans for this parser: any match, whatever
+/// follows "followed by ", makes the upkeep, end-step and beginning-phase arms
+/// fail closed, so narrowing it narrows what those arms refuse.
+fn parse_combat_follow_up(input: &str) -> OracleResult<'_, Option<Phase>> {
+    preceded(
+        tag("followed by "),
+        opt(value(
+            Phase::PostCombatMain,
+            // A comma here opens a clause the combat arm does not model, so
+            // unlike `peek_clause_terminator` this accepts only a sentence end.
+            terminated(
+                tag("an additional main phase"),
+                peek(alt((value((), tag(".")), value((), (space0, eof))))),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 500.8: "this combat phase", the combat phase the effect resolves in.
+fn this_combat_phase() -> ExtraPhaseAnchor {
+    ExtraPhaseAnchor::ThisPhase {
+        named: Some(vec![PhaseGroup::Combat]),
+    }
+}
+
+/// CR 500.8 + CR 500.9 + CR 500.10 + CR 505.1: the anchor phrase of an added
+/// step or phase — "after this step" / "after this phase" / "after this combat
+/// phase" / "after this main phase", or a fixed phase of the turn: "after the
+/// first combat phase this turn" / "after the second main phase this turn"
+/// (CR 505.1a + CR 505.1b: every main phase after the first is a postcombat
+/// main phase, so the second is the first postcombat one). No other ordinal
+/// names a phase the turn's step tally can identify, so none is accepted.
+fn parse_extra_step_anchor_phrase(input: &str) -> OracleResult<'_, ExtraPhaseAnchor> {
+    preceded(
+        tag("after "),
+        alt((
+            preceded(
+                tag("this "),
+                alt((
+                    value(ExtraPhaseAnchor::ThisStep, tag("step")),
+                    value(ExtraPhaseAnchor::ThisPhase { named: None }, tag("phase")),
+                    value(this_combat_phase(), tag("combat phase")),
+                    value(ExtraPhaseAnchor::this_main_phase(), tag("main phase")),
+                )),
+            ),
+            preceded(
+                tag("the "),
+                terminated(
+                    alt((
+                        value(
+                            ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::Combat),
+                            tag("first combat phase"),
+                        ),
+                        value(
+                            ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::PostcombatMain),
+                            tag("second main phase"),
+                        ),
+                    )),
+                    tag(" this turn"),
+                ),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+/// An added step's or phase's anchor phrase, ending at a clause boundary.
+fn parse_extra_step_anchor(input: &str) -> OracleResult<'_, ExtraPhaseAnchor> {
+    terminated(
+        parse_extra_step_anchor_phrase,
+        nom_primitives::peek_clause_terminator,
+    )
+    .parse(input)
+}
+
+/// CR 500.8 + CR 500.9 + CR 500.10: the anchor of an added upkeep step, end step or
+/// beginning phase. These arms model no continuation, so a text that carries a
+/// "followed by" continuation (`parse_combat_follow_up`, the one authority for
+/// that phrase), wherever it stands relative to the anchor, has no anchor they
+/// accept and fails closed rather than dropping what the continuation adds.
+fn step_or_beginning_anchor(lower: &str) -> Option<ExtraPhaseAnchor> {
+    if nom_primitives::scan_at_word_boundaries(lower, parse_combat_follow_up).is_some() {
+        return None;
+    }
+    nom_primitives::scan_at_word_boundaries(lower, parse_extra_step_anchor)
+}
+
+/// CR 500.8: an added combat phase's anchor phrase. Beside the shared phrases,
+/// "after this one" names the combat phase just mentioned ("one" stands for
+/// it), so the anchor is the combat phase the effect resolves in (Save Point,
+/// activated only during combat). The phrase ends at a clause boundary or at
+/// the combat phase's continuation ("after this phase followed by an
+/// additional main phase", All-Out Assault), which `parse_combat_follow_up`
+/// reads.
+fn parse_combat_anchor(input: &str) -> OracleResult<'_, ExtraPhaseAnchor> {
+    terminated(
+        alt((
+            parse_extra_step_anchor_phrase,
+            value(this_combat_phase(), tag("after this one")),
+        )),
+        alt((
+            nom_primitives::peek_clause_terminator,
+            value((), peek(tag(" followed by "))),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 701.4a: Recognize a "behold a [quality]" effect leaf. "Behold a [quality]"
@@ -11430,71 +11564,112 @@ pub(super) fn parse_imperative_family_ast(
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
     if nom_primitives::scan_contains(lower, "additional combat phase") {
-        let with_main =
-            nom_primitives::scan_contains(lower, "followed by an additional main phase");
-        // CR 500.8 (Full Throttle): "After this main phase, there are N additional
-        // combat phases" anchors to whichever main phase the spell resolves in.
-        // `PreCombatMain` is a resolution-time sentinel remapped in
-        // `effects/additional_phase.rs` when the active phase is a main phase.
-        let after = if nom_primitives::scan_contains(lower, "after this main phase") {
-            Phase::PreCombatMain
-        } else {
-            Phase::EndCombat
-        };
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
-            target: TargetFilter::Controller,
-            phase: Phase::BeginCombat,
-            after,
-            followed_by: if with_main {
-                vec![Phase::PostCombatMain]
-            } else {
-                vec![]
+        // CR 500.8: an added combat phase comes directly after the phase the
+        // text names. "After this phase" is the phase the effect resolves in,
+        // whatever it is (Moraug's precombat landfall adds a combat before the
+        // natural one); "after this combat phase" / "after this main phase" adds
+        // nothing if the effect resolves outside that kind of phase (CR 505.1
+        // for a main phase, CR 506.1 for a combat phase);
+        // "after the first combat phase / second main phase this turn" names a
+        // fixed phase of the turn (CR 505.1b; Swinging Ship, World at War).
+        // CR 500.8 adds phases after a phase, so a step anchor or no anchor
+        // phrase fails closed, as does a continuation other than the one
+        // `parse_combat_follow_up` models.
+        let anchor = nom_primitives::scan_at_word_boundaries(lower, parse_combat_anchor);
+        let follow_up = nom_primitives::scan_at_word_boundaries(lower, parse_combat_follow_up);
+        return Some(ImperativeFamilyAst::GainKeyword(
+            match (anchor, follow_up) {
+                (
+                    Some(
+                        after @ (ExtraPhaseAnchor::ThisPhase { .. }
+                        | ExtraPhaseAnchor::FirstOfTurn(_)),
+                    ),
+                    None | Some(Some(_)),
+                ) => Effect::AdditionalPhase {
+                    target: additional_phase_recipient(lower),
+                    phase: Phase::BeginCombat,
+                    after,
+                    followed_by: follow_up.flatten().into_iter().collect(),
+                    count: parse_additional_phase_count(lower),
+                    attacker_restriction: None,
+                },
+                (
+                    Some(ExtraPhaseAnchor::ThisPhase { .. } | ExtraPhaseAnchor::FirstOfTurn(_)),
+                    Some(None),
+                )
+                | (Some(ExtraPhaseAnchor::ThisStep | ExtraPhaseAnchor::Step(_)) | None, _) => {
+                    Effect::unimplemented("additional_phase", text)
+                }
             },
-            count: parse_additional_phase_count(lower),
-            attacker_restriction: None,
-        }));
+        ));
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
-            target: TargetFilter::Controller,
-            phase: Phase::Upkeep,
-            after: Phase::Upkeep,
-            followed_by: vec![],
-            count: parse_additional_phase_count(lower),
-            attacker_restriction: None,
-        }));
+        // CR 500.9: "after this step" (Paradox Haze, The Ninth Doctor).
+        // CR 500.10: "after this phase" (Obeka, Untap Upkeep Draw) — the effect first
+        // creates a beginning phase holding only the upkeep; `turns` continues the turn
+        // after the anchor once that upkeep ends. No anchor phrase → strict failure.
+        return Some(ImperativeFamilyAst::GainKeyword(
+            match step_or_beginning_anchor(lower) {
+                Some(after) => Effect::AdditionalPhase {
+                    target: additional_phase_recipient(lower),
+                    phase: Phase::Upkeep,
+                    after,
+                    followed_by: vec![],
+                    count: parse_additional_phase_count(lower),
+                    attacker_restriction: None,
+                },
+                None => Effect::unimplemented("additional_phase", text),
+            },
+        ));
     }
-    // CR 500.8 + CR 513.1: "there is an additional end step after this step"
-    // (Y'shtola Rhul). The extra end step is anchored to `Phase::End` so the
-    // LIFO `advance_phase` scan inserts it as the current end step completes.
+    // CR 500.9 + CR 513.1: "there is an additional end step after this step"
+    // (Y'shtola Rhul) — the extra end step follows the end step the effect
+    // resolves in. This arm emits only that step form; a phase anchor and a
+    // missing anchor fail closed.
     if nom_primitives::scan_contains(lower, "additional end step") {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
-            target: TargetFilter::Controller,
-            phase: Phase::End,
-            after: Phase::End,
-            followed_by: vec![],
-            count: parse_additional_phase_count(lower),
-            attacker_restriction: None,
-        }));
+        return Some(ImperativeFamilyAst::GainKeyword(
+            match step_or_beginning_anchor(lower) {
+                Some(after @ ExtraPhaseAnchor::ThisStep) => Effect::AdditionalPhase {
+                    target: additional_phase_recipient(lower),
+                    phase: Phase::End,
+                    after,
+                    followed_by: vec![],
+                    count: parse_additional_phase_count(lower),
+                    attacker_restriction: None,
+                },
+                Some(
+                    ExtraPhaseAnchor::ThisPhase { .. }
+                    | ExtraPhaseAnchor::FirstOfTurn(_)
+                    | ExtraPhaseAnchor::Step(_),
+                )
+                | None => Effect::unimplemented("additional_phase", text),
+            },
+        ));
     }
     // CR 501.1 + CR 500.8: "there is an additional beginning phase after this
     // phase" (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus). The
-    // beginning phase is untap → upkeep → draw (CR 501.1). `phase: Untap` is the
-    // self-documenting marker the resolver keys the beginning-phase schedule on
-    // (untap begins only the beginning phase, CR 502) — no other AdditionalPhase
-    // producer emits `phase: Untap`. `after`/`followed_by` are unused for this
-    // shape: the resolver derives the anchor from the phase this ability resolves
-    // in ("this phase", CR 500.8) via `last_step_of_phase`, and resumes the turn
-    // at that phase's natural successor. `after` is a don't-care sentinel.
+    // beginning phase is untap → upkeep → draw (CR 501.1), so `phase: Untap`
+    // names the added phase by its first step. CR 500.8 adds phases after a
+    // phase, so only a phase anchor is accepted; a step anchor or no anchor
+    // phrase fails closed.
     if nom_primitives::scan_contains(lower, "additional beginning phase") {
-        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
-            target: TargetFilter::Controller,
-            phase: Phase::Untap,
-            after: Phase::PostCombatMain,
-            followed_by: vec![],
-            count: parse_additional_phase_count(lower),
-            attacker_restriction: None,
-        }));
+        return Some(ImperativeFamilyAst::GainKeyword(
+            match step_or_beginning_anchor(lower) {
+                Some(
+                    after @ (ExtraPhaseAnchor::ThisPhase { .. } | ExtraPhaseAnchor::FirstOfTurn(_)),
+                ) => Effect::AdditionalPhase {
+                    target: additional_phase_recipient(lower),
+                    phase: Phase::Untap,
+                    after,
+                    followed_by: vec![],
+                    count: parse_additional_phase_count(lower),
+                    attacker_restriction: None,
+                },
+                Some(ExtraPhaseAnchor::ThisStep | ExtraPhaseAnchor::Step(_)) | None => {
+                    Effect::unimplemented("additional_phase", text)
+                }
+            },
+        ));
     }
 
     // CR 606.3: "activate each planeswalker's loyalty ability an additional
@@ -16025,6 +16200,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 mod tests {
     use super::*;
     use crate::types::ability::{ParitySource, ZoneChoiceChooser};
+    use crate::types::phase::PhaseGroup;
 
     /// Matrix row 18 — the mana ROLE must survive the cost-resource AST
     /// round-trip byte-for-byte.
@@ -19932,11 +20108,11 @@ mod tests {
                 effect,
                 Effect::AdditionalPhase {
                     phase: Phase::BeginCombat,
-                    after: Phase::PreCombatMain,
+                    ref after,
                     ref followed_by,
                     count: QuantityExpr::Fixed { value: 2 },
                     ..
-                } if followed_by.is_empty()
+                } if followed_by.is_empty() && *after == ExtraPhaseAnchor::this_main_phase()
             ),
             "Expected AdditionalPhase anchored to main phase with count 2, got {effect:?}"
         );
@@ -19953,8 +20129,9 @@ mod tests {
             matches!(
                 effect,
                 Effect::AdditionalPhase {
+                    target: TargetFilter::None,
                     phase: Phase::BeginCombat,
-                    after: Phase::EndCombat,
+                    after: ExtraPhaseAnchor::ThisPhase { named: None },
                     ref followed_by,
                     ..
                 } if followed_by.is_empty()
@@ -20056,7 +20233,9 @@ mod tests {
 
     #[test]
     fn parse_additional_phase_with_main_phase() {
-        let text = "there is an additional combat phase followed by an additional main phase";
+        // All-Out Assault: no comma between the anchor and "followed by".
+        let text =
+            "there is an additional combat phase after this phase followed by an additional main phase";
         let lower = text.to_lowercase();
         let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse additional combat + main");
@@ -20065,8 +20244,9 @@ mod tests {
             matches!(
                 effect,
                 Effect::AdditionalPhase {
+                    target: TargetFilter::None,
                     phase: Phase::BeginCombat,
-                    after: Phase::EndCombat,
+                    after: ExtraPhaseAnchor::ThisPhase { named: None },
                     ref followed_by,
                     ..
                 } if followed_by == &vec![Phase::PostCombatMain]
@@ -20087,7 +20267,7 @@ mod tests {
                 effect,
                 Effect::AdditionalPhase {
                     phase: Phase::Upkeep,
-                    after: Phase::Upkeep,
+                    after: ExtraPhaseAnchor::ThisStep,
                     ref followed_by,
                     ..
                 } if followed_by.is_empty()
@@ -20107,7 +20287,7 @@ mod tests {
     /// CR 500.8 + CR 510.2: Obeka, Splitter of Seconds — "you get that many
     /// additional upkeep steps after this phase" must thread the triggering
     /// combat damage amount through `EventContextAmount`, not collapse it to
-    /// the singular default.
+    /// the singular default, and anchors after this phase (CR 500.10).
     #[test]
     fn parse_obeka_that_many_additional_upkeep_steps_binds_event_amount() {
         let text = "you get that many additional upkeep steps after this phase";
@@ -20119,7 +20299,7 @@ mod tests {
         match effect {
             Effect::AdditionalPhase {
                 phase: Phase::Upkeep,
-                after: Phase::Upkeep,
+                after: ExtraPhaseAnchor::ThisPhase { named: None },
                 count:
                     QuantityExpr::Ref {
                         qty: QuantityRef::EventContextAmount,
@@ -20167,6 +20347,478 @@ mod tests {
             } => {}
             other => panic!("expected count=Fixed(1) for singular form, got {other:?}"),
         }
+    }
+
+    /// Parses one imperative-family phrase and lowers it to its `Effect`.
+    fn additional_phase_family_effect(text: &str) -> Effect {
+        let lower = text.to_lowercase();
+        lower_imperative_family_effect(
+            parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("{text:?} should reach the additional-phase family")),
+        )
+    }
+
+    /// Asserts a phrase fails closed as the `additional_phase` strict failure.
+    fn assert_additional_phase_unimplemented(text: &str) {
+        match additional_phase_family_effect(text) {
+            Effect::Unimplemented { ref name, .. } if name == "additional_phase" => {}
+            other => panic!("{text:?}: expected Unimplemented(additional_phase), got {other:?}"),
+        }
+    }
+
+    /// CR 500.9: "after this step" anchors at the step the effect resolves in.
+    /// Reach guard for the anchorless upkeep negatives below.
+    #[test]
+    fn additional_upkeep_after_this_step_is_this_step() {
+        assert!(matches!(
+            additional_phase_family_effect("get an additional upkeep step after this step"),
+            Effect::AdditionalPhase {
+                phase: Phase::Upkeep,
+                after: ExtraPhaseAnchor::ThisStep,
+                ..
+            }
+        ));
+    }
+
+    /// CR 500.10: a leading "after this phase, there is an additional upkeep
+    /// step" (Untap, Upkeep, Draw mode 2) anchors after the resolving phase.
+    #[test]
+    fn leading_after_this_phase_additional_upkeep_is_this_phase() {
+        assert!(matches!(
+            additional_phase_family_effect("after this phase, there is an additional upkeep step."),
+            Effect::AdditionalPhase {
+                phase: Phase::Upkeep,
+                after: ExtraPhaseAnchor::ThisPhase { named: None },
+                ..
+            }
+        ));
+    }
+
+    /// CR 500.8 + CR 500.9: an upkeep phrase with no recognizable anchor fails
+    /// closed instead of guessing an insertion point. The anchored phrase in
+    /// `additional_upkeep_after_this_step_is_this_step` is the reach guard.
+    #[test]
+    fn anchorless_additional_upkeep_fails_closed() {
+        for text in [
+            "you get an additional upkeep step",
+            "you get an additional upkeep step after this phases",
+            "you get an additional upkeep step after this turn",
+        ] {
+            assert_additional_phase_unimplemented(text);
+        }
+        assert!(
+            matches!(
+                super::super::parse_effect("You get an additional upkeep step."),
+                Effect::Unimplemented { ref name, .. } if name == "additional_phase"
+            ),
+            "full-line anchorless upkeep must stay a strict failure"
+        );
+    }
+
+    /// CR 500.9 + CR 513.1: the end-step arm accepts only "after this step"
+    /// (Y'shtola Rhul). A phase anchor and a missing anchor fail closed.
+    #[test]
+    fn additional_end_step_accepts_only_this_step() {
+        assert!(matches!(
+            additional_phase_family_effect("there is an additional end step after this step"),
+            Effect::AdditionalPhase {
+                phase: Phase::End,
+                after: ExtraPhaseAnchor::ThisStep,
+                ..
+            }
+        ));
+        for text in [
+            "there is an additional end step",
+            "there is an additional end step after this phase",
+            "there is an additional end step after this main phase",
+        ] {
+            assert_additional_phase_unimplemented(text);
+        }
+    }
+
+    /// CR 500.8: an added combat phase anchors on the phase its text names —
+    /// "this phase" is any phase, "this combat phase" and "this one" (Save
+    /// Point) the combat phase the effect resolves in. The anchor may sit
+    /// before or after the grant, and " followed by " ends it (All-Out Assault).
+    #[test]
+    fn combat_insert_anchors_on_the_phase_its_text_names() {
+        let combat = ExtraPhaseAnchor::ThisPhase {
+            named: Some(vec![PhaseGroup::Combat]),
+        };
+        for (text, anchor, followed_by) in [
+            (
+                "after this phase, there is an additional combat phase",
+                ExtraPhaseAnchor::ThisPhase { named: None },
+                vec![],
+            ),
+            (
+                "there is an additional combat phase after this phase.",
+                ExtraPhaseAnchor::ThisPhase { named: None },
+                vec![],
+            ),
+            (
+                "there is an additional combat phase after this phase followed by an additional main phase",
+                ExtraPhaseAnchor::ThisPhase { named: None },
+                vec![Phase::PostCombatMain],
+            ),
+            (
+                "after this phase, there is an additional combat phase followed by an additional main phase",
+                ExtraPhaseAnchor::ThisPhase { named: None },
+                vec![Phase::PostCombatMain],
+            ),
+            (
+                "after this combat phase, there is an additional combat phase",
+                combat.clone(),
+                vec![],
+            ),
+            (
+                "there is an additional combat phase after this one.",
+                combat.clone(),
+                vec![],
+            ),
+            (
+                "there is an additional combat phase after this phase, followed by an additional main phase",
+                ExtraPhaseAnchor::ThisPhase { named: None },
+                vec![Phase::PostCombatMain],
+            ),
+        ] {
+            match additional_phase_family_effect(text) {
+                Effect::AdditionalPhase {
+                    phase: Phase::BeginCombat,
+                    after,
+                    followed_by: parsed_followed_by,
+                    ..
+                } => {
+                    assert_eq!(after, anchor, "{text:?}");
+                    assert_eq!(parsed_followed_by, followed_by, "{text:?}");
+                }
+                other => panic!("{text:?}: expected AdditionalPhase, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 500.8: a combat insert adds a phase after a phase, so a step anchor, an
+    /// anchor phrase the grammar does not name, or no anchor fails closed; so
+    /// does a continuation other than an additional main phase, or one that
+    /// goes on past it.
+    /// Reach guard: `combat_insert_anchors_on_the_phase_its_text_names`.
+    #[test]
+    fn combat_insert_without_a_phase_anchor_fails_closed() {
+        for text in [
+            "there is an additional combat phase followed by an additional main phase",
+            "there is an additional combat phase after this step",
+            "there is an additional combat phase after this one step",
+            "after each opponent's first combat phase of each turn, there is an additional combat phase",
+            "there is an additional combat phase after this phase followed by an additional beginning phase",
+            "after this phase, there is an additional combat phase followed by an additional upkeep step",
+            "there is an additional combat phase after this phase followed by an additional main phase and an additional end step",
+            "there is an additional combat phase after this phase followed by an additional main phase followed by an additional end step",
+            "there is an additional combat phase after this phase followed by an additional main phase, followed by an additional end step",
+            "there is an additional combat phase after this phase followed by an additional main phase, and an additional end step",
+        ] {
+            assert_additional_phase_unimplemented(text);
+        }
+    }
+
+    /// CR 500.9 + CR 500.10: a step or beginning-phase anchor ends at a clause
+    /// boundary; only an added combat phase takes a "followed by" continuation,
+    /// so a step sentence carrying one fails closed rather than dropping it,
+    /// wherever the continuation stands and with or without a comma before it.
+    /// Reach guard: `additional_upkeep_after_this_step_is_this_step`.
+    #[test]
+    fn step_anchor_takes_no_continuation() {
+        for text in [
+            "you get an additional upkeep step after this step followed by an additional draw step",
+            "there is an additional beginning phase after this phase followed by an additional main phase",
+            "you get an additional upkeep step after this step, followed by an additional draw step",
+            "after this step, you get an additional upkeep step followed by an additional draw step",
+            "you get an additional upkeep step followed by an additional draw step after this step",
+            "there is an additional end step after this step, followed by an additional draw step",
+            "after this step, there is an additional end step followed by an additional draw step",
+            "there is an additional end step followed by an additional draw step after this step",
+            "there is an additional beginning phase after this phase, followed by an additional main phase",
+            "after this phase, there is an additional beginning phase followed by an additional main phase",
+            "there is an additional beginning phase followed by an additional main phase after this phase",
+        ] {
+            assert_additional_phase_unimplemented(text);
+        }
+    }
+
+    /// CR 500.10a: who gets an added step or phase. "There is / there's / there
+    /// are" names no player (`TargetFilter::None`); "you get" is the controller.
+    /// An expletive that opens another clause ("if there are three or more
+    /// cards …") is not the grant's subject.
+    #[test]
+    fn additional_phase_recipient_follows_the_subject() {
+        for (text, recipient) in [
+            (
+                "after this phase, there is an additional combat phase",
+                TargetFilter::None,
+            ),
+            (
+                "after this main phase, there are two additional combat phases",
+                TargetFilter::None,
+            ),
+            (
+                "there's an additional combat phase after the first combat phase this turn",
+                TargetFilter::None,
+            ),
+            (
+                "there\u{2019}s an additional combat phase after this phase",
+                TargetFilter::None,
+            ),
+            (
+                "there is an additional end step after this step",
+                TargetFilter::None,
+            ),
+            (
+                "there is an additional beginning phase after this phase",
+                TargetFilter::None,
+            ),
+            (
+                "there is an additional upkeep step after this phase",
+                TargetFilter::None,
+            ),
+            (
+                "you get an additional upkeep step after this step",
+                TargetFilter::Controller,
+            ),
+            (
+                "you get that many additional upkeep steps after this phase",
+                TargetFilter::Controller,
+            ),
+            (
+                "if there are three or more cards in your hand, you get an additional upkeep step after this step",
+                TargetFilter::Controller,
+            ),
+        ] {
+            match additional_phase_family_effect(text) {
+                Effect::AdditionalPhase { target, .. } => {
+                    assert_eq!(target, recipient, "{text:?}")
+                }
+                other => panic!("{text:?}: expected AdditionalPhase, got {other:?}"),
+            }
+        }
+    }
+
+    /// CR 500.8 + CR 505.1: "after this main phase" is encoded as a phase anchor
+    /// that names both main phases (Relentless Assault, Full Throttle).
+    #[test]
+    fn after_this_main_phase_combat_names_both_main_phases() {
+        match additional_phase_family_effect(
+            "after this main phase, there is an additional combat phase followed by an additional main phase.",
+        ) {
+            Effect::AdditionalPhase {
+                phase: Phase::BeginCombat,
+                after,
+                followed_by,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } => {
+                assert_eq!(
+                    after,
+                    ExtraPhaseAnchor::ThisPhase {
+                        named: Some(vec![PhaseGroup::PrecombatMain, PhaseGroup::PostcombatMain]),
+                    }
+                );
+                assert_eq!(followed_by, vec![Phase::PostCombatMain]);
+            }
+            other => panic!("expected AdditionalPhase, got {other:?}"),
+        }
+        match additional_phase_family_effect(
+            "after this main phase, there are two additional combat phases.",
+        ) {
+            Effect::AdditionalPhase {
+                after,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            } => assert_eq!(after, ExtraPhaseAnchor::this_main_phase()),
+            other => panic!("expected two main-phase-anchored combats, got {other:?}"),
+        }
+    }
+
+    /// CR 500.8 + CR 501.1: an added beginning phase follows a phase, so only
+    /// "after this phase" is accepted; a step anchor fails closed.
+    #[test]
+    fn additional_beginning_phase_accepts_only_phase_anchor() {
+        assert!(matches!(
+            additional_phase_family_effect(
+                "there is an additional beginning phase after this phase"
+            ),
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                after: ExtraPhaseAnchor::ThisPhase { named: None },
+                ..
+            }
+        ));
+        assert_additional_phase_unimplemented(
+            "there is an additional beginning phase after this step",
+        );
+    }
+
+    /// CR 500.8 + CR 505.1a + CR 505.1b: World at War and Swinging Ship name a
+    /// fixed phase of the turn.
+    #[test]
+    fn first_of_turn_anchor_names_the_first_combat_and_the_second_main_phase() {
+        match additional_phase_family_effect(
+            "After the second main phase this turn, there's an additional combat phase followed by an additional main phase.",
+        ) {
+            Effect::AdditionalPhase {
+                phase: Phase::BeginCombat,
+                after,
+                followed_by,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } => {
+                assert_eq!(after, ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::PostcombatMain));
+                assert_eq!(followed_by, vec![Phase::PostCombatMain]);
+            }
+            other => panic!("expected World at War's AdditionalPhase, got {other:?}"),
+        }
+        match additional_phase_family_effect(
+            "After the first combat phase this turn, there's an additional combat phase.",
+        ) {
+            Effect::AdditionalPhase {
+                phase: Phase::BeginCombat,
+                after,
+                followed_by,
+                ..
+            } => {
+                assert_eq!(after, ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::Combat));
+                assert!(followed_by.is_empty());
+            }
+            other => panic!("expected Swinging Ship's AdditionalPhase, got {other:?}"),
+        }
+    }
+
+    /// CR 505.1b: the ordinal grammar accepts exactly "the first combat phase
+    /// this turn" and "the second main phase this turn", so it emits only the
+    /// `Combat` and `PostcombatMain` groups. Every other ordinal, phase noun or
+    /// turn qualifier over the same frame is rejected; the two accepted cells
+    /// are the reach guard for the rejected ones.
+    #[test]
+    fn first_of_turn_anchor_grammar_accepts_only_the_two_printed_phrases() {
+        let mut accepted = Vec::new();
+        for ordinal in ["first", "second", "third", "last", "next"] {
+            for noun in [
+                "combat phase",
+                "main phase",
+                "precombat main phase",
+                "postcombat main phase",
+                "beginning phase",
+                "ending phase",
+                "upkeep step",
+                "draw step",
+                "end step",
+            ] {
+                for qualifier in [" this turn", " of the turn", " of each turn", ""] {
+                    let phrase = format!("after the {ordinal} {noun}{qualifier}, there is");
+                    if let Ok((_, anchor)) = parse_extra_step_anchor(&phrase) {
+                        accepted.push((ordinal, noun, qualifier, anchor));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            accepted,
+            vec![
+                (
+                    "first",
+                    "combat phase",
+                    " this turn",
+                    ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::Combat),
+                ),
+                (
+                    "second",
+                    "main phase",
+                    " this turn",
+                    ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::PostcombatMain),
+                ),
+            ]
+        );
+        // The anchor must end at a clause boundary.
+        assert!(parse_extra_step_anchor("after the first combat phase this turn and").is_err());
+        // Throat Wolf and Bear with Set's Mechanic name an ordinal combat phase
+        // in other frames; neither is an anchor.
+        for lower in [
+            "after each opponent's first combat phase of each turn, there is an additional combat phase.",
+            "there is an additional combat phase after the first, and only creatures with aggressive may attack during it",
+        ] {
+            assert_eq!(
+                nom_primitives::scan_at_word_boundaries(lower, parse_extra_step_anchor),
+                None,
+                "{lower:?}"
+            );
+        }
+    }
+
+    /// CR 500.8: the combat and beginning-phase arms accept a first-of-turn
+    /// phase anchor; the end-step arm, which emits only the CR 500.9 step
+    /// form, fails closed on it. A combat insert after an ordinal phase the
+    /// grammar rejects has no phase anchor, so it fails closed too.
+    #[test]
+    fn first_of_turn_anchor_per_arm() {
+        assert!(matches!(
+            additional_phase_family_effect(
+                "there is an additional beginning phase after the first combat phase this turn"
+            ),
+            Effect::AdditionalPhase {
+                phase: Phase::Untap,
+                after: ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::Combat),
+                ..
+            }
+        ));
+        assert_additional_phase_unimplemented(
+            "there is an additional end step after the first combat phase this turn",
+        );
+        for text in [
+            "after the second combat phase this turn, there is an additional combat phase",
+            "after the third main phase this turn, there is an additional combat phase",
+        ] {
+            assert_additional_phase_unimplemented(text);
+        }
+    }
+
+    /// World at War's and Swinging Ship's full Oracle text parse to a
+    /// first-of-turn anchor (the spell ability and the Attraction's visit
+    /// trigger).
+    #[test]
+    fn world_at_war_and_swinging_ship_parse_to_first_of_turn() {
+        fn anchor_in(def: &AbilityDefinition) -> Option<ExtraPhaseAnchor> {
+            match &*def.effect {
+                Effect::AdditionalPhase { after, .. } => Some(after.clone()),
+                _ => def.sub_ability.as_deref().and_then(anchor_in),
+            }
+        }
+        let waw = crate::parser::oracle::parse_oracle_text(
+            "After the second main phase this turn, there's an additional combat phase followed by an additional main phase. At the beginning of that combat, untap all creatures that attacked this turn.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)",
+            "World at War",
+            &["Rebound".to_string()],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert_eq!(
+            waw.abilities.iter().find_map(anchor_in),
+            Some(ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::PostcombatMain)),
+            "{:?}",
+            waw.abilities
+        );
+        let ship = crate::parser::oracle::parse_oracle_text(
+            "Visit — After the first combat phase this turn, there's an additional combat phase. At the beginning of that combat, untap all creatures that attacked this turn.",
+            "Swinging Ship",
+            &[],
+            &["Artifact".to_string()],
+            &["Attraction".to_string()],
+        );
+        assert_eq!(
+            ship.triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .find_map(anchor_in),
+            Some(ExtraPhaseAnchor::FirstOfTurn(PhaseGroup::Combat)),
+            "{:?}",
+            ship.triggers
+        );
     }
 
     #[test]
