@@ -142,6 +142,16 @@ pub mod players;
 pub(crate) mod precast_copy_shortcut;
 pub use precast_copy_shortcut::normalize_untrusted_restore;
 pub use precast_copy_shortcut::rekey_after_trusted_restore;
+pub(crate) mod payment_transaction;
+/// Test-support accessor for the materialized shadow contract. Production
+/// consumers continue to use viewer-filtered projections and never receive the
+/// authoritative replay helper directly.
+#[cfg(feature = "test-support")]
+pub fn staged_payment_shadow_for_test(
+    state: &crate::types::game_state::GameState,
+) -> crate::types::game_state::GameState {
+    payment_transaction::project(state)
+}
 pub mod preview;
 pub mod printed_cards;
 pub mod priority;

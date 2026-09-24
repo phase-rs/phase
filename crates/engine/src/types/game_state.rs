@@ -24,7 +24,7 @@ use super::ability::{
     ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
     TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
 };
-use super::actions::{DebugCardCreationKind, ResolveAllScope};
+use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
@@ -17955,6 +17955,61 @@ pub struct LoopDetectSample {
     pub live: GameState,
 }
 
+/// CR 601.2h + CR 608.2c: authoritative descriptor for a resolution-time
+/// composite payment that crossed an interactive choice. The canonical state
+/// remains the pre-payment base while this descriptor is live; viewers and
+/// legal-action consumers materialize the shadow by replaying `root` and the
+/// submitted `transcript` against that base. Keeping the descriptor as a
+/// replayable root rather than a nested `GameState` snapshot avoids a second
+/// rules authority and keeps persistence/restore deterministic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolutionPaymentTransaction {
+    /// Descriptor wire version. This is independent from the resolution-frame
+    /// wire version because the transaction is a top-level optional carrier.
+    #[serde(default = "resolution_payment_transaction_wire_version")]
+    pub wire_version: u32,
+    /// Player who owns the payment decision. The live `WaitingFor` remains the
+    /// action-authorization authority; this field is provenance for audits and
+    /// restore validation.
+    pub owner: PlayerId,
+    /// The complete resolution root, including its printed rider chain.
+    pub root: Box<ResolvedAbility>,
+    /// Actions already accepted while the payment shadow was paused. The
+    /// authenticated actor is persisted alongside each action so replay cannot
+    /// silently substitute a different controller/submitter. Events are
+    /// deliberately not stored here; replay regenerates them and commit
+    /// publishes them exactly once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<ResolutionPaymentTranscriptEntry>,
+    /// Authoritative pre-payment waiting state. The live state may expose the
+    /// shadow prompt while this descriptor is active, but resource/object state
+    /// remains at this base until commit.
+    pub base_waiting_for: WaitingFor,
+    /// CR 603.2c + CR 608.2c: resolution-time trigger context captured at the
+    /// transaction boundary. A replay must restore this context before it
+    /// re-evaluates payer and quantity expressions after a pause/serde roundtrip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_trigger_context: Option<ResolvingTriggerContext>,
+}
+
+/// One admitted action in a staged payment transaction. Both halves of the
+/// original interaction boundary are durable: the authenticated submitter is
+/// retained for audit, while the semantic owner freezes the decision slot that
+/// was admitted. Replay uses that frozen owner instead of re-authorizing the
+/// historical submitter against a later control topology.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolutionPaymentTranscriptEntry {
+    #[serde(alias = "actor")]
+    pub authenticated_actor: PlayerId,
+    #[serde(default)]
+    pub semantic_owner: PlayerId,
+    pub action: GameAction,
+}
+
+fn resolution_payment_transaction_wire_version() -> u32 {
+    1
+}
+
 /// CR 104.1: the result of a game that has ended. `winner: None` is a draw (CR 104.4).
 /// Written only by `elimination::end_game`; see [`GameState::game_end`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19607,6 +19662,16 @@ declare_game_state! {
     /// first migrated family parks work.
     #[serde(default, skip_serializing_if = "ResolutionStack::is_empty")]
     pub resolution_stack: Box<ResolutionStack>,
+
+    /// CR 601.2h + CR 608.2c: staged resolution-time composite payment. The
+    /// descriptor is durable authority (base + replayable transaction), while
+    /// the two execution flags below are transient replay guards only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_transaction: Option<Box<ResolutionPaymentTransaction>>,
+    #[serde(skip)]
+    pub payment_transaction_replay: bool,
+    #[serde(skip)]
+    pub payment_transaction_just_handled: bool,
 
     /// Borrowed execution-local view of the active continuation's captured
     /// Aura host. The authoritative value remains inside
@@ -25219,6 +25284,9 @@ impl GameState {
             public_revealed_cards: Box::default(),
             product_knowledge_state: Box::default(),
             resolution_stack: Box::default(),
+            payment_transaction: None,
+            payment_transaction_replay: false,
+            payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
             resolving_player_scope_linked_exile: None,
             merged_card_component_route: None,
@@ -27482,6 +27550,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         public_revealed_cards: _,
         product_knowledge_state: _,
         resolution_stack: _,
+        payment_transaction: _,
+        payment_transaction_replay: _,
+        payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
         resolving_player_scope_linked_exile: _,
         merged_card_component_route: _,
@@ -27824,6 +27895,7 @@ impl PartialEq for GameState {
             && self.public_revealed_cards == other.public_revealed_cards
             && self.product_knowledge_state == other.product_knowledge_state
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
+            && self.payment_transaction == other.payment_transaction
             && self.pending_resolution_completion == other.pending_resolution_completion
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing

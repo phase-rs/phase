@@ -227,6 +227,21 @@ pub fn eliminate_players_simultaneously(
         }
     }
 
+    // CR 800.4a: a staged resolution-payment descriptor is a continuation
+    // owned by its payer/root owner. Retire it before the leave sweep when that
+    // owner departs; an unrelated player's concession must leave the payment
+    // live for its surviving owner. `GameAction::Concede` reaches this normal
+    // elimination path rather than the payment transcript authority.
+    if let Some(owner) = state
+        .payment_transaction
+        .as_ref()
+        .map(|transaction| transaction.owner)
+    {
+        if leaving_set.contains(&owner) {
+            super::payment_transaction::abandon_for_owner_departure(state, owner);
+        }
+    }
+
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before
     // `do_eliminate` removes the departing player's own state, so teardown

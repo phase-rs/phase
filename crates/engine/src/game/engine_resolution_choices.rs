@@ -26,7 +26,9 @@ use super::effects;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
-use super::{casting, casting_costs, engine_priority, mana_abilities, public_state};
+use super::{
+    casting, casting_costs, engine_priority, mana_abilities, payment_transaction, public_state,
+};
 
 /// A fresh mass library-order prompt is valid only for
 /// the exact member identities and origins frozen by its producer. Prompt cards
@@ -1771,6 +1773,32 @@ pub(super) fn handle_resolution_choice(
     action: GameAction,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionChoiceOutcome, EngineError> {
+    // CR 601.2h + CR 608.2c: callers that already sit inside the resolution
+    // choice reducer (including legacy/internal tests) must use the same
+    // staged-payment action owner as the public engine boundary. The public
+    // boundary normally intercepts earlier; this guard is the single fallback
+    // for direct resolution-choice dispatch and cannot double-apply because the
+    // descriptor is cleared or extended by `apply_pending_action` itself.
+    if payment_transaction::owns_action(state, &action) {
+        let semantic_owner = waiting_for
+            .acting_players()
+            .first()
+            .copied()
+            .or_else(|| state.payment_transaction.as_ref().map(|tx| tx.owner))
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "staged payment choice has no semantic owner".to_string(),
+                )
+            })?;
+        let actor = super::turn_control::authorized_submitter_for_player(state, semantic_owner);
+        let result = payment_transaction::apply_pending_action(state, actor, action)?;
+        events.extend(result.events);
+        return Ok(ResolutionChoiceOutcome::ActionResult(ActionResult {
+            events: std::mem::take(events),
+            waiting_for: result.waiting_for,
+            log_entries: result.log_entries,
+        }));
+    }
     let outcome = match (waiting_for, action) {
         // CR 608.2d: the resolving effect offers only its legal optional payment choices; CR 118.12: choosing a payable branch continues the payment whose success governs the reflexive "If you do" result.
         (

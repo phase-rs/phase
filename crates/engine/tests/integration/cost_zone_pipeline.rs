@@ -4797,8 +4797,18 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
         life_before,
         "neither the later life cost nor the rider may run before the typed mana root settles"
     );
+    assert!(
+        runner.state().payment_transaction.is_some(),
+        "the canonical state keeps the staged payment descriptor"
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the canonical state remains pre-payment while the composite is paused"
+    );
+    let shadow = engine::game::staged_payment_shadow_for_test(runner.state());
+    assert!(shadow.payment_transaction.is_none());
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        shadow.pending_cost_move_resume.as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }
@@ -4829,6 +4839,15 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
             .count(),
         1,
         "the source's paid tap prefix is never replayed"
+    );
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::LifeChanged { amount: 1, .. }))
+            .count(),
+        1,
+        "the rider resumes exactly once after the unpaid suffix"
     );
     assert!(runner.state().pending_cost_move_resume.is_none());
 }

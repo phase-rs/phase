@@ -2337,6 +2337,15 @@ pub fn flat_priority_actions_with_probe(
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
+    // CR 601.2h + CR 608.2c: enumerate against the replayed payment shadow so
+    // the live choice remains actionable while canonical resources stay staged.
+    let payment_projected;
+    let state = if state.payment_transaction.is_some() {
+        payment_projected = crate::game::payment_transaction::project(state);
+        &payment_projected
+    } else {
+        state
+    };
     let priority_probe_storage;
     let flushed_storage;
     let (state, priority_probe) = match &state.waiting_for {

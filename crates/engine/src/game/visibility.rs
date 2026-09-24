@@ -494,6 +494,14 @@ fn privately_looked_at_ids(
     viewer: PlayerId,
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> HashSet<ObjectId> {
+    privately_looked_at_ids_for_scope(state, Some(viewer), can_view_private_for_player)
+}
+
+fn privately_looked_at_ids_for_scope(
+    state: &GameState,
+    viewer: Option<PlayerId>,
+    can_view_private_for_player: &impl Fn(PlayerId) -> bool,
+) -> HashSet<ObjectId> {
     let mut visible: HashSet<ObjectId> = match state.private_look_player {
         Some(looker) if can_view_private_for_player(looker) => {
             state.private_look_ids.iter().copied().collect()
@@ -501,7 +509,7 @@ fn privately_looked_at_ids(
         _ => HashSet::new(),
     };
     for (_, search) in state.active_library_searches.iter() {
-        if search.learned_audience().contains(&viewer) {
+        if viewer.is_some_and(|viewer| search.learned_audience().contains(&viewer)) {
             for (owner, zone, identity) in search.looked_at() {
                 if state
                     .objects
@@ -977,6 +985,66 @@ pub(crate) fn identity_projection_for_viewer(
     projections
 }
 
+/// Identity projection for an unseated wire observer. There is no player id
+/// to feed into topology or turn-control authority: every private zone is
+/// redacted, while globally revealed cards remain public. Face-down battlefield
+/// identities are likewise hidden because an unseated observer controls no
+/// player.
+pub(crate) fn identity_projection_for_unseated_viewer(
+    state: &GameState,
+) -> BTreeMap<ObjectId, IdentityProjection> {
+    let mut projections = BTreeMap::new();
+    let mut hide_if_private = |object_id: ObjectId| {
+        let public = state.revealed_cards.contains(&object_id)
+            || state.objects.get(&object_id).is_some_and(|object| {
+                state.public_revealed_cards.contains(&object_id) && object.zone != Zone::Library
+            });
+        if !public {
+            projections.insert(object_id, IdentityProjection::Hidden);
+        }
+    };
+
+    for player in &state.players {
+        for object_id in player
+            .hand
+            .iter()
+            .chain(player.library.iter())
+            .chain(player.attraction_deck.iter())
+            .chain(player.contraption_deck.iter())
+        {
+            hide_if_private(*object_id);
+        }
+    }
+    for object_id in state
+        .planar_deck
+        .iter()
+        .chain(state.scheme_deck.iter())
+        .chain(state.exile.iter())
+    {
+        if state
+            .objects
+            .get(object_id)
+            .is_some_and(|object| object.face_down)
+        {
+            hide_if_private(*object_id);
+        }
+    }
+    for object_id in state
+        .battlefield
+        .iter()
+        .chain(state.stack.iter().map(|entry| &entry.id))
+    {
+        if state
+            .objects
+            .get(object_id)
+            .is_some_and(|object| object.face_down && object.back_face.is_some())
+        {
+            projections.insert(*object_id, IdentityProjection::FaceDownRedacted);
+        }
+    }
+    projections
+}
+
 /// CR 732.2a: the board a loop-shortcut DETECTION drive is entitled to reason about — a
 /// clone of `state` with every object `proposer` may not look at blanked.
 ///
@@ -1023,7 +1091,96 @@ pub(crate) fn proposer_hidden_view(state: &GameState, proposer: PlayerId) -> Gam
 /// Hides all opponents' hand contents and all library contents except where the
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
-    let mut filtered = state.clone();
+    filter_state_for_scope(state, Some(viewer))
+}
+
+/// Returns a public projection for a wire with no authenticated seat. An
+/// unseated observer has no private-zone or team access, including in
+/// OneVsMany/Archenemy topologies.
+pub fn filter_state_for_unseated_viewer(state: &GameState) -> GameState {
+    // Keep the unscoped wire's public continuation/provenance shape intact.
+    // `filter_state_for_scope` is the seated viewer projection authority and
+    // deliberately clears executable carriers such as `resolution_stack` and
+    // delayed-trigger roots; a direct client wire must retain those public
+    // fields so its existing raw-ingress fingerprint remains meaningful.
+    let mut filtered = crate::game::payment_transaction::project_without_viewer(state);
+    for (object_id, projection) in identity_projection_for_unseated_viewer(state) {
+        match projection {
+            IdentityProjection::Hidden => hide_card(&mut filtered, object_id),
+            IdentityProjection::FaceDownRedacted => {
+                if let Some(object) = filtered.objects.get_mut(&object_id) {
+                    redact_face_down_identity_from_observer(object);
+                }
+            }
+            // The unseated scope never receives a revealed face-down identity.
+            IdentityProjection::FaceDownRevealed => {}
+        }
+    }
+    filtered.viewer_projection = None;
+    filtered
+}
+
+fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameState {
+    // CR 601.2h + CR 608.2c: only the actor entitled to answer the staged
+    // prompt receives its materialized shadow. Other viewers retain the
+    // canonical base, preventing an uncommitted public-zone mutation from
+    // becoming observable before a later abort/commit decision.
+    let mut filtered = match viewer {
+        Some(viewer) => crate::game::payment_transaction::project_for_viewer(state, viewer),
+        None => crate::game::payment_transaction::project_without_viewer(state),
+    };
+    let viewer_knows = |object_id: ObjectId| {
+        viewer.is_some_and(|viewer| state.viewer_knows_card_identity(viewer, object_id))
+    };
+    let can_view_private_for_player = |player: PlayerId| {
+        viewer.is_some_and(|viewer| viewer_has_private_access_to_player(state, viewer, player))
+    };
+    // CR 400.2 + CR 608.2h: an authorized submitter may receive the staged
+    // shadow's zone/choice shape, but that shadow must not mint a new card
+    // identity for a controller who could not identify the canonical hidden
+    // object. Compare the canonical base with the already-materialized shadow
+    // and redact only hidden-zone objects that crossed into a public zone;
+    // already-known/revealed identities remain visible as before. This is a
+    // display-only overlay, so the authoritative replay still retains the
+    // real object and transcript.
+    let staged_hidden_identity_ids: HashSet<ObjectId> = state
+        .payment_transaction
+        .as_ref()
+        .map(|_| {
+            state
+                .objects
+                .iter()
+                .filter_map(|(object_id, base_object)| {
+                    let projected_object = filtered.objects.get(object_id)?;
+                    let crossed_hidden_boundary =
+                        matches!(base_object.zone, Zone::Hand | Zone::Library)
+                            && projected_object.zone != base_object.zone;
+                    let identity_already_known = viewer_knows(*object_id)
+                        || state.revealed_cards.contains(object_id)
+                        || state.public_revealed_cards.contains(object_id);
+                    (crossed_hidden_boundary
+                        && !can_view_private_for_player(base_object.owner)
+                        && !identity_already_known)
+                        .then_some(*object_id)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for object_id in &staged_hidden_identity_ids {
+        let (face_down, foretold) = filtered
+            .objects
+            .get(object_id)
+            .map(|object| (object.face_down, object.foretold))
+            .unwrap_or((false, false));
+        hide_card(&mut filtered, *object_id);
+        if let Some(object) = filtered.objects.get_mut(object_id) {
+            // This is a hidden-identity overlay, not a face-down zone change:
+            // retain the projected object's zone/face-down state after the
+            // shared hide leaf clears every printed and derived characteristic.
+            object.face_down = face_down;
+            object.foretold = foretold;
+        }
+    }
     // This clone is a display snapshot, never rules authority: the ~20 private
     // carriers blanked below are dropped while the public `waiting_for` that
     // stands over them is preserved. Record that here so the fact survives
@@ -1032,7 +1189,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // It is deliberately NOT refused on the transport decode path: the multiplayer
     // protocol ships projections to viewers on purpose. Last-writer-wins:
     // re-projecting a projection for another viewer re-latches to that viewer.
-    filtered.viewer_projection = Some(viewer);
+    filtered.viewer_projection = viewer;
     // The original Cube multiset is authoritative pack-generation input. A viewer
     // learns the opened pack through `waiting_for`, never every undealt entry.
     filtered.booster_pack_pool = None;
@@ -1200,12 +1357,12 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered.liminal_entries.clear();
     filtered.pending_liminal_entry_resume = None;
 
-    let can_view_private_for_player =
-        |player: PlayerId| viewer_has_private_access_to_player(state, viewer, player);
     let replacement_choice_authorized = matches!(
         &state.waiting_for,
         WaitingFor::ReplacementChoice { player, .. }
-            if turn_control::authorized_submitter_for_player(state, *player) == viewer
+            if viewer.is_some_and(|viewer| {
+                turn_control::authorized_submitter_for_player(state, *player) == viewer
+            })
     );
 
     // A pending replacement is the authoritative continuation record behind a
@@ -1216,16 +1373,19 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         filtered.pending_replacement = None;
     }
 
-    filtered
-        .active_library_searches
-        .retain(|_, search| search.learned_audience().contains(&viewer));
+    filtered.active_library_searches.retain(|_, search| {
+        viewer.is_some_and(|viewer| search.learned_audience().contains(&viewer))
+    });
     filtered
         .active_search_decision_controls
         .retain(|searcher, _| {
             state.waiting_for.acting_players().contains(searcher)
-                && turn_control::authorized_submitter_for_player(state, *searcher) == viewer
+                && viewer.is_some_and(|viewer| {
+                    turn_control::authorized_submitter_for_player(state, *searcher) == viewer
+                })
         });
-    let private_look_visible = privately_looked_at_ids(state, viewer, &can_view_private_for_player);
+    let private_look_visible =
+        privately_looked_at_ids_for_scope(state, viewer, &can_view_private_for_player);
 
     // CR 400.2 + CR 406.3 + CR 708.5: ONE identity decision per object, taken by the
     // single authority both this projection and the detection-drive view read, then
@@ -1235,7 +1395,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // Every leaf that HIDES records its replacement-candidate source immediately after
     // its write; `FaceDownRevealed` records nothing, because it discloses rather than
     // hides.
-    for (obj_id, projection) in identity_projection_for_viewer(state, viewer) {
+    let identity_projection = match viewer {
+        Some(viewer) => identity_projection_for_viewer(state, viewer),
+        None => identity_projection_for_unseated_viewer(state),
+    };
+    for (obj_id, projection) in identity_projection {
         match projection {
             IdentityProjection::Hidden => {
                 hide_card(&mut filtered, obj_id);
@@ -1262,6 +1426,33 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             }
         }
     }
+
+    // CR 400.2 + CR 400.7: the turn-scoped zone-change journal snapshots a
+    // card's identity independently of `objects`. A staged shadow may append a
+    // hand -> public-zone record before commit, so redact that record from a
+    // viewer who could not identify the canonical object. Otherwise the object
+    // is hidden but its journal still leaks the same card name/LKI.
+    let mut hidden_zone_change_ids: HashSet<ObjectId> = match viewer {
+        Some(viewer) => identity_projection_for_viewer(state, viewer),
+        None => identity_projection_for_unseated_viewer(state),
+    }
+    .into_iter()
+    .filter_map(|(object_id, projection)| {
+        matches!(projection, IdentityProjection::Hidden).then_some(object_id)
+    })
+    .collect();
+    hidden_zone_change_ids.extend(staged_hidden_identity_ids);
+    filtered.zone_changes_this_turn = filtered
+        .zone_changes_this_turn
+        .iter()
+        .cloned()
+        .map(|mut record| {
+            if hidden_zone_change_ids.contains(&record.object_id) {
+                redact_zone_change_record(&mut record);
+            }
+            record
+        })
+        .collect();
 
     // Source-bound named choices carry complete source contexts in authoritative
     // state. The client needs only the exact public prompt projection, never its
@@ -1346,7 +1537,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             owner: None,
             proposition_truth: None,
         };
-        let is_controller = source.prompt.controller == viewer;
+        let is_controller = viewer.is_some_and(|viewer| source.prompt.controller == viewer);
         if !is_controller {
             if let Some(obj) = filtered
                 .objects
@@ -1441,8 +1632,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         state.objects.get(&id).is_some_and(|obj| {
             matches!(obj.zone, Zone::Hand | Zone::Library)
                 && !can_view_private_for_player(obj.owner)
-                && !is_visible_revealed_card(state, viewer, id)
-                && !state.viewer_knows_card_identity(viewer, id)
+                && !viewer.is_some_and(|viewer| is_visible_revealed_card(state, viewer, id))
+                && !viewer_knows(id)
                 && !private_look_visible.contains(&id)
         })
     };
@@ -1755,7 +1946,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     let can_view_scoped_search_private = |searcher: PlayerId| {
         state.active_library_searches.get(&searcher).map_or_else(
             || can_view_private_for_player(searcher),
-            |search| search.learned_audience().contains(&viewer),
+            |search| viewer.is_some_and(|viewer| search.learned_audience().contains(&viewer)),
         )
     };
     if let Some(pending) = filtered.pending_scoped_library_search.as_mut() {
@@ -2195,14 +2386,18 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
-    filtered.auto_pass.retain(|pid, _| *pid == viewer);
-    filtered.phase_stops.retain(|pid, _| *pid == viewer);
+    filtered
+        .auto_pass
+        .retain(|pid, _| viewer.is_some_and(|viewer| *pid == viewer));
+    filtered
+        .phase_stops
+        .retain(|pid, _| viewer.is_some_and(|viewer| *pid == viewer));
     filtered
         .priority_passing_modes
-        .retain(|pid, _| *pid == viewer);
+        .retain(|pid, _| viewer.is_some_and(|viewer| *pid == viewer));
     filtered
         .may_trigger_auto_choices
-        .retain(|record| record.selector.player() == viewer);
+        .retain(|record| viewer.is_some_and(|viewer| record.selector.player() == viewer));
     // CR 723.4: "If information about an object in the game would be visible to the player
     // being controlled, it's visible to both that player and the player controlling them."
     // The pin vector's other carriers already answer "may this viewer see it" with this same
@@ -2214,16 +2409,18 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
         .decision_templates
         .retain(|t| can_view_private_for_player(t.owner));
-    filtered.priority_yields.retain(|y| y.player == viewer);
+    filtered
+        .priority_yields
+        .retain(|y| viewer.is_some_and(|viewer| y.player == viewer));
     filtered
         .lands_tapped_for_mana
-        .retain(|pid, _| *pid == viewer);
+        .retain(|pid, _| viewer.is_some_and(|viewer| *pid == viewer));
     filtered
         .cards_drawn_this_turn
         .retain(|pid, _| can_view_private_for_player(*pid));
     filtered
         .outside_game_cards_brought_in
-        .retain(|record| record.player == viewer);
+        .retain(|record| viewer.is_some_and(|viewer| record.player == viewer));
 
     // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
     // caster, targets, chosen X values, and pending mana payment are all visible to
@@ -2244,7 +2441,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // and sideboarding between games is one of those, so a turn controller has no
     // sideboarding role to serve and the seat's registered list stays with its owner.
     let sideboarding_player = match &state.waiting_for {
-        WaitingFor::BetweenGamesSideboard { player, .. } if *player == viewer => Some(*player),
+        WaitingFor::BetweenGamesSideboard { player, .. }
+            if viewer.is_some_and(|viewer| *player == viewer) =>
+        {
+            Some(*player)
+        }
         _ => None,
     };
     for pool in &mut filtered.deck_pools {
@@ -2344,7 +2545,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 /// information visible to that player; when turns are shared, controlling one
 /// player controls that player's team. Reuse submitter authority so the same
 /// team-turn boundary governs decisions and private information.
-fn viewer_has_private_access_to_player(
+pub(crate) fn viewer_has_private_access_to_player(
     state: &GameState,
     viewer: PlayerId,
     player: PlayerId,
@@ -2670,6 +2871,29 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     Arc::make_mut(&mut obj.base_static_definitions).clear();
     obj.base_color.clear();
     obj.base_printed_ref = None;
+}
+
+fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRecord) {
+    record.name = HIDDEN_CARD_NAME.to_string();
+    record.core_types.clear();
+    record.subtypes.clear();
+    record.supertypes.clear();
+    record.keywords.clear();
+    record.trigger_definitions.clear();
+    record.trigger_source_context = None;
+    record.power = None;
+    record.toughness = None;
+    record.base_power = None;
+    record.base_toughness = None;
+    record.colors.clear();
+    record.mana_value = 0;
+    record.cast_from_zone = None;
+    record.played_from_zone = None;
+    record.attachments.clear();
+    record.linked_exile_snapshot.clear();
+    record.is_token = false;
+    record.combat_status = Default::default();
+    record.co_departed.clear();
 }
 
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {

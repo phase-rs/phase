@@ -993,6 +993,8 @@ pub struct ClientGameStateRef<'a> {
     pub state: &'a GameState,
     pub derived: DerivedViews,
     display_visible_object_ids: Option<BTreeSet<ObjectId>>,
+    viewer: Option<PlayerId>,
+    already_filtered: bool,
 }
 
 impl Serialize for ClientGameStateRef<'_> {
@@ -1006,8 +1008,13 @@ impl Serialize for ClientGameStateRef<'_> {
             derived: &'a DerivedViews,
         }
 
-        let state = client_state_wire_value(self.state, self.display_visible_object_ids.as_ref())
-            .map_err(serde::ser::Error::custom)?;
+        let state = client_state_wire_value(
+            self.state,
+            self.display_visible_object_ids.as_ref(),
+            self.viewer,
+            self.already_filtered,
+        )
+        .map_err(serde::ser::Error::custom)?;
         ClientGameStateEnvelope {
             state: &state,
             derived: &self.derived,
@@ -1023,8 +1030,22 @@ impl Serialize for ClientGameStateRef<'_> {
 fn client_state_wire_value(
     state: &GameState,
     display_visible_object_ids: Option<&BTreeSet<ObjectId>>,
+    viewer: Option<PlayerId>,
+    already_filtered: bool,
 ) -> serde_json::Result<serde_json::Value> {
-    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    // CR 601.2h + CR 608.2c: direct client snapshots must pass through the
+    // same identity/knowledge redaction as the filtered-viewer path. An
+    // unscoped wire has no authenticated actor, so it must keep the canonical
+    // base and never materialize a staged shadow; wrap_filtered has already
+    // performed the viewer projection.
+    let payment_projected = match (viewer, already_filtered) {
+        (Some(viewer), false) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+        (Some(_), true) => state.clone(),
+        (None, false) => crate::game::visibility::filter_state_for_unseated_viewer(state),
+        (None, true) => state.clone(),
+    };
+    let projected_state =
+        crate::game::visibility::project_paid_cast_cleanup_authority(&payment_projected);
     let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
@@ -1119,14 +1140,16 @@ impl<'a> ClientGameStateRef<'a> {
                 .filter_map(|(id, object)| object.display_visible_to_viewer.then_some(*id))
                 .collect()
         });
-        let mut derived = derive_views(state, viewer);
-        if let Some(filtered) = filtered_state.as_ref() {
-            derived.visible_exile_object_ids = visible_exile_object_ids(filtered);
-        }
+        let derived = match filtered_state.as_ref() {
+            Some(filtered) => derive_filtered_views(state, filtered, viewer),
+            None => derive_views(state, viewer),
+        };
         Self {
             state,
             derived,
             display_visible_object_ids,
+            viewer,
+            already_filtered: false,
         }
     }
 
@@ -1142,6 +1165,8 @@ impl<'a> ClientGameStateRef<'a> {
             state: filtered_state,
             derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
             display_visible_object_ids: None,
+            viewer,
+            already_filtered: true,
         }
     }
 }
