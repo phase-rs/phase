@@ -10,8 +10,8 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
     AdditionalCostInstancePayment, AttachCardinality, AttachSelection, CastTimingPermission,
-    CostPaidObjectSnapshot, Duration, Effect, EffectKind, KickerVariant, LibraryPosition,
-    ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    CostPaidObjectSnapshot, Duration, Effect, EffectKind, ExileConcealment, KickerVariant,
+    LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -210,7 +210,7 @@ pub struct ZoneMoveRequest {
     /// exile. This is deliberately a delivery modifier, not an effect epilogue:
     /// a later batch member may park on CR 616.1 while earlier members must
     /// already be hidden.
-    pub face_down_in_exile: bool,
+    pub face_down_in_exile: ExileConcealment,
 }
 
 impl ZoneMoveRequest {
@@ -320,7 +320,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -334,7 +334,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -352,7 +352,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -366,7 +366,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -390,7 +390,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: seed_applied,
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -405,7 +405,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -422,7 +422,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -437,7 +437,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -454,7 +454,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -468,7 +468,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
-            face_down_in_exile: false,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -529,7 +529,7 @@ impl ZoneMoveRequest {
     /// CR 406.3: Conceal this card immediately if the replacement-aware move
     /// delivers it to Exile.
     pub fn face_down_in_exile(mut self) -> Self {
-        self.face_down_in_exile = true;
+        self.face_down_in_exile = ExileConcealment::FaceDown;
         self
     }
 
@@ -1032,7 +1032,7 @@ pub(crate) fn move_object_with_terminal(
         if matches!(req.cause, ZoneChangeCause::DebugCommand) {
             let delivery_start = events.len();
             zones::move_to_zone(state, req.object_id, req.to, events);
-            if req.face_down_in_exile && req.to == Zone::Exile {
+            if req.face_down_in_exile.is_face_down() && req.to == Zone::Exile {
                 zones::mark_face_down_in_exile(state, &mut events[delivery_start..], req.object_id);
             }
             // pod-lab loop-3 Q5: debug-staged board setup (GameScenario, the
@@ -1331,9 +1331,6 @@ fn deliver_batch(
         let object_id = req.object_id;
         match move_object_with_terminal(state, req, events) {
             ZoneMoveTerminalResult::Completed(completion) => {
-                if face_down_in_exile {
-                    zones::mark_face_down_in_exile(state, &mut events[delivery_start..], object_id);
-                }
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
                     .expect("batch member records its exact terminal outcome");
@@ -3639,7 +3636,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 }
             }
         }
-        if face_down_in_exile && to == Zone::Exile {
+        if face_down_in_exile.is_face_down() && to == Zone::Exile {
             zones::mark_face_down_in_exile(state, events, object_id);
         }
         // CR 730.3e: the survivor split (inside `move_to_zone` above) has consumed
@@ -4105,6 +4102,7 @@ pub(crate) fn execute_zone_move_with_controller(
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    face_down_in_exile: ExileConcealment,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4125,7 +4123,7 @@ pub(crate) fn execute_zone_move_with_controller(
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
-        false,
+        face_down_in_exile,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4168,7 +4166,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
-        false,
+        ExileConcealment::Public,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4192,7 +4190,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
-    face_down_in_exile: bool,
+    face_down_in_exile: ExileConcealment,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4239,7 +4237,7 @@ fn execute_zone_move_with_applied_terminal(
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
-    face_down_in_exile: bool,
+    face_down_in_exile: ExileConcealment,
     // CR 608.2c: whether this entry is the producer a following demonstrative
     // anaphor binds to. Only `move_object_with_terminal` forwards a request's
     // intent; the four public `execute_zone_move*` wrappers are raw movers with

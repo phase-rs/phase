@@ -3784,19 +3784,21 @@ pub struct PendingZoneChangeDelivery {
     /// CR 406.3: A batch delivery requested concealment on an Exile landing.
     /// It survives the replacement-choice pause so the settled member is hidden
     /// before the next batch member is attempted.
-    #[serde(default)]
-    pub face_down_in_exile: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+    )]
+    pub face_down_in_exile: crate::types::ability::ExileConcealment,
 }
 
 impl PendingZoneChangeDelivery {
     pub fn new(member: ObjectIncarnationRef, expected_event: ProposedEvent) -> Self {
-        let face_down_in_exile = matches!(
-            &expected_event,
+        let face_down_in_exile = match &expected_event {
             ProposedEvent::ZoneChange {
-                face_down_in_exile: true,
-                ..
-            }
-        );
+                face_down_in_exile, ..
+            } => *face_down_in_exile,
+            _ => crate::types::ability::ExileConcealment::Public,
+        };
         Self {
             member,
             expected_event,
@@ -3955,8 +3957,11 @@ pub struct PendingChangeZoneIteration {
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
     /// Typed SearchLibrary intent carried across a replacement pause.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub face_down_in_exile: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+    )]
+    pub face_down_in_exile: crate::types::ability::ExileConcealment,
     /// CR 608.2c: Optional mass-move count carried by `ChangeZoneAll` resume
     /// paths so a paused Aura host choice still leaves "that many" chained
     /// effects with the same count the uninterrupted mass path records.
@@ -5727,8 +5732,11 @@ pub struct PendingBatchZoneMoveRequest {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub face_down_in_exile: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+    )]
+    pub face_down_in_exile: crate::types::ability::ExileConcealment,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -13495,6 +13503,14 @@ pub enum WaitingFor {
         owner_library: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         track_exiled_by_source: bool,
+        /// CR 406.3: typed hidden-Exile intent carried across an interactive
+        /// `EffectZoneChoice` pause. Legacy state still serializes this as a
+        /// boolean through `ExileConcealment`'s compatibility serde.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+        )]
+        face_down_in_exile: crate::types::ability::ExileConcealment,
         /// CR 708.2a + CR 708.3: face-down entry profile carried across the
         /// `EffectZoneChoice` round-trip so a selected `ChangeZone` card that
         /// must enter face down (Yedora-style "return it face down ... It's a
@@ -24008,7 +24024,7 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            conceal = paused.face_down_in_exile && settled_in_exile;
+            conceal = paused.face_down_in_exile.is_face_down() && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
@@ -24059,7 +24075,7 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            conceal = paused.face_down_in_exile && settled_in_exile;
+            conceal = paused.face_down_in_exile.is_face_down() && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
@@ -36808,6 +36824,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -37242,6 +37259,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -37343,7 +37361,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             duration: None,
             track_exiled_by_source: false,
-            face_down_in_exile: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             // CR 708.2a + CR 708.3: the face-down profile must survive the
             // pause/resume serde round-trip so a paused face-down return
@@ -37828,6 +37846,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             // CR 708.2a + CR 708.3: a face-down `ChangeZone` selection must keep
             // its profile across the `EffectZoneChoice` round-trip.
             face_down_profile: Some(crate::types::ability::FaceDownProfile {

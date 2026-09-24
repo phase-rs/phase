@@ -554,8 +554,11 @@ pub enum ProposedEvent {
         face_down_profile: Option<Box<FaceDownProfile>>,
         /// Typed SearchLibrary intent. This is delivery metadata, not a
         /// battlefield `FaceDownProfile`, and survives replacement pauses.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        face_down_in_exile: bool,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+        )]
+        face_down_in_exile: crate::types::ability::ExileConcealment,
         /// CR 608.2c: whether this entry is the producer a following
         /// demonstrative anaphor binds to. Rides the event so a CR 616.1
         /// pause/resume delivers the same answer the effect asked for.
@@ -957,7 +960,7 @@ impl ProposedEvent {
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
-            face_down_in_exile: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: ChainReferentIntent::default(),
             enter_as_copy: None,
             discard_frame: None,

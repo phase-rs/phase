@@ -2126,6 +2126,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         enters_attacking,
         owner_library,
         track_exiled_by_source,
+        face_down_in_exile,
         ref face_down_profile,
         ref enter_with_counters,
         ref conditional_enter_with_counters,
@@ -2158,6 +2159,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 enters_attacking,
                 owner_library,
                 track_exiled_by_source,
+                face_down_in_exile,
                 // Face-down entry characteristics are public effect parameters,
                 // not private hand info — pass them through the redaction.
                 face_down_profile: face_down_profile.clone(),
@@ -2579,20 +2581,17 @@ fn event_visible_to_viewer(
             .as_ref()
             .is_some_and(|context| context.face_down) =>
         {
-            record
+            match record
                 .trigger_source_context()
                 .map(|context| context.identity.reference)
                 .and_then(|identity| hidden_search_viewers.get(&identity))
-                .is_some_and(|audience| audience.contains(&viewer))
-                || state.objects.get(object_id).is_some_and(|obj| {
-                    obj.face_down
-                        && face_down_exile_visible_to_viewer(
-                            state,
-                            *object_id,
-                            obj,
-                            &can_view_private_for_player,
-                        )
-                })
+            {
+                Some(audience) => audience.contains(&viewer),
+                // A face-down Exile departure without hidden-search audience
+                // evidence is an ordinary public face-down Exile move
+                // (foretell/hideaway), not a hidden-search event.
+                None => true,
+            }
         }
         _ => true,
     }
@@ -2626,7 +2625,7 @@ fn library_zone_change_visible_to_viewer(
     // Keep the event-time marker authoritative even after a later continuation
     // moves the card out of Exile, rather than falling through to the live
     // object (whose face-down flag is cleared on zone exit).
-    if event_face_down {
+    if event_face_down && to == Zone::Exile {
         return event_identity
             .and_then(|identity| hidden_search_viewers.get(&identity))
             .is_some_and(|audience| audience.contains(&viewer))
@@ -3823,6 +3822,46 @@ mod tests {
                 visible.as_slice(),
                 [GameEvent::Foretold { object_id, .. }] if *object_id == foretold
             ));
+        }
+    }
+
+    #[test]
+    fn non_search_face_down_exile_departure_keeps_public_fallback() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(705),
+            PlayerId(1),
+            "Public Face-Down Exile".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&card).unwrap().face_down = true;
+
+        let mut record =
+            state.objects[&card].snapshot_for_zone_change(card, Some(Zone::Exile), Zone::Graveyard);
+        record.name = "Public Face-Down Exile".to_string();
+        record.owner = PlayerId(1);
+        record
+            .trigger_source_context
+            .as_mut()
+            .expect("zone-change snapshot carries source context")
+            .face_down = true;
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: card,
+            from: Some(Zone::Exile),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        }];
+
+        for viewer in [PlayerId(0), PlayerId(u8::MAX)] {
+            let visible = filter_events_for_viewer(&events, &state, viewer);
+            assert!(
+                visible.iter().any(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged { object_id, .. } if *object_id == card
+                )),
+                "ordinary face-down Exile departure must remain public without hidden-search evidence"
+            );
         }
     }
 

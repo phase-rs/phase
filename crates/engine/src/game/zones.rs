@@ -1898,29 +1898,37 @@ pub(crate) fn mark_face_down_in_exile(
         }
     }
 
-    if let Some(GameEvent::ZoneChanged { record, .. }) = events.iter_mut().rev().find(|event| {
-        matches!(
-            event,
-            GameEvent::ZoneChanged {
-                object_id: id,
-                to: Zone::Exile,
-                ..
-            } if *id == object_id
-        )
-    }) {
+    let exact_ledger_entry = events.iter_mut().rev().find_map(|event| {
+        let GameEvent::ZoneChanged {
+            object_id: event_object_id,
+            to: Zone::Exile,
+            record,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if *event_object_id != object_id || record.object_id != object_id {
+            return None;
+        }
         if let Some(context) = record.trigger_source_context.as_mut() {
             context.face_down = true;
         }
-    }
+        Some((record.turn_zone_change_index, record.recorded_turn_number))
+    });
 
-    if let Some(record) = state
-        .zone_changes_this_turn
-        .iter_mut()
-        .rev()
-        .find(|record| record.object_id == object_id && record.to_zone == Zone::Exile)
-    {
-        if let Some(context) = record.trigger_source_context.as_mut() {
-            context.face_down = true;
+    // The event record carries the exact occurrence assigned by
+    // `record_zone_change`. Never search the ledger by object/destination:
+    // repeated Exile entries for one object are distinct incarnations.
+    if let Some((index, recorded_turn)) = exact_ledger_entry {
+        if recorded_turn == state.turn_number {
+            if let Some(record) = state.zone_changes_this_turn.get_mut(index) {
+                if record.object_id == object_id && record.to_zone == Zone::Exile {
+                    if let Some(context) = record.trigger_source_context.as_mut() {
+                        context.face_down = true;
+                    }
+                }
+            }
         }
     }
 }
@@ -3438,6 +3446,39 @@ mod tests {
         assert!(!state.players[0].library.contains(&id));
         assert!(state.players[0].hand.contains(&id));
         assert_eq!(state.objects[&id].zone, Zone::Hand);
+    }
+
+    #[test]
+    fn face_down_exile_marks_the_exact_ledger_occurrence() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Repeated Exile".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        move_to_zone(&mut state, id, Zone::Hand, &mut events);
+        let second_exile_start = events.len();
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        mark_face_down_in_exile(&mut state, &mut events[second_exile_start..], id);
+
+        assert_eq!(state.zone_changes_this_turn.len(), 3);
+        assert!(
+            !state.zone_changes_this_turn[0]
+                .trigger_source_context()
+                .expect("first Exile record carries source context")
+                .face_down
+        );
+        assert!(
+            state.zone_changes_this_turn[2]
+                .trigger_source_context()
+                .expect("second Exile record carries source context")
+                .face_down
+        );
     }
 
     /// CR 122.2 + CR 400.7: Counters cease to exist when an object changes
