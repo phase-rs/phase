@@ -37,6 +37,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
+use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
     AbilityContinuationFrame, ChildStackDepth, FrameGate, OptionalEffectFrame,
@@ -4457,8 +4458,13 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             count: _,
             attacker_restriction,
         } => (
+            // CR 608.2c + CR 118.12: a declined "if you do" skips only a later
+            // instruction whose referent the gated action supplies; "there is an
+            // additional … phase" (`TargetFilter::None`) names no player (CR 500.10a
+            // gates only "you get"), so the grant has no referent to audit.
             Some(
                 std::iter::once(target)
+                    .filter(|target| **target != TargetFilter::None)
                     .chain(attacker_restriction.as_ref())
                     .collect(),
             ),
@@ -13656,6 +13662,9 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     state.private_look_player = None;
     state.last_zone_changed_ids.clear();
     state.exile_rider_countered_ids.clear();
+    // CR 603.7a + CR 608.2c: "that combat" names a phase this resolution's
+    // own instructions added, never one an earlier resolution added.
+    state.last_added_phase_ids.clear();
     // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
     // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
     // alongside `last_zone_changed_ids` so cross-resolution leakage is
@@ -18754,11 +18763,15 @@ pub(crate) fn evaluate_condition(
         }
         // CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase
         // of the turn" gates follow-up effects such as additional combats.
-        AbilityCondition::FirstCombatPhaseOfTurn => state.combat_phases_started_this_turn == 1,
+        AbilityCondition::FirstCombatPhaseOfTurn => {
+            state.steps_started_this_turn.count(Phase::BeginCombat) == 1
+        }
         // CR 500.8 + CR 513.1 + CR 608.2c: "if it's the first end step of the
         // turn" gates the additional-end-step follow-up (Y'shtola Rhul); only
         // the first end step schedules another, preventing an infinite loop.
-        AbilityCondition::FirstEndStepOfTurn => state.end_steps_started_this_turn == 1,
+        AbilityCondition::FirstEndStepOfTurn => {
+            state.steps_started_this_turn.count(Phase::End) == 1
+        }
         // CR 505.1 + CR 505.1a + CR 500.1 + CR 608.2c: "if it is[n't] your
         // [phase]" reads the live current phase at resolution (CR 608.2c). The
         // grouped "main phase" phrase carries both `PreCombatMain` and
@@ -19709,13 +19722,22 @@ mod tests {
                 r#""owner":{"type":"TriggeringPlayer"}"#
             )
         ));
-        // AdditionalPhase (Wyll).
-        let phase = r#"{"type":"AdditionalPhase","target":{"type":"Controller"},"phase":"BeginCombat","after":"PreCombatMain","followed_by":["PostCombatMain"],"count":{"type":"Fixed","value":1}}"#;
+        // AdditionalPhase (Wyll): "there is" names no player (`None`); a grant
+        // to the controller ("you get") survives too; a grant to a player the
+        // trigger event names does not.
+        let phase = r#"{"type":"AdditionalPhase","target":{"type":"None"},"phase":"BeginCombat","after":{"type":"ThisPhase","data":{"named":["PrecombatMain","PostcombatMain"]}},"followed_by":["PostCombatMain"],"count":{"type":"Fixed","value":1}}"#;
         assert!(survives(DRAW, phase));
+        assert!(survives(
+            DRAW,
+            &phase.replace(
+                r#""target":{"type":"None"}"#,
+                r#""target":{"type":"Controller"}"#
+            )
+        ));
         assert!(!survives(
             DRAW,
             &phase.replace(
-                r#""target":{"type":"Controller"}"#,
+                r#""target":{"type":"None"}"#,
                 r#""target":{"type":"TriggeringPlayer"}"#
             )
         ));
@@ -33832,21 +33854,21 @@ mod tests {
             PlayerId(0),
         );
 
-        state.combat_phases_started_this_turn = 0;
+        state.steps_started_this_turn.clear();
         assert!(!evaluate_condition(
             &AbilityCondition::FirstCombatPhaseOfTurn,
             &state,
             &ability,
         ));
 
-        state.combat_phases_started_this_turn = 1;
+        state.steps_started_this_turn.record(Phase::BeginCombat);
         assert!(evaluate_condition(
             &AbilityCondition::FirstCombatPhaseOfTurn,
             &state,
             &ability,
         ));
 
-        state.combat_phases_started_this_turn = 2;
+        state.steps_started_this_turn.record(Phase::BeginCombat);
         assert!(!evaluate_condition(
             &AbilityCondition::FirstCombatPhaseOfTurn,
             &state,

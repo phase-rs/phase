@@ -11888,10 +11888,10 @@ fn full_throttle_parses_additional_combats_and_delayed_combat_trigger() {
     assert!(matches!(
         r.abilities[0].effect.as_ref(),
         Effect::AdditionalPhase {
-            after: Phase::PreCombatMain,
+            after,
             count: QuantityExpr::Fixed { value: 2 },
             ..
-        }
+        } if *after == crate::types::ability::ExtraPhaseAnchor::this_main_phase()
     ));
     assert!(matches!(
         r.abilities[1].effect.as_ref(),

@@ -35,8 +35,8 @@ use super::events::{
 };
 use super::format::FormatConfig;
 use super::identifiers::{
-    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, LogicalZoneChangeGroupId, ObjectId,
-    ObjectIdentityBinding, ObjectIncarnationRef, ResolutionCastOfferId, TrackedSetId,
+    CardId, DelayedInstallIdentity, DelayedTriggerOrigin, ExtraPhaseId, LogicalZoneChangeGroupId,
+    ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ResolutionCastOfferId, TrackedSetId,
     TriggerFiring,
 };
 use super::interaction::{ActiveInteractionSlot, InteractionSessionId};
@@ -45,7 +45,7 @@ use super::mana::{
     ColoredManaCount, ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction,
 };
 use super::match_config::{MatchConfig, MatchForfeitResult, MatchPhase, MatchScore};
-use super::phase::{Phase, PhaseStop, TurnDirection};
+use super::phase::{Phase, PhaseStop, TurnDirection, TurnSegment};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{
     AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec,
@@ -7904,6 +7904,17 @@ impl GameState {
             .checked_add(1)
             .expect("resolution-cast offer allocator exhausted");
         ResolutionCastOfferId(id)
+    }
+
+    /// CR 500.8: mint the nonzero identity of one scheduled extra phase or
+    /// step. The allocator is persisted, so an id minted after a reload never
+    /// repeats one already on a scheduled entry or resume record.
+    pub(crate) fn mint_extra_phase_id(&mut self) -> ExtraPhaseId {
+        let id = self.next_extra_phase_id.max(1);
+        self.next_extra_phase_id = id
+            .checked_add(1)
+            .expect("extra-phase id allocator exhausted");
+        ExtraPhaseId(id)
     }
 
     /// Records durable product knowledge at the instant a viewer is shown card
@@ -19015,22 +19026,41 @@ declare_game_state! {
 
     /// CR 500.8: Extra phases granted by effects, stored as a LIFO stack of
     /// anchored entries. Each `ExtraPhase` records the phase it occurs
-    /// directly after (`anchor`) and the phase to insert (`phase`).
-    /// Consumed by `advance_phase()` — only entries whose `anchor` matches
-    /// `state.phase` are popped, scanned from the end so the most recently
-    /// created entry occurs first.
+    /// directly after (`anchor`) and what to insert (`segment`).
+    /// Consumed by `advance_phase()`. An entry is taken when its `anchor` step
+    /// ends, or when an inserted unit ends and its anchor is treated as having
+    /// just ended (CR 500.8 + CR 500.9 + CR 500.10; see `extra_phase_resume`).
+    /// Entries are scanned from the end so the most recently created occurs
+    /// first.
     #[serde(default)]
     pub extra_phases: Vec<ExtraPhase>,
 
-    /// CR 500.8 + CR 501.1: LIFO stack of anchor phases for inserted beginning
-    /// phases (Temple of Atropos, Sphinx/Shadow of the Second Sun, Cyclonus)
-    /// currently in progress. When such a phase's draw step ends, the turn
-    /// resumes at the anchor's natural successor (or runs the next queued
-    /// beginning phase for the same anchor) rather than at the draw step's
-    /// default successor. Empty outside inserted beginning phases.
-    /// `#[serde(default)]` so saved games load unchanged.
+    /// CR 500.8 + CR 500.9 + CR 500.10: LIFO stack of inserted units in
+    /// progress — an added phase, a phase created to hold one added step, or a
+    /// step added directly after a step. When the final step of a record's
+    /// `segment` ends, the turn continues as though its `anchor` had just ended
+    /// (`turns::take_scheduled_successor`). Empty outside inserted units.
+    /// `#[serde(default)]`: an absent or empty value loads; a non-empty value
+    /// written before the element type changed fails to decode — rejected rather
+    /// than resumed wrongly.
     #[serde(default)]
-    pub extra_phase_resume: Vec<Phase>,
+    pub extra_phase_resume: Vec<InsertedPhaseResume>,
+
+    /// CR 500.8: allocator for [`ExtraPhaseId`]. [`GameState::new`] sets it to
+    /// 1, [`GameState::mint_extra_phase_id`] advances it, and the loop-detection
+    /// clone made by `normalize_for_loop` zeroes it. `#[serde(default)]`: a
+    /// state saved before ids existed reads 0, and minting still starts at 1.
+    #[serde(default)]
+    pub(crate) next_extra_phase_id: u64,
+
+    /// CR 603.7a + CR 608.2c: the identities of the phases the most recent
+    /// `Effect::AdditionalPhase` instruction of this resolution added (its
+    /// primary phases, not their follow-ups). "At the beginning of that combat"
+    /// binds to it when its delayed trigger is created. Resolution-scoped, like
+    /// `last_zone_changed_ids`: cleared at chain depth 0 and at the start of
+    /// every `additional_phase::resolve`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) last_added_phase_ids: Vec<ExtraPhaseId>,
 
     /// CR 103.1: The current turn-order direction. Durable — persists across
     /// turns until an effect reverses it again. Default `Normal` is the game's
@@ -19697,16 +19727,12 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub creature_blocked_attackers_this_turn: HashSet<BlockHistoryPair>,
-    /// CR 500.8 + CR 506.1: Number of combat phases that have begun this turn.
-    /// Used by intervening-if triggers that only fire during the first combat phase.
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub combat_phases_started_this_turn: u32,
-    /// CR 500.8 + CR 513.1: Number of end steps that have begun this turn.
-    /// Mirrors `combat_phases_started_this_turn` for the end-step axis; used by
-    /// conditions that gate a follow-up only during the first end step
-    /// (Y'shtola Rhul's "if it's the first end step of the turn" loop guard).
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub end_steps_started_this_turn: u32,
+    /// CR 500.1 + CR 500.8: steps begun this turn, keyed by step, including the
+    /// second combat damage step (CR 510.4) and each repeated cleanup step
+    /// (CR 514.3a); a skipped step is not counted (CR 500.11). Read by the
+    /// "first combat phase / first end step of the turn" conditions.
+    #[serde(default, skip_serializing_if = "StepTally::is_empty")]
+    pub steps_started_this_turn: StepTally,
     /// CR 508.1a: Object IDs of creatures declared as attackers this turn.
     /// Persists after combat ends for post-combat filtering.
     #[serde(default)]
@@ -22485,9 +22511,28 @@ impl From<ExtraTurnCompat> for ExtraTurn {
     }
 }
 
+/// CR 500.8 + CR 500.9 + CR 500.10: an inserted unit in progress (an added
+/// phase, a phase created to hold one added step, or a step added directly
+/// after a step). When its segment's final step ends, the turn continues as
+/// though `anchor` had just ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsertedPhaseResume {
+    /// The step the unit was inserted after (`ExtraPhase::anchor`).
+    pub anchor: Phase,
+    /// What the unit adds (`ExtraPhase::segment`); the unit ends when
+    /// `segment.final_step()` ends.
+    pub segment: TurnSegment,
+    /// The identity of the scheduled entry this unit was taken from
+    /// (`ExtraPhase::id`). `#[serde(default)]`: a record saved before ids
+    /// existed reads the default, which names no minted entry.
+    #[serde(default)]
+    pub entry: ExtraPhaseId,
+}
+
 /// CR 500.8: An extra phase added to a turn by an effect, anchored to the
 /// phase it occurs *directly after*. Stored on `GameState.extra_phases` and
-/// consumed by `advance_phase` only when the current phase matches `anchor`.
+/// consumed by `turns::take_scheduled_successor` when its `anchor` ends
+/// (directly, or via CR 500.10 continuation).
 ///
 /// CR 500.8 ("phases are added directly after the specified phase") requires
 /// per-entry anchor typing — a flat `Vec<Phase>` consumed at every transition
@@ -22502,8 +22547,9 @@ impl From<ExtraTurnCompat> for ExtraTurn {
 pub struct ExtraPhase {
     /// The phase after which this extra phase is inserted (CR 500.8).
     pub anchor: Phase,
-    /// The phase to insert.
-    pub phase: Phase,
+    /// CR 500.8 + CR 500.9 + CR 500.10: what is inserted — a whole phase, a
+    /// phase created to hold one step, or a step added to the phase in progress.
+    pub segment: TurnSegment,
     /// CR 508.1c: Attacker restriction active while this scheduled combat phase
     /// is current (concretized at resolution to `TrackedSet` / `Typed` /
     /// `SpecificObject`). `None` for ordinary extra phases. Carried here so the
@@ -22518,6 +22564,48 @@ pub struct ExtraPhase {
     /// extra phases.
     #[serde(default)]
     pub attacker_restriction_source: Option<ObjectId>,
+    /// CR 500.8: this entry's identity, minted by the effect that scheduled it
+    /// (`GameState::mint_extra_phase_id`). `#[serde(default)]`: an entry
+    /// seeded or saved without an id reads the default, never a minted id.
+    #[serde(default)]
+    pub id: ExtraPhaseId,
+}
+
+/// CR 500.1 + CR 500.8 + CR 500.9: how many times each step has begun this
+/// turn, natural or added. A main phase has no steps (CR 505.2), so it is
+/// counted under its own `Phase`; every main phase after the first is a
+/// postcombat main phase (CR 505.1a). The second combat damage step after a
+/// first-strike step counts (CR 510.4), as does each repeated cleanup step
+/// (CR 514.3a). A skipped step never begins and is not counted (CR 500.11 /
+/// CR 103.8a / CR 614.10), whether a begin-phase replacement, a static or
+/// one-shot "skip your … step", or the starting player's first draw skips it.
+/// Written only by `turns::record_step_begin` (from the step entry, the
+/// CR 508.8 end-of-combat mark, the CR 510.4 second combat damage step, the
+/// CR 514.3a repeated cleanup step, and game setup's first untap step) and
+/// cleared when the next turn starts. Omitted from the wire while empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StepTally(BTreeMap<Phase, u32>);
+
+impl StepTally {
+    /// Record that `step` began.
+    pub fn record(&mut self, step: Phase) {
+        let n = self.0.entry(step).or_default();
+        *n = n.saturating_add(1);
+    }
+
+    /// How many times `step` has begun this turn.
+    pub fn count(&self, step: Phase) -> u32 {
+        self.0.get(&step).copied().unwrap_or(0)
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 // Pin `GameState: Send + Sync` at compile time. Blocks accidental imports of
@@ -25586,6 +25674,8 @@ impl GameState {
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
             extra_phase_resume: Vec::new(),
+            next_extra_phase_id: 1,
+            last_added_phase_ids: Vec::new(),
             turn_direction: TurnDirection::Normal,
             current_combat_attacker_restriction: None,
             current_combat_attacker_restriction_source: None,
@@ -25651,8 +25741,7 @@ impl GameState {
             attacked_defenders_last_turn: Box::default(),
             creature_attacked_defenders_this_turn: HashMap::new(),
             creature_blocked_attackers_this_turn: HashSet::new(),
-            combat_phases_started_this_turn: 0,
-            end_steps_started_this_turn: 0,
+            steps_started_this_turn: StepTally::default(),
             creatures_attacked_this_turn: HashSet::new(),
             attacker_declarations_this_turn: Vec::new(),
             creatures_blocked_this_turn: HashSet::new(),
@@ -26765,6 +26854,47 @@ impl GameState {
         // CR 732.2a recurrence certification that shares this seam can confirm a
         // repeat.
         clone.chain_tracked_set_id = None;
+        // CR 104.4b + CR 732.2a: a scheduled extra phase's identity is monotonic
+        // provenance, but which scheduled phase a bound "that combat" trigger
+        // names is not (CR 603.7a). So the ids are renumbered by first
+        // occurrence across the scheduled entries and then the units in
+        // progress, which never share an id, and each bound trigger follows its
+        // entry's new number. Two positions minted at different times still
+        // confirm as a repeat, while two positions whose triggers name
+        // different entries stay different. An id that names no scheduled
+        // entry or unit can never be matched again (ids are never reminted), so
+        // it canonicalizes to the unminted default, as does the unminted id
+        // itself. The allocator and the resolution-scoped channel are residue.
+        clone.next_extra_phase_id = 0;
+        clone.last_added_phase_ids.clear();
+        let live: Vec<ExtraPhaseId> = clone
+            .extra_phases
+            .iter()
+            .map(|scheduled| scheduled.id)
+            .chain(clone.extra_phase_resume.iter().map(|unit| unit.entry))
+            .filter(|id| *id != ExtraPhaseId::default())
+            .collect();
+        let canonical = |id: ExtraPhaseId| {
+            live.iter()
+                .position(|live_id| *live_id == id)
+                .map_or(ExtraPhaseId::default(), |index| {
+                    ExtraPhaseId(index as u64 + 1)
+                })
+        };
+        for scheduled in clone.extra_phases.iter_mut() {
+            scheduled.id = canonical(scheduled.id);
+        }
+        for unit in clone.extra_phase_resume.iter_mut() {
+            unit.entry = canonical(unit.entry);
+        }
+        for trigger in clone.delayed_triggers.iter_mut() {
+            if let DelayedTriggerCondition::AtBeginningOfAddedPhase {
+                entry: Some(entry), ..
+            } = &mut trigger.condition
+            {
+                *entry = canonical(*entry);
+            }
+        }
         // CR 104.4b: the journal coordinate is monotonic provenance, while the
         // caster and Some-vs-None state remain rules-relevant. Canonicalize the
         // coordinate on both object and stack-ability carriers so derived stack
@@ -27852,6 +27982,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         scheduled_turn_controls: _,
         extra_phases: _,
         extra_phase_resume: _,
+        next_extra_phase_id: _,
+        last_added_phase_ids: _,
         turn_direction: _,
         current_combat_attacker_restriction: _,
         current_combat_attacker_restriction_source: _,
@@ -27929,8 +28061,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         attacked_defenders_last_turn: _,
         creature_attacked_defenders_this_turn: _,
         creature_blocked_attackers_this_turn: _,
-        combat_phases_started_this_turn: _,
-        end_steps_started_this_turn: _,
+        steps_started_this_turn: _,
         creatures_attacked_this_turn: _,
         attacker_declarations_this_turn: _,
         creatures_blocked_this_turn: _,
@@ -28202,6 +28333,8 @@ impl PartialEq for GameState {
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
             && self.extra_phase_resume == other.extra_phase_resume
+            && self.next_extra_phase_id == other.next_extra_phase_id
+            && self.last_added_phase_ids == other.last_added_phase_ids
             && self.turn_direction == other.turn_direction
             && self.current_combat_attacker_restriction
                 == other.current_combat_attacker_restriction
@@ -28269,8 +28402,7 @@ impl PartialEq for GameState {
                 == other.creature_attacked_defenders_this_turn
             && self.creature_blocked_attackers_this_turn
                 == other.creature_blocked_attackers_this_turn
-            && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
-            && self.end_steps_started_this_turn == other.end_steps_started_this_turn
+            && self.steps_started_this_turn == other.steps_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.attacker_declarations_this_turn == other.attacker_declarations_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn
@@ -29519,6 +29651,7 @@ mod tests {
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
         LEGACY_INCARNATION,
     };
+    use crate::types::phase::PhaseGroup;
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
 
@@ -32580,6 +32713,121 @@ mod tests {
         assert!(
             restored.resolution_stack.is_empty(),
             "the v1 projection yields an empty frame stack, exactly as before"
+        );
+    }
+
+    /// CR 500.10: the `extra_phase_resume` element is a unit record. The empty
+    /// wire form is unchanged, an absent key still loads, and a legacy non-empty
+    /// value (bare anchor phases) is rejected rather than resumed wrongly.
+    #[test]
+    fn extra_phase_resume_wire_form() {
+        let wire = serde_json::to_value(GameState::new_two_player(42))
+            .expect("the bare GameState serializes");
+        assert_eq!(wire["extra_phase_resume"], serde_json::json!([]));
+        assert!(
+            serde_json::from_value::<GameState>(wire.clone()).is_ok(),
+            "the unmodified wire decodes"
+        );
+
+        let mut absent = wire.clone();
+        absent
+            .as_object_mut()
+            .expect("GameState serializes as an object")
+            .remove("extra_phase_resume");
+        let restored = serde_json::from_value::<GameState>(absent)
+            .expect("an absent extra_phase_resume defaults");
+        assert!(restored.extra_phase_resume.is_empty());
+
+        let mut legacy = wire;
+        legacy["extra_phase_resume"] = serde_json::json!(["PostCombatMain"]);
+        assert!(serde_json::from_value::<GameState>(legacy).is_err());
+
+        let mut state = GameState::new_two_player(42);
+        state.extra_phase_resume = vec![InsertedPhaseResume {
+            anchor: Phase::PostCombatMain,
+            segment: TurnSegment::Phase(PhaseGroup::Beginning),
+            entry: ExtraPhaseId::default(),
+        }];
+        let wire = serde_json::to_value(&state).expect("the GameState serializes");
+        assert_eq!(
+            wire["extra_phase_resume"],
+            serde_json::json!([{
+                "anchor": "PostCombatMain",
+                "segment": {"type": "Phase", "data": "Beginning"},
+                "entry": 0
+            }])
+        );
+        let restored =
+            serde_json::from_value::<GameState>(wire).expect("a unit record round-trips");
+        assert_eq!(restored.extra_phase_resume, state.extra_phase_resume);
+    }
+
+    /// CR 500.8: a scheduled extra phase's identity is additive wire state. A
+    /// scheduled entry, a resume record and a whole `GameState` written without
+    /// it decode to the default, which no mint returns; a present id round-trips.
+    #[test]
+    fn extra_phase_identity_defaults_when_absent() {
+        let entry = ExtraPhase {
+            anchor: Phase::EndCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+            id: ExtraPhaseId(7),
+        };
+        let mut wire = serde_json::to_value(&entry).expect("an entry serializes");
+        assert_eq!(wire["id"], serde_json::json!(7));
+        assert_eq!(
+            serde_json::from_value::<ExtraPhase>(wire.clone()).expect("an entry decodes"),
+            entry,
+            "positive control: a present id round-trips"
+        );
+        wire.as_object_mut()
+            .expect("an entry serializes as an object")
+            .remove("id");
+        assert_eq!(
+            serde_json::from_value::<ExtraPhase>(wire).expect("an entry without an id decodes"),
+            ExtraPhase {
+                id: ExtraPhaseId::default(),
+                ..entry
+            }
+        );
+
+        let unit = InsertedPhaseResume {
+            anchor: Phase::PreCombatMain,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
+            entry: ExtraPhaseId(7),
+        };
+        let mut wire = serde_json::to_value(unit).expect("a unit record serializes");
+        assert_eq!(
+            serde_json::from_value::<InsertedPhaseResume>(wire.clone())
+                .expect("a unit record decodes"),
+            unit,
+            "positive control: a present entry round-trips"
+        );
+        wire.as_object_mut()
+            .expect("a unit record serializes as an object")
+            .remove("entry");
+        assert_eq!(
+            serde_json::from_value::<InsertedPhaseResume>(wire)
+                .expect("a unit record without an entry decodes"),
+            InsertedPhaseResume {
+                entry: ExtraPhaseId::default(),
+                ..unit
+            }
+        );
+
+        let mut wire =
+            serde_json::to_value(GameState::new_two_player(42)).expect("the GameState serializes");
+        wire.as_object_mut()
+            .expect("GameState serializes as an object")
+            .remove("next_extra_phase_id");
+        let mut restored =
+            serde_json::from_value::<GameState>(wire).expect("an absent allocator defaults");
+        assert_eq!(restored.next_extra_phase_id, 0);
+        assert_eq!(
+            restored.mint_extra_phase_id(),
+            ExtraPhaseId(1),
+            "a defaulted allocator still mints from 1, never the default id"
         );
     }
 
@@ -36079,6 +36327,103 @@ mod tests {
         );
     }
 
+    /// CR 500.1 + CR 500.8: the tally counts each step under its own key. The
+    /// interleaved records are the hostile case: one shared counter would read 3.
+    #[test]
+    fn step_tally_counts_each_step_independently() {
+        let mut tally = StepTally::default();
+        tally.record(Phase::BeginCombat);
+        tally.record(Phase::End);
+        tally.record(Phase::BeginCombat);
+
+        assert_eq!(tally.count(Phase::BeginCombat), 2);
+        assert_eq!(tally.count(Phase::End), 1);
+        assert_eq!(tally.count(Phase::Upkeep), 0, "an absent step reads 0");
+        assert!(!tally.is_empty());
+
+        tally.clear();
+        assert!(tally.is_empty());
+        assert_eq!(tally.count(Phase::BeginCombat), 0);
+    }
+
+    /// `record` saturates rather than overflowing, as the retired counters did.
+    #[test]
+    fn step_tally_record_saturates() {
+        let mut tally: StepTally =
+            serde_json::from_value(serde_json::json!({ "End": u32::MAX })).unwrap();
+        tally.record(Phase::End);
+        assert_eq!(tally.count(Phase::End), u32::MAX);
+    }
+
+    /// The tally is omitted from the wire while empty, and serializes its keys in
+    /// turn order (`Phase` declaration order, not alphabetical: `Upkeep` precedes
+    /// `Draw`).
+    #[test]
+    fn step_tally_wire_form_is_phase_ordered_and_omitted_when_empty() {
+        let fresh = serde_json::to_value(GameState::new_two_player(7)).unwrap();
+        assert!(
+            fresh.get("steps_started_this_turn").is_none(),
+            "an empty tally is omitted from the wire"
+        );
+
+        // Reach guard for the negative above: one record DOES put the key on the wire.
+        let mut recorded = GameState::new_two_player(7);
+        recorded.steps_started_this_turn.record(Phase::Upkeep);
+        let recorded = serde_json::to_value(&recorded).unwrap();
+        assert_eq!(
+            recorded["steps_started_this_turn"],
+            serde_json::json!({ "Upkeep": 1 })
+        );
+
+        let mut tally = StepTally::default();
+        tally.record(Phase::End);
+        tally.record(Phase::BeginCombat);
+        assert_eq!(
+            serde_json::to_string(&tally).unwrap(),
+            r#"{"BeginCombat":1,"End":1}"#
+        );
+        let back: StepTally =
+            serde_json::from_value(serde_json::to_value(&tally).unwrap()).unwrap();
+        assert_eq!(back, tally);
+
+        let mut out_of_alphabetical = StepTally::default();
+        out_of_alphabetical.record(Phase::Draw);
+        out_of_alphabetical.record(Phase::Upkeep);
+        assert_eq!(
+            serde_json::to_string(&out_of_alphabetical).unwrap(),
+            r#"{"Upkeep":1,"Draw":1}"#
+        );
+    }
+
+    /// CR 104.4b: the strict loop comparator compares the whole tally, and
+    /// `normalize_for_loop` preserves it. The tally is rules-readable per-turn
+    /// history ("first combat phase of the turn"), so two positions that differ
+    /// in it are not the same position. The CR 732.2a modulo layer clears it
+    /// instead (`analysis::resource::tests::modulo_projection_clears_the_step_tally`).
+    #[test]
+    fn strict_loop_equality_compares_the_step_tally() {
+        let mut base = GameState::new_two_player(7);
+        base.steps_started_this_turn.record(Phase::Upkeep);
+        let same = base.clone();
+        let mut extra_upkeep = base.clone();
+        extra_upkeep.steps_started_this_turn.record(Phase::Upkeep);
+
+        let normalized = base.normalize_for_loop();
+        assert_eq!(
+            normalized.steps_started_this_turn.count(Phase::Upkeep),
+            1,
+            "normalize_for_loop preserves the tally"
+        );
+        assert!(
+            loop_states_equal(&normalized, &same.normalize_for_loop()),
+            "reach guard: the unmodified clone confirms as a repeat"
+        );
+        assert!(
+            !loop_states_equal(&normalized, &extra_upkeep.normalize_for_loop()),
+            "states differing only in count(Upkeep) are not the same position"
+        );
+    }
+
     /// CR 700.2 + CR 104.4b: the mode-boundary edge latch
     /// (`resolving_modal_instruction`) is resolution-scoped and is cleared only at
     /// depth-0 chain ENTRY, so between resolutions it holds the last resolved
@@ -36204,6 +36549,140 @@ mod tests {
             ),
             "CR 104.4b: a further minted tracked set is real accumulated content and must \
              not be normalized into a repeat"
+        );
+    }
+
+    /// CR 104.4b + CR 732.2a: a scheduled extra phase's identity
+    /// (`ExtraPhase::id`, `InsertedPhaseResume::entry`) and its allocator are
+    /// monotonic provenance. Two positions that agree in every scheduled phase
+    /// and unit in progress except those ids must confirm as a repeat.
+    ///
+    /// DISCRIMINATION: the fixture differs in all three (the allocator, the entry
+    /// id, the resume-record id), so deleting any one of the three
+    /// canonicalizations in `normalize_for_loop` fails the equality assertion.
+    /// The `!=` assertion is the non-vacuity witness. The paired negatives hold
+    /// every id equal and differ in an anchor, once on a scheduled entry and once
+    /// on a unit in progress, so a normalization that erased either list fails.
+    #[test]
+    fn normalize_for_loop_canonicalizes_extra_phase_identity() {
+        let with_ids = |entry: u64, unit: u64, next: u64| {
+            let mut state = GameState::new_two_player(7);
+            state.extra_phases.push(ExtraPhase {
+                anchor: Phase::EndCombat,
+                segment: TurnSegment::Phase(PhaseGroup::Combat),
+                attacker_restriction: None,
+                attacker_restriction_source: None,
+                id: ExtraPhaseId(entry),
+            });
+            state.extra_phase_resume.push(InsertedPhaseResume {
+                anchor: Phase::PreCombatMain,
+                segment: TurnSegment::Phase(PhaseGroup::Combat),
+                entry: ExtraPhaseId(unit),
+            });
+            state.next_extra_phase_id = next;
+            state
+        };
+        let first = with_ids(2, 1, 3);
+        let later = with_ids(5, 4, 6);
+        assert!(
+            first != later,
+            "non-vacuity: the two states must differ before normalization"
+        );
+        assert!(
+            loop_states_equal(&first.normalize_for_loop(), &later.normalize_for_loop()),
+            "CR 104.4b: positions differing only in scheduled-phase ids confirm as a repeat"
+        );
+
+        let mut other_entry_anchor = first.clone();
+        other_entry_anchor.extra_phases[0].anchor = Phase::PostCombatMain;
+        assert!(
+            !loop_states_equal(
+                &first.normalize_for_loop(),
+                &other_entry_anchor.normalize_for_loop()
+            ),
+            "CR 500.8: a scheduled phase with a different anchor is a different position"
+        );
+
+        let mut other_unit_anchor = first.clone();
+        other_unit_anchor.extra_phase_resume[0].anchor = Phase::PostCombatMain;
+        assert!(
+            !loop_states_equal(
+                &first.normalize_for_loop(),
+                &other_unit_anchor.normalize_for_loop()
+            ),
+            "CR 500.8: a unit in progress with a different anchor is a different position"
+        );
+    }
+
+    /// CR 104.4b + CR 603.7a: a "that combat" trigger's bound id follows its
+    /// scheduled entry through loop canonicalization. Which entry it names is
+    /// position content; when its ids were minted is not.
+    ///
+    /// DISCRIMINATION: zeroing the triggers' ids along with the entries' fails
+    /// the first assertion; zeroing the entries' ids only (P5's
+    /// canonicalization) or renumbering them without rewriting the triggers
+    /// fails the second; mapping a dangling id to itself fails the third.
+    #[test]
+    fn normalize_for_loop_keeps_which_added_phase_a_trigger_names() {
+        let two_combats = |ids: [u64; 2], bound: u64| {
+            let mut state = GameState::new_two_player(7);
+            for id in ids {
+                state.extra_phases.push(ExtraPhase {
+                    anchor: Phase::PostCombatMain,
+                    segment: TurnSegment::Phase(PhaseGroup::Combat),
+                    attacker_restriction: None,
+                    attacker_restriction_source: None,
+                    id: ExtraPhaseId(id),
+                });
+            }
+            state.delayed_triggers.push(DelayedTrigger::new(
+                DelayedTriggerCondition::AtBeginningOfAddedPhase {
+                    phase: Phase::BeginCombat,
+                    entry: Some(ExtraPhaseId(bound)),
+                },
+                Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    ObjectId(90_001),
+                    PlayerId(0),
+                )),
+                PlayerId(0),
+                ObjectId(90_001),
+                true,
+            ));
+            state.next_extra_phase_id = ids[1] + 1;
+            state
+        };
+        let names = |state: &GameState| state.normalize_for_loop();
+
+        assert!(
+            !loop_states_equal(
+                &names(&two_combats([1, 2], 1)),
+                &names(&two_combats([1, 2], 2))
+            ),
+            "CR 603.7a: a trigger bound to the older combat and one bound to the newer \
+             combat fire at different times, so the positions differ"
+        );
+        let first = two_combats([1, 2], 1);
+        let later = two_combats([7, 9], 7);
+        assert!(
+            first != later,
+            "non-vacuity: the ids differ before normalization"
+        );
+        assert!(
+            loop_states_equal(&names(&first), &names(&later)),
+            "CR 104.4b: the same entries and the same named entry, minted later, repeat"
+        );
+        assert!(
+            loop_states_equal(
+                &names(&two_combats([1, 2], 3)),
+                &names(&two_combats([1, 2], 8))
+            ),
+            "CR 104.4b: a trigger bound to no scheduled phase can never fire, whichever \
+             spent id it holds"
         );
     }
 

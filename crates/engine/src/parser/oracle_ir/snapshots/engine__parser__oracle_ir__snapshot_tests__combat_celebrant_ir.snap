@@ -55,10 +55,15 @@ expression: "&ir"
                   "effect": {
                     "type": "AdditionalPhase",
                     "target": {
-                      "type": "Controller"
+                      "type": "None"
                     },
                     "phase": "BeginCombat",
-                    "after": "EndCombat",
+                    "after": {
+                      "type": "ThisPhase",
+                      "data": {
+                        "named": null
+                      }
+                    },
                     "followed_by": [],
                     "count": {
                       "type": "Fixed",

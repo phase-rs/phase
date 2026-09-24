@@ -135,6 +135,9 @@ pub(crate) fn handle_priority_pass_with_limit(
                 // returns `None` and advances normally (the until-EOT control
                 // TCE is already pruned, so no new loss event re-fires — the
                 // one-shot trigger is gone, guaranteeing termination).
+                // CR 514.3a: "another cleanup step begins", re-running the cleanup arm
+                // directly rather than through the turn machine's step entry.
+                turns::record_step_begin(state, crate::types::phase::Phase::Cleanup);
                 let (waiting_for, cleanup_deferred) =
                     auto_advance_with_cleanup_deferred(state, events);
                 PriorityPassOutcome {
