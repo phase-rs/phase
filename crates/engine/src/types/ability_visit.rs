@@ -631,6 +631,10 @@ where
         // static card name to extract, and that extraction now lives in the
         // caller's visitor closure (`printed_cards::collect_conjure_names`).
         Effect::Conjure { .. } => {}
+        // CR 707.12: no nested ability carrier. The literal `name` (and the
+        // closed choice domain that feeds the chosen-name form) is extracted by
+        // the caller's visitor closure (`printed_cards::collect_conjure_names`).
+        Effect::CreateCardCopyByName { .. } => {}
         // CR 701.42 / CR 712.4b: the melded permanent presents the `result`
         // card's characteristics, but `result` is an outside-the-game third card.
         // Its name is extracted by the caller's visitor closure

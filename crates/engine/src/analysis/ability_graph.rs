@@ -832,6 +832,19 @@ fn effect_projection(effect: &Effect) -> Projection {
         // — a multi-card or counted conjure produces that many ETBs, and a
         // variable/X count is marked Unbounded. Any other destination has no
         // repeatable axis ⇒ Unmodeled.
+        // CR 707.12: a card copy created from a name is the same shape as a
+        // conjure for this projection — only a battlefield entry is a modeled
+        // axis, and the copy count is the repeatable seed.
+        Effect::CreateCardCopyByName {
+            destination, count, ..
+        } => {
+            if *destination == Zone::Battlefield {
+                let (a, mag) = count_seed(count);
+                b.add_etb(a, mag);
+            } else {
+                return Projection::Unmodeled;
+            }
+        }
         Effect::Conjure {
             cards, destination, ..
         } => {

@@ -149,7 +149,10 @@ fn chosen_opponent_binds_private_look_and_card_name_in_three_player() {
         );
     };
     assert!(
-        matches!(choice_type, engine::types::ability::ChoiceType::CardName),
+        matches!(
+            choice_type,
+            engine::types::ability::ChoiceType::CardName { .. }
+        ),
         "the second choice must be Choose(CardName), got {:?}",
         choice_type
     );
@@ -252,7 +255,7 @@ fn single_opponent_still_binds_and_reaches_card_name() {
     };
     assert!(matches!(
         choice_type,
-        engine::types::ability::ChoiceType::CardName
+        engine::types::ability::ChoiceType::CardName { .. }
     ));
 
     runner
@@ -330,7 +333,7 @@ fn empty_hand_chosen_opponent_is_noop_and_reaches_card_name() {
     };
     assert!(matches!(
         choice_type,
-        engine::types::ability::ChoiceType::CardName
+        engine::types::ability::ChoiceType::CardName { .. }
     ));
 
     runner

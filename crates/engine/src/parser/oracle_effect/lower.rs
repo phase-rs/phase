@@ -26,6 +26,7 @@ use super::super::oracle_target::{
     parse_that_clause_suffix, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
 };
 use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
+use super::gap_diagnosis::clause_gap_unimplemented;
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -33,9 +34,9 @@ use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
-    CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
+    CastingPermission, ChoiceType, CombatHistoryScope, Comparator, ConjureSource,
+    ContinuousModification, ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition,
+    Duration, Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
     ManaSpendPermission, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter,
     PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
     RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
@@ -2771,6 +2772,7 @@ impl ReflexiveGateParent {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -3484,7 +3486,104 @@ pub(crate) fn publishes_chain_created_referent(effect: &Effect) -> bool {
                 | Effect::ManifestDread
                 | Effect::Cloak { .. }
                 | Effect::Conjure { .. }
+                // CR 707.12: `CreateCardCopyByName` is the same shape once more —
+                // exactly one new object into a zone, no declared target, so a
+                // following same-chain "it" / "the copy" has one possible referent.
+                | Effect::CreateCardCopyByName { .. }
         )
+}
+
+/// CR 707.12 + CR 608.2g: bind "You may cast the copy." to the copy the chain
+/// just created, and cast it WHILE the ability is still resolving.
+///
+/// Two rewrites, both forced by the same fact — the copy exists only inside this
+/// resolution.
+///
+/// The target: `try_parse_cast_effect` lowers every anaphoric cast object — "the
+/// copy" included — to `TargetFilter::ParentTarget`, which resolves against the
+/// resolving ability's DECLARED targets. Garth One-Eye's activated ability
+/// declares none, so the permission would bind to nothing.
+/// `TargetFilter::LastCreated` is the referent the creating resolver actually
+/// publishes (`state.last_created_token_ids`).
+///
+/// The driver: the parser's default is `LingeringPermission` — grant the
+/// permission and let the controller cast at a later priority window. There is no
+/// later window for this object. CR 704.5e removes a copy of a card from exile at
+/// the very next state-based check, which is the first thing that happens after
+/// the resolution ends, so a lingering grant is a permission over a card that no
+/// longer exists (measured: the copy vanished and "you may cast the copy" did
+/// nothing, exactly as the unfixed card behaved). `DuringResolution` is CR 608.2g
+/// — "cast the card as the granting ability resolves" — which is also what the
+/// printed reminder means by "You still pay its costs": a real, paid cast, not a
+/// free recast.
+///
+/// Keyed on `CreateCardCopyByName` specifically, not on the broader
+/// `publishes_chain_created_referent`: `CopySpell` + `CastFromZone{ParentTarget}`
+/// is the pair `fold_cast_copy_of_card_defs` fuses into `Effect::CastCopyOfCard`
+/// (Mizzix's Mastery), and rewriting either field would take the fold's input
+/// away. Only the new effect is touched, so no existing card can change shape.
+/// CR 201.2a + coverage honesty: a "create a copy of the card with the chosen
+/// name" clause whose chain never made a card-name CHOICE has no name to read,
+/// so it would resolve as a silent no-op — and, worse, its clause would count as
+/// parsed and could flip the whole card to `supported` in `cargo coverage` while
+/// doing nothing.
+///
+/// Measured over the corpus: Svega, the Unconventional names its domain by
+/// planeswalker type ("Choose an Elspeth, Teferi, Liliana, Chandra, or Garruk
+/// planeswalker card name with mana value X"), which no card-name phrase-table
+/// arm claims. Its copy clause is therefore returned to `Unimplemented`, keeping
+/// the card honestly unsupported until that domain has a parse of its own.
+/// The Oracle sentence this fold hands back to the gap authority when no
+/// card-name choice reaches it — the same clause the parser would otherwise have
+/// left unparsed.
+const CARD_COPY_BY_NAME_CLAUSE: &str = "Create a copy of the card with the chosen name";
+
+fn unimplement_card_copy_without_a_name_choice(defs: &mut [AbilityDefinition]) {
+    for i in 0..defs.len() {
+        if !matches!(
+            *defs[i].effect,
+            Effect::CreateCardCopyByName { name: None, .. }
+        ) {
+            continue;
+        }
+        let chain_chose_a_name = defs[..i].iter().any(|d| {
+            matches!(
+                &*d.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName { .. },
+                    ..
+                }
+            )
+        });
+        if !chain_chose_a_name {
+            // Through the single gap authority, never a hand-built literal: it is
+            // what names the verdict on the wire (`gap_diagnosis`), and Gate A
+            // forbids the literal precisely so this stays one seam.
+            *defs[i].effect = clause_gap_unimplemented(CARD_COPY_BY_NAME_CLAUSE);
+        }
+    }
+}
+
+pub(super) fn bind_cast_of_created_card_copy(defs: &mut [AbilityDefinition]) {
+    unimplement_card_copy_without_a_name_choice(defs);
+    for i in 1..defs.len() {
+        let creator_is_card_copy = defs[..i]
+            .iter()
+            .rev()
+            .find(|d| publishes_chain_created_referent(&d.effect))
+            .is_some_and(|d| matches!(*d.effect, Effect::CreateCardCopyByName { .. }));
+        if !creator_is_card_copy {
+            continue;
+        }
+        if let Effect::CastFromZone { target, driver, .. } = &mut *defs[i].effect {
+            if matches!(target, TargetFilter::ParentTarget) {
+                *target = TargetFilter::LastCreated;
+            }
+            if matches!(driver, CastFromZoneDriver::LingeringPermission) {
+                *driver = CastFromZoneDriver::DuringResolution;
+            }
+        }
+    }
 }
 
 /// CR 603.12 + CR 609.3: Re-link a clause that READS the just-created-token

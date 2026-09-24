@@ -1246,6 +1246,14 @@ pub enum GameEvent {
         object_id: ObjectId,
         name: String,
     },
+    /// CR 707.12: A copy of a card was created from its NAME rather than from an
+    /// object in a zone (Garth One-Eye). Separate from `ObjectConjured` because
+    /// the product is a copy, not a card: CR 704.5e sweeps it out of any zone but
+    /// the stack and the battlefield, and the log must not call it a conjure.
+    CardCopyCreated {
+        object_id: ObjectId,
+        name: String,
+    },
     CreatureDestroyed {
         object_id: ObjectId,
     },

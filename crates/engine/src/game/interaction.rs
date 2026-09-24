@@ -2022,7 +2022,10 @@ fn text_choice_projection(
     }
     Ok(Some(TextChoiceProjection {
         options: options.clone(),
-        allow_arbitrary: matches!(choice_type, ChoiceType::CardName),
+        // CR 201.2a: free entry is the OPEN card-name prompt only. A closed
+        // Oracle-listed domain (Garth One-Eye) enumerates its options, and a
+        // domain that still accepted an arbitrary name would not be a domain.
+        allow_arbitrary: matches!(choice_type, ChoiceType::CardName { options, .. } if options.is_empty()),
         source_name: source
             .as_ref()
             .map(|source| source.prompt.display_name.clone()),

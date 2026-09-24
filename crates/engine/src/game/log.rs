@@ -196,6 +196,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CreatureDestroyed { .. }
         | GameEvent::PermanentSacrificed { .. }
         | GameEvent::TokenCreated { .. }
+        | GameEvent::CardCopyCreated { .. }
         | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
         GameEvent::PhaseChanged { .. }
         | GameEvent::AbilityActivated { .. }
@@ -339,6 +340,7 @@ fn tone(event: &GameEvent) -> LogTone {
         GameEvent::LifeChanged { amount, .. } if *amount > 0 => LogTone::Positive,
         GameEvent::TokenCreated { .. }
         | GameEvent::ObjectConjured { .. }
+        | GameEvent::CardCopyCreated { .. }
         | GameEvent::CityBlessingGained { .. }
         | GameEvent::EnduringStoryGained { .. }
         | GameEvent::MonarchChanged { .. }
@@ -799,6 +801,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::SpeedChanged { .. } | GameEvent::ArmyAmassed { .. } => LogCategory::Special,
 
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => LogCategory::Token,
+        GameEvent::CardCopyCreated { .. } => LogCategory::Token,
 
         GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
@@ -1568,6 +1571,17 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::ObjectConjured { object_id, name } => vec![
             text("Conjured: "),
+            LogSegment::CardName {
+                name: name.clone(),
+                object_id: *object_id,
+            },
+        ],
+
+        // CR 707.12: a copy created from a name, not a conjure — the log must not
+        // call it one, or the player reads a permanent card where there is a copy
+        // CR 704.5e is about to sweep.
+        GameEvent::CardCopyCreated { object_id, name } => vec![
+            text("Copy created: "),
             LogSegment::CardName {
                 name: name.clone(),
                 object_id: *object_id,

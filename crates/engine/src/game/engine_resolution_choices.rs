@@ -6994,16 +6994,36 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseOption { choice },
         ) => {
-            if matches!(choice_type, ChoiceType::CardName) {
-                let lower = choice.to_lowercase();
-                if !state
-                    .all_card_names
-                    .iter()
-                    .any(|name| name.to_lowercase() == lower)
-                {
+            // CR 201.2a: the OPEN card-name prompt has no option list, so the whole
+            // of Magic is its domain and `all_card_names` is the only membership
+            // test there is. A CLOSED, Oracle-listed domain (Garth One-Eye) is the
+            // opposite: the legal answers are the ones the prompt published, and
+            // CR 609.3 has already removed from that list every name this source
+            // committed before ("a card name that hasn't been chosen"). Validating
+            // a closed domain against the global card list would accept both a
+            // seventh name and a name already used — the option list is the
+            // authority here, and this is the seam that enforces it (the client's
+            // `allow_arbitrary` projection is a hint, not a check).
+            if let ChoiceType::CardName {
+                options: domain, ..
+            } = &choice_type
+            {
+                if domain.is_empty() {
+                    let lower = choice.to_lowercase();
+                    if !state
+                        .all_card_names
+                        .iter()
+                        .any(|name| name.to_lowercase() == lower)
+                    {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Invalid card name '{}'",
+                            choice
+                        )));
+                    }
+                } else if !options.contains(&choice) {
                     return Err(EngineError::InvalidAction(format!(
-                        "Invalid card name '{}'",
-                        choice
+                        "Invalid card name '{}', must be one of: {:?}",
+                        choice, options
                     )));
                 }
             } else if let Some(accepted) = choice_type.accepts_free_entry_answer(&choice) {

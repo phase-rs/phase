@@ -63,7 +63,7 @@ fn psychic_paper_equip_prompts_name_then_type_and_binds_both_on_attach() {
 
     match &runner.state().waiting_for {
         WaitingFor::NamedChoice {
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::CardName { .. },
             source: Some(source),
             ..
         } => assert_eq!(

@@ -204,6 +204,7 @@ mod cr733_resolved_zone_change;
 mod cr_annotations;
 mod crackle_with_power;
 mod craft_tithing_blade_transform;
+mod create_card_copy_with_chosen_name;
 mod crime_tracking;
 mod cross_line_instead_override_branch;
 mod cross_slot_target_binding;

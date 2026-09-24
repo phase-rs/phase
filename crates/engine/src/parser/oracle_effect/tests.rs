@@ -36981,7 +36981,7 @@ fn conjurers_ban_full_oracle_has_no_unimplemented() {
         effects.iter().any(|e| matches!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::CardName,
+                choice_type: ChoiceType::CardName { .. },
                 ..
             }
         )),
@@ -44710,19 +44710,19 @@ fn parse_next_spell_has_improvise() {
 fn named_choice_accepts_land_card_name() {
     assert_eq!(
         super::try_parse_named_choice("choose a land card name"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
     assert_eq!(
         super::try_parse_named_choice("choose a card name"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
     assert_eq!(
         super::try_parse_named_choice("choose a nonland card name"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
     assert_eq!(
         super::try_parse_named_choice("choose a creature card name"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
 }
 
@@ -57247,30 +57247,30 @@ fn parse_look_at_an_opponents_hand_is_private_opponent_look() {
 fn named_choice_accepts_any_card_name() {
     assert_eq!(
         super::try_parse_named_choice("choose any card name."),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
     assert_eq!(
         super::try_parse_named_choice("choose a card name"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
     assert_eq!(
         super::try_parse_named_choice("choose a nonland card name"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
     // Negatives: no "name" head → not a CardName choice.
     assert_ne!(
         super::try_parse_named_choice("choose any card"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
     assert_ne!(
         super::try_parse_named_choice("choose any card type"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
     // The new "any" determiner arm must not swallow other "any …" choices — a
     // number choice must not collapse into CardName.
     assert_ne!(
         super::try_parse_named_choice("choose any number"),
-        Some(ChoiceType::CardName)
+        Some(ChoiceType::card_name())
     );
 }
 
@@ -62305,6 +62305,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }

@@ -611,6 +611,7 @@ fn redundancy_delta(
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::Intensify { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::DraftFromSpellbook { .. }
