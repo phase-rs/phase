@@ -5112,7 +5112,21 @@ mod tests {
         state.remember_card_identities([PlayerId(0)], &[library]);
         crate::game::zones::reorder_within_library(&mut state, PlayerId(1), &[library], Some(0));
 
-        assert_eq!(state, baseline);
+        assert_ne!(
+            state, baseline,
+            "the live action boundary generation must remain available to privacy filtering"
+        );
+        assert_eq!(
+            state
+                .product_knowledge_state
+                .action_library_knowledge_generations,
+            vec![0, 1]
+        );
+        assert_eq!(
+            state.normalize_for_loop(),
+            baseline.normalize_for_loop(),
+            "loop snapshots must ignore action-scoped privacy provenance after the action"
+        );
     }
 
     /// CR 400.7 + CR 122.2: A card that was publicly revealed in hand (e.g.

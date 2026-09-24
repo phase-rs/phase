@@ -26619,6 +26619,20 @@ impl GameState {
         // CR 603.5: the "may"-answer journal belongs to the LIVE window, not to a stored
         // position sample. Cleared with the ring, on this same receiver.
         clone.loop_answer_journal = None;
+        // Hidden-search privacy provenance is action-scoped event-filtering state,
+        // not recurring game-position state. Keep it on the live state so the
+        // current action can still apply its exact lineage receipts, but omit it
+        // from loop-equivalence snapshots so a completed action cannot suppress a
+        // genuine shortcut on the next recurrence.
+        clone.completed_hidden_search_audiences.clear();
+        clone
+            .product_knowledge_state
+            .action_library_knowledge_generations
+            .clear();
+        clone
+            .product_knowledge_state
+            .zone_change_library_knowledge_stamps
+            .clear();
         // Private shortcut capabilities are live interaction state, never part
         // of a CR 104.4b position sample.
         clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
