@@ -454,7 +454,7 @@ pub(crate) fn finish_deferred_meld_entry(
 
     let attack_target = targets.first().copied();
     commit_final_attack_status(state, &context, attack_target);
-    finalize_meld_entry_snapshot(state, context.source_id, attack_target, events);
+    finalize_meld_entry_snapshot(state, &context, attack_target, events);
     finish_resolution(state, context.source_id, events);
 }
 
@@ -491,7 +491,7 @@ pub(crate) fn finish_meld_attack_choice(
     };
     let attack_target = still_valid.then_some(selected);
     commit_final_attack_status(state, &context, attack_target);
-    finalize_meld_entry_snapshot(state, context.source_id, attack_target, events);
+    finalize_meld_entry_snapshot(state, &context, attack_target, events);
     finish_resolution(state, context.source_id, events);
 }
 
@@ -540,10 +540,11 @@ fn park_meld_entry_event(state: &mut GameState, source_id: ObjectId, events: &mu
 
 fn finalize_meld_entry_snapshot(
     state: &mut GameState,
-    source_id: ObjectId,
+    context: &MeldSelection,
     attack_target: Option<AttackTarget>,
     events: &mut Vec<GameEvent>,
 ) {
+    let source_id = context.source_id;
     let defending_player = attack_target.and_then(|target| {
         state.objects.get(&source_id).and_then(|object| {
             combat::entry_attack_target_defender(state, object.controller, target)
@@ -556,8 +557,22 @@ fn finalize_meld_entry_snapshot(
     };
     refresh_meld_entry_records(state, source_id, combat_status, events);
 
-    if !state.deferred_entry_events.is_empty() {
+    let replay_deferred_entry = !state.deferred_entry_events.is_empty();
+    if replay_deferred_entry {
         events.extend(state.deferred_entry_events.iter().cloned());
+    }
+    // CR 701.42a: the pair is now one permanent on the battlefield. Announced
+    // after its entry event so observers see the entry, then the meld.
+    let controller = state
+        .objects
+        .get(&source_id)
+        .map_or(context.controller, |object| object.controller);
+    events.push(GameEvent::Melded {
+        object_id: source_id,
+        partner_id: context.partner_id,
+        controller,
+    });
+    if replay_deferred_entry {
         let _ =
             crate::game::engine_replacement::replay_deferred_entry_events(state, source_id, events);
     }

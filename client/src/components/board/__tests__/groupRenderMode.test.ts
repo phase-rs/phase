@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest";
 import type { GroupedPermanent } from "../../../viewmodel/battlefieldProps.ts";
 import {
   getGroupRenderMode,
+  groupCardScale,
   groupStaggerPx,
   visibleCardSlotCount,
+  visibleCardSlotWidth,
   visibleStaggerCount,
 } from "../groupRenderMode.ts";
+import { MELDED_CARD_SCALE } from "../boardSizing.ts";
 
 function group(count: number): GroupedPermanent {
   return {
@@ -68,5 +71,23 @@ describe("getGroupRenderMode", () => {
 
   it("stacks lands tighter than creatures", () => {
     expect(groupStaggerPx("lands")).toBeLessThan(groupStaggerPx("creatures"));
+  });
+});
+
+describe("oversized melded cards", () => {
+  const melded: GroupedPermanent = {
+    ...group(1),
+    representative: { isMelded: true } as GroupedPermanent["representative"],
+  };
+
+  it("scales only a melded group's card size", () => {
+    expect(groupCardScale(group(1))).toBe(1);
+    expect(groupCardScale(melded)).toBe(MELDED_CARD_SCALE);
+  });
+
+  it("reserves a melded card's extra row width", () => {
+    expect(visibleCardSlotWidth("single", group(1))).toBe(1);
+    expect(visibleCardSlotWidth("single", melded)).toBe(MELDED_CARD_SCALE);
+    expect(visibleCardSlotWidth("expanded", group(3))).toBe(3);
   });
 });

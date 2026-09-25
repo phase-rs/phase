@@ -1035,6 +1035,7 @@ mod mazemind_tome_existential_counter_state_trigger;
 mod mbaku_attacked_monarch_intervening_if;
 mod mechtitan_core_return_exiled;
 mod megamorph_paid_turn_up_counter;
+mod meld_real_card_data;
 mod memory_jar_delayed_end_step;
 mod memory_plunder_free_cast_2884;
 mod mercenaries_any_player_activate_prevention_scope;

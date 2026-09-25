@@ -6,14 +6,21 @@ import type {
   ObjectId,
   PlayerId,
 } from "../adapter/types";
-import { publicName, toCardProps } from "./cardProps";
+import { isMeldedPermanent, publicName, toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
 
 function canGroup(obj: GameObject, ringBearerIds: ReadonlySet<ObjectId>): boolean {
   // Ring-bearers (CR 701.54) must never be hidden behind a same-named
   // non-bearer representative in a collapsed/stacked group display — render
   // them solo so the ring-bearer badge in PermanentCard is always visible.
-  return obj.attachments.length === 0 && !ringBearerIds.has(obj.id) && !obj.face_down;
+  // A melded permanent renders oversized, so it never shares a group's
+  // normal-sized representative slot either.
+  return (
+    obj.attachments.length === 0
+    && !ringBearerIds.has(obj.id)
+    && !obj.face_down
+    && !isMeldedPermanent(obj)
+  );
 }
 
 function groupKey(

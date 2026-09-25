@@ -2502,3 +2502,46 @@ fn meld_resolves_under_a_format_that_forbids_digital_only_cards() {
         "the digital leg on the same face is gated out"
     );
 }
+
+/// CR 701.42a: a meld card that enters mid-game (a debug spawn) brings its
+/// combined back into the game's registry, exactly as a card that started in the
+/// game would; its digital-only conjure target still follows the format gate.
+#[test]
+fn mid_game_entry_extends_the_registry_under_the_format_gate() {
+    use crate::game::printed_cards::{extend_card_face_registry, outside_game_faces_for};
+    use crate::types::format::{FormatConfig, GameFormat};
+    use crate::types::game_state::GameState;
+
+    let db = meld_layout_export_db();
+    let source = db
+        .get_face_by_name("Gisela, the Broken Blade")
+        .expect("the fixture has the meld source");
+    let faces = outside_game_faces_for(source, &db);
+    let names = |faces: &[CardFace]| {
+        faces
+            .iter()
+            .map(|face| face.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&faces.paper), [RESULT_NAME]);
+    assert_eq!(names(&faces.digital), [CONJURED_NAME]);
+
+    for (format, admits_digital) in [(GameFormat::Standard, false), (GameFormat::Historic, true)] {
+        let config = FormatConfig::for_format(format).expect("built-in format");
+        let mut state = GameState::new(config, 2, 42);
+        extend_card_face_registry(&mut state, &faces);
+        assert!(
+            state
+                .card_face_registry
+                .contains_key(&RESULT_NAME.to_lowercase()),
+            "{format:?}: meld is a paper keyword action, so its result is always reachable"
+        );
+        assert_eq!(
+            state
+                .card_face_registry
+                .contains_key(&CONJURED_NAME.to_lowercase()),
+            admits_digital,
+            "{format:?}: the conjure target follows the digital-only gate"
+        );
+    }
+}

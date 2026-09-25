@@ -15,6 +15,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
+import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -294,6 +295,8 @@ export const PermanentCard = memo(function PermanentCard({
     (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
   );
   const counterDisplay = useCounterDisplay(objectId);
+  // An active animation (the meld forge) is presenting this card itself.
+  const isVeiledByAnimation = useAnimationStore((s) => s.veiledObjectIds.has(objectId));
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
@@ -793,6 +796,7 @@ export const PermanentCard = memo(function PermanentCard({
       className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
         zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : isHovered ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
+        visibility: isVeiledByAnimation ? "hidden" : undefined,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:

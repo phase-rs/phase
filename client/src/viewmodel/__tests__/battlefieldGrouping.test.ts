@@ -215,6 +215,20 @@ describe("partitionByType", () => {
 });
 
 describe("groupByName", () => {
+  it("never folds a melded permanent into a same-named group", () => {
+    const objects = [
+      makeGameObject({ id: 1, name: "Brisela, Voice of Nightmares" }),
+      makeGameObject({ id: 2, name: "Brisela, Voice of Nightmares", merge_kind: "Meld", merged_components: [2, 3] }),
+    ];
+
+    const groups = groupByName(objects, undefined, undefined, undefined);
+
+    expect(groups).toHaveLength(2);
+    expect(groups.find((g) => g.ids.includes(2))).toMatchObject({ ids: [2], count: 1 });
+    expect(groups.find((g) => g.ids.includes(2))?.representative.isMelded).toBe(true);
+    expect(groups.find((g) => g.ids.includes(1))?.representative.isMelded).toBe(false);
+  });
+
   it("stacks matching permanents by name and tapped state", () => {
     const objects = [
       makeGameObject({ id: 1, name: "Forest" }),

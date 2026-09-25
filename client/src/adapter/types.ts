@@ -13,6 +13,9 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
+/** CR 701.42a / CR 730.2: the keyword that built a merged permanent. */
+export type MergeKind = "Mutate" | "Meld" | "Augment";
+
 // Engine masking sentinel emitted at the client boundary for hidden card faces.
 export const HIDDEN_CARD_NAME = "Hidden Card";
 
@@ -1598,6 +1601,19 @@ export interface GameObject {
    * only when true; the frontend does not read it (display only).
    */
   is_copy?: boolean;
+  /**
+   * CR 701.42a / CR 730.2: which keyword built this merged permanent (mirrors the
+   * engine's `merge_kind`). Present only on a merged permanent. `"Meld"` marks a
+   * melded permanent — one object represented by the two cards of a meld pair
+   * (CR 701.42a), displayed as its oversized combined card.
+   */
+  merge_kind?: MergeKind;
+  /**
+   * CR 701.42a / CR 730.2: the components representing a merged permanent,
+   * topmost first (mirrors the engine's `merged_components`). Present only on a
+   * merged permanent.
+   */
+  merged_components?: ObjectId[];
   /**
    * Image-lookup routing hint from the engine. "Card" → look up the image
    * in the real-card database (default; also covers token-copies of real
@@ -3262,6 +3278,9 @@ export type GameEvent =
   | { type: "Transformed"; data: { object_id: ObjectId } }
   // CR 710.4: a Kamigawa flip permanent flipped to its alternative face.
   | { type: "Flipped"; data: { object_id: ObjectId } }
+  // CR 701.42a: a meld pair entered the battlefield as one melded permanent.
+  // `object_id` is the melded permanent; `partner_id` is the pair's other card.
+  | { type: "Melded"; data: { object_id: ObjectId; partner_id: ObjectId; controller: PlayerId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }

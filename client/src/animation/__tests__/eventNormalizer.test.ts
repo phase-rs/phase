@@ -91,6 +91,50 @@ describe("normalizeEvents", () => {
     expect(normalizeEvents(events)).toEqual([]);
   });
 
+  describe("Melded", () => {
+    const melded: GameEvent = {
+      type: "Melded",
+      data: { object_id: 10, partner_id: 11, controller: 0 },
+    };
+    const meldSequence: GameEvent[] = [
+      { type: "ZoneChanged", data: { object_id: 10, from: "Battlefield", to: "Exile" } },
+      { type: "ZoneChanged", data: { object_id: 11, from: "Battlefield", to: "Exile" } },
+      { type: "ZoneChanged", data: { object_id: 10, from: "Exile", to: "Battlefield" } },
+      melded,
+    ];
+
+    it("plays the forge animation as its own step at the meld duration", () => {
+      const steps = normalizeEvents([
+        { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
+        melded,
+      ]);
+      expect(steps).toHaveLength(2);
+      expect(steps[1].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+      expect(steps[1].duration).toBe(EVENT_DURATIONS.Melded);
+    });
+
+    it("presents the pair's exile and entry moves through the forge animation alone", () => {
+      const steps = normalizeEvents(meldSequence);
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+    });
+
+    it("still animates unrelated zone moves in the same batch", () => {
+      const unrelated: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 12, from: "Battlefield", to: "Graveyard" },
+      };
+      const steps = normalizeEvents([
+        { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },
+        unrelated,
+        ...meldSequence,
+      ]);
+      const animated = steps.flatMap((step) => step.effects.map((effect) => effect.event));
+      expect(animated).toContainEqual(unrelated);
+      expect(animated.filter((event) => event.type === "ZoneChanged")).toHaveLength(1);
+    });
+  });
+
   it("SpellCast always starts a new step", () => {
     const events: GameEvent[] = [
       { type: "SpellCast", data: { card_id: 1, controller: 0, object_id: 1 } },

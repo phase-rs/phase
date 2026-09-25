@@ -55,6 +55,7 @@ const NON_VISUAL_EVENTS = new Set([
 const OWN_STEP_TYPES = new Set([
   "SpellCast",
   "TurnStarted",
+  "Melded",
 ]);
 
 /** Events that merge into the preceding step rather than starting a new one. */
@@ -116,6 +117,26 @@ const GROUPING_STRATEGIES: Map<string, GroupingStrategy> = new Map([
   ["CreatureDestroyed", sameTypeGrouping],
   ["PermanentSacrificed", sameTypeGrouping],
 ]);
+
+/**
+ * CR 701.42a: a meld exiles both cards of the pair and returns them as one
+ * melded permanent. The `Melded` forge animation presents that whole sequence,
+ * so the pair's preceding exile and entry moves are not animated separately.
+ */
+function meldPresentedZoneChanges(events: GameEvent[]): Set<number> {
+  const presented = new Set<number>();
+  events.forEach((event, meldIndex) => {
+    if (event.type !== "Melded") return;
+    const pair = new Set([event.data.object_id, event.data.partner_id]);
+    for (let index = 0; index < meldIndex; index++) {
+      const candidate = events[index];
+      if (candidate.type !== "ZoneChanged" || !pair.has(candidate.data.object_id)) continue;
+      const { from, to } = candidate.data;
+      if (to === "Exile" || (from === "Exile" && to === "Battlefield")) presented.add(index);
+    }
+  });
+  return presented;
+}
 
 // ---------------------------------------------------------------------------
 // Step construction helpers
@@ -761,7 +782,7 @@ export function normalizeEvents(
   const replacementByAggregateIndex = new Map(
     aggregateReplacements.map((replacement) => [replacement.aggregateIndex, replacement]),
   );
-  const skipIndices = new Set<number>();
+  const skipIndices = meldPresentedZoneChanges(events);
   for (const replacement of aggregateReplacements) {
     for (const index of replacement.skipIndices) skipIndices.add(index);
   }

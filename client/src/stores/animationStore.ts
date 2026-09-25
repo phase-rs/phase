@@ -31,6 +31,12 @@ interface AnimationStoreState {
   positionRegistry: Map<number, DOMRect>;
   animationNewState: GameState | null;
   displayedLife: DisplayedLifeTotals | null;
+  /**
+   * Objects the active step presents itself — e.g. the two cards a meld forge
+   * lifts off the board — so their board cards hide until the step ends.
+   * Step-scoped: every step change and queue clear resets it.
+   */
+  veiledObjectIds: ReadonlySet<number>;
 }
 
 interface AnimationStoreActions {
@@ -42,10 +48,14 @@ interface AnimationStoreActions {
   setAnimationNewState: (state: GameState | null) => void;
   /** Record an engine-reported life total whose hit has just landed on screen. */
   recordDisplayedLife: (playerId: number, life: number, engineCommitEpoch: number) => void;
+  /** Hide these objects' board cards for the rest of the active step. */
+  veilObjects: (objectIds: readonly number[]) => void;
   clearQueue: () => void;
 }
 
 export type AnimationStore = AnimationStoreState & AnimationStoreActions;
+
+const NO_VEILED_OBJECTS: ReadonlySet<number> = new Set();
 
 export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   queue: [],
@@ -55,6 +65,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   positionRegistry: new Map(),
   animationNewState: null,
   displayedLife: null,
+  veiledObjectIds: NO_VEILED_OBJECTS,
 
   enqueueSteps: (steps) => {
     if (steps.length === 0) return;
@@ -83,6 +94,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
         activeStep: next,
         activeGeneration: state.activeGeneration + 1,
         queue: rest,
+        veiledObjectIds: NO_VEILED_OBJECTS,
       }));
     } else {
       set((state) => ({
@@ -90,6 +102,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
         activeGeneration: state.activeGeneration + 1,
         isPlaying: false,
         animationNewState: null,
+        veiledObjectIds: NO_VEILED_OBJECTS,
       }));
     }
   },
@@ -131,6 +144,10 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     });
   },
 
+  veilObjects: (objectIds) => {
+    set((state) => ({ veiledObjectIds: new Set([...state.veiledObjectIds, ...objectIds]) }));
+  },
+
   clearQueue: () => set((state) => ({
     queue: [],
     activeStep: null,
@@ -138,5 +155,6 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     isPlaying: false,
     animationNewState: null,
     displayedLife: null,
+    veiledObjectIds: NO_VEILED_OBJECTS,
   })),
 }));

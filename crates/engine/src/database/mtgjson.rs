@@ -237,8 +237,79 @@ pub struct SetRelatedCards {
 /// Load and deserialize an AtomicCards.json file.
 pub fn load_atomic_cards(path: &Path) -> Result<AtomicCardsFile, Box<dyn Error>> {
     let contents = std::fs::read_to_string(path)?;
-    let file: AtomicCardsFile = serde_json::from_str(&contents)?;
+    let mut file: AtomicCardsFile = serde_json::from_str(&contents)?;
+    regroup_meld_cards(&mut file.data);
     Ok(file)
+}
+
+/// The two halves of a meld card, as MTGJSON's `side` field codes them.
+#[derive(Clone, Copy)]
+enum MeldHalf {
+    Front,
+    CombinedBack,
+}
+
+impl MeldHalf {
+    fn mtgjson_side(self) -> &'static str {
+        match self {
+            MeldHalf::Front => "a",
+            MeldHalf::CombinedBack => "b",
+        }
+    }
+}
+
+fn is_meld_half(face: &AtomicCard, half: MeldHalf) -> bool {
+    face.layout == "meld" && face.side.as_deref() == Some(half.mtgjson_side())
+}
+
+/// The combined back face a meld front names: MTGJSON keys a front as
+/// `"<front> // <combined back>"` with `face_name` holding `<front>`.
+fn meld_back_name(front: &AtomicCard) -> Option<&str> {
+    front
+        .name
+        .strip_prefix(front.face_name.as_deref()?)?
+        .strip_prefix(" // ")
+}
+
+/// CR 712.4 + CR 701.42a: give every meld card its combined back face.
+///
+/// A meld card has a Magic card face on one side and half of an oversized card
+/// face on the other, but MTGJSON publishes a meld pair as three independent
+/// single-face groups: each front (`side: "a"`) is keyed
+/// `"<front> // <combined back>"`, and the combined back (`side: "b"`) is a
+/// standalone group of its own. Every loader models a double-faced card as one
+/// group holding `[front, back]` — `CardLayout::Meld(front, back)`, the
+/// export's `layout` / `face_index` fields, and the shared-oracle-id face
+/// grouping that meld-pair validation reads — so regroup each front with a copy
+/// of the back face it names.
+///
+/// The standalone back group is kept. CR 712.4b: the combined back supplies
+/// the melded permanent's characteristics, and it carries the combined card's
+/// own printed identity (its own oracle id), which the melded permanent
+/// presents. The front's copy only records which physical card it is half of;
+/// the export keeps it under a hidden per-front key.
+fn regroup_meld_cards(data: &mut HashMap<String, Vec<AtomicCard>>) {
+    let backs: HashMap<String, AtomicCard> = data
+        .iter()
+        .filter_map(|(key, faces)| match faces.as_slice() {
+            [face] if is_meld_half(face, MeldHalf::CombinedBack) => {
+                Some((key.clone(), face.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    for faces in data.values_mut() {
+        let back = match faces.as_slice() {
+            [front] if is_meld_half(front, MeldHalf::Front) => {
+                meld_back_name(front).and_then(|name| backs.get(name))
+            }
+            _ => None,
+        };
+        if let Some(back) = back {
+            faces.push(back.clone());
+        }
+    }
 }
 
 /// Load and deserialize a CardTypes.json file.
@@ -401,6 +472,129 @@ mod tests {
         assert_eq!(faces[0].face_name.as_deref(), Some("Delver of Secrets"));
         assert_eq!(faces[1].side.as_deref(), Some("b"));
         assert_eq!(faces[1].face_name.as_deref(), Some("Insectile Aberration"));
+    }
+
+    /// MTGJSON's published meld shape: two single-face fronts naming one
+    /// shared combined back, which is its own single-face group.
+    fn meld_atomic_data() -> HashMap<String, Vec<AtomicCard>> {
+        let face = |name: &str, face_name: &str, side: &str, oracle: &str| {
+            serde_json::json!({
+                "name": name,
+                "faceName": face_name,
+                "side": side,
+                "layout": "meld",
+                "colors": [],
+                "colorIdentity": [],
+                "manaValue": 0.0,
+                "identifiers": { "scryfallOracleId": oracle }
+            })
+        };
+        let dfc = |face_name: &str, side: &str| {
+            serde_json::json!({
+                "name": "Delver of Secrets // Insectile Aberration",
+                "faceName": face_name,
+                "side": side,
+                "layout": "transform",
+                "colors": [],
+                "colorIdentity": [],
+                "manaValue": 1.0,
+                "identifiers": { "scryfallOracleId": "delver-oracle" }
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "Gisela, the Broken Blade // Brisela, Voice of Nightmares": [face(
+                "Gisela, the Broken Blade // Brisela, Voice of Nightmares",
+                "Gisela, the Broken Blade",
+                "a",
+                "gisela-oracle",
+            )],
+            "Bruna, the Fading Light // Brisela, Voice of Nightmares": [face(
+                "Bruna, the Fading Light // Brisela, Voice of Nightmares",
+                "Bruna, the Fading Light",
+                "a",
+                "bruna-oracle",
+            )],
+            "Brisela, Voice of Nightmares": [face(
+                "Brisela, Voice of Nightmares",
+                "Brisela, Voice of Nightmares",
+                "b",
+                "brisela-oracle",
+            )],
+            "Orphan Meld Front // Missing Combined Back": [face(
+                "Orphan Meld Front // Missing Combined Back",
+                "Orphan Meld Front",
+                "a",
+                "orphan-oracle",
+            )],
+            "Delver of Secrets // Insectile Aberration": [
+                dfc("Delver of Secrets", "a"),
+                dfc("Insectile Aberration", "b"),
+            ],
+        }))
+        .expect("meld fixture should deserialize")
+    }
+
+    fn face_names(faces: &[AtomicCard]) -> Vec<Option<&str>> {
+        faces.iter().map(|face| face.face_name.as_deref()).collect()
+    }
+
+    /// CR 712.4: every meld front carries its combined back face, exactly as a
+    /// transforming double-faced card carries its back.
+    #[test]
+    fn regroup_meld_cards_pairs_each_front_with_its_combined_back() {
+        let mut data = meld_atomic_data();
+        regroup_meld_cards(&mut data);
+
+        for (key, front) in [
+            (
+                "Gisela, the Broken Blade // Brisela, Voice of Nightmares",
+                "Gisela, the Broken Blade",
+            ),
+            (
+                "Bruna, the Fading Light // Brisela, Voice of Nightmares",
+                "Bruna, the Fading Light",
+            ),
+        ] {
+            let faces = &data[key];
+            assert_eq!(
+                face_names(faces),
+                vec![Some(front), Some("Brisela, Voice of Nightmares")],
+                "{key}: front first, combined back second"
+            );
+            assert_eq!(faces[1].side.as_deref(), Some("b"));
+        }
+    }
+
+    /// CR 712.4b: the combined back keeps its own group — it carries the
+    /// melded permanent's printed identity (its own oracle id), which the
+    /// fronts' copies do not replace.
+    #[test]
+    fn regroup_meld_cards_keeps_the_standalone_combined_back() {
+        let mut data = meld_atomic_data();
+        regroup_meld_cards(&mut data);
+        let back = &data["Brisela, Voice of Nightmares"];
+        assert_eq!(face_names(back), vec![Some("Brisela, Voice of Nightmares")]);
+        assert_eq!(
+            back[0].identifiers.scryfall_oracle_id.as_deref(),
+            Some("brisela-oracle")
+        );
+    }
+
+    #[test]
+    fn regroup_meld_cards_leaves_other_groups_untouched() {
+        let mut data = meld_atomic_data();
+        regroup_meld_cards(&mut data);
+
+        assert_eq!(
+            face_names(&data["Orphan Meld Front // Missing Combined Back"]),
+            vec![Some("Orphan Meld Front")],
+            "a front whose combined back is absent stays single-faced"
+        );
+        assert_eq!(
+            face_names(&data["Delver of Secrets // Insectile Aberration"]),
+            vec![Some("Delver of Secrets"), Some("Insectile Aberration")],
+            "non-meld double-faced cards are already grouped"
+        );
     }
 
     #[test]

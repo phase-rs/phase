@@ -725,6 +725,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // Unstable Host/Augment combine is a distinct mechanic and has no
         // dedicated trigger mode today.
         GameEvent::Augmented { .. } => {}
+        // CR 701.42a: no printed card triggers on melding; the melded
+        // permanent's entry is indexed through its `ZoneChanged` event.
+        GameEvent::Melded { .. } => {}
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }

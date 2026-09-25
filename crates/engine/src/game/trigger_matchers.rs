@@ -999,6 +999,8 @@ fn count_matching_trigger_event_subjects(
         // Unstable Host/Augment combine also makes the surviving Host permanent
         // the observable subject for generic object-scoped event helpers.
         GameEvent::Augmented { merged_id, .. } => count_one(*merged_id),
+        // CR 701.42a: the melded permanent is the event's subject.
+        GameEvent::Melded { object_id, .. } => count_one(*object_id),
         GameEvent::ContraptionAssembled { object_id, .. } => count_one(*object_id),
         GameEvent::ContraptionCranked { contraption_id, .. } => count_one(*contraption_id),
         // Object target events yield the affected object as subject. Player

@@ -117,6 +117,11 @@ export class GameObjectFactory extends Factory<GameObject> {
   signatureSpell() {
     return this.inCommandZone().params({ signature_spell: {} });
   }
+
+  /** CR 701.42a: a melded permanent represented by `components`, topmost first. */
+  melded(components: ObjectId[]) {
+    return this.onBattlefield().params({ merge_kind: "Meld", merged_components: components });
+  }
 }
 
 export const gameObjectFactory = GameObjectFactory.define(({ sequence }): GameObject => ({

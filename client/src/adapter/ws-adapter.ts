@@ -210,6 +210,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 80 — GameEvent gained the tagged variant Melded. Full-game event frames
+ *      can carry it, so the exact handshake refuses v79 peers. P2P moves in
+ *      lockstep (wire 62); lobby messages are unchanged.
  * 78 — Duration::UntilEvent (the event-deadline duration) and
  *      TransientContinuousEffect's duration_event_source are new in serialized
  *      GameState. This client hands server frames to JSON.parse, so a v77
@@ -549,7 +552,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      activation_cost_snapshot fields are additive and skipped when empty, so
  *      every spell frame is byte-identical to v78.
  */
-export const PROTOCOL_VERSION = 79;
+export const PROTOCOL_VERSION = 80;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

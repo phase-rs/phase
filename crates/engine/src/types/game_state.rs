@@ -4213,6 +4213,30 @@ pub struct DebugCardEntrySource {
     pub face: CardFace,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back_face: Option<BackFaceData>,
+    /// Faces from outside the game this card can reach, bound with it so its
+    /// entry can extend `GameState::card_face_registry` without a database.
+    #[serde(default, skip_serializing_if = "OutsideGameFaces::is_empty")]
+    pub outside_game_faces: OutsideGameFaces,
+}
+
+/// Faces from outside the game one card can reach — a meld pair's combined
+/// back (CR 701.42a), and digital-only conjure and spellbook targets — split
+/// by the digital-only format gate, so a card that enters mid-game can extend
+/// `GameState::card_face_registry` the same way the game's starting cards did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideGameFaces {
+    /// Reachable in every format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paper: Vec<CardFace>,
+    /// Reachable only where the format admits digital-only cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub digital: Vec<CardFace>,
+}
+
+impl OutsideGameFaces {
+    pub fn is_empty(&self) -> bool {
+        self.paper.is_empty() && self.digital.is_empty()
+    }
 }
 
 /// CR 400.7 + CR 614.1: Remaining real battlefield entries for one debug

@@ -34,6 +34,29 @@ describe("animationStore", () => {
     });
   });
 
+  describe("veilObjects", () => {
+    it("hides objects only for the step that veiled them", () => {
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()]);
+      useAnimationStore.getState().veilObjects([10, 11]);
+      expect([...useAnimationStore.getState().veiledObjectIds]).toEqual([10, 11]);
+
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().veiledObjectIds.size).toBe(0);
+    });
+
+    it("never outlives the queue", () => {
+      useAnimationStore.getState().enqueueSteps([makeStep()]);
+      useAnimationStore.getState().veilObjects([10]);
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().veiledObjectIds.size).toBe(0);
+
+      useAnimationStore.getState().enqueueSteps([makeStep()]);
+      useAnimationStore.getState().veilObjects([12]);
+      useAnimationStore.getState().clearQueue();
+      expect(useAnimationStore.getState().veiledObjectIds.size).toBe(0);
+    });
+  });
+
   describe("advanceStep", () => {
     it("advances through steps in order", () => {
       const step1 = makeStep(100);

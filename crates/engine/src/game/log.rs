@@ -205,6 +205,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
+        | GameEvent::Melded { .. }
         | GameEvent::Flipped { .. }
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::TurnedFaceDown { .. }
@@ -436,6 +437,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::Saddled { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::Transformed { .. }
+        | GameEvent::Melded { .. }
         | GameEvent::Flipped { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::DayNightChanged { .. }
@@ -586,6 +588,18 @@ fn card_seg(state: &GameState, id: ObjectId) -> LogSegment {
     LogSegment::CardName {
         name: resolve_object_name(state, id),
         object_id: id,
+    }
+}
+
+/// A card segment naming the object's printed card rather than its live
+/// characteristics, for events where the two differ (a melded permanent).
+fn printed_card_seg(state: &GameState, id: ObjectId) -> LogSegment {
+    match state.objects.get(&id) {
+        Some(obj) if !obj.base_name.is_empty() => LogSegment::CardName {
+            name: obj.base_name.clone(),
+            object_id: id,
+        },
+        _ => card_seg(state, id),
     }
 }
 
@@ -772,6 +786,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ControllerChanged { .. }
         | GameEvent::Transformed { .. }
+        | GameEvent::Melded { .. }
         // CR 710.4: flipping is an object-status change, grouped with transform
         // and face up/down.
         | GameEvent::Flipped { .. }
@@ -1474,6 +1489,20 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::Transformed { object_id } => {
             vec![card_seg(state, *object_id), text(" transforms")]
         }
+
+        // CR 701.42a: name both physical cards by their printed fronts — the
+        // melded permanent's live name is already the combined back face's.
+        GameEvent::Melded {
+            object_id,
+            partner_id,
+            ..
+        } => vec![
+            printed_card_seg(state, *object_id),
+            text(" and "),
+            card_seg(state, *partner_id),
+            text(" meld into "),
+            card_seg(state, *object_id),
+        ],
 
         // CR 710.4: the log names the permanent by its (now alternative,
         // CR 710.1b) characteristics, which `card_seg` reads live.
