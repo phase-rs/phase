@@ -45,10 +45,10 @@ import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { loadP2PTerminalResult } from "../services/p2pTerminalResult";
-import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
+import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
-import { loadDraftRun } from "../services/quickDraftPersistence";
+import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import {
@@ -1459,9 +1459,84 @@ export function GameProvider({
     // On cleanup, we clear the WASM game state but keep the worker alive.
     const setupLocal = async () => {
       if (cancelled) return;
-
-      const savedState = await loadGame(gameId);
       const adapter = getSharedAdapter();
+      const soloDraft = source === "draft" && !!draftId;
+      const draftDeckKey = `phase:draft-deck:${gameId}`;
+      const reportDraftError = (error: unknown) => {
+        if (!cancelled) onNoDeckRef.current?.(error instanceof Error ? error.message : String(error));
+      };
+      const startDraftDeck = async (raw: string) => {
+        try {
+          const deckList = JSON.parse(raw) as DeckListPayload;
+          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+          if (cancelled) return;
+          controller = createGameLoopController({
+            mode: mode === "local" ? "local" : "ai", difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty), playerCount,
+          });
+          controller.start();
+          if (cancelled) return;
+          audioManager.setContext("battlefield");
+          if (sessionStorage.getItem(draftDeckKey) === raw) sessionStorage.removeItem(draftDeckKey);
+        } catch (error) {
+          console.error("Draft deck validation failed:", error);
+          reportDraftError(error);
+        }
+      };
+      const startExactDraftStage = async () => {
+        try {
+          const meta = await inspectActiveQuickDraftLifecycle("inspect");
+          if (!meta || meta.id !== draftId) throw new Error("This draft match is unavailable");
+          const run = await loadDraftRun(draftId!);
+          if (!run) throw new Error("This draft match is unavailable");
+          const { isCoherentUnresolvedDraftStage } = await import("../stores/draftStore");
+          if (!Array.isArray(run.results) || !Array.isArray(run.playerDeck)
+            || !Array.isArray(run.opponentDeck) || !Array.isArray(run.usedBotSeats)
+            || !isCoherentUnresolvedDraftStage(run, draftId!, gameId)
+            || (meta.setCode === "custom-cube" && !Array.isArray(run.booster_pack_pool))) {
+            throw new Error("This draft match is unavailable");
+          }
+          const deckList = {
+            booster_pack_pool: run.booster_pack_pool,
+            player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+            opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
+            ai_decks: [],
+          };
+          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+          if (cancelled) return;
+          controller = createGameLoopController({
+            mode: mode === "local" ? "local" : "ai", difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty), playerCount,
+          });
+          controller.start();
+          if (!cancelled) audioManager.setContext("battlefield");
+        } catch (error) {
+          console.error("Draft IDB deck fallback failed:", error);
+          reportDraftError(error);
+        }
+      };
+      let draftDeckRaw: string | null;
+      try {
+        draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+      } catch (error) {
+        reportDraftError(error);
+        return;
+      }
+      if (soloDraft && draftDeckRaw !== null) {
+        await startDraftDeck(draftDeckRaw);
+        return;
+      }
+      let savedState;
+      try {
+        savedState = await loadGame(gameId);
+      } catch (error) {
+        if (soloDraft) {
+          await startExactDraftStage();
+          return;
+        }
+        reportDraftError(error);
+        return;
+      }
 
       if (savedState) {
         try {
@@ -1495,6 +1570,10 @@ export function GameProvider({
               });
           onResumeResetRef.current?.(reason);
           clearGame(gameId);
+          if (soloDraft) {
+            await startExactDraftStage();
+            return;
+          }
           const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
           const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
           const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
@@ -1550,80 +1629,14 @@ export function GameProvider({
       // No saved state — start a new game.
       // Quick drafts and local Commander pods publish their full engine payload
       // in sessionStorage, including opaque original cube metadata.
-      const draftDeckKey = `phase:draft-deck:${gameId}`;
-      const draftDeckRaw = sessionStorage.getItem(draftDeckKey);
-      if (draftDeckRaw) {
-        sessionStorage.removeItem(draftDeckKey);
-        const deckList = JSON.parse(draftDeckRaw) as {
-          player: ExpandedDeck;
-          opponent: ExpandedDeck;
-          ai_decks: ExpandedDeck[];
-          // Every set the draft contained, passed opaquely to the engine.
-          draft_set_codes?: string[] | null;
-          booster_pack_pool?: string[] | null;
-        };
-        try {
-          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
-          if (cancelled) return;
-          controller = createGameLoopController({
-            mode: mode === "local" ? "local" : "ai",
-            difficulty,
-            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
-            playerCount,
-          });
-          controller.start();
-          audioManager.setContext("battlefield");
-        } catch (err) {
-          console.error("Draft deck validation failed:", err);
-          if (!cancelled) onNoDeckRef.current?.();
-        }
+      if (draftDeckRaw !== null) {
+        await startDraftDeck(draftDeckRaw);
         return;
       }
 
-      if (source === "draft" && draftId) {
-        const run = await loadDraftRun(draftId);
-        if (run) {
-          const deckList = {
-            booster_pack_pool: run.booster_pack_pool,
-            player: {
-              main_deck: run.playerDeck,
-              sideboard: [] as string[],
-              commander: [] as string[],
-              planar_deck: [] as string[],
-              scheme_deck: [] as string[],
-              sticker_sheets: [] as string[],
-              signature_spell: [] as string[],
-              companion: [] as string[],
-            },
-            opponent: {
-              main_deck: run.opponentDeck,
-              sideboard: [] as string[],
-              commander: [] as string[],
-              planar_deck: [] as string[],
-              scheme_deck: [] as string[],
-              sticker_sheets: [] as string[],
-              signature_spell: [] as string[],
-              companion: [] as string[],
-            },
-            ai_decks: [],
-          };
-          try {
-            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
-            if (cancelled) return;
-            controller = createGameLoopController({
-              mode: mode === "local" ? "local" : "ai",
-              difficulty,
-              aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
-              playerCount,
-            });
-            controller.start();
-            audioManager.setContext("battlefield");
-          } catch (err) {
-            console.error("Draft IDB deck fallback failed:", err);
-            if (!cancelled) onNoDeckRef.current?.();
-          }
-          return;
-        }
+      if (soloDraft) {
+        await startExactDraftStage();
+        return;
       }
 
       const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);

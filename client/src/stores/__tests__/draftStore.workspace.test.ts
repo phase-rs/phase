@@ -25,7 +25,7 @@ import {
   createDefaultDraftWorkspacePreferences,
   setArrivingCardBoardPreferences,
 } from "../../components/draft/workspace/workspacePreferences";
-import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
+import { ACTIVE_QUICK_DRAFT_KEY, DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
 import {
   projectWorkspaceLandCounts,
   projectWorkspaceMainDeck,
@@ -852,6 +852,192 @@ describe("draft store workspace authority", () => {
     await start([card("existing")]);
     wasm.suggest_deck.mockRejectedValue(new Error("live suggestion"));
     await expect(useDraftStore.getState().autoSuggestDeck()).rejects.toThrow("live suggestion");
+  });
+
+  it("recovers a submitted Cube run without its separate session and launches its exact stage at Hard", async () => {
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"],
+      usedBotSeats: [2], booster_pack_pool: [],
+      activeMatch: { draftId: "durable", gameId: "same-game", format: "run",
+        resultCountAtLaunch: 0, botSeat: 2, opponentDeck: ["Opponent"] },
+    };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: "durable", setCode: "custom-cube", difficulty: 3, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementationOnce(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    const outcome = await useDraftStore.getState().resumeDraft();
+    expect(outcome).toEqual({ status: "resumed", draftId: "durable" });
+    expect(useDraftStore.getState()).toMatchObject({ draftId: "durable", phase: "playing",
+      difficulty: 3, runFormat: "run", runState: run, adapter: null, view: null, workspaceState: null });
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { main_deck: string[] }).main_deck))
+      .toEqual([["Player"], ["Opponent"]]);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId: "durable", gameId: "same-game", payload: expect.objectContaining({ booster_pack_pool: [] }),
+    }));
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("difficulty=Hard"));
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/game/same-game?"));
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it.each([5, 2.5])("refuses persisted finite invalid difficulty %s while retaining the run ID", async (difficulty) => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [] };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: "invalid-difficulty", setCode: "custom-cube", difficulty, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    expect((await actualPersistence.inspectActiveQuickDraftLifecycle("inspect"))?.id).toBe("invalid-difficulty");
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementationOnce(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    const outcome = await useDraftStore.getState().resumeDraft();
+    expect(outcome).toEqual({ status: "unavailable", draftId: "invalid-difficulty",
+      reason: "Saved draft run is unavailable" });
+    expect(useDraftStore.getState().draftId).toBe("invalid-difficulty");
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
+  it("keeps an unreadable run available for Retry Resume and succeeds after the read recovers", async () => {
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "read-retry", setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    persistence.loadDraftRun.mockRejectedValueOnce(new Error("IndexedDB read failed")).mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId: "read-retry", reason: "IndexedDB read failed",
+    });
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "read-retry" });
+    expect(useDraftStore.getState().runState).toEqual(run);
+    await useDraftStore.getState().launchNextMatch(vi.fn());
+    expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { draft_set_codes: string[] }).draft_set_codes))
+      .toEqual([["TST"], ["TST"]]);
+  });
+
+  it.each(["session read", "adapter import"])("recovers a complete run when the separate %s fails", async (failure) => {
+    const run: DraftRunState = { format: "single", results: [{ gameId: "finished", result: "win" }],
+      playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "complete-run", setCode: "custom-cube", difficulty: 2, kind: "Quick", phase: "complete",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    if (failure === "session read") {
+      persistence.loadQuickDraftSession.mockRejectedValueOnce(new Error("session read failed"));
+    } else {
+      persistence.loadQuickDraftSession.mockResolvedValueOnce({ sessionJson: "broken session",
+        mainDeck: [], landCounts: {}, poolSortMode: "color", poolPanelOpen: true, workspace: null });
+      wasm.import_draft_session.mockImplementationOnce(() => { throw new Error("import failed"); });
+    }
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "complete-run" });
+    expect(useDraftStore.getState()).toMatchObject({ phase: "complete", draftId: "complete-run",
+      runState: run, runFormat: "single", adapter: null, view: null, workspaceState: null });
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+  });
+
+  it("mints one run-only stage from the stored opponent and refuses a rejecting engine gate", async () => {
+    const run: DraftRunState = { format: "run", results: [{ gameId: "prior", result: "draw" }],
+      playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [4], booster_pack_pool: [] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "new-stage", setCode: "custom-cube", difficulty: 1, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: !(request as { main_deck: string[] }).main_deck.includes("Opponent"),
+      reasons: ["Opponent deck is not legal"],
+    }));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Opponent deck is not legal");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toEqual(run);
+    formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      run: expect.objectContaining({ opponentDeck: ["Opponent"],
+        activeMatch: expect.objectContaining({ draftId: "new-stage", botSeat: 4, opponentDeck: ["Opponent"] }) }),
+    }));
+    expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a nonfinite in-memory difficulty changed through the store after a valid resume", async () => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "difficulty-change", setCode: "TST", difficulty: 3, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    useDraftStore.getState().setDifficulty(Number.NaN);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the same unresolved run-only stage after publisher rejection and retries it", async () => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId: "publish-retry", gameId: "same-stage", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "publish-retry", setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    persistence.publishStagedDraftMatch.mockRejectedValueOnce(new Error("handoff write failed"));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("handoff write failed");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
+    expect(navigate).not.toHaveBeenCalled();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    const publishedCalls = persistence.publishStagedDraftMatch.mock.calls as unknown as Array<[{ gameId: string }]>;
+    expect(publishedCalls.map(([input]) => input.gameId)).toEqual(["same-stage", "same-stage"]);
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it.each(["serialized", "literal"])("keeps nonfinite %s metadata at the parser boundary", async (encoding) => {
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    const raw = encoding === "serialized"
+      ? JSON.stringify({ id: "nonfinite", setCode: "TST", difficulty: Number.NaN,
+        phase: "playing", pickCount: 40, updatedAt: Date.now() })
+      : `{ "id": "nonfinite", "setCode": "TST", "difficulty": NaN, "phase": "playing", "pickCount": 40, "updatedAt": ${Date.now()} }`;
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, raw);
+    expect(await actualPersistence.inspectActiveQuickDraftLifecycle("inspect")).toBeNull();
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).toBeNull();
+    expect(persistence.loadDraftRun).not.toHaveBeenCalled();
   });
 
   it("routes_resume_suggestions_and_submit_through_workspace_installation", async () => {

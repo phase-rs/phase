@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { useNavigate, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import {
   useDraftStore,
@@ -143,8 +143,8 @@ function FormatPicker({
 // ── Between Matches ───────────────────────────────────────────────────
 
 function BetweenMatches({
-  onNext, onEnd, pending, error,
-}: { onNext: () => void; onEnd: () => void; pending: boolean; error: string | null }) {
+  onNext, onEnd, pending, error, endError,
+}: { onNext: () => void; onEnd: () => void; pending: boolean; error: string | null; endError: boolean }) {
   const { t } = useTranslation("draft");
   const runState = useDraftStore((s) => s.runState);
   const runFormat = useDraftStore((s) => s.runFormat);
@@ -178,9 +178,10 @@ function BetweenMatches({
         <button
           type="button"
           onClick={onEnd}
-          className={menuButtonClass({ tone: "neutral", size: "md" })}
+          disabled={pending}
+          className={menuButtonClass({ tone: "neutral", size: "md", disabled: pending })}
         >
-          {t("run.endRun")}
+          {endError ? t("run.retryEndRun") : t("run.endRun")}
         </button>
       </div>
       {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
@@ -190,7 +191,7 @@ function BetweenMatches({
 
 // ── Run Complete ──────────────────────────────────────────────────────
 
-function RunComplete({ onDone }: { onDone: () => void }) {
+function RunComplete({ onDone, pending, error }: { onDone: () => void; pending: boolean; error: string | null }) {
   const { t } = useTranslation("draft");
   const runState = useDraftStore((s) => s.runState);
   const runFormat = useDraftStore((s) => s.runFormat);
@@ -238,10 +239,13 @@ function RunComplete({ onDone }: { onDone: () => void }) {
       <button
         type="button"
         onClick={onDone}
-        className={menuButtonClass({ tone: "neutral", size: "lg" })}
+        disabled={pending}
+        aria-busy={pending}
+        className={menuButtonClass({ tone: "neutral", size: "lg", disabled: pending })}
       >
-        {t("run.done")}
+        {error ? t("run.retryEndRun") : t("run.endRun")}
       </button>
+      {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
     </motion.div>
   );
 }
@@ -368,6 +372,7 @@ export function DraftPage() {
   const draftDoubleClickConfirmPick = usePreferencesStore((s) => s.draftDoubleClickConfirmPick);
   const reset = useDraftStore((s) => s.reset);
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const requestedSetupMode = searchParams.get("mode");
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
@@ -375,7 +380,11 @@ export function DraftPage() {
   const [resumeLoading, setResumeLoading] = useState(false);
   const [launchPending, setLaunchPending] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
+  const [resumeProblem, setResumeProblem] = useState<{ draftId: string; reason: string } | null>(null);
+  const [endPending, setEndPending] = useState(false);
+  const [endError, setEndError] = useState<string | null>(null);
   const launchInFlight = useRef(false);
+  const endInFlight = useRef(false);
   const [workspacePreferences, setWorkspacePreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
   const [responsiveViewport, setResponsiveViewport] = useState(() => ({
     width: window.innerWidth,
@@ -433,24 +442,40 @@ export function DraftPage() {
     }
   }, [responsiveLayout]);
 
+  const routeError = location.state as { draftId?: unknown; draftStartError?: unknown } | null;
+  const attemptResume = useCallback(async (isCancelled: () => boolean = () => false) => {
+    setResumeLoading(true);
+    try {
+      const outcome = await useDraftStore.getState().resumeDraft();
+      if (isCancelled()) return;
+      if (outcome?.status === "unavailable") {
+        setResumeProblem({ draftId: outcome.draftId, reason: outcome.reason });
+      } else if (outcome?.status === "resumed") {
+        setIntroDismissed(true);
+        setResumeProblem(null);
+        setLaunchError(routeError?.draftId === outcome.draftId
+          ? (typeof routeError.draftStartError === "string" ? routeError.draftStartError : t("run.startUnavailable"))
+          : null);
+      } else {
+        setResumeProblem(routeError?.draftId && typeof routeError.draftId === "string"
+          ? { draftId: routeError.draftId, reason: t("run.resumeUnavailable") }
+          : null);
+      }
+    } catch (error) {
+      if (isCancelled()) return;
+      const draftId = useDraftStore.getState().draftId;
+      if (draftId) setResumeProblem({ draftId, reason: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (!isCancelled()) setResumeLoading(false);
+    }
+  }, [routeError?.draftId, routeError?.draftStartError, t]);
+
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
     let cancelled = false;
-
-    async function doResume() {
-      setResumeLoading(true);
-      try {
-        await useDraftStore.getState().resumeDraft();
-        if (!cancelled) setIntroDismissed(true);
-      } catch {
-        await useDraftStore.getState().abandonDraft();
-      } finally {
-        if (!cancelled) setResumeLoading(false);
-      }
-    }
-    doResume();
+    void attemptResume(() => cancelled);
     return () => { cancelled = true; };
-  }, [searchParams]);
+  }, [searchParams, attemptResume]);
 
   useEffect(() => {
     setSetupMode(
@@ -490,7 +515,7 @@ export function DraftPage() {
   );
 
   const handleLaunch = useCallback(async (next: boolean) => {
-    if (launchInFlight.current) return;
+    if (launchInFlight.current || endInFlight.current) return;
     launchInFlight.current = true;
     setLaunchPending(true);
     setLaunchError(null);
@@ -510,9 +535,22 @@ export function DraftPage() {
   const handleLaunchNextMatch = useCallback(() => { void handleLaunch(true); }, [handleLaunch]);
 
   const handleEndRun = useCallback(async () => {
-    await useDraftStore.getState().endRun();
-    navigate("/draft");
-  }, [navigate]);
+    if (endInFlight.current || launchInFlight.current) return;
+    const draftId = resumeProblem?.draftId ?? useDraftStore.getState().draftId;
+    if (!draftId) return;
+    endInFlight.current = true;
+    setEndPending(true);
+    setEndError(null);
+    try {
+      await useDraftStore.getState().endRun(draftId);
+      navigate("/draft");
+    } catch (error) {
+      setEndError(error instanceof Error ? error.message : String(error));
+    } finally {
+      endInFlight.current = false;
+      setEndPending(false);
+    }
+  }, [navigate, resumeProblem?.draftId]);
 
   const handleWorkspacePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
     if (useDraftStore.getState().pickInteractionLocked) return;
@@ -684,7 +722,7 @@ export function DraftPage() {
           </div>
         ) : null}
 
-        {!resumeLoading && phase === "setup" && (
+        {!resumeLoading && phase === "setup" && !resumeProblem && (
           <div className="mx-auto w-full max-w-4xl">
             <h1 className="mb-8 menu-display text-3xl text-white">
               {setupMode === "cube"
@@ -831,12 +869,28 @@ export function DraftPage() {
           />
         )}
 
+        {!resumeLoading && resumeProblem && phase === "setup" && (
+          <div className="flex flex-col items-center gap-4 py-16">
+            <p role="alert" className="text-sm text-red-200">{endError ?? resumeProblem.reason}</p>
+            <div className="flex gap-3">
+              <button type="button" onClick={() => void attemptResume()} disabled={endPending || resumeLoading}
+                className={menuButtonClass({ tone: "emerald", size: "md", disabled: endPending || resumeLoading })}>
+                {t("run.retryResume")}
+              </button>
+              <button type="button" onClick={() => void handleEndRun()} disabled={endPending}
+                className={menuButtonClass({ tone: "neutral", size: "md", disabled: endPending })}>
+                {endError ? t("run.retryEndRun") : t("run.endRun")}
+              </button>
+            </div>
+          </div>
+        )}
+
         {phase === "launching" && (
           <FormatPicker
             onLaunch={handleLaunchMatch}
             supportsBo3={draftView?.match_config.match_type === "Bo3"}
-            pending={launchPending}
-            error={launchError}
+            pending={launchPending || endPending}
+            error={endError ?? launchError}
           />
         )}
 
@@ -844,13 +898,14 @@ export function DraftPage() {
           <BetweenMatches
             onNext={handleLaunchNextMatch}
             onEnd={handleEndRun}
-            pending={launchPending}
-            error={launchError}
+            pending={launchPending || endPending}
+            error={endError ?? launchError}
+            endError={endError !== null}
           />
         )}
 
         {!resumeLoading && phase === "complete" && (
-          <RunComplete onDone={handleEndRun} />
+          <RunComplete onDone={handleEndRun} pending={endPending} error={endError ?? launchError} />
         )}
         </div>
       </MenuShell>

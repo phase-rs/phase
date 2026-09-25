@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
@@ -52,12 +52,12 @@ const wasm = vi.hoisted(() => ({
 const persistence = vi.hoisted(() => ({
   cleanupQuickDraftLifecycle: vi.fn(async () => undefined),
   drainQuickDraftPersistence: vi.fn(async () => undefined),
-  inspectActiveQuickDraftLifecycle: vi.fn(async () => null),
-  loadDraftRun: vi.fn(async () => null),
+  inspectActiveQuickDraftLifecycle: vi.fn<() => Promise<unknown>>(async () => null),
+  loadDraftRun: vi.fn<() => Promise<unknown>>(async () => null),
   loadQuickDraftSession: vi.fn(async () => null),
   persistQuickDraftSnapshot: vi.fn(async () => undefined),
   publishInitialDraftMatch: vi.fn(async () => undefined),
-  publishStagedDraftMatch: vi.fn(async () => undefined),
+  publishStagedDraftMatch: vi.fn<() => Promise<void>>(async () => undefined),
   recordDraftMatchResult: vi.fn(async () => null),
   runLimits: vi.fn(() => ({ maxWins: 1, maxLosses: 1 })),
 }));
@@ -559,5 +559,105 @@ describe("DraftPage local deckbuilding wiring", () => {
     expect(useDraftStore.getState().workspaceState).toBe(openingWorkspace);
     await waitFor(() => expect(screen.getByTestId("limited-deck-builder")).toBeInTheDocument());
     expect(captured.local!.workspace).toBe(openingWorkspace);
+  });
+
+  it.each(["playing", "complete"] as const)("keeps %s visible and retries End Run with the same ID after cleanup rejects", async (phase) => {
+    const run = { format: "run" as const, results: phase === "complete"
+      ? [{ gameId: "finished", result: "win" as const }] : [],
+      playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [] };
+    useDraftStore.setState({ draftId: "retained-run", phase, runState: run, runFormat: "run" });
+    persistence.cleanupQuickDraftLifecycle.mockRejectedValueOnce(new Error("meta delete failed"));
+    render(<MemoryRouter><DraftPage /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "End Run" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("meta delete failed");
+    expect(useDraftStore.getState().draftId).toBe("retained-run");
+    expect(useDraftStore.getState().phase).toBe(phase);
+    fireEvent.click(screen.getByRole("button", { name: "Retry End Run" }));
+    await waitFor(() => expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledTimes(2));
+    expect(persistence.cleanupQuickDraftLifecycle.mock.calls).toEqual([["retained-run"], ["retained-run"]]);
+    await waitFor(() => expect(useDraftStore.getState().draftId).toBeNull());
+  });
+
+  it("shows the exact draft start error only for the matching Resume run and clears it on a launch attempt", async () => {
+    const run = { format: "run" as const, results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId: "matching-run", gameId: "game", format: "run" as const,
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "matching-run", setCode: "custom-cube", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    render(<MemoryRouter initialEntries={[{ pathname: "/draft/quick", search: "?resume=1",
+      state: { draftId: "matching-run", draftStartError: "Contract from Below requires ante" } }]}>
+      <DraftPage />
+    </MemoryRouter>);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Contract from Below requires ante");
+    fireEvent.click(screen.getByRole("button", { name: "Next Match" }));
+    await waitFor(() => expect(screen.queryByText("Contract from Below requires ante")).toBeNull());
+  });
+
+  it("offers Retry Resume and End Run after a run read rejects, then recovers the same ID", async () => {
+    const run = { format: "run" as const, results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "read-again", setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockRejectedValueOnce(new Error("Storage read failed")).mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    render(<MemoryRouter initialEntries={["/draft/quick?resume=1"]}><DraftPage /></MemoryRouter>);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Storage read failed");
+    expect(screen.getByRole("button", { name: "Retry Resume" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "End Run" })).toBeEnabled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry Resume" }));
+    expect(await screen.findByRole("button", { name: "Next Match" })).toBeEnabled();
+    expect(useDraftStore.getState().draftId).toBe("read-again");
+    expect(screen.queryByText("Storage read failed")).toBeNull();
+  });
+
+  it("excludes double-clicked Next Match while publication waits and retries after rejection", async () => {
+    const run = { format: "run" as const, results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId: "next-run", gameId: "next-game", format: "run" as const,
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } };
+    useDraftStore.setState({ draftId: "next-run", selectedSet: "TST", difficulty: 2,
+      phase: "playing", runFormat: "run", runState: run });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    let rejectWrite!: (reason: Error) => void;
+    persistence.publishStagedDraftMatch.mockReturnValueOnce(new Promise<void>((_resolve, reject) => {
+      rejectWrite = reject;
+    }));
+    render(<MemoryRouter initialEntries={["/draft/quick"]}><Routes>
+      <Route path="/draft/quick" element={<DraftPage />} />
+      <Route path="/game/:id" element={<div data-testid="launched-game" />} />
+    </Routes></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "Next Match" }));
+    await waitFor(() => expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: /Next Match/ }));
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("launched-game")).toBeNull();
+    rejectWrite(new Error("handoff write failed"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("handoff write failed");
+    fireEvent.click(screen.getByRole("button", { name: "Next Match" }));
+    await waitFor(() => expect(persistence.publishStagedDraftMatch).toHaveBeenCalledTimes(2));
+    expect(await screen.findByTestId("launched-game")).toBeInTheDocument();
+  });
+
+  it.each([
+    { search: "?resume=1", routeId: "other-run" },
+    { search: "", routeId: "matching-run" },
+  ])("ignores a draft error for a different run or a non-Resume route: $search/$routeId", async ({ search, routeId }) => {
+    const run = { format: "run" as const, results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "matching-run", setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    render(<MemoryRouter initialEntries={[{ pathname: "/draft/quick", search,
+      state: { draftId: routeId, draftStartError: "wrong run error" } }]}><DraftPage /></MemoryRouter>);
+    if (search) expect(await screen.findByRole("button", { name: "Next Match" })).toBeEnabled();
+    expect(screen.queryByText("wrong run error")).toBeNull();
   });
 });
