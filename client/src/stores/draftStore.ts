@@ -939,7 +939,9 @@ function validRun(run: DraftRunState, setCode: string): boolean {
     && run.usedBotSeats.length > 0
     && run.usedBotSeats.every((seat) => Number.isInteger(seat) && seat > 0)
     && (setCode !== "custom-cube" || Array.isArray(run.booster_pack_pool))
-    && (!run.activeMatch || isCoherentUnresolvedDraftStage(run, run.activeMatch.draftId, run.activeMatch.gameId));
+    && (run.activeMatch === undefined
+      || (typeof run.activeMatch === "object" && run.activeMatch !== null
+        && isCoherentUnresolvedDraftStage(run, run.activeMatch.draftId, run.activeMatch.gameId)));
 }
 
 /** Transport identity for a submitted, unresolved match. The run is the authority. */
