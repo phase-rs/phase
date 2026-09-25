@@ -35,8 +35,7 @@
 //! The discriminator is therefore the CURSOR, not the slot count: an
 //! engine-announced binder leaves `selection.current_slot` at 1 with the binder
 //! already recorded, whereas a prompted binder would leave it at 0 offering a
-//! player. CR 601.2c + CR 115.3 govern announcement and per-instance
-//! distinctness; CR 115.1 scopes each slot's legal set to its own filter.
+//! player. Each permanent slot's legal set must match the opponent bound to it.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
@@ -57,9 +56,9 @@ const BLATANT_THIEVERY: &str =
 /// Cast Blatant Thievery in a four-player game and capture the target-selection
 /// slots exactly as the engine offers them.
 ///
-/// Four players means three opponents, so CR 601.2c expects three slots. The
-/// reporter saw "six targets", but their player count was never stated — with a
-/// known count here, the slot count becomes a measurement rather than a guess.
+/// Four players means three opponents and three permanent targets. The engine
+/// represents each target with a binder and a permanent-selection slot, so the
+/// slot count becomes a measurement rather than a guess.
 #[test]
 fn blatant_thievery_binds_each_target_slot_to_its_own_opponent() {
     let mut scenario = GameScenario::new_n_player(4, 42);
@@ -182,11 +181,9 @@ fn blatant_thievery_binds_each_target_slot_to_its_own_opponent() {
 
     let (slots, selection) = slots;
 
-    // CR 115.10a + CR 115.1a: SIX slots is the intended shape, not the bug. The
+    // SIX slots is the engine's representation of three permanent targets. The
     // fanout builds a pinned *binder* slot (the opponent, affected but NOT
-    // targeted) followed by the real permanent slot scoped to that opponent. An
-    // earlier revision of this test asserted `slots.len() == 3` and was simply
-    // wrong about the contract.
+    // targeted) followed by the real permanent slot scoped to that opponent.
     //
     // So the slot COUNT cannot answer the question this test exists to ask.
     // The cursor can: a binder the engine announces on the caster's behalf
@@ -215,6 +212,11 @@ fn blatant_thievery_binds_each_target_slot_to_its_own_opponent() {
     binder(4, P3);
 
     let objects_of = |index: usize| {
+        assert_eq!(
+            slots[index].legal_targets.len(),
+            2,
+            "slot {index} has exactly two permanent choices"
+        );
         let mut ids: Vec<ObjectId> = slots[index]
             .legal_targets
             .iter()
@@ -281,6 +283,11 @@ fn blatant_thievery_binds_each_target_slot_to_its_own_opponent() {
         match runner.state().waiting_for.clone() {
             WaitingFor::TargetSelection { selection, .. } => {
                 assert_eq!(selection.current_slot, slot, "walk lands on slot {slot}");
+                assert_eq!(
+                    selection.current_legal_targets.len(),
+                    want.len(),
+                    "slot {slot} has only the expected permanent choices"
+                );
                 let mut got: Vec<ObjectId> = selection
                     .current_legal_targets
                     .iter()
