@@ -18196,7 +18196,7 @@ pub struct ResolutionPaymentTransaction {
     /// shadow prompt while this descriptor is active, but resource/object state
     /// remains at this base until commit.
     pub base_waiting_for: WaitingFor,
-    /// CR 603.2c + CR 608.2c: resolution-time trigger context captured at the
+    /// CR 608.2c + CR 608.2h: resolution-time trigger context captured at the
     /// transaction boundary. A replay must restore this context before it
     /// re-evaluates payer and quantity expressions after a pause/serde roundtrip.
     #[serde(default, skip_serializing_if = "Option::is_none")]

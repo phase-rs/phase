@@ -498,14 +498,16 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
 mod tests {
     use super::*;
 
+    use crate::game::deck_loading::DeckEntry;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Effect, EffectOutcomeSignal,
         PlayerFilter, QuantityExpr, QuantityModification, ReplacementDefinition, SubAbilityLink,
         TargetFilter, TargetRef,
     };
+    use crate::types::card::CardFace;
     use crate::types::events::GameEvent;
-    use crate::types::game_state::PersistedGameState;
+    use crate::types::game_state::{PersistedGameState, PlayerDeckPool};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
@@ -650,6 +652,18 @@ mod tests {
             "R5 OneVsMany hero hand card".to_string(),
             Zone::Hand,
         );
+        state.deck_pools = vec![PlayerDeckPool {
+            player: PlayerId(1),
+            registered_main: std::sync::Arc::new(vec![DeckEntry {
+                card: CardFace {
+                    name: "R5 private registered deck card".to_string(),
+                    ..CardFace::default()
+                },
+                count: 1,
+            }]),
+            ..PlayerDeckPool::default()
+        }];
+        assert_eq!(state.deck_pools[0].registered_main.len(), 1);
         state.active_library_searches.insert(
             crate::types::game_state::ActiveLibrarySearch::try_new(
                 PlayerId(0),
@@ -702,6 +716,12 @@ mod tests {
             "unseated wire leaked a hero hand identity: {wire}"
         );
         assert!(wire["state"].get("payment_transaction").is_none());
+        assert_eq!(
+            wire["state"]["deck_pools"][0]["registered_main"],
+            serde_json::json!([]),
+            "unseated wire leaked a registered deck: {wire}"
+        );
+        assert!(!wire.to_string().contains("R5 private registered deck card"));
         assert!(
             wire["state"].get("active_library_searches").is_none(),
             "unseated wire leaked a private search carrier: {wire}"

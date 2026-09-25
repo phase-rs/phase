@@ -987,8 +987,8 @@ pub(crate) fn identity_projection_for_viewer(
     projections
 }
 
-/// Identity projection for an unseated wire observer. There is no player id
-/// to feed into topology or turn-control authority: every private zone is
+/// CR 400.2 + CR 406.3 + CR 708.5: an unseated wire observer has no player ID
+/// for topology or turn-control authority. Every private zone is
 /// redacted, while globally revealed cards remain public. Face-down battlefield
 /// identities are likewise hidden because an unseated observer controls no
 /// player.
@@ -1403,9 +1403,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         Some(viewer) => identity_projection_for_viewer(state, viewer),
         None => identity_projection_for_unseated_viewer(state),
     };
+    let mut hidden_zone_change_ids = HashSet::new();
     for (obj_id, projection) in identity_projection {
         match projection {
             IdentityProjection::Hidden => {
+                hidden_zone_change_ids.insert(obj_id);
                 hide_card(&mut filtered, obj_id);
                 record_hidden_replacement_candidate_source(
                     replacement_candidate_source_ids.as_ref(),
@@ -1436,15 +1438,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // hand -> public-zone record before commit, so redact that record from a
     // viewer who could not identify the canonical object. Otherwise the object
     // is hidden but its journal still leaks the same card name/LKI.
-    let mut hidden_zone_change_ids: HashSet<ObjectId> = match viewer {
-        Some(viewer) => identity_projection_for_viewer(state, viewer),
-        None => identity_projection_for_unseated_viewer(state),
-    }
-    .into_iter()
-    .filter_map(|(object_id, projection)| {
-        matches!(projection, IdentityProjection::Hidden).then_some(object_id)
-    })
-    .collect();
     hidden_zone_change_ids.extend(staged_hidden_identity_ids);
     filtered.zone_changes_this_turn = filtered
         .zone_changes_this_turn
