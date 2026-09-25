@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-24T00:00:00Z",
+  "updated": "2026-09-25T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -301,7 +301,7 @@
       ],
       "main": [
         {
-          "count": 3,
+          "count": 4,
           "name": "Burst Lightning"
         },
         {
@@ -325,12 +325,8 @@
           "name": "Monstrous Rage"
         },
         {
-          "count": 1,
+          "count": 15,
           "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Burst Lightning"
         },
         {
           "count": 2,
@@ -341,11 +337,7 @@
           "name": "Reckless Rage"
         },
         {
-          "count": 1,
-          "name": "Rockface Village"
-        },
-        {
-          "count": 4,
+          "count": 2,
           "name": "Screaming Nemesis"
         },
         {
@@ -353,48 +345,16 @@
           "name": "Sokenzan, Crucible of Defiance"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Soul-Scar Mage"
         },
         {
-          "count": 1,
+          "count": 3,
           "name": "Sunspine Lynx"
         },
         {
-          "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
           "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
+          "name": "Screaming Nemesis"
         },
         {
           "count": 4,
@@ -402,37 +362,33 @@
         },
         {
           "count": 3,
-          "name": "Sunspine Lynx"
+          "name": "Eidolon of the Great Revel"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Flowstone Infusion"
+          "name": "Scorching Shot"
         },
         {
           "count": 4,
           "name": "Magebane Lizard"
         },
         {
-          "count": 1,
+          "count": 3,
           "name": "Pyroclasm"
-        },
-        {
-          "count": 2,
-          "name": "Redcap Melee"
         },
         {
           "count": 3,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
           "name": "Weathered Runestone"
         },
         {
+          "count": 2,
+          "name": "The Legend of Roku"
+        },
+        {
           "count": 1,
-          "name": "Pyroclasm"
+          "name": "Sunspine Lynx"
         }
       ]
     },
@@ -1131,15 +1087,11 @@
         },
         {
           "count": 1,
-          "name": "Galvanic Iteration"
+          "name": "Temporal Trespass"
         },
         {
           "count": 3,
           "name": "Into the Flood Maw"
-        },
-        {
-          "count": 1,
-          "name": "Stormcarved Coast"
         },
         {
           "count": 3,
@@ -1147,7 +1099,11 @@
         },
         {
           "count": 4,
-          "name": "Riverglide Pathway"
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
         },
         {
           "count": 1,
@@ -1166,12 +1122,8 @@
           "name": "Proft's Eidetic Memory"
         },
         {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
+          "count": 1,
+          "name": "Stormcarved Coast"
         },
         {
           "count": 4,
@@ -1183,11 +1135,15 @@
         },
         {
           "count": 4,
-          "name": "Island"
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
         },
         {
           "count": 1,
-          "name": "Temporal Trespass"
+          "name": "Galvanic Iteration"
         },
         {
           "count": 4,
@@ -1196,16 +1152,12 @@
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 2,
-          "name": "Brazen Borrower"
-        },
-        {
           "count": 1,
           "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Disdainful Stroke"
         },
         {
           "count": 4,
@@ -1218,6 +1170,10 @@
         {
           "count": 3,
           "name": "Redcap Melee"
+        },
+        {
+          "count": 2,
+          "name": "Brazen Borrower"
         }
       ]
     },
