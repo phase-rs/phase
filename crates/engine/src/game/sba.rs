@@ -2624,6 +2624,7 @@ mod tests {
         });
         let paused_prompt = WaitingFor::OptionalEffectChoice {
             player: PlayerId(2),
+            decision_subject_id: None,
             source_id: source,
             description: None,
             may_trigger_key: None,

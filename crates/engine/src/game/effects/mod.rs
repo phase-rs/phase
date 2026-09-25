@@ -24,7 +24,7 @@ use crate::types::ability::{
     TargetRef, ThisWayCause, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject};
+use crate::types::ability::{AttackSubject, CombatHistoryScope};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor,
@@ -106,6 +106,7 @@ pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod each_player_copy_chosen;
 pub mod effect;
+pub mod empower_jace;
 pub mod encore;
 pub mod end_combat_phase;
 pub(super) mod end_phase;
@@ -296,6 +297,25 @@ pub(crate) fn resolved_effect_object_ids(
             target_filter,
             &crate::game::targeting::resolved_targets(ability, target_filter, state),
         ),
+    }
+}
+
+/// CR 400.7j + CR 608.2c: latch the exact new public-zone object that a later
+/// optional instruction refers to; do not rediscover it from the ability source
+/// or by scanning a zone. Only effect shapes whose operated-on object role has
+/// been audited opt in here.
+fn resolved_optional_decision_subject_id(
+    state: &GameState,
+    hydrated_ability: &ResolvedAbility,
+) -> Option<ObjectId> {
+    let target = match &hydrated_ability.effect {
+        Effect::CastFromZone { target, .. } | Effect::ChangeZone { target, .. } => target,
+        _ => return None,
+    };
+    let ids = resolved_effect_object_ids(state, hydrated_ability, target);
+    match ids.as_slice() {
+        [id] => Some(*id),
+        _ => None,
     }
 }
 
@@ -1566,6 +1586,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             conditional_enter_with_counters,
             duration,
             track_exiled_by_source,
+            face_down_in_exile,
             mut moved_count,
             face_down_profile,
             library_placement,
@@ -1645,6 +1666,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 conditional_enter_with_counters: vec![],
                 duration: duration.clone(),
                 track_exiled_by_source,
+                face_down_in_exile,
                 // CR 708.2a + CR 708.3: thread the preserved face-down profile back
                 // into the resume ctx so a face-down move that parked on a
                 // per-permanent replacement-ordering / as-enters choice resumes
@@ -1661,14 +1683,22 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
             let anticipated_pause = state.objects.get(obj_id).map(|object| {
+                let mut expected_event = crate::types::proposed_event::ProposedEvent::zone_change(
+                    *obj_id,
+                    object.zone,
+                    ctx.destination,
+                    Some(ctx.source_id),
+                );
+                if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                    face_down_in_exile: conceal,
+                    ..
+                } = &mut expected_event
+                {
+                    *conceal = ctx.face_down_in_exile;
+                }
                 crate::types::game_state::PendingZoneChangeDelivery::new(
                     crate::types::identifiers::ObjectIncarnationRef::from_object(object),
-                    crate::types::proposed_event::ProposedEvent::zone_change(
-                        *obj_id,
-                        object.zone,
-                        ctx.destination,
-                        Some(ctx.source_id),
-                    ),
+                    expected_event,
                 )
             });
             let delivery_start = events.len();
@@ -1735,6 +1765,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                                 .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            face_down_in_exile: ctx.face_down_in_exile,
                             moved_count,
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
@@ -1794,6 +1825,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                                 .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
+                            face_down_in_exile: ctx.face_down_in_exile,
                             moved_count: moved_count
                                 .map(|count| count + i32::from(entry_target_choice)),
                             // CR 708.2a + CR 708.3: preserve the face-down profile
@@ -3353,7 +3385,13 @@ fn apply_parent_chain_context(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
     state: &mut GameState,
 ) {
+    // The face-down Exile marker is authored on the exact ChangeZone node by
+    // the parser.  Ordinary chain context handoff replaces the child's
+    // context wholesale, so preserve the node-local intent while inheriting
+    // the remaining casting-time facts from its parent.
+    let child_face_down_in_exile = child.context.face_down_in_exile;
     child.context = parent.context.clone();
+    child.context.face_down_in_exile |= child_face_down_in_exile;
     // CR 120.1 + CR 608.2b: The damage-subject binding names the object THIS
     // hand-off supplies (or fails to supply) to the immediate child's damage
     // clause. It is one-hop by construction — a grandchild's subject slot is a
@@ -3722,6 +3760,8 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::BeholdChoice { .. }
+            // CR 608.2c: riders run after the choice.
+            | WaitingFor::EmpowerJaceChoice { .. }
     )
 }
 
@@ -4300,7 +4340,8 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
         | Duration::WhileControllingHost
         | Duration::ForAsLongAs { condition: _ }
         | Duration::UntilSourceExilesAnotherCard
-        | Duration::UntilOpponentBecomesMonarch => false,
+        | Duration::UntilOpponentBecomesMonarch
+        | Duration::UntilEvent { .. } => false,
     }
 }
 
@@ -4671,6 +4712,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
@@ -6533,6 +6575,7 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::SkipNextStep { count: amount, .. }
         | Effect::Incubate { count: amount, .. }
         | Effect::Amass { count: amount, .. }
+        | Effect::EmpowerJace { count: amount }
         | Effect::Monstrosity { count: amount, .. }
         | Effect::Renown { count: amount, .. }
         | Effect::Bolster { count: amount, .. }
@@ -7115,6 +7158,7 @@ pub fn resolve_effect(
         Effect::ChangeTargets { .. } => change_targets::resolve(state, ability, events),
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
         Effect::Amass { .. } => amass::resolve(state, ability, events),
+        Effect::EmpowerJace { .. } => empower_jace::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
         Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
@@ -10505,6 +10549,7 @@ fn drive_sequential_repeated_optional_payment(
     });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: ability.controller,
+        decision_subject_id: None,
         source_id: ability.source_id,
         description: ability.description.clone(),
         may_trigger_key: None,
@@ -10583,6 +10628,7 @@ pub(super) fn resolve_repeated_optional_payment_choice(
                     .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
                 state.waiting_for = WaitingFor::OptionalEffectChoice {
                     player,
+                    decision_subject_id: None,
                     source_id,
                     description,
                     may_trigger_key: None,
@@ -12340,6 +12386,7 @@ fn set_player_scope_sacrifice_waiting_for(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
@@ -14860,16 +14907,20 @@ fn resolve_chain_body(
                 .collect();
             if let Some(first) = opponent_order.first().copied() {
                 let remaining = opponent_order.split_off(1);
+                let hydrated_ability = ability_with_event_context_targets(state, ability);
+                let decision_subject_id =
+                    resolved_optional_decision_subject_id(state, &hydrated_ability);
                 state
                     .install_direct_choice_frame(
                         ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                            ability: Box::new(ability_with_event_context_targets(state, ability)),
+                            ability: Box::new(hydrated_ability),
                             trigger_event: state.current_trigger_event.clone(),
                             trigger_events: state.current_trigger_events.clone(),
                             trigger_match_count: state.current_trigger_match_count,
                         }),
                         WaitingFor::OpponentMayChoice {
                             player: first,
+                            decision_subject_id,
                             source_id: ability.source_id,
                             description,
                             remaining,
@@ -14989,10 +15040,12 @@ fn resolve_chain_body(
                 return Ok(());
             }
         }
+        let hydrated_ability = ability_with_event_context_targets(state, ability);
+        let decision_subject_id = resolved_optional_decision_subject_id(state, &hydrated_ability);
         state
             .install_direct_choice_frame(
                 ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                    ability: Box::new(ability_with_event_context_targets(state, ability)),
+                    ability: Box::new(hydrated_ability),
                     // CR 608.2: capture the triggering event in lockstep with the stashed
                     // ability while `current_trigger_event` is still live (we are inside
                     // `execute_effect`). Restored when the optional decision resumes so an
@@ -15011,6 +15064,7 @@ fn resolve_chain_body(
                 }),
                 WaitingFor::OptionalEffectChoice {
                     player: prompt_player,
+                    decision_subject_id,
                     source_id: ability.source_id,
                     description,
                     may_trigger_key,
@@ -15898,7 +15952,7 @@ fn resolve_chain_body(
         } = event
         {
             state.player_actions_this_way.insert((*player_id, *action));
-            state.player_actions_this_turn.push((*player_id, *action));
+            record_player_action_this_turn(state, *player_id, *action);
         }
     }
 
@@ -17607,6 +17661,17 @@ fn resolve_chain_body(
     Ok(())
 }
 
+/// `resolve_chain_body` records, through this helper, each `PlayerPerformedAction`
+/// emitted inside its window; any other caller must run outside every chain
+/// window.
+pub(crate) fn record_player_action_this_turn(
+    state: &mut GameState,
+    player: PlayerId,
+    action: PlayerActionKind,
+) {
+    state.player_actions_this_turn.push((player, action));
+}
+
 /// CR 608.2c + CR 609.3: Whether a producer already bound this node's referent
 /// to the empty set.
 ///
@@ -19313,6 +19378,167 @@ mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
 
+    fn effect_from_json(json: &str) -> Effect {
+        serde_json::from_str(json).expect("test effect shape must deserialize")
+    }
+
+    #[test]
+    fn optional_decision_subject_supports_only_audited_single_object_roles() {
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First subject".to_string(),
+            Zone::Exile,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second subject".to_string(),
+            Zone::Exile,
+        );
+        let cast_effect = effect_from_json(r#"{"type":"CastFromZone","target":{"type":"Any"}}"#);
+        let change_zone_effect = effect_from_json(
+            r#"{"type":"ChangeZone","destination":"Hand","target":{"type":"Any"}}"#,
+        );
+
+        for effect in [cast_effect, change_zone_effect] {
+            let none = ResolvedAbility::new(effect.clone(), vec![], ObjectId(900), PlayerId(0));
+            let one = ResolvedAbility::new(
+                effect.clone(),
+                vec![TargetRef::Object(first)],
+                ObjectId(900),
+                PlayerId(0),
+            );
+            let many = ResolvedAbility::new(
+                effect,
+                vec![TargetRef::Object(first), TargetRef::Object(second)],
+                ObjectId(900),
+                PlayerId(0),
+            );
+            assert!(none.targets.is_empty(), "zero-object reach guard");
+            assert_eq!(one.targets.len(), 1, "singleton reach guard");
+            assert_eq!(many.targets.len(), 2, "multi-object reach guard");
+            assert_eq!(resolved_optional_decision_subject_id(&state, &none), None);
+            assert_eq!(
+                resolved_optional_decision_subject_id(&state, &one),
+                Some(first)
+            );
+            assert_eq!(resolved_optional_decision_subject_id(&state, &many), None);
+        }
+
+        let hostile = ResolvedAbility::new(
+            effect_from_json(
+                r#"{"type":"CopyTokenOf","target":{"type":"Any"},"owner":{"type":"Controller"}}"#,
+            ),
+            vec![TargetRef::Object(first)],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        assert_eq!(hostile.targets, vec![TargetRef::Object(first)]);
+        assert_eq!(
+            resolved_optional_decision_subject_id(&state, &hostile),
+            None,
+            "a populated multi-role effect is not implicitly a decision subject"
+        );
+    }
+
+    #[test]
+    fn optional_prompt_latches_subject_from_the_exact_hydrated_frame_ability() {
+        let mut state = GameState::new_two_player(42);
+        let subject = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Event subject".to_string(),
+            Zone::Graveyard,
+        );
+        state.current_trigger_event = Some(GameEvent::PermanentSacrificed {
+            object_id: subject,
+            player_id: PlayerId(1),
+        });
+        let mut ability = ResolvedAbility::new(
+            effect_from_json(
+                r#"{"type":"ChangeZone","destination":"Exile","target":{"type":"TriggeringSource"}}"#,
+            ),
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        assert!(ability.targets.is_empty(), "raw ability reach guard");
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("optional event-context effect opens its prompt");
+        let WaitingFor::OptionalEffectChoice {
+            decision_subject_id,
+            ..
+        } = state.waiting_for
+        else {
+            panic!("expected optional prompt, got {:?}", state.waiting_for);
+        };
+        let frame = state
+            .active_optional_effect_frame()
+            .expect("prompt owns an optional-effect frame");
+        assert_eq!(frame.ability.targets, vec![TargetRef::Object(subject)]);
+        assert_eq!(decision_subject_id, Some(subject));
+        assert_eq!(
+            resolved_optional_decision_subject_id(&state, &frame.ability),
+            decision_subject_id,
+            "display identity and parked resolution authority derive from one hydrated value"
+        );
+    }
+
+    #[test]
+    fn optional_prompt_hydrates_post_replacement_subject_before_latching() {
+        let mut state = GameState::new_two_player(42);
+        let subject = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Prevented damage target".to_string(),
+            Zone::Battlefield,
+        );
+        let placeholder = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(901), PlayerId(0));
+        let mut drain = crate::types::game_state::PostReplacementDrain::ready(
+            crate::types::ability::PostReplacementContinuation::Resolved(Box::new(placeholder)),
+        );
+        drain.event_target = Some(TargetRef::Object(subject));
+        let mut drains = crate::types::game_state::PostReplacementDrainStack::default();
+        assert!(drains.install(
+            drain,
+            crate::types::game_state::ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        let mut ability = ResolvedAbility::new(
+            effect_from_json(
+                r#"{"type":"ChangeZone","destination":"Exile","target":{"type":"PostReplacementDamageTarget"}}"#,
+            ),
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("optional post-replacement effect opens its prompt");
+
+        let WaitingFor::OptionalEffectChoice {
+            decision_subject_id,
+            ..
+        } = state.waiting_for
+        else {
+            panic!("expected optional prompt, got {:?}", state.waiting_for);
+        };
+        let frame = state
+            .active_optional_effect_frame()
+            .expect("prompt owns an optional-effect frame");
+        assert!(frame.ability.targets.contains(&TargetRef::Object(subject)));
+        assert_eq!(decision_subject_id, Some(subject));
+    }
+
     /// Phase 7, J-3 (f): the declined "if you do" survival test is an
     /// ALLOW-LIST. Each audited effect shape keeps a later instruction whose
     /// referents exist without the gated action and drops one that names a
@@ -20415,6 +20641,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::Any,
                 target: TargetFilter::Any,
+                selection: crate::types::ability::AttachSelection::Targeted,
             },
             Vec::new(),
             ObjectId(100),
@@ -21468,7 +21695,7 @@ mod tests {
                 PlayerId(2),
                 &PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
                 PlayerId(0),
                 angel,
@@ -21481,7 +21708,7 @@ mod tests {
                 PlayerId(2),
                 &PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::Source,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
                 PlayerId(0),
                 angel,
@@ -21494,7 +21721,7 @@ mod tests {
                 PlayerId(1),
                 &PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::Source,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
                 PlayerId(0),
                 angel,
@@ -22850,6 +23077,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -23018,6 +23246,7 @@ mod tests {
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
+            decision_subject_id: None,
             source_id: first_key.source_id,
             description: None,
             may_trigger_key: Some(first_key.clone()),
@@ -23062,6 +23291,7 @@ mod tests {
             });
             state.waiting_for = WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
+                decision_subject_id: None,
                 source_id: key.source_id,
                 description: None,
                 may_trigger_key: Some(key),
@@ -24320,6 +24550,7 @@ mod tests {
                 player: TargetFilter::Controller,
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             ObjectId(100),
@@ -25158,6 +25389,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::ParentTarget,
+                selection: crate::types::ability::AttachSelection::Targeted,
             },
             vec![],
             source,
@@ -25437,6 +25669,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::LastCreated,
+                selection: crate::types::ability::AttachSelection::Targeted,
             },
             vec![],
             source,
@@ -29823,6 +30056,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -29868,6 +30102,7 @@ mod tests {
                 enters_attacking: false,
                 owner_library: false,
                 track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 face_down_profile: None,
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
@@ -30755,6 +30990,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             evelyn,
@@ -30842,6 +31078,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             source,
@@ -32701,11 +32938,14 @@ mod tests {
                 .contains(&(PlayerId(1), action)),
             "P1 searched and must be recorded in player_actions_this_way"
         );
-        assert!(
+        assert_eq!(
             state
                 .player_actions_this_turn
-                .contains(&(PlayerId(1), action)),
-            "P1 searched and must be recorded in player_actions_this_turn"
+                .iter()
+                .filter(|entry| **entry == (PlayerId(1), action))
+                .count(),
+            1,
+            "P1 searched and must be recorded in player_actions_this_turn exactly once"
         );
         assert!(
             state
@@ -32713,11 +32953,14 @@ mod tests {
                 .contains(&(PlayerId(2), action)),
             "P2 searched and must be recorded in player_actions_this_way"
         );
-        assert!(
+        assert_eq!(
             state
                 .player_actions_this_turn
-                .contains(&(PlayerId(2), action)),
-            "P2 searched and must be recorded in player_actions_this_turn"
+                .iter()
+                .filter(|entry| **entry == (PlayerId(2), action))
+                .count(),
+            1,
+            "P2 searched and must be recorded in player_actions_this_turn exactly once"
         );
     }
 
@@ -34800,6 +35043,7 @@ mod tests {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             ObjectId(100),
@@ -38685,6 +38929,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             source_id,

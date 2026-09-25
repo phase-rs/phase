@@ -1897,9 +1897,8 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     // permanent retains its Planeswalker type while it is also a creature).
     let trailing_condition = condition_tp.map(|cond_tp| {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-            text: cond_text.to_string(),
-        })
+        parse_static_condition(cond_text)
+            .unwrap_or_else(|| unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive))
     });
     let condition = match (turn_condition, trailing_condition) {
         // CR 611.3a: when both a leading turn restriction and a trailing
@@ -2059,10 +2058,8 @@ pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
         .description(description.to_string());
     if let Some(cond_tp) = condition_tp {
         let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                text: cond_text.to_string(),
-            });
+        let condition = parse_static_condition(cond_text)
+            .unwrap_or_else(|| unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive));
         def = def.condition(condition);
     }
     Some(def)

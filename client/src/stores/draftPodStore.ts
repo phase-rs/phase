@@ -15,11 +15,14 @@
  */
 
 import { create } from "zustand";
+import i18n from "i18next";
 
 import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PackDistribution, type PoolInput, type SetLayoutKind, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
 import type { DraftPackChoice } from "./draftStore";
-import type { DraftPodHostConfig } from "../adapter/draftPodHostAdapter";
+import type { DraftPodHostConfig, DraftPodListing } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
+import type { DraftLobbyMetadata } from "../adapter/types";
+import { openBrokerClient, type BrokerClient } from "../services/brokerClient";
 import {
   clearActiveDraftPodIfCurrent,
   inspectActiveDraftPod,
@@ -56,6 +59,114 @@ export interface CubeForm {
   settings: CubeDraftSettings;
 }
 
+// ── Lobby listing ──────────────────────────────────────────────────────
+
+/** Public-lobby listing form state for the next created pod. */
+export interface PodListing {
+  isPublic: boolean;
+  password: string;
+  roomName: string;
+}
+
+/**
+ * The lobby broker advertises at most this many seats for a new
+ * registration (`lobby-broker` `Broker::handle_create_game`), so a larger
+ * pod would be listed with fewer seats than it has.
+ */
+export const LOBBY_LISTING_MAX_SEATS = 6;
+
+/** Whether a pod of `podSize` seats can be listed with a truthful seat count. */
+export function podListingEligible(podSize: number): boolean {
+  return podSize <= LOBBY_LISTING_MAX_SEATS;
+}
+
+/**
+ * The lobby broker's bounds on each listing label (`lobby-broker`
+ * `validation.rs`); the character bounds count code points, and the cube
+ * name shares the room-name bound.
+ */
+export const LOBBY_HOST_NAME_MAX_CHARS = 20;
+export const LOBBY_LABEL_MAX_CHARS = 40;
+export const LOBBY_PASSWORD_MAX_BYTES = 128;
+
+/** Sentinel `draft_metadata.setCode` for a cube pod. */
+const CUSTOM_CUBE_SET_CODE = "custom-cube";
+
+/** A pool source that can carry a truthful lobby-listing label. The legacy
+ * `{ set_pool_json }` Set spelling carries no set code to list. */
+type ListablePoolInput =
+  | Exclude<PoolInput, { type: "Set" }>
+  | { type: "Set"; data: SetPackSequence };
+
+/**
+ * The lobby-listing label for a pod's pool. Matches the server's own draft
+ * source label (`server-core` `draft_lobby_source_label`): the Chaos arm
+ * names only the host-chosen candidate sets, never the private per-seat
+ * assignment.
+ */
+export function podLobbyMetadata(
+  poolInput: ListablePoolInput,
+  kind: DraftKind,
+): DraftLobbyMetadata {
+  switch (poolInput.type) {
+    case "Set":
+      return { setCode: distinctJoined(poolInput.data.sequence, "+"), draftKind: kind };
+    case "Chaos":
+      return { setCode: `Chaos:${poolInput.data.candidate_codes.join("+")}`, draftKind: kind };
+    case "Cube":
+      return {
+        setCode: CUSTOM_CUBE_SET_CODE,
+        draftKind: kind,
+        cubeName: poolInput.data.cube_name.trim(),
+      };
+  }
+}
+
+/**
+ * The broker registration request for a listed pod. A blank room name lists
+ * under the same default HostSetup shows as its placeholder.
+ */
+export function podListingRequest(
+  poolInput: ListablePoolInput,
+  hostConfig: Pick<DraftPodHostConfig, "hostDisplayName" | "podSize" | "kind">,
+  listing: PodListing,
+): DraftPodListing["request"] {
+  return {
+    displayName: hostConfig.hostDisplayName,
+    public: true,
+    password: listing.password || null,
+    timerSeconds: null,
+    playerCount: hostConfig.podSize,
+    matchConfig: { match_type: "Bo1" },
+    formatConfig: null,
+    roomName: listing.roomName.trim()
+      || i18n.t("multiplayer:hostSetup.roomNameDefaultPlaceholder", { name: hostConfig.hostDisplayName }),
+    draftMetadata: podLobbyMetadata(poolInput, hostConfig.kind),
+    ranked: false,
+  };
+}
+
+/**
+ * The first listing label out of the broker's bounds, localized, or `null`
+ * when every label is within them.
+ */
+export function podListingRefusal(request: DraftPodListing["request"]): string | null {
+  if (Array.from(request.displayName).length > LOBBY_HOST_NAME_MAX_CHARS) {
+    return i18n.t("draft:podSetup.listingHostNameTooLong", { max: LOBBY_HOST_NAME_MAX_CHARS });
+  }
+  if (Array.from(request.roomName ?? "").length > LOBBY_LABEL_MAX_CHARS) {
+    return i18n.t("draft:podSetup.listingRoomNameTooLong", { max: LOBBY_LABEL_MAX_CHARS });
+  }
+  const cubeName = request.draftMetadata.cubeName;
+  if (cubeName !== undefined && Array.from(cubeName).length > LOBBY_LABEL_MAX_CHARS) {
+    return i18n.t("draft:podSetup.listingCubeNameTooLong", { max: LOBBY_LABEL_MAX_CHARS });
+  }
+  if (request.password !== null && new TextEncoder().encode(request.password).length > LOBBY_PASSWORD_MAX_BYTES) {
+    return i18n.t("draft:podSetup.listingPasswordTooLong");
+  }
+  return null;
+}
+
 export interface PodConfig {
   /**
    * The set filling each booster, in the order the host arranged them. One
@@ -85,6 +196,11 @@ interface DraftPodState {
   botFillEnabled: boolean;
   /** Host display name for the local player. */
   hostDisplayName: string;
+  /** Public-lobby listing chosen for the next created pod. The store's own
+   * initial value is unlisted; the setup form seeds the host's remembered
+   * choice through `adoptRememberedListing`. A pod above
+   * `LOBBY_LISTING_MAX_SEATS` is still created unlisted regardless. */
+  listing: PodListing;
   /** Join code entered by guest. */
   joinCode: string;
   /** Guest display name. */
@@ -155,6 +271,8 @@ interface DraftPodActions {
   toggleBotFill: () => void;
   /** Set host display name. */
   setHostDisplayName: (name: string) => void;
+  /** Merge into the pod's public-lobby listing. */
+  setListing: (partial: Partial<PodListing>) => void;
   /** Set guest display name. */
   setGuestDisplayName: (name: string) => void;
   /**
@@ -171,6 +289,9 @@ interface DraftPodActions {
    * page it lands after this seed rather than before it.
    */
   adoptSavedDisplayName: () => void;
+  /** Seeds the listing choice from the host's last submitted one, on when
+   *  there is none. */
+  adoptRememberedListing: () => void;
   /** Set join code for guest. */
   setJoinCode: (code: string) => void;
   /**
@@ -215,6 +336,7 @@ const initialState: DraftPodState = {
   },
   botFillEnabled: true,
   hostDisplayName: "",
+  listing: { isPublic: false, password: "", roomName: "" },
   guestDisplayName: "",
   joinCode: "",
   poolMode: "set",
@@ -380,6 +502,75 @@ function procedurePublication(
   };
 }
 
+type HostPodOutcome = "hosted" | "failed" | "refused";
+
+/**
+ * Host `hostConfig`'s pod. From the moment an opened broker client is
+ * available until `hostDraft` resolves `true`, this function owns it and
+ * closes it on every other outcome — `hostDraft` can return `false` before
+ * its own `initialize` runs (a superseding pod, or going offline).
+ */
+async function hostPod(
+  set: (partial: Partial<DraftPodState>) => void,
+  get: () => DraftPodState,
+  procedureRequest: number,
+  config: PodConfig,
+  listing: PodListing,
+  poolInput: ListablePoolInput,
+  hostConfig: DraftPodHostConfig,
+): Promise<HostPodOutcome> {
+  const stale = () => !isCurrentPodOrchestration(procedureRequest) || get().config !== config;
+
+  if (!listing.isPublic || !podListingEligible(hostConfig.podSize)) {
+    if (getEffectiveOffline()) {
+      set({ configError: DRAFT_OFFLINE_ERROR });
+      return "refused";
+    }
+    const hosted = await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+    return hosted ? "hosted" : "failed";
+  }
+
+  const request = podListingRequest(poolInput, hostConfig, listing);
+  const refusal = podListingRefusal(request);
+  if (refusal !== null) {
+    set({ configError: refusal });
+    return "refused";
+  }
+
+  const { url, socket } = await useMultiplayerStore
+    .getState()
+    .resolveP2PBroker(useMultiplayerStore.getState().hostingServer);
+  if (stale()) return "refused";
+  if (socket?.serverInfo.mode !== "LobbyOnly") {
+    set({ configError: i18n.t("draft:podSetup.lobbyUnavailable") });
+    return "refused";
+  }
+
+  let broker: BrokerClient;
+  try {
+    broker = await openBrokerClient(url);
+  } catch {
+    if (!stale()) set({ configError: i18n.t("draft:podSetup.lobbyUnavailable") });
+    return "refused";
+  }
+
+  let hosted = false;
+  try {
+    if (stale()) return "refused";
+    if (getEffectiveOffline()) {
+      set({ configError: DRAFT_OFFLINE_ERROR });
+      return "refused";
+    }
+    hosted = await useMultiplayerDraftStore.getState().hostDraft({
+      ...hostConfig,
+      listing: { broker, request },
+    });
+    return hosted ? "hosted" : "failed";
+  } finally {
+    if (!hosted) broker.close();
+  }
+}
+
 // ── Store ──────────────────────────────────────────────────────────────
 
 export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
@@ -518,6 +709,10 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       set({ hostDisplayName: name });
     },
 
+    setListing: (partial) => {
+      set((prev) => ({ listing: { ...prev.listing, ...partial } }));
+    },
+
     setGuestDisplayName: (name) => {
       set({ guestDisplayName: name });
     },
@@ -535,6 +730,13 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
       set((prev) => ({
         hostDisplayName: prev.hostDisplayName || saved,
         guestDisplayName: prev.guestDisplayName || saved,
+      }));
+    },
+
+    adoptRememberedListing: () => {
+      const remembered = useMultiplayerStore.getState().lastPodListingPublic;
+      set((prev) => ({
+        listing: { ...prev.listing, isPublic: remembered ?? true },
       }));
     },
 
@@ -567,12 +769,16 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         return;
       }
       let { config, poolMode, setDraftMode } = get();
-      const { hostDisplayName, cubeForm } = get();
+      const { hostDisplayName, cubeForm, listing } = get();
 
       if (!hostDisplayName.trim()) {
         set({ configError: "Enter a display name" });
         return;
       }
+
+      // The host's toggle is remembered, not whether the pod was listed, so a
+      // choice held off by the seat ceiling is kept.
+      useMultiplayerStore.getState().rememberPodListingPublic(listing.isPublic);
 
       // Cache every engine-published procedure axis before either host branch;
       // both lead to the same lobby. The newest request wins if setup changes
@@ -650,7 +856,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           set({ setPoolJson: JSON.stringify(selection), loadingPool: false });
 
           const persistenceId = crypto.randomUUID();
-          const poolInput: PoolInput = setDraftMode === "chaos"
+          const poolInput: ListablePoolInput = setDraftMode === "chaos"
             ? {
                 type: "Chaos",
                 data: {
@@ -670,13 +876,9 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
             backupEndpoint: configuredBackupEndpoint(),
           };
 
-          if (getEffectiveOffline()) {
-            set({ configError: DRAFT_OFFLINE_ERROR });
-            return;
-          }
-          const hosted = await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+          const outcome = await hostPod(set, get, procedureRequest, config, listing, poolInput, hostConfig);
           if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
-          if (hosted) return;
+          if (outcome !== "failed") return;
           if (getEffectiveOffline()) {
             set({ configError: DRAFT_OFFLINE_ERROR });
             return;
@@ -712,15 +914,16 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           return;
         }
         const persistenceId = crypto.randomUUID();
-        const hostConfig: DraftPodHostConfig = {
-          poolInput: {
-            type: "Cube",
-            data: {
-              cube_list_text: cubeForm.cubeListText,
-              cube_name: cubeForm.cubeName,
-              cube_draft_settings: cubeForm.settings,
-            },
+        const poolInput: ListablePoolInput = {
+          type: "Cube",
+          data: {
+            cube_list_text: cubeForm.cubeListText,
+            cube_name: cubeForm.cubeName,
+            cube_draft_settings: cubeForm.settings,
           },
+        };
+        const hostConfig: DraftPodHostConfig = {
+          poolInput,
           kind: config.kind,
           podSize: config.podSize,
           hostDisplayName: hostDisplayName.trim(),
@@ -730,9 +933,9 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           backupEndpoint: configuredBackupEndpoint(),
         };
 
-        const hosted = await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
+        const outcome = await hostPod(set, get, procedureRequest, config, listing, poolInput, hostConfig);
         if (!isCurrentPodOrchestration(procedureRequest) || get().config !== config) return;
-        if (hosted) return;
+        if (outcome !== "failed") return;
         if (getEffectiveOffline()) {
           set({ configError: DRAFT_OFFLINE_ERROR });
           return;
@@ -845,7 +1048,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           set({
             config: {
               packs: [],
-              setCode: "custom-cube",
+              setCode: CUSTOM_CUBE_SET_CODE,
               setName: cubeData.cube_name,
               kind: persisted.kind,
               podSize: persisted.podSize,

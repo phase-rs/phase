@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { draftProcedureFixture } from "../../adapter/__tests__/draftProcedureFixture";
+import { refuseRealWebSockets } from "../../test/helpers/refusingWebSocket";
 
 /**
  * The pod host's set selection, end to end through the page.
@@ -83,6 +84,7 @@ vi.mock("../../components/draft/CubeSetupPanel", () => ({ CubeSetupPanel: () => 
 
 import { DraftPodPage } from "../DraftPodPage";
 import { useDraftPodStore } from "../../stores/draftPodStore";
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
 
 /** `draft-pools.json` and `scryfall-sets.json`, as the selector fetches them. */
 const POOLS: Record<string, unknown> = {
@@ -106,6 +108,8 @@ function stubFetch(): void {
     })),
   );
 }
+
+let socketUrls: string[] = [];
 
 /** The `poolInput` the page handed the host adapter. */
 function hostedPoolInput(): { type: string; data: { pools: unknown[]; sequence: string[] } } {
@@ -140,10 +144,13 @@ describe("DraftPodPage host set selection", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    const opened = [...socketUrls];
+    expect(opened).toEqual([]);
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    socketUrls = refuseRealWebSockets();
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.view = null;
     mocks.multiplayerState.role = null;
@@ -161,6 +168,7 @@ describe("DraftPodPage host set selection", () => {
       match_config: { match_type: "Bo1" },
     }));
     stubFetch();
+    useMultiplayerStore.setState({ lastPodListingPublic: false });
     useDraftPodStore.getState().reset();
   });
 
@@ -304,5 +312,7 @@ describe("DraftPodPage host set selection", () => {
     const poolInput = hostedPoolInput();
     expect(poolInput.type).toBe("Set");
     expect(poolInput.data.sequence).toEqual(["ISD", "DKA"]);
+    const [config] = mocks.multiplayerState.hostDraft.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(config).not.toHaveProperty("listing");
   });
 });

@@ -648,6 +648,7 @@ pub fn record_zone_change(
     record.recorded_turn_number = state.turn_number;
     record.turn_zone_change_index = turn_zone_change_index;
     state.zone_changes_this_turn.push_back(record.clone());
+    state.record_zone_change_library_knowledge_stamp(record);
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);
@@ -999,10 +1000,14 @@ fn has_activate_as_instant_permission(
     ability_index: usize,
     gates: &ActivationRestrictionStaticGates,
 ) -> bool {
-    let Some(ability) = state
-        .objects
-        .get(&source_id)
-        .and_then(|obj| obj.abilities.get(ability_index))
+    // CR 702.6a: use the same effective-ability lookup as activation itself
+    // (`activation_ability_definition`), not the raw stored `obj.abilities`
+    // list — a runtime-granted Equip ability (e.g. from a keyword-granting
+    // effect) lives past the end of that list and is synthesized on demand,
+    // so reading `obj.abilities` directly would silently miss it and deny
+    // the permission to every dynamically granted Equip ability.
+    let Some(ability) =
+        super::casting::activation_ability_definition(state, source_id, ability_index)
     else {
         return false;
     };
@@ -1015,6 +1020,8 @@ fn has_activate_as_instant_permission(
         return false;
     }
 
+    let ability_tag = ability.ability_tag;
+
     crate::game::perf_counters::record_restriction_static_exact_scan();
     crate::game::functioning_abilities::battlefield_active_statics(state).any(
         |(static_source, def)| {
@@ -1023,12 +1030,29 @@ fn has_activate_as_instant_permission(
             }
             let StaticMode::ActivateAsInstant {
                 cost_category: permitted_category,
-            } = def.mode
+                keyword,
+            } = &def.mode
             else {
                 return false;
             };
-            if !cost_categories.contains(&permitted_category) {
-                return false;
+            // CR 702.6a class-narrowing: when the static names an ability tag
+            // (Leonin Shikari's "equip abilities"), match the activating
+            // ability's `AbilityTag` directly instead of its cost category.
+            // The tagged class isn't defined by cost shape — an Equip ability
+            // with a non-mana cost (e.g. a sacrifice cost) still carries
+            // `AbilityTag::Equip` and must still gain the permission — so
+            // `cost_category` is only consulted when there's no tag to match.
+            match keyword {
+                Some(keyword) => {
+                    if ability_tag != Some(*keyword) {
+                        return false;
+                    }
+                }
+                None => {
+                    if !cost_categories.contains(permitted_category) {
+                        return false;
+                    }
+                }
             }
             def.affected.as_ref().is_some_and(|filter| {
                 super::filter::matches_target_filter(

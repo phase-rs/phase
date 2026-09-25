@@ -1326,6 +1326,7 @@ fn pay_ability_cost_inner(
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: true,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     face_down_profile: None,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],

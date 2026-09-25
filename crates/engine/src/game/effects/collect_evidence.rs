@@ -260,6 +260,9 @@ fn complete_cost_payment(
         scry_bottom_count: None,
         scry_top_count: None,
     });
+    // CR 701.59a: this event is published after the choice, outside any chain
+    // window, so record it here.
+    super::record_player_action_this_turn(state, player, PlayerActionKind::CollectEvidence);
 
     match resume {
         CollectEvidenceResume::Casting {

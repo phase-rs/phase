@@ -507,6 +507,9 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        // CR 701.71a + CR 608.2d: empower may prompt (EmpowerJaceChoice with 2+
+        // Jace tokens) — fail-closed MayPrompt.
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
         | Effect::Renown { .. }

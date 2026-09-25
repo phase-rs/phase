@@ -68,8 +68,8 @@ mod prelude {
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
-        ExileCastTiming, HandSizeModification, ProhibitionScope, RequiredDefender, StaticMode,
-        SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+        ExileCastGrantee, ExileCastTiming, HandSizeModification, ProhibitionScope,
+        RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -117,7 +117,8 @@ mod support {
     pub(super) use super::evasion::{
         classify_block_exception, parse_compound_subject_keyword_static,
         parse_compound_subject_rule_static, parse_leading_except_for_rule_static,
-        parse_property_descriptor, parse_rule_static_separator_nom, try_parse_compound_subtypes,
+        parse_property_descriptor, parse_rule_static_separator_nom,
+        try_defender_exception_with_companion, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
         try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
         try_split_and_cant_attack, try_split_and_cant_attack_or_block,
@@ -189,6 +190,7 @@ pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
 pub(crate) use static_helpers::parse_basic_land_type_plural;
 pub(crate) use static_helpers::parse_leading_turn_scope;
 pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
+pub(crate) use static_helpers::unenforceable_gate_marker;
 pub(crate) use type_change::parse_additive_type_clause_modifications;
 pub(crate) use type_change::parse_inverted_base_pt_type_grant;
 

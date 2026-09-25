@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
+use crate::game::deck_loading::{
+    hydrate_loaded_game_from_card_db, load_deck_into_state, DeckEntry, DeckPayload,
+    PlayerDeckPayload,
+};
 use crate::types::events::GameEvent;
 use crate::types::format::SideboardPolicy;
 use crate::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
@@ -531,10 +534,18 @@ fn restart_between_games_with_starting_player(
     // slots the engine binds match the new game's pause.
     let interaction_session = state.interaction_session_id.clone();
 
+    // The card database is a property of the engine instance, not of a single
+    // game, and `GameState::new` leaves the `#[serde(skip)]` handle as `None`.
+    // Without this carry every later game of the match loses its whole-corpus
+    // draw source — the Momir Basic emblem's `{X}` ability (CR 707.2 + CR 202.3)
+    // resolves to no token — and the database-derived registries below are
+    // never rebuilt.
+    next_state.card_db = state.card_db.clone();
+
     load_deck_into_state(&mut next_state, &payload);
-    // The booster shelf is stocked only at rehydrate, which this rebuild never
-    // reaches: it holds no card database, and `load_deck_into_state` resets the
-    // shelf. Carry it for every source, set products and Cube alike. Whether a
+    // `load_deck_into_state` resets the booster shelf, and the hydration below
+    // stocks one only when it is empty. Carry it for every source, set products
+    // and Cube alike, before hydrating so game one's shelf is kept. Whether a
     // game stocks one depends only on the registered deck pools, sideboards
     // included, which sideboarding cannot extend; what it holds comes from the
     // card database and `booster_pack_pool`, neither of which changes within a
@@ -545,6 +556,16 @@ fn restart_between_games_with_starting_player(
     // from the carried one. The shelf is `#[serde(skip)]` and outside state
     // identity, and either sample is an equally random draw of sets.
     next_state.booster_shelf = state.booster_shelf.clone();
+    // Hydrate game two exactly as the canonical init hydrates game one: printed
+    // faces (`back_face` for DFCs), the Conjure / meld / card-name registries,
+    // and the full-corpus creature subtype vocabulary are all `#[serde(skip)]`
+    // or reset by `GameState::new`. The payload synthesis half of
+    // `load_and_hydrate_decks` is deliberately skipped — the pools already hold
+    // game one's synthesized decks. A game built without a database (tests)
+    // had nothing to hydrate in game one either.
+    if let Some(db) = next_state.card_db.clone() {
+        hydrate_loaded_game_from_card_db(&mut next_state, &db);
+    }
     let start = super::engine::start_game_with_starting_player(&mut next_state, starting_player);
     events.extend(start.events);
 

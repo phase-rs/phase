@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import i18n from "i18next";
 
 import type { PlayerAvatarIdentity } from "../services/playerAvatars.ts";
 
@@ -37,6 +38,8 @@ import {
   saveWsSession,
 } from "../services/multiplayerSession";
 import {
+  BrokerRequestError,
+  LobbyCapabilityError,
   lookupJoinTargetOver,
   openBrokerClient,
   resolveGuestOver,
@@ -105,6 +108,7 @@ import type { DirectorySource } from "../services/serverDirectory";
 import { reportConnectOutcome } from "../services/serverMetrics";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
+  OFFICIAL_MULTIPLAYER_SERVER_URL,
   isOfficialMultiplayerServerUrl,
 } from "../config/multiplayerServer";
 import { saveActiveGame, useGameStore } from "./gameStore";
@@ -593,6 +597,17 @@ function closeChannel(set: MultiplayerSet, get: MultiplayerGet, url: string): vo
   subscriptionChannels.delete(url);
   const status = new Map(get().sourceStatus);
   if (status.delete(url)) set({ sourceStatus: status });
+}
+
+/** Show the shared toast for a `registerHost` refusal from
+ * {@link LobbyCapabilityError}. A no-op for any other rejection. */
+function toastLobbyCapabilityRefusal(get: MultiplayerGet, err: unknown): void {
+  if (!(err instanceof LobbyCapabilityError)) return;
+  get().showToast(
+    i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", {
+      needed: err.neededLobbyVersion,
+    }),
+  );
 }
 
 function setSourceStatus(
@@ -1495,6 +1510,9 @@ export interface HostingSettings {
   roomName: string | null;
   /** Enable ranked rating updates for the room. */
   ranked: boolean;
+  /** Pre-minted `[A-Z0-9]{6}` game code from a Discord link. Absent → the
+   *  broker/server mints one. */
+  requestedCode?: string;
 }
 
 /** Snapshot of the host's session config, captured at startHosting time.
@@ -1590,6 +1608,9 @@ interface MultiplayerState {
   /** Last host-setup form choices, persisted across sessions. `null` until the
    *  player has hosted at least once. See {@link RememberedHostConfig}. */
   lastHostConfig: RememberedHostConfig | null;
+  /** The last "List in lobby" choice submitted from pod setup; `null` until
+   *  one is made. */
+  lastPodListingPublic: boolean | null;
   /**
    * Tournament code → bearer credentials this browser holds. Persisted:
    * `organizer_token` and `player_token` are minted once in a point reply and
@@ -1674,6 +1695,7 @@ interface MultiplayerActions {
   setCompatibilityPlayerCount: (count: number | null) => void;
   rememberHostConfig: (config: RememberedHostConfig) => void;
   clearRememberedHostConfig: () => void;
+  rememberPodListingPublic: (isPublic: boolean) => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   setSpectators: (names: string[]) => void;
   setIsSpectator: (value: boolean) => void;
@@ -1719,6 +1741,12 @@ interface MultiplayerActions {
    * crash.
    */
   ensureSubscriptionSocket: (url: string) => Promise<PhaseSocket | null>;
+  /**
+   * Choose and probe the broker a P2P registration uses. Preserve a custom
+   * broker anchor; the official broker is the fallback. Unknown custom
+   * endpoints are probed before deciding.
+   */
+  resolveP2PBroker: (anchor: string | null) => Promise<{ url: string; socket: PhaseSocket | null }>;
   /** Close and discard every source's subscription socket. Called on store
    * teardown. */
   closeSubscriptionSocket: () => void;
@@ -2609,6 +2637,7 @@ function handleServerHostMessage(
   ws: PhaseSocketTransport,
   msg: { type: string; data?: unknown },
   serverUrl: string,
+  requestedCode?: string,
 ): void {
   if (msg.type === "GameCreated") {
     const data = msg.data as {
@@ -2616,6 +2645,13 @@ function handleServerHostMessage(
       player_token: string;
       full_key?: { game_code: string; generation: number };
     };
+    // A pre-10 server drops `requested_code` and mints its own code, which no
+    // Discord guest link names.
+    if (requestedCode !== undefined && data.game_code !== requestedCode) {
+      get().showToast(i18n.t("multiplayer:botLink.codeUnsupported"));
+      get().cancelHosting();
+      return;
+    }
     savePregameHostSession(get, data, serverUrl);
     // Reset reconnect counter on successful (re)connection.
     hostReconnectAttempt = 0;
@@ -2659,9 +2695,13 @@ function handleServerHostMessage(
       get().showToast(`${joiner.name} joined the game.`);
     }
   } else if (msg.type === "Error") {
-    const data = msg.data as { message: string };
+    const data = msg.data as { message: string; code?: string };
     console.error("Host error:", data.message);
-    get().showToast(data.message || "Failed to create game.");
+    get().showToast(
+      data.code === "code_in_use"
+        ? i18n.t("multiplayer:botLink.codeInUse")
+        : data.message || "Failed to create game.",
+    );
     if (get().hostingStatus !== "waiting") {
       get().cancelHosting();
     }
@@ -2674,6 +2714,7 @@ async function openServerHostSocket(
   setupFrame: () => unknown,
   onReopen: () => void,
   serverUrl: string,
+  requestedCode?: string,
 ): Promise<void> {
   // The dialed URL arrives as an argument rather than being read from store
   // state, and every caller supplies the one the session records: every frame
@@ -2717,7 +2758,7 @@ async function openServerHostSocket(
       type: string;
       data?: unknown;
     };
-    handleServerHostMessage(set, get, socket.ws, msg, url);
+    handleServerHostMessage(set, get, socket.ws, msg, url, requestedCode);
   };
   socket.ws.onerror = () => {
     if (!gameStartedFired) {
@@ -2853,6 +2894,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       toasts: new Map(),
       formatConfig: null,
       lastHostConfig: null,
+      lastPodListingPublic: null as boolean | null,
       tournamentCredentials: {},
       playerSlots: [],
       spectators: [],
@@ -3018,6 +3060,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         lastHostConfig: normalizeRememberedHostConfig(config),
       }),
       clearRememberedHostConfig: () => set({ lastHostConfig: null }),
+      rememberPodListingPublic: (isPublic) => set({ lastPodListingPublic: isPublic }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),
       setIsSpectator: (value) => set({ isSpectator: value }),
@@ -3086,10 +3129,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
               ranked: settings.ranked,
+              requested_code: settings.requestedCode ?? null,
             },
           }),
           () => attemptServerHostReconnect(set, get),
           serverUrl,
+          settings.requestedCode,
         );
       },
 
@@ -3174,14 +3219,20 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           console.error("[openBroker] no hosting server selected");
           return null;
         }
+        let broker: BrokerClient | null = null;
         try {
-          const broker = await openBrokerClient(url);
+          broker = await openBrokerClient(url);
           const registered = await broker.registerHost(req);
           activeBroker = broker;
           activeBrokerGameCode = registered.gameCode;
           return { broker, gameCode: registered.gameCode };
         } catch (err) {
+          // registerHost can reject after openBrokerClient already opened the
+          // socket; activeBroker is only assigned once both succeed, so
+          // closing here is what closeBroker() would otherwise never reach.
+          broker?.close();
           console.error("[openBroker] failed:", err);
+          toastLobbyCapabilityRefusal(get, err);
           return null;
         }
       },
@@ -3317,10 +3368,22 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               draftMetadata: null,
               startWhenFull: settings.startWhenFull,
               ranked: settings.ranked,
+              requestedCode: settings.requestedCode,
             });
             brokerGameCode = registered.gameCode;
             if (!isCurrentAttempt()) {
               releaseAttempt();
+              return false;
+            }
+            // A pre-10 broker drops `requested_code` and mints its own code,
+            // which no Discord guest link names: withdraw that listing.
+            if (
+              settings.requestedCode !== undefined
+              && registered.gameCode !== settings.requestedCode
+            ) {
+              get().showToast(i18n.t("multiplayer:botLink.codeUnsupported"));
+              releaseAttempt();
+              resetFailedHosting();
               return false;
             }
             activeBroker = broker;
@@ -3431,7 +3494,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             && err.code === AdapterErrorCode.NOT_INITIALIZED
           ) {
             get().showToast(err.message);
+          } else if (
+            err instanceof BrokerRequestError
+            && err.code === "code_in_use"
+          ) {
+            get().showToast(i18n.t("multiplayer:botLink.codeInUse"));
           }
+          toastLobbyCapabilityRefusal(get, err);
           resetFailedHosting();
           return false;
         }
@@ -3680,6 +3749,18 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         });
 
         return channel.firstOpen;
+      },
+
+      resolveP2PBroker: async (anchor) => {
+        let url = anchor !== null && get().sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
+          ? anchor
+          : OFFICIAL_MULTIPLAYER_SERVER_URL;
+        let socket = await get().ensureSubscriptionSocket(url);
+        if (socket?.serverInfo.mode === "Full") {
+          url = OFFICIAL_MULTIPLAYER_SERVER_URL;
+          socket = await get().ensureSubscriptionSocket(url);
+        }
+        return { url, socket };
       },
 
       closeSubscriptionSocket: () => {
@@ -4030,6 +4111,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             saved.connectionMode === "server" || saved.connectionMode === "p2p"
               ? saved.connectionMode
               : null,
+          lastPodListingPublic:
+            typeof saved.lastPodListingPublic === "boolean"
+              ? saved.lastPodListingPublic
+              : null,
         };
       },
       partialize: (state) => ({
@@ -4046,6 +4131,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // projection is rebuilt each session, never persisted.
         disabledDirectorySources: state.disabledDirectorySources,
         lastHostConfig: state.lastHostConfig,
+        lastPodListingPublic: state.lastPodListingPublic,
         // `tournamentCredentials` is deliberately ABSENT: these are bearer
         // secrets and must not be written to localStorage. They persist to
         // sessionStorage instead — see `hydrateSessionTournamentCredentials`

@@ -179,12 +179,33 @@ describe("draft store workspace authority", () => {
     // geometry one test publishes into the next.
     setArrivingCardBoardPreferences(createDefaultDraftWorkspacePreferences().deck);
     useDraftStore.getState().reset();
+    // `reset()` deliberately keeps the player's chosen bot difficulty, so pin
+    // it here to keep tests independent of order.
+    useDraftStore.getState().setDifficulty(2);
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("keeps_the_chosen_bot_difficulty_through_start_and_reset", async () => {
+    // The setup screen stays mounted while a start loads, so the lifecycle
+    // reset must not snap the selector back to the Medium default.
+    useDraftStore.getState().setDifficulty(4);
+    wasm.start_quick_draft.mockReturnValue(view([]));
+    wasm.load_card_database.mockReturnValue(0);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
+
+    const starting = useDraftStore.getState().startDraft("pool", "TST", "Test", 4);
+    expect(useDraftStore.getState().difficulty).toBe(4);
+    await starting;
+    expect(useDraftStore.getState().difficulty).toBe(4);
+    expect(wasm.start_quick_draft).toHaveBeenCalledWith("pool", 4, expect.any(Number));
+
+    useDraftStore.getState().reset();
+    expect(useDraftStore.getState().difficulty).toBe(4);
   });
 
   it("applies_pending_destination_only_after_pool_acknowledgement", async () => {

@@ -4,6 +4,8 @@ import { gameObjectFactory } from "../gameObjectFactory.ts";
 import {
   castOfferWaitingForFactory,
   gameStateFactory,
+  opponentMayChoiceWaitingForFactory,
+  optionalEffectChoiceWaitingForFactory,
   resolutionOptionalPaymentWaitingForFactory,
   targetSelectionWaitingForFactory,
   waitingForFactory,
@@ -116,6 +118,33 @@ describe("waitingForFactory", () => {
       },
     });
   });
+
+  it("builds both optional-effect sibling prompts through the shared hierarchy", () => {
+    expect(
+      optionalEffectChoiceWaitingForFactory
+        .forPlayer(1)
+        .withData({ source_id: 100, decision_subject_id: 44 })
+        .build(),
+    ).toMatchObject({
+      type: "OptionalEffectChoice",
+      data: { player: 1, source_id: 100, decision_subject_id: 44 },
+    });
+    expect(
+      opponentMayChoiceWaitingForFactory
+        .forPlayer(1)
+        .withData({ source_id: 100, decision_subject_id: 44, remaining: [2] })
+        .build(),
+    ).toEqual({
+      type: "OpponentMayChoice",
+      data: {
+        player: 1,
+        source_id: 100,
+        decision_subject_id: 44,
+        description: undefined,
+        remaining: [2],
+      },
+    });
+  });
 });
 
 describe("gameStateFactory convenience methods", () => {
@@ -145,5 +174,24 @@ describe("gameStateFactory convenience methods", () => {
     expect(state.players).toHaveLength(3);
     expect(state.players[2].life).toBe(12);
     expect(state.seat_order).toEqual([0, 1, 2]);
+  });
+
+  it("delegates optional-effect siblings through GameStateFactory", () => {
+    expect(
+      gameStateFactory
+        .optionalEffectChoice({ source_id: 100, decision_subject_id: 44 })
+        .build().waiting_for,
+    ).toMatchObject({
+      type: "OptionalEffectChoice",
+      data: { source_id: 100, decision_subject_id: 44 },
+    });
+    expect(
+      gameStateFactory
+        .opponentMayChoice({ source_id: 100, decision_subject_id: 44 })
+        .build().waiting_for,
+    ).toMatchObject({
+      type: "OpponentMayChoice",
+      data: { source_id: 100, decision_subject_id: 44 },
+    });
   });
 });

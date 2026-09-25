@@ -10,6 +10,7 @@
 pub mod bridge;
 pub mod condition;
 pub mod context;
+pub mod defender_exception;
 pub mod duration;
 pub mod enchant;
 pub mod enters_under;

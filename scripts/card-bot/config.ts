@@ -69,8 +69,11 @@ const DEFAULT_GUILD_ID = "1485498006781427802";
 
 /** Discord application credentials (the dedicated card-bot app, not the bug bot). */
 export const discord = {
-  /** Bot token (secret) — only needed to register slash commands (register.ts). */
+  /** Bot token (secret). register.ts requires it; the server uses it for /lfg
+   *  game threads when set (see `tokenIfSet`). */
   token: () => required("CARD_BOT_TOKEN"),
+  /** The bot token, or undefined when unset (the server then runs without game threads). */
+  tokenIfSet: () => Bun.env.CARD_BOT_TOKEN || undefined,
   /** Ed25519 public key — verifies inbound interaction signatures. */
   publicKey: () => Bun.env.CARD_BOT_PUBLIC_KEY || DEFAULT_PUBLIC_KEY,
   /** Application (client) id. */
@@ -85,3 +88,29 @@ export const PORT = Number(Bun.env.CARD_BOT_PORT ?? 9375);
 /** Identifies the bot to Scryfall per their API etiquette. */
 export const SCRYFALL_USER_AGENT =
   Bun.env.CARD_BOT_USER_AGENT ?? "phase-rs-card-bot/1.0 (+https://phase-rs.dev)";
+
+/**
+ * Where a build's players play, and the lobby its P2P games register on. The
+ * lobby URL MUST equal that build's client OFFICIAL_MULTIPLAYER_SERVER_URL
+ * (release: the multiplayerServerUrls.ts fallback; preview: deploy.yml) —
+ * pinned by __tests__/endpoints.test.ts. `lobbyHttp` is the same host over
+ * https (where `/health` and `/servers` are served).
+ */
+export const BUILD_ENDPOINTS: Record<Build, { site: string; lobbyWs: string; lobbyHttp: string }> = {
+  release: {
+    site: "https://phase-rs.dev",
+    lobbyWs: "wss://lobby.phase-rs.dev/ws",
+    lobbyHttp: "https://lobby.phase-rs.dev",
+  },
+  preview: {
+    site: "https://preview.phase-rs.dev",
+    lobbyWs: "wss://lobby-preview.phase-rs.dev/ws",
+    lobbyHttp: "https://lobby-preview.phase-rs.dev",
+  },
+};
+
+/** Default /lfg build. Separate from DEFAULT_BUILD (/card) so the two can differ. */
+export const LFG_DEFAULT_BUILD: Build = "preview";
+
+/** SQLite file for LFG state (a Docker volume in production). */
+export const LFG_DB_PATH = Bun.env.CARD_BOT_DB_PATH ?? "/data/lfg.sqlite";

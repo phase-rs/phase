@@ -3,7 +3,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { WasmAdapter, getHostAdapter, getSharedAdapter } from "../wasm-adapter";
+import {
+  WasmAdapter,
+  createHostSessionOwner,
+  getHostAdapter,
+  getSharedAdapter,
+} from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
 import type {
   InteractionPreview,
@@ -22,6 +27,13 @@ const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const resumeRestoredGameState = vi.hoisted(() => vi.fn());
 const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
 const previewInteractionJs = vi.hoisted(() => vi.fn());
+const initializeMultiplayerHostGameJs = vi.hoisted(() =>
+  vi.fn().mockReturnValue({ events: [], log_entries: [] }),
+);
+const getGameStateJs = vi.hoisted(() => vi.fn());
+const getLegalActionsJs = vi.hoisted(() => vi.fn());
+const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
+const clearGameStateJs = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/cardData", () => ({
   ensureWasmInit,
@@ -32,6 +44,11 @@ vi.mock("@wasm/engine", () => ({
   resume_restored_game_state: resumeRestoredGameState,
   resume_multiplayer_host_state: resumeMultiplayerHostState,
   preview_interaction_js: previewInteractionJs,
+  initialize_multiplayer_host_game: initializeMultiplayerHostGameJs,
+  get_game_state: getGameStateJs,
+  get_legal_actions_js: getLegalActionsJs,
+  set_multiplayer_mode: setMultiplayerModeJs,
+  clear_game_state: clearGameStateJs,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -121,6 +138,8 @@ describe("WasmAdapter", () => {
       status: "stale",
       reason: "test",
     });
+    getGameStateJs.mockReturnValue(buildGameState());
+    getLegalActionsJs.mockReturnValue({ actions: [], autoPassRecommended: false });
     const restored = {
       presentation: {
         outcome: "noop" as const,
@@ -1055,6 +1074,56 @@ describe("releaseHostSession", () => {
       .toBeLessThan(mockWorkerClient.resetGame.mock.invocationCallOrder[0]);
   });
 
+  it("clears the claimed shared main-thread fallback through its runtime queue", async () => {
+    const shared = getSharedAdapter();
+    const owner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await shared.initialize();
+    await shared.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+
+    await shared.releaseHostSession(true, owner);
+
+    expect(setMultiplayerModeJs).toHaveBeenCalledWith(false);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+    expect(getSharedAdapter()).toBe(shared);
+  });
+
+  it("records ownership when restoring a main-thread fallback host", async () => {
+    const host = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    resumeMultiplayerHostState.mockReturnValueOnce({
+      presentation: {
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
+      snapshot: {
+        state: buildGameState(),
+        legalResult: { actions: [], autoPassRecommended: false },
+      },
+    });
+    await host.initialize();
+    await host.resumeMultiplayerHostState(buildGameState(), owner);
+
+    await host.releaseHostSession(true, owner);
+
+    expect(setMultiplayerModeJs).toHaveBeenCalledWith(false);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+  });
+
+  it("leaves an unclaimed main-thread fallback untouched", async () => {
+    const shared = getSharedAdapter();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await shared.initialize();
+
+    await shared.releaseHostSession(false);
+
+    expect(setMultiplayerModeJs).not.toHaveBeenCalled();
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+  });
+
   it("leaves the shared engine completely untouched when the host never claimed it", async () => {
     const shared = getSharedAdapter();
     await shared.initialize();
@@ -1076,6 +1145,42 @@ describe("releaseHostSession", () => {
     await expect(host.getState()).rejects.toThrow(AdapterError);
     // A private release must never post the shared engine's flag clear.
     expect(mockWorkerClient.setMultiplayerMode).not.toHaveBeenCalled();
+  });
+
+  it("clears a claimed private main-thread fallback before disposing it", async () => {
+    const host = new WasmAdapter();
+    const owner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await host.initialize();
+    await host.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, owner);
+
+    await host.releaseHostSession(true, owner);
+
+    expect(setMultiplayerModeJs).toHaveBeenCalledWith(false);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
+    expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+    await expect(host.getState()).rejects.toThrow(AdapterError);
+  });
+
+  it("does not let a stale fallback release clear a newer host generation", async () => {
+    const shared = getSharedAdapter();
+    const firstOwner = createHostSessionOwner();
+    const secondOwner = createHostSessionOwner();
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    await shared.initialize();
+    await shared.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, firstOwner);
+    await shared.initializeMultiplayerHostGame(undefined, undefined, undefined, undefined, undefined, secondOwner);
+
+    await shared.releaseHostSession(true, firstOwner);
+    await shared.resetGameState();
+
+    expect(setMultiplayerModeJs).not.toHaveBeenCalled();
+    expect(clearGameStateJs).not.toHaveBeenCalled();
+
+    await shared.releaseHostSession(true, secondOwner);
+
+    expect(setMultiplayerModeJs).toHaveBeenCalledWith(false);
+    expect(clearGameStateJs).toHaveBeenCalledOnce();
   });
 });
 

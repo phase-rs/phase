@@ -5,9 +5,10 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
-    TargetSelectionMode, ZoneChoiceCandidateSource,
+    ControllerRef, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
+use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
 
 /// Parser-only lookahead for token body clauses split across adjacent sentences.
@@ -365,6 +366,44 @@ pub(crate) struct ParseContext {
     /// host (Springheart Nantuko's landfall copy-token). `None` for non-Aura
     /// cards, so `ParentTarget` keeps its chosen-target semantics (Twinflame).
     pub host_self_reference: Option<TargetFilter>,
+    /// CR 109.1 + CR 205.2: The printed core card types of the object whose
+    /// Oracle text is being parsed. Set once per card by `parse_oracle_ir` from
+    /// the same MTGJSON type list the pipeline already receives, and propagated
+    /// into per-trigger / per-line effect contexts alongside
+    /// `host_self_reference`.
+    ///
+    /// Needed by any keyword action whose CR-defined expansion is conditioned on
+    /// the card type of its source rather than on anything in the ability's own
+    /// text. `support N` (CR 701.41a) is the incumbent consumer, via
+    /// [`ParseContext::source_is_instant_or_sorcery`]: the expansion says "other
+    /// target creatures" on a permanent and "target creatures" on an instant or
+    /// sorcery, and no amount of reading the clause "support 2" can tell those
+    /// apart.
+    ///
+    /// Deliberately the full typed type list rather than the single derived
+    /// `is_spell` boolean `parse_normalized_oracle_ir` computes for its own use:
+    /// a `bool` on a long-lived context states one consumer's question instead
+    /// of the fact that answers it, and the next keyword action conditioned on a
+    /// different type axis would have to add a second boolean beside it.
+    pub source_core_types: Vec<CoreType>,
+    /// CR 115.10a + CR 701.41a: Producer-declared target-choice timing for the
+    /// current chunk, snapshotted into `ClauseIr.declared_target_choice_timing`
+    /// by the chain chunk loop and consumed by
+    /// `lower::target_choice_timing_for_clause` ahead of its text-scan ladder.
+    ///
+    /// That ladder decides "targeted or described" by scanning the clause's
+    /// PRINTED fragment for the literal word "target" (CR 115.10a). The scan is
+    /// right for printed prose and wrong for a keyword-action SHORTHAND, whose
+    /// printed fragment is not the ability's rules text: "support 2" contains no
+    /// "target", yet CR 701.41a defines it to mean "… up to two other target
+    /// creatures". A producer that performs such an expansion knows the answer
+    /// the scan is trying to guess, so it states it here and the statement
+    /// outranks the scan. `None` (the default) leaves the ladder in charge, so
+    /// every incumbent clause is unaffected.
+    ///
+    /// Set and consumed within a single chunk parse; never serialized. A
+    /// speculative sub-parse that discards its cloned context discards this too.
+    pub declared_target_choice_timing: Option<TargetChoiceTiming>,
     /// CR 603.4: Transient relative-clause filter parsed from a
     /// trigger subject ("an opponent **who controls F** draws a card"). Set by
     /// `parse_single_subject` when it consumes a "who controls <filter>"
@@ -596,6 +635,28 @@ pub(crate) struct ParseContext {
 }
 
 impl ParseContext {
+    /// CR 110.1 + CR 701.41a: is the object whose text is being parsed an
+    /// instant or sorcery — i.e. NOT a permanent card? A permanent is a card on
+    /// the battlefield (CR 110.1), and instants and sorceries are the card types
+    /// that never become one, so this is the permanent-vs-spell axis CR 701.41a
+    /// turns on, stated as the negative because "instant or sorcery" is the
+    /// closed, enumerable side of it.
+    ///
+    /// The single authority for the source-type question, so a keyword action
+    /// whose expansion turns on it never re-derives the answer from a proxy (an
+    /// enclosing trigger subject, say) that only correlates with it.
+    ///
+    /// An empty type list — the test-facing `parse_effect` entry points, which
+    /// parse a fragment with no card behind it — reads as a permanent. That is
+    /// the fail-safe direction: on the permanent branch `support` adds
+    /// `FilterProp::Another`, which can only ever REMOVE the source from its own
+    /// target set, and a fragment with no source object has nothing to remove.
+    pub fn source_is_instant_or_sorcery(&self) -> bool {
+        self.source_core_types
+            .iter()
+            .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery))
+    }
+
     /// Resolve third-person player pronouns ("they", "their") against the
     /// nearest parser context that introduced a player referent.
     pub fn third_person_player_controller_ref(&self) -> Option<ControllerRef> {

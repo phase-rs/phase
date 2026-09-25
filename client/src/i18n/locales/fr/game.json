@@ -112,6 +112,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugMove": {
+    "runEtbEffects": "Exécuter les effets ETB",
+    "simulate": "Simuler (effets ETB, déclenchements + SBA)"
+  },
   "debugLibrary": {
     "openActions": "Ouvrir les actions de débogage pour {{name}}"
   },
@@ -1670,6 +1674,10 @@
       "subtitleChoose": "Choisissez un permanent correspondant ou révélez une carte correspondante",
       "labelExile": "Exiler",
       "labelBehold": "Contempler"
+    },
+    "empowerJace": {
+      "title": "Renforcer Jace",
+      "subtitle": "Choisissez un jeton Jace que vous contrôlez pour qu'il gagne +{{count}} de loyauté"
     },
     "collectEvidence": {
       "title": "Collecter des preuves",

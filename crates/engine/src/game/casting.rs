@@ -36,7 +36,7 @@ use crate::types::resolved_commands::ManaPaymentRecipient;
 use crate::types::statics::{
     ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
     CastingProhibitionCondition, CostModifyMode, CostReductionReach, ExileCardPool, ExileCastCost,
-    ExileCastTiming, ProhibitionScope, StaticMode, StaticModeKind,
+    ExileCastGrantee, ExileCastTiming, ProhibitionScope, StaticMode, StaticModeKind,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -619,7 +619,7 @@ pub fn activated_ability_definitions(
     abilities
 }
 
-fn activation_ability_definition(
+pub(crate) fn activation_ability_definition(
     state: &GameState,
     source_id: ObjectId,
     ability_index: usize,
@@ -4771,6 +4771,11 @@ struct ExilePermissionSource<'a> {
     /// remove-counters). Borrowed from the static definition so the source struct
     /// stays `Copy`.
     extra_cost: &'a Option<crate::types::statics::CastExtraCost>,
+    /// CR 406.6 + CR 607.2b: The player whose exiles are the only eligible pool
+    /// cards (matched against `GameObject::exiled_by`) — `Some` for an "each
+    /// player may … cards they exiled with ~" grant (Uba Mask), `None` when the
+    /// grantee is the source's controller and the whole pool is eligible.
+    own_exiles_of: Option<PlayerId>,
 }
 
 /// CR 113.6b + CR 406.6: The set of exiled object ids this source's permission
@@ -4778,7 +4783,7 @@ struct ExilePermissionSource<'a> {
 /// rolling list; `Persistent` reads the lifetime `exile_links` set (the same
 /// source-keyed set that backs `TargetFilter::ExiledBySource`).
 fn exile_permission_pool(state: &GameState, source: &ExilePermissionSource<'_>) -> Vec<ObjectId> {
-    match source.pool {
+    let mut pool = match source.pool {
         ExileCardPool::ThisTurn => state
             .cards_exiled_with_source_this_turn
             .get(&source.source_id)
@@ -4791,7 +4796,19 @@ fn exile_permission_pool(state: &GameState, source: &ExilePermissionSource<'_>) 
                 .map(|entry| entry.exiled_id)
                 .collect()
         }
+    };
+    // CR 406.6 + CR 607.2b: An "each player … cards they exiled with ~" grant
+    // admits only the source-linked cards this player exiled — the recorded
+    // exiling player, never the card's owner.
+    if let Some(player) = source.own_exiles_of {
+        pool.retain(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.exiled_by == Some(player))
+        });
     }
+    pool
 }
 
 /// CR 117.1c: Whether a source's timing gate is currently satisfied.
@@ -4823,9 +4840,6 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
         .copied()
         .filter_map(|source_id| {
             let obj = state.objects.get(&source_id)?;
-            if obj.controller != player {
-                return None;
-            }
             active_static_definitions(state, obj).find_map(|definition| match definition.mode {
                 // CR 305.1: `Cast` (Maralen) admits non-land spells; `Play` (The
                 // Matrix of Time) admits lands and non-land cards. Both shapes
@@ -4840,24 +4854,40 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                     mana_spend_permission,
                     grants_flash,
                     ref extra_cost,
+                    grantee,
                     // enters-with counter is read at the finalize_cast seam via
                     // `selected_static_permission_enters_with_counter`, not here.
                     ..
-                } => definition
-                    .affected
-                    .as_ref()
-                    .map(|filter| ExilePermissionSource {
-                        source_id,
-                        filter,
-                        frequency,
-                        cost,
-                        play_mode,
-                        pool,
-                        timing,
-                        mana_spend_permission,
-                        grants_flash,
-                        extra_cost,
-                    }),
+                } => {
+                    // CR 406.6 + CR 607.1: "you may …" grants only the source's
+                    // controller; "each player may … cards they exiled" grants
+                    // every player their own share of the pool.
+                    let own_exiles_of = match grantee {
+                        ExileCastGrantee::SourceController => {
+                            if obj.controller != player {
+                                return None;
+                            }
+                            None
+                        }
+                        ExileCastGrantee::EachPlayerOwnExiles => Some(player),
+                    };
+                    definition
+                        .affected
+                        .as_ref()
+                        .map(|filter| ExilePermissionSource {
+                            source_id,
+                            filter,
+                            frequency,
+                            cost,
+                            play_mode,
+                            pool,
+                            timing,
+                            mana_spend_permission,
+                            grants_flash,
+                            extra_cost,
+                            own_exiles_of,
+                        })
+                }
                 _ => None,
             })
         })

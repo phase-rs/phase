@@ -572,7 +572,20 @@
     "tabs": {
       "set": "Extension",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Impossible de joindre le salon pour lister ce pod. Désactivez « $t(draft:podSetup.listInLobby) » pour héberger par code de salle.",
+    "listingHostNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom affiché d'au plus {{max}} caractères.",
+    "listingRoomNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom de salle d'au plus {{max}} caractères.",
+    "listingCubeNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom de Cube d'au plus {{max}} caractères.",
+    "listingPasswordTooLong": "Pour lister ce pod dans le salon, utilisez un mot de passe plus court.",
+    "listInLobby": "Répertorier dans le salon",
+    "listingSeatLimit": "Le salon peut lister des pods jusqu'à {{max}} joueurs.",
+    "setPassword": "Définir un mot de passe",
+    "passwordPlaceholder": "Mot de passe du pod",
+    "roomName": "Nom de la salle",
+    "optional": "(facultatif)",
+    "roomNameHelp": "Affiché aux joueurs qui parcourent le salon.",
+    "roomNamePlaceholder": "ex. Cube du vendredi soir"
   },
   "podPhaseView": {
     "tournamentPairings": "Appariements du tournoi",

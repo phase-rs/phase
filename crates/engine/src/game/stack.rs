@@ -3634,12 +3634,17 @@ pub(crate) fn priority_checkpoint_is_settled(state: &GameState) -> bool {
         && state.current_trigger_match_count.is_none()
         && state.die_result_this_resolution.is_none()
         && state.resolution_stack.is_empty()
+        && state.resolving_stack_entry.is_none()
+        && state.resolving_trigger_firing.is_none()
+        && state.pending_resolution_completion.is_none()
         && state.pending_miracle_offers.is_empty()
         && state.pending_paradigm_remaining_offers.is_none()
         && state.pending_damage_replacements.is_empty()
         && state.pending_step_end_mana_handlers.is_empty()
         && state.pending_phase_transition_progress.is_none()
         && state.deferred_step_trigger_resume.is_none()
+        && state.pending_liminal_entry_resume.is_none()
+        && state.pending_token_battlefield_entry.is_none()
         && state.pending_team_draw_step.is_empty()
         && state.pending_untap_declines.is_empty()
 }
@@ -5259,7 +5264,7 @@ mod tests {
         AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCast, StackPaidSnapshot,
         WaitingFor,
     };
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -8162,7 +8167,7 @@ mod tests {
             resolve_proven_inert_trigger_batch_with_proof_hook, resolve_top, self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
-        use super::setup;
+        use super::{pending_spell_entry, setup};
         use crate::game::triggers;
         use crate::game::zones::create_object;
         use crate::types::ability::{
@@ -8174,8 +8179,9 @@ mod tests {
         use crate::types::counter::CounterType;
         use crate::types::events::GameEvent;
         use crate::types::game_state::{
-            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
-            StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
+            AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, MeldSelection,
+            PendingLiminalEntryResume, PendingResolutionCompletion, PendingTokenBattlefieldEntry,
+            StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
             StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
             StackResolutionSession,
         };
@@ -9100,6 +9106,55 @@ mod tests {
         }
 
         #[test]
+        fn resolution_identity_fields_are_each_required_for_a_settled_checkpoint() {
+            let mut state = setup();
+            assert!(priority_checkpoint_is_settled(&state));
+
+            state.resolving_stack_entry = Some(pending_spell_entry(ObjectId(90)));
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.resolving_stack_entry = None;
+
+            state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.resolving_trigger_firing = None;
+
+            state.pending_resolution_completion = Some(PendingResolutionCompletion {
+                player: PlayerId(0),
+                source_id: ObjectId(91),
+                final_cast: None,
+            });
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.pending_resolution_completion = None;
+
+            state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::Meld {
+                source_id: ObjectId(92),
+                player: PlayerId(0),
+                context: MeldSelection {
+                    source_id: ObjectId(92),
+                    partner_id: ObjectId(93),
+                    controller: PlayerId(0),
+                    expected_source: "Meld source".to_string(),
+                    expected_partner: "Meld partner".to_string(),
+                    result: "Meld result".to_string(),
+                    entry: crate::types::ability::PermanentEntryMode::default(),
+                },
+                attack_target: None,
+            });
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.pending_liminal_entry_resume = None;
+
+            state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+                object_id: ObjectId(94),
+                name: "checkpoint token".to_string(),
+                source_id: ObjectId(95),
+            });
+            assert!(!priority_checkpoint_is_settled(&state));
+            state.pending_token_battlefield_entry = None;
+
+            assert!(priority_checkpoint_is_settled(&state));
+        }
+
+        #[test]
         fn self_counter_batch_refuses_when_checkpoint_annihilates_counters() {
             crate::game::perf_counters::reset();
             let mut state = setup();
@@ -9819,6 +9874,7 @@ mod tests {
                     display_name: "Insect".to_string(),
                     power: Some(1),
                     toughness: Some(1),
+                    loyalty: None,
                     core_types: vec![CoreType::Creature],
                     subtypes: vec!["Insect".to_string()],
                     supertypes: vec![],

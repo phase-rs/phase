@@ -10,17 +10,17 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AdditionalCostPaymentSource,
-    AggregateFunction, AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter,
-    DamageChannel, DamageKindFilter, DamageModification, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, KickerVariant, ManaContribution, ManaProduction,
-    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope,
-    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
-    SacrificeCost, SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    AggregateFunction, AttachCardinality, AttachSelection, AttackSubject, CardPlayMode,
+    CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
+    CombatHistoryScope, Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, DamageChannel, DamageKindFilter, DamageModification,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
+    ReplacementDefinition, RuntimeHandler, SacrificeCost, SearchSelectionConstraint,
+    StaticCondition, StaticDefinition, TapStateChange, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -575,6 +575,11 @@ pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefi
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            // CR 702.6a: the keyword's "target" names the HOST (the equipped
+            // creature); the attachment ("this permanent") is determined.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     )
     .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -615,6 +620,11 @@ pub fn synthesize_fortify(face: &mut CardFace) {
                             target: TargetFilter::Typed(
                                 TypedFilter::land().controller(ControllerRef::You),
                             ),
+                            // CR 702.67a: fortify — the keyword's "target" names the host (the
+                            // fortified land); the attachment ("this Fortification") is determined.
+                            selection: AttachSelection::AtResolution {
+                                count: AttachCardinality::One,
+                            },
                         },
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -660,6 +670,11 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::Another]),
                     ),
+                    // CR 702.151a: reconfigure — the keyword's "target" names
+                    // the HOST; the attachment ("this permanent") is determined.
+                    selection: AttachSelection::AtResolution {
+                        count: AttachCardinality::One,
+                    },
                 },
             )
             .cost(AbilityCost::Mana { cost: cost.clone() })
@@ -1015,6 +1030,10 @@ fn synthesize_etb_token_attach_keyword(
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::LastCreated,
+            // The created token is the host; the attachment is the source.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     );
 
@@ -5701,7 +5720,7 @@ fn melee_attacked_opponents_expr() -> QuantityExpr {
         qty: QuantityRef::PlayerCount {
             filter: PlayerFilter::OpponentAttacked {
                 subject: AttackSubject::You,
-                scope: AttackScope::ThisCombat,
+                scope: CombatHistoryScope::ThisCombat,
             },
         },
     }
@@ -6018,6 +6037,7 @@ fn build_ingest_trigger() -> TriggerDefinition {
         count: QuantityExpr::Fixed { value: 1 },
         position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
     };
     let execute = AbilityDefinition::new(AbilityKind::Spell, exile).description(
         "CR 702.115a: Ingest — that player exiles the top card of their library".to_string(),
@@ -6050,6 +6070,7 @@ fn is_ingest_trigger(t: &TriggerDefinition) -> bool {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             })
         )
 }
@@ -11703,7 +11724,8 @@ mod job_select_synthesis_tests {
                 sub.effect.as_ref(),
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
-                    target: TargetFilter::LastCreated
+                    target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach targeting LastCreated"
@@ -15208,7 +15230,7 @@ mod melee_synthesis_tests {
                 qty: QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentAttacked {
                         subject: AttackSubject::You,
-                        scope: AttackScope::ThisCombat,
+                        scope: CombatHistoryScope::ThisCombat,
                     },
                 },
             }
@@ -18842,6 +18864,7 @@ mod sorcery_speed_invariant_tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::Typed(tf),
+                ..
             } => {
                 assert_eq!(
                     *tf,
@@ -23681,6 +23704,7 @@ mod living_weapon_synthesis_tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
@@ -23795,6 +23819,7 @@ mod for_mirrodin_synthesis_tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::LastCreated,
+                    ..
                 }
             ),
             "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
@@ -25251,6 +25276,7 @@ mod ingest_gravestorm_synthesis_tests {
             count,
             position: _,
             face_down,
+            actor: _,
         } = effect
         else {
             panic!("Ingest must exile the top card, got {effect:?}");

@@ -48,9 +48,11 @@ pub struct CardSearchQuery {
     /// legality is a separate filter (`legal_format`).
     #[serde(default)]
     pub sets: Vec<String>,
-    /// A legality-format key (e.g. `"modern"`); the card must be `legal` in it.
-    #[serde(default)]
-    pub legal_format: Option<String>,
+    /// The legality table the card must be `legal` in, named by its
+    /// `LegalityFormat::as_key` key. A key no table carries fails
+    /// deserialization instead of searching unfiltered.
+    #[serde(default, deserialize_with = "deserialize_legality_key")]
+    pub legal_format: Option<LegalityFormat>,
     /// Max results returned (defaults to [`DEFAULT_LIMIT`]); `total` is unbounded.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -75,6 +77,18 @@ pub struct CardSearchResults {
     pub total: usize,
 }
 
+fn deserialize_legality_key<'de, D>(deserializer: D) -> Result<Option<LegalityFormat>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|key| {
+            LegalityFormat::from_key(&key)
+                .ok_or_else(|| serde::de::Error::custom(format!("unknown legality key {key:?}")))
+        })
+        .transpose()
+}
+
 impl CardDatabase {
     /// Filter the loaded cards by the query, deduplicating multi-face cards by
     /// oracle id. Name/text matches sort ahead of incidental oracle-text hits,
@@ -92,10 +106,7 @@ impl CardDatabase {
             .filter_map(|c| parse_color_letter(c))
             .collect();
         let type_needle = query.type_line.trim().to_lowercase();
-        let legal_format = query
-            .legal_format
-            .as_deref()
-            .and_then(LegalityFormat::from_key);
+        let legal_format = query.legal_format;
         let requested_sets: Vec<String> = query.sets.iter().map(|s| s.to_uppercase()).collect();
 
         let mut seen_oracle: HashSet<&str> = HashSet::new();
@@ -554,10 +565,101 @@ mod tests {
     fn legal_format_excludes_banned_and_unknown() {
         // Shock is banned in modern; Bolt and Bears are legal.
         let res = sample_db().search(&CardSearchQuery {
-            legal_format: Some("modern".into()),
+            legal_format: Some(LegalityFormat::Modern),
             ..Default::default()
         });
         assert_eq!(result_names(&res), vec!["Grizzly Bears", "Lightning Bolt"]);
+    }
+
+    #[test]
+    fn legal_format_accepts_every_table_key_and_rejects_any_other() {
+        use crate::types::format::GameFormat;
+
+        for t in LegalityFormat::ALL {
+            let query: CardSearchQuery =
+                serde_json::from_value(json!({ "legal_format": t.as_key() })).unwrap();
+            assert_eq!(query.legal_format, Some(t));
+        }
+        let query: CardSearchQuery =
+            serde_json::from_value(json!({ "legal_format": Value::Null })).unwrap();
+        assert_eq!(query.legal_format, None);
+        let query: CardSearchQuery = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(query.legal_format, None);
+
+        for meta in GameFormat::registry() {
+            if meta.legality_key.is_some() {
+                continue;
+            }
+            let key = meta.format.to_string().to_lowercase();
+            let result: Result<CardSearchQuery, _> =
+                serde_json::from_value(json!({ "legal_format": key }));
+            assert!(
+                result.is_err(),
+                "{key:?} must be rejected, not silently unfiltered"
+            );
+        }
+    }
+
+    /// A format whose card data records no legality table (e.g.
+    /// Freeform, Freeform Commander) searches unfiltered rather than through a
+    /// fallthrough — paired against a table-backed format that still filters.
+    #[test]
+    fn a_format_whose_card_data_records_no_table_searches_unfiltered() {
+        use crate::types::format::GameFormat;
+
+        let db = db_from(&[
+            (
+                "unrecorded avatar",
+                card(
+                    "Unrecorded Avatar",
+                    "o-unrecorded",
+                    &["Blue"],
+                    1,
+                    "Creature",
+                    &["Blue"],
+                    "",
+                    json!({}),
+                    &[],
+                ),
+            ),
+            (
+                "recorded avatar",
+                card(
+                    "Recorded Avatar",
+                    "o-recorded",
+                    &["Blue"],
+                    1,
+                    "Creature",
+                    &["Blue"],
+                    "",
+                    json!({ "legacy": "legal" }),
+                    &[],
+                ),
+            ),
+        ]);
+
+        for format in [GameFormat::Freeform, GameFormat::FreeformCommander] {
+            let query: CardSearchQuery = serde_json::from_value(json!({
+                "text": "avatar",
+                "legal_format": format.legality_key(),
+            }))
+            .unwrap();
+            let res = db.search(&query);
+            assert_eq!(
+                result_names(&res),
+                vec!["Recorded Avatar", "Unrecorded Avatar"]
+            );
+        }
+
+        let legacy_query: CardSearchQuery = serde_json::from_value(json!({
+            "text": "avatar",
+            "legal_format": GameFormat::Legacy.legality_key(),
+        }))
+        .unwrap();
+        assert_eq!(
+            result_names(&db.search(&legacy_query)),
+            vec!["Recorded Avatar"]
+        );
     }
 
     #[test]

@@ -150,4 +150,40 @@ describe("GameListItem", () => {
     expect(screen.getByTitle("Listed by play.example.com")).toBeInTheDocument();
     expect(screen.queryByTitle(/game server/)).not.toBeInTheDocument();
   });
+
+  it("shows a draft row's draft badge and no format badge", () => {
+    const draftRow = entry(officialSource, {
+      ...baseGame,
+      format: undefined,
+      draft_metadata: { setCode: "MKM", draftKind: "Premier" },
+    });
+
+    render(<GameListItem entry={draftRow} onJoin={vi.fn()} />);
+
+    expect(screen.getByText("MKM Draft")).toBeInTheDocument();
+    expect(screen.queryByText("STD")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Standard badge for a constructed row that omits its format", () => {
+    const noFormatRow = entry(officialSource, { ...baseGame, format: undefined });
+
+    render(<GameListItem entry={noFormatRow} onJoin={vi.fn()} />);
+
+    expect(screen.getByText("STD")).toBeInTheDocument();
+  });
+
+  it("labels a cube row by its cube name, not its source id", () => {
+    const cubeRow = entry(officialSource, {
+      ...baseGame,
+      draft_metadata: { setCode: "custom-cube", draftKind: "Premier", cubeName: "Friday Cube" },
+    });
+
+    render(<GameListItem entry={cubeRow} onJoin={vi.fn()} />);
+
+    const badge = screen.getByText("Friday Cube Draft");
+    expect(badge).toBeInTheDocument();
+    expect(screen.queryByText(/custom-cube/)).not.toBeInTheDocument();
+    expect(badge).toHaveAttribute("title", expect.stringContaining("Friday Cube"));
+    expect(badge.getAttribute("title")).not.toContain("custom-cube");
+  });
 });

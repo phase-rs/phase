@@ -2462,6 +2462,7 @@ mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                duration_event_source: None,
                 source_name: String::new(),
             });
 

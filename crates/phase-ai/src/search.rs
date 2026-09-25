@@ -1495,6 +1495,11 @@ pub fn fallback_action(
         WaitingFor::BeholdChoice { choices, .. } => choices
             .first()
             .map(|&id| GameAction::SelectCards { cards: vec![id] }),
+        // CR 701.71a + CR 608.2d: empower Jace chooses exactly one Jace token;
+        // every candidate is legal, so take the first.
+        WaitingFor::EmpowerJaceChoice { choices, .. } => choices
+            .first()
+            .map(|&id| GameAction::SelectCards { cards: vec![id] }),
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice — keep the first
         // `keep_count` flips (always in range, since keep_count <= results.len()).
         WaitingFor::CoinFlipKeepChoice { keep_count, .. } => Some(GameAction::SelectCoinFlips {
@@ -3915,17 +3920,7 @@ pub(crate) fn deterministic_choice(
     }
 
     // CR 608.2d: ChooseFromZoneChoice — select cards from a tracked set.
-    if let WaitingFor::ChooseFromZoneChoice {
-        cards,
-        count,
-        player,
-        ..
-    } = &state.waiting_for
-    {
-        let mut scored: Vec<_> = cards
-            .iter()
-            .map(|&id| (id, intrinsic_value(state, id)))
-            .collect();
+    if let WaitingFor::ChooseFromZoneChoice { player, .. } = &state.waiting_for {
         // The search optimizes for `ai_player`, so a choice made by any other
         // player is an opponent's (they pick the highest-value cards for
         // themselves; the AI picks the lowest when choosing for itself).
@@ -3934,14 +3929,39 @@ pub(crate) fn deterministic_choice(
         // controller (the authorized submitter), not the chooser, which would
         // misclassify the controlled player's choice.
         let is_opponent_chooser = *player != ai_player;
-        if is_opponent_chooser {
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        } else {
-            scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        }
-        let chosen: Vec<_> = scored.iter().take(*count).map(|(id, _)| *id).collect();
-        if !chosen.is_empty() {
-            return Some(GameAction::SelectCards { cards: chosen });
+
+        // Rank the engine-issued domain instead of rebuilding a selection from
+        // the prompt's raw card pool. The latter can violate a tracked-set
+        // constraint (Atraxa's distinct card types are one example), and the
+        // final contract gate then turns the decision into `None`. Maximum
+        // cardinality keeps the established `take(count)` behavior for
+        // `up_to` prompts. Stable sorting retains engine order on ties.
+        let mut scored: Vec<_> = issued_selections(actions)
+            .map(|selection| {
+                let value = selection
+                    .iter()
+                    .map(|id| intrinsic_value(state, *id))
+                    .sum::<f64>();
+                (selection, value)
+            })
+            .collect();
+        scored.sort_by(|(left_cards, left_value), (right_cards, right_value)| {
+            right_cards.len().cmp(&left_cards.len()).then_with(|| {
+                if is_opponent_chooser {
+                    right_value
+                        .partial_cmp(left_value)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    left_value
+                        .partial_cmp(right_value)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            })
+        });
+        if let Some((chosen, _)) = scored.first() {
+            return Some(GameAction::SelectCards {
+                cards: chosen.to_vec(),
+            });
         }
     }
 
@@ -5267,6 +5287,7 @@ mod tests {
                         engine::types::ability::TypedFilter::creature()
                             .controller(ControllerRef::You),
                     ),
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             ));
         }
@@ -5383,6 +5404,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::Any,
+                    selection: engine::types::ability::AttachSelection::Targeted,
                 },
             ));
         }
@@ -13517,6 +13539,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),
@@ -14272,6 +14295,7 @@ mod tests {
                 enters_attacking: false,
                 owner_library: false,
                 track_exiled_by_source: false,
+                face_down_in_exile: engine::types::ability::ExileConcealment::Public,
                 face_down_profile: None,
                 enter_with_counters: Vec::new(),
                 conditional_enter_with_counters: Vec::new(),
@@ -14680,6 +14704,133 @@ mod tests {
         assert!(
             choose_action(&state, bystander, &config, &mut rng).is_none(),
             "a seat that owes no decision must be declined, not asserted on"
+        );
+    }
+
+    /// Issue #6594: a constrained `ChooseFromZoneChoice` must be answered from
+    /// the resolver's issued domain. The raw heuristic would select eight
+    /// lands from this Atraxa-shaped pool, which violates `DistinctCardTypes`,
+    /// so the contract gate would turn the decision into `None` and leave the
+    /// continuation parked.
+    #[test]
+    fn choose_action_answers_constrained_zone_choice_and_resumes_continuation() {
+        let mut state = make_state();
+        let source_card = CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            source_card,
+            P0,
+            "Atraxa test source".to_string(),
+            Zone::Battlefield,
+        );
+        let lands: Vec<_> = (0..9).map(|_| land_in_hand(&mut state, P0)).collect();
+        let creature = creature_in_hand(&mut state, P0);
+
+        let categories = vec![
+            CoreType::Artifact,
+            CoreType::Battle,
+            CoreType::Creature,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Land,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
+        ];
+        let change_zone = Box::new(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Graveyard,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+                conditional_enter_with_counters: Vec::new(),
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            Vec::new(),
+            source,
+            P0,
+        ));
+        let choose = ResolvedAbility {
+            sub_ability: Some(change_zone),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 8,
+                    zone: Zone::Hand,
+                    additional_zones: Vec::new(),
+                    zone_owner: engine::types::ability::ZoneOwner::Controller,
+                    filter: None,
+                    chooser: engine::types::ability::Chooser::Controller.into(),
+                    candidate_source: engine::types::ability::ZoneChoiceCandidateSource::Legacy,
+                    reciprocal_role: None,
+                    up_to: true,
+                    constraint: Some(
+                        engine::types::ability::ChooseFromZoneConstraint::DistinctCardTypes {
+                            categories,
+                        },
+                    ),
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
+                },
+                Vec::new(),
+                source,
+                P0,
+            )
+        };
+        engine::game::effects::resolve_ability_chain(&mut state, &choose, &mut Vec::new(), 0)
+            .expect("the resolver must park the constrained zone choice");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ));
+
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let contract = AiDecisionContract::issue(&state, P0);
+        let action = choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(6594))
+            .expect("the AI must answer the constrained choice");
+        assert!(
+            contract.contains_action(&state, &action),
+            "the public AI action must belong to the resolver-issued domain"
+        );
+        let selected = match &action {
+            GameAction::SelectCards { cards } => cards.clone(),
+            other => panic!("expected SelectCards, got {other:?}"),
+        };
+        assert_eq!(
+            selected.len(),
+            2,
+            "the fixture has only one creature and one distinct land type"
+        );
+        assert!(
+            selected.contains(&creature),
+            "a legal maximum-cardinality pick must include the sole creature"
+        );
+
+        engine::game::engine::apply_as_current(&mut state, action)
+            .expect("the accepted AI choice must resume the continuation");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        for id in selected {
+            assert_eq!(
+                state.objects.get(&id).expect("selected object exists").zone,
+                Zone::Graveyard,
+                "the continuation must move selected cards to its destination"
+            );
+        }
+        assert!(
+            lands.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.zone == Zone::Hand)
+            }),
+            "unchosen cards must remain in the source zone"
         );
     }
 

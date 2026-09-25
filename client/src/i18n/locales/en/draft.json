@@ -580,7 +580,20 @@
     "tabs": {
       "set": "Set",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Couldn't reach the lobby to list this pod. Turn off “$t(draft:podSetup.listInLobby)” to host by room code.",
+    "listingHostNameTooLong": "To list this pod in the lobby, use a display name of at most {{max}} characters.",
+    "listingRoomNameTooLong": "To list this pod in the lobby, use a room name of at most {{max}} characters.",
+    "listingCubeNameTooLong": "To list this pod in the lobby, use a cube name of at most {{max}} characters.",
+    "listingPasswordTooLong": "To list this pod in the lobby, use a shorter password.",
+    "listInLobby": "List in lobby",
+    "listingSeatLimit": "Lobby listing supports pods of up to {{max}} players.",
+    "setPassword": "Set password",
+    "passwordPlaceholder": "Pod password",
+    "roomName": "Room Name",
+    "optional": "(optional)",
+    "roomNameHelp": "Shown to players browsing the lobby.",
+    "roomNamePlaceholder": "e.g. Friday Night Cube"
   },
   "podPhaseView": {
     "tournamentPairings": "Tournament Pairings",

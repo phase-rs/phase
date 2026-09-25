@@ -263,6 +263,7 @@ fn state_with_resolving_stack_entry() -> GameState {
     let mut state = GameState::new_two_player(42);
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: P0,
+        decision_subject_id: None,
         source_id: SOURCE,
         description: None,
         may_trigger_key: None,
@@ -280,6 +281,56 @@ fn state_with_resolving_stack_entry() -> GameState {
         },
     });
     state
+}
+
+#[test]
+fn optional_decision_subjects_round_trip_and_accept_legacy_payloads() {
+    let variants = [
+        WaitingFor::OptionalEffectChoice {
+            player: P0,
+            decision_subject_id: Some(ObjectId(44)),
+            source_id: SOURCE,
+            description: Some("cast that card".to_string()),
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        },
+        WaitingFor::OpponentMayChoice {
+            player: P1,
+            decision_subject_id: Some(ObjectId(45)),
+            source_id: SOURCE,
+            description: Some("put that card into a graveyard".to_string()),
+            remaining: vec![P0],
+        },
+    ];
+
+    for waiting_for in variants {
+        let value = serde_json::to_value(&waiting_for).expect("waiting state serializes");
+        let restored: WaitingFor =
+            serde_json::from_value(value.clone()).expect("present subject deserializes");
+        assert_eq!(
+            restored, waiting_for,
+            "trusted subject identity round-trips"
+        );
+
+        let mut legacy = value;
+        legacy["data"]
+            .as_object_mut()
+            .expect("tagged waiting state has data")
+            .remove("decision_subject_id");
+        let legacy_restored: WaitingFor =
+            serde_json::from_value(legacy).expect("legacy missing subject deserializes");
+        match legacy_restored {
+            WaitingFor::OptionalEffectChoice {
+                decision_subject_id,
+                ..
+            }
+            | WaitingFor::OpponentMayChoice {
+                decision_subject_id,
+                ..
+            } => assert_eq!(decision_subject_id, None),
+            other => panic!("unexpected optional sibling after legacy decode: {other:?}"),
+        }
+    }
 }
 
 #[test]

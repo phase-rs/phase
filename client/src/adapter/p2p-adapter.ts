@@ -33,7 +33,11 @@ import {
   isActionRejection,
   nextSnapshotSeq,
 } from "./types";
-import { getHostAdapter } from "./wasm-adapter";
+import {
+  createHostSessionOwner,
+  getHostAdapter,
+  type HostSessionOwner,
+} from "./wasm-adapter";
 import {
   WebSocketAdapter,
   type NativeAiSeat,
@@ -854,6 +858,10 @@ function hostDisposedError(): AdapterError {
  */
 export class P2PHostAdapter implements EngineAdapter {
   private wasm = getHostAdapter();
+  /** Caller-held lease for the current WASM host attempt. The shared adapter
+   * can serve several hosts over its lifetime, so teardown must use this
+   * exact handle rather than whatever owner started later. */
+  private wasmHostOwner: HostSessionOwner | null = null;
   private nativeBridge: NativeP2PBridge | null = null;
   /** Present for a P2P host, whether its authority is browser WASM or native. */
   exportPersistenceState?: () => Promise<string>;
@@ -1346,6 +1354,8 @@ export class P2PHostAdapter implements EngineAdapter {
    * this path left a 5 s interval firing for the life of the page. A resume
    * that fails before this path is reached still relies on `dispose()`. */
   private async abortUnpublishedResume(): Promise<void> {
+    const owner = this.wasmHostOwner;
+    this.wasmHostOwner = null;
     this.resumedAutomation = null;
     this.unsubscribeHostConnections();
     this.disposed = true;
@@ -1354,7 +1364,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.redeliveryTimer = null;
     }
     if (sharedEngineHost === this.engineClaim) sharedEngineHost = null;
-    await this.wasm.releaseHostSession(true);
+    if (owner) await this.wasm.releaseHostSession(true, owner);
     releaseP2PHostLease(this.authority);
     try {
       this.hostPeer.destroy();
@@ -1398,8 +1408,14 @@ export class P2PHostAdapter implements EngineAdapter {
    * would throw `assertInitialized`, turning a clean bail into an unhandled
    * rejection.
    */
-  private async bailDisposed(claimed: boolean, during: string): Promise<never> {
-    await this.wasm.releaseHostSession(claimed);
+  private async bailDisposed(
+    claimed: boolean,
+    during: string,
+    owner: HostSessionOwner | null = this.wasmHostOwner,
+  ): Promise<never> {
+    if (owner) await this.wasm.releaseHostSession(claimed, owner);
+    else await this.wasm.releaseHostSession(claimed);
+    if (owner === this.wasmHostOwner) this.wasmHostOwner = null;
     throw new AdapterError("P2P_ERROR", `Host session disposed during ${during}`, true);
   }
 
@@ -1757,12 +1773,23 @@ export class P2PHostAdapter implements EngineAdapter {
         if (!gameId) {
           throw new AdapterError("P2P_ERROR", "Resumed host is missing its durable game id", false);
         }
-        this.resumedAutomation = await this.wasm.resumeMultiplayerHostState(this.resumeGameState);
+        const owner = createHostSessionOwner();
+        this.wasmHostOwner = owner;
+        this.resumedAutomation = await this.wasm.resumeMultiplayerHostState(this.resumeGameState, owner);
         this.resumeGameState = null;
         // The engine now holds both this game's state and the multiplayer
         // flag. Its await window is the widest in the adapter (the full card
         // DB load happens inside), so re-check before recording the claim.
-        if (this.disposed) await this.bailDisposed(true, "resume");
+        if (this.disposed) await this.bailDisposed(true, "resume", owner);
+        // A same-session resume may have superseded this host while the engine
+        // was restoring the persisted state. The stale adapter must release
+        // only the owner it captured for this attempt and must not publish,
+        // persist, or clear the resumed game belonging to the live host.
+        if (!this.ownsAuthority()) {
+          await this.wasm.releaseHostSession(true, owner);
+          if (this.wasmHostOwner === owner) this.wasmHostOwner = null;
+          throw new AdapterError("P2P_ERROR", "Host session superseded", true);
+        }
         sharedEngineHost = this.engineClaim;
         // Persist the post-automation authority before any reconnect can be
         // accepted or snapshot published. A terminal restore first creates its
@@ -1788,6 +1815,8 @@ export class P2PHostAdapter implements EngineAdapter {
     } catch (err) {
       if (this.isResume && sharedEngineHost === this.engineClaim) {
         await this.abortUnpublishedResume();
+      } else if (this.isResume) {
+        this.wasmHostOwner = null;
       }
       this.unsubscribeHostConnections();
       this.rejectPregameReady(err);
@@ -2222,6 +2251,8 @@ export class P2PHostAdapter implements EngineAdapter {
       // and destroy the hosted game (or be destroyed by it). A refusal arrives
       // as `AdapterErrorCode.ENGINE_OCCUPIED`.
       let result: SubmitResult;
+      const owner = createHostSessionOwner();
+      this.wasmHostOwner = owner;
       try {
         result = await this.wasm.initializeMultiplayerHostGame(
           deckPayload,
@@ -2229,6 +2260,7 @@ export class P2PHostAdapter implements EngineAdapter {
           playerCount,
           this.matchConfig,
           undefined,
+          owner,
         );
       } catch (err) {
         // Nothing to compensate. The engine claims itself only on a successful
@@ -2242,19 +2274,21 @@ export class P2PHostAdapter implements EngineAdapter {
         // "disposed during start" error. gameStore catches the rethrow and
         // shows a toast, so the original error is preserved.
         if (this.disposed) await this.bailDisposed(false, "start");
-        await this.wasm.releaseHostSession(false);
+        await this.wasm.releaseHostSession(false, owner);
+        if (this.wasmHostOwner === owner) this.wasmHostOwner = null;
         throw err;
       }
       // The engine now holds this game. Record the claim only now: claiming
       // before the engine accepted would let a refused call's teardown clear
       // state this session never owned.
-      if (this.disposed) await this.bailDisposed(true, "start");
+      if (this.disposed) await this.bailDisposed(true, "start", owner);
       // Checked before the stamp: a host whose lease was superseded mid-start
       // must not take the claim from the host that superseded it. It did
       // install engine state, so it hands that state back rather than leaving
       // it for someone else's teardown to find unclaimed.
       if (!this.ownsAuthority()) {
-        await this.wasm.releaseHostSession(true);
+        await this.wasm.releaseHostSession(true, owner);
+        if (this.wasmHostOwner === owner) this.wasmHostOwner = null;
         throw new AdapterError("P2P_ERROR", "Host session superseded", true);
       }
       sharedEngineHost = this.engineClaim;
@@ -3030,11 +3064,14 @@ export class P2PHostAdapter implements EngineAdapter {
     // called twice on the same instance (GameProvider disposes directly, then
     // `gameStore.reset()` disposes it again), and the second pass takes the
     // unclaimed branch. Fire-and-forget from a synchronous `dispose()`.
+    const owner = this.wasmHostOwner;
+    this.wasmHostOwner = null;
     if (sharedEngineHost === this.engineClaim) {
       sharedEngineHost = null;
-      void this.wasm.releaseHostSession(true);
+      if (owner) void this.wasm.releaseHostSession(true, owner);
     } else {
-      void this.wasm.releaseHostSession(false);
+      if (owner) void this.wasm.releaseHostSession(false, owner);
+      else void this.wasm.releaseHostSession(false);
     }
     releaseP2PHostLease(this.authority);
     // Close the broker only when the adapter owns it. When the multiplayer

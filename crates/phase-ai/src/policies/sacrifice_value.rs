@@ -731,6 +731,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: source,
+            decision_subject_id: None,
             description: Some("You may sacrifice a creature. If you do, draw a card.".to_string()),
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,

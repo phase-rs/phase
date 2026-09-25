@@ -92,6 +92,7 @@ vi.mock("../wasm-adapter", () => {
   return {
     WasmAdapter: vi.fn().mockImplementation(createEngine),
     getHostAdapter: vi.fn(createEngine),
+    createHostSessionOwner: vi.fn(() => Symbol("test-host-session-owner")),
   };
 });
 

@@ -850,4 +850,43 @@ describe("LobbyView", () => {
     expect(screen.getByRole("button", { name: /Server table/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Direct table/ })).not.toBeInTheDocument();
   });
+
+  it("a format filter hides draft rows", async () => {
+    const user = userEvent.setup();
+    const source: LobbySource = {
+      url: SERVER_PRESETS[0].url,
+      name: "lobby.phase-rs.dev",
+      origin: "official",
+    };
+    const subscribeLobby = vi.fn(
+      async (onUpdate: (games: LobbyGame[], source: LobbySource) => void) => {
+        onUpdate(
+          [
+            { ...lobbyGame("STD01", "Std table", 100), format: "Standard" },
+            {
+              ...lobbyGame("POD01", "Pod table", 200),
+              draft_metadata: { setCode: "MKM", draftKind: "Premier" },
+            },
+          ],
+          source,
+        );
+        return () => {};
+      },
+    );
+    useMultiplayerStore.setState({
+      subscribeLobby,
+      subscribeAmbientLobby: vi.fn(() => () => {}),
+    });
+    renderLobby({});
+
+    // Reach guard: both rows are present before filtering.
+    await screen.findByRole("button", { name: /Std table/ });
+    expect(screen.getByRole("button", { name: /Pod table/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("option", { name: "Standard" }));
+
+    expect(screen.getByRole("button", { name: /Std table/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Pod table/ })).not.toBeInTheDocument();
+  });
 });

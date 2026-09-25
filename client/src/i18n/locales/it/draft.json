@@ -572,7 +572,20 @@
     "tabs": {
       "set": "Espansione",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Impossibile raggiungere la lobby per elencare questo pod. Disattiva “$t(draft:podSetup.listInLobby)” per ospitare tramite codice stanza.",
+    "listingHostNameTooLong": "Per elencare questo pod nella lobby, usa un nome visualizzato di al massimo {{max}} caratteri.",
+    "listingRoomNameTooLong": "Per elencare questo pod nella lobby, usa un nome stanza di al massimo {{max}} caratteri.",
+    "listingCubeNameTooLong": "Per elencare questo pod nella lobby, usa un nome Cube di al massimo {{max}} caratteri.",
+    "listingPasswordTooLong": "Per elencare questo pod nella lobby, usa una password più corta.",
+    "listInLobby": "Elenca nella lobby",
+    "listingSeatLimit": "L'elenco della lobby supporta pod fino a {{max}} giocatori.",
+    "setPassword": "Imposta password",
+    "passwordPlaceholder": "Password del pod",
+    "roomName": "Nome stanza",
+    "optional": "(facoltativo)",
+    "roomNameHelp": "Mostrato ai giocatori che sfogliano la lobby.",
+    "roomNamePlaceholder": "es. Cube del venerdì sera"
   },
   "podPhaseView": {
     "tournamentPairings": "Accoppiamenti torneo",

@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1796
 expression: "&ir"
 ---
 {
@@ -181,6 +180,9 @@ expression: "&ir"
                       ],
                       "controller": "You",
                       "properties": []
+                    },
+                    "selection": {
+                      "at_resolution": {}
                     }
                   },
                   "duration": null,

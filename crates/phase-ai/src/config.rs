@@ -1410,7 +1410,12 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
             0.3,
             AiProfile {
                 risk_tolerance: 0.45,
-                interaction_patience: 1.0,
+                // NOT 1.0, and the difference is load-bearing: the wasted-mana
+                // penalty in `policies/mana_efficiency.rs` scales with
+                // `1.0 - interaction_patience`, so a preset that ships exactly
+                // 1.0 switches that policy off for itself. See
+                // `no_preset_disables_the_wasted_mana_penalty`.
+                interaction_patience: 0.7,
                 stabilize_bias: 1.2,
                 combat_ev_model: CombatEvModel::DownsideWeighted,
                 ..AiProfile::default()
@@ -1441,7 +1446,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
             0.2,
             AiProfile {
                 risk_tolerance: 0.4,
-                interaction_patience: 1.0,
+                // See the note on VeryHard: 1.0 zeroes the wasted-mana penalty.
+                interaction_patience: 0.7,
                 stabilize_bias: 1.2,
                 combat_ev_model: CombatEvModel::DownsideWeighted,
                 ..AiProfile::default()
@@ -1560,6 +1566,49 @@ pub fn create_config_for_players(
 
 #[cfg(test)]
 mod tests {
+    /// No shipped preset may set `interaction_patience` to 1.0.
+    ///
+    /// The wasted-mana penalty in `policies::mana_efficiency` scales with
+    /// `1.0 - interaction_patience`. That contract is deliberate — a caller that
+    /// asks for maximum patience is asking for the penalty to go away, and
+    /// `high_patience_reduces_penalty` pins it. The problem is a *preset* taking
+    /// that exit: with the factor at zero, passing the turn with every land
+    /// untapped scores exactly the same as passing with none, so nothing in the
+    /// score opposes holding up mana forever. `VeryHard` and `CEDH` shipped 1.0
+    /// and never committed a threat against a removal-dense opponent.
+    ///
+    /// Measured (v0.88.0, `Platform::Wasm`, blue control mirror, 30 paired games
+    /// per cell, `Medium` on the other seat), varying only this field on
+    /// `VeryHard`:
+    ///
+    /// | `interaction_patience` | creatures on board | record |
+    /// |---|---|---|
+    /// | 1.0 (old preset) | 0.3 | 7–23 |
+    /// | 0.7 | 0.6 | 10–20 |
+    /// | 0.4 | 0.6 | 10–20 |
+    /// | 0.2 | 0.6 | 10–20 |
+    ///
+    /// A step, not a curve: the penalty does not need to be large, it needs to
+    /// exist — it only breaks the tie between "cast the threat" and "pass". 0.7
+    /// is therefore the smallest departure that clears zero among the values
+    /// measured. For scale, in that same mirror `Easy` beat the old `VeryHard`
+    /// 25–5.
+    #[test]
+    fn no_preset_disables_the_wasted_mana_penalty() {
+        for difficulty in ACCEPTED_DIFFICULTY_LABELS
+            .iter()
+            .copied()
+            .map(AiDifficulty::from_label)
+        {
+            let config = create_config(difficulty, Platform::Native);
+            assert!(
+                config.profile.interaction_patience < 1.0,
+                "{difficulty:?} ships interaction_patience = {}, which zeroes the wasted-mana penalty",
+                config.profile.interaction_patience
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1855,7 +1904,8 @@ mod tests {
         assert_eq!(config.difficulty, AiDifficulty::CEDH);
         assert_eq!(config.temperature, 0.2);
         assert_eq!(config.profile.risk_tolerance, 0.4);
-        assert_eq!(config.profile.interaction_patience, 1.0);
+        // 0.7, not 1.0: see `no_preset_disables_the_wasted_mana_penalty`.
+        assert_eq!(config.profile.interaction_patience, 0.7);
         assert_eq!(config.profile.stabilize_bias, 1.2);
         assert!(config.play_lookahead);
         assert!(config.combat_lookahead);

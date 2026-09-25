@@ -36,10 +36,11 @@ use crate::parser::oracle_ir::effect_chain::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
-    ControllerRef, CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal,
-    FilterProp, GuessOutcome, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
+    CoinFlipResult, Comparator, ControllerRef, CountScope, DamageChannel, DigSource, Duration,
+    Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1765,6 +1766,10 @@ pub(super) fn try_parse_moved_card_subtype_attach_followup(
     let attach = Effect::Attach {
         attachment: TargetFilter::SelfRef,
         target: TargetFilter::ParentTarget,
+        // The attachment is the source; the host is the returned permanent.
+        selection: AttachSelection::AtResolution {
+            count: AttachCardinality::One,
+        },
     };
     Some((condition, attach, is_optional))
 }
@@ -5673,11 +5678,19 @@ pub(crate) fn static_condition_to_ability_condition(
         // no `AbilityCondition` counterpart yet. Return `None` rather than
         // lowering it to `Not(IsYourTurn)`, which would be wrong in 2HG.
         | StaticCondition::DuringOpponentsTurn
-        // CR 508.6: the existential "a player attacked you during their last turn"
-        // gate drives a self-spell cost reduction (Avenge), not an
-        // effect-resolution rider; no `AbilityCondition` equivalent — lowering
-        // returns `None`.
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        // CR 508.6 + CR 608.2: no `AbilityCondition` equivalent on either scope;
+        // `None` for DIFFERENT reasons.
+        //
+        // Default (`AnyPlayer`) scope: it drives a self-spell cost reduction
+        // (Avenge), not an effect-resolution rider.
+        //
+        // Anchored (`AttackedPlayer`) scope: an `AbilityCondition` is evaluated
+        // during RESOLUTION (CR 608.2), by which point the declare-attackers
+        // turn-based action is long past and no `declared_attack` is in context;
+        // the resolving ability need not belong to an attacking creature at all,
+        // so there is no attacker whose latched record could answer. The anchor
+        // is structurally unavailable here, not merely unused.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::None => None,
     }
 }
@@ -9853,7 +9866,10 @@ mod tests {
         let attach = def
             .sub_ability
             .expect("expected conditional attach sub-ability");
-        let Effect::Attach { attachment, target } = &*attach.effect else {
+        let Effect::Attach {
+            attachment, target, ..
+        } = &*attach.effect
+        else {
             panic!("expected attach sub-ability, got {:?}", attach.effect);
         };
         assert_eq!(*attachment, TargetFilter::TriggeringSource);
@@ -11728,6 +11744,7 @@ mod tests {
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: TargetFilter::ParentTarget,
+                    ..
                 }
             ),
             "moved card must be the attachment (SelfRef) and the source the host (ParentTarget), got {effect:?}"

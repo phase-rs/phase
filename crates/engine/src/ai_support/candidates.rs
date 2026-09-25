@@ -1592,6 +1592,20 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 701.71a + CR 608.2d: empower Jace chooses exactly one Jace token
+        // from the engine-provided candidates; every candidate is a legal pick.
+        WaitingFor::EmpowerJaceChoice {
+            player, choices, ..
+        } => choices
+            .iter()
+            .map(|&id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ChooseOneOfBranch {
             player, branches, ..
         } => (0..branches.len())
@@ -7612,6 +7626,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],

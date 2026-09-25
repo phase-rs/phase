@@ -173,6 +173,7 @@ fn creature_token_spec(controller: PlayerId) -> TokenSpec {
             display_name: "Zombie".to_string(),
             power: Some(2),
             toughness: Some(2),
+            loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Zombie".to_string()],
             supertypes: Vec::new(),

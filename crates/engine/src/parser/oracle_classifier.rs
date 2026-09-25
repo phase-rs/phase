@@ -721,7 +721,16 @@ fn is_static_compound_pattern(lower: &str) -> bool {
             // the ExileCastPermission line routes to the static parser instead
             // of the Priority-8 replacement gate. Narrowly widens the exile
             // anchor to accept the ownership infix.
-            || scan_contains(lower, "from among cards you own exiled with"))
+            || scan_contains(lower, "from among cards you own exiled with")
+            // CR 601.2a + CR 400.7: the graveyard-side mirror of the exile
+            // anchors above — "cast a creature spell from among cards in your
+            // graveyard that were put there from anywhere other than the
+            // battlefield this turn" (Banon, the Returners' Leader; Kagha,
+            // Shadow Archdruid). The bare "from your graveyard" anchor on the
+            // first line of this disjunction does not match the pool form, so
+            // without this the line never reaches `parse_static_line` and the
+            // whole permission lowers to an `Unimplemented` gap.
+            || scan_contains(lower, "from among cards in your graveyard"))
     {
         return true;
     }

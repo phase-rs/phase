@@ -5,6 +5,8 @@ use crate::types::game_state::{
     ExileLink, ExileLinkKind, ExiledStopInput, GameState, RepeatUntilStopWitness,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
     "ExiledBySource",
@@ -145,6 +147,20 @@ pub(crate) fn push_exiled_with_source_this_turn(
         .entry(source_id)
         .or_default();
     entry.push(exiled_id);
+}
+
+/// CR 406.6 + CR 607.2b + CR 608.2c: Record the player who performed the exile
+/// that put `exiled_id` into exile — the resolving instruction's acting player
+/// (its "that player" / "each player" subject when one is bound, otherwise the
+/// ability's controller). This is who "cards *they* exiled with ~" refers to,
+/// independent of who owns the card. A card that did not settle in exile (a
+/// replacement redirected it) gets no record.
+pub(crate) fn record_exiling_player(state: &mut GameState, exiled_id: ObjectId, player: PlayerId) {
+    if let Some(obj) = state.objects.get_mut(&exiled_id) {
+        if obj.zone == Zone::Exile {
+            obj.exiled_by = Some(player);
+        }
+    }
 }
 
 // CR 611.2a + CR 607.2a: Source-linked durations expire when that same source
