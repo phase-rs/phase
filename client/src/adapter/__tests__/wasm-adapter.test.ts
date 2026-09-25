@@ -1211,6 +1211,10 @@ const answer = {
 const viewerTransitionEvents: GameEvent[] = [{ type: "GameStarted" }];
 
 describe("WasmAdapter.getViewerTransitionSnapshot", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("forwards the engine-owned snapshot through the worker boundary", async () => {
     const rawState = buildGameState({ turn_number: 4, phase: "PreCombatMain" });
     const snapshot = {
