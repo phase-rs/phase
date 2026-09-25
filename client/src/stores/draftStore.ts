@@ -1438,7 +1438,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       && lifecycle === lifecycleGeneration && revision === workspaceRevision
       && get().draftId === state.draftId && get().adapter === state.adapter
       && get().runFormat === selectedRunFormat;
-    const samePreRunSession = () => lifecycle === lifecycleGeneration
+    const samePreRunSession = () => exclusiveToken === null
+      && lifecycle === lifecycleGeneration
       && get().draftId === state.draftId && get().adapter === state.adapter
       && get().selectedSet === state.selectedSet && get().phase === "launching"
       && get().runFormat === selectedRunFormat && get().runState === null;
@@ -1446,6 +1447,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     const legacyFacades = workspaceFacades(state.workspaceState, state.view);
     let durableRun: DraftRunState | null | undefined;
     let publicationStarted = false;
+    let publicationSucceeded = false;
     let launchError: unknown = null;
     let launchFailed = false;
     try {
@@ -1521,6 +1523,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           meta,
         });
       }
+      publicationSucceeded = true;
       if (!fresh()) return;
       set({ phase: "playing", runState: run });
       navigateToMatch({ ...get(), runState: run }, gameId, selectedMatchType, navigate);
@@ -1530,12 +1533,18 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     } finally {
       const owned = isExclusive(token, "launch");
       retireExclusive(token);
-      if (owned && durableRun === null && !publicationStarted && samePreRunSession()) {
+      if (owned && durableRun === null && !publicationSucceeded && samePreRunSession()) {
         try {
-          await persistDraft(persistenceGeneration, {
-            propagateFailure: true,
-            canPersist: samePreRunSession,
-          });
+          // The initial publication writes the session before the run. A
+          // rejected write may therefore have cancelled the format debounce
+          // without leaving any durable run for resume to read.
+          const publishedRun = publicationStarted ? await loadDraftRun(state.draftId) : null;
+          if (publishedRun === null && samePreRunSession()) {
+            await persistDraft(persistenceGeneration, {
+              propagateFailure: true,
+              canPersist: samePreRunSession,
+            });
+          }
         } catch (saveError) {
           const cause = launchError instanceof Error ? launchError.message
             : launchError === null ? "Draft match launch stopped" : String(launchError);

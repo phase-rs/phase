@@ -1710,8 +1710,11 @@ describe("draft store workspace authority", () => {
     const randomUuid = vi.spyOn(crypto, "randomUUID")
       .mockReturnValue("00000000-0000-4000-8000-000000000123");
     let stagedRun: unknown;
+    persistence.loadDraftRun.mockResolvedValueOnce(null);
     persistence.publishInitialDraftMatch.mockImplementationOnce(async (input: { run: unknown }) => {
       stagedRun = input.run;
+      // The publication reached the durable run write before metadata failed.
+      persistence.loadDraftRun.mockResolvedValue(stagedRun);
       throw new Error("metadata failed");
     });
     const navigate = vi.fn();
@@ -1722,7 +1725,7 @@ describe("draft store workspace authority", () => {
       run: expect.objectContaining({ booster_pack_pool: pool }),
       payload: expect.objectContaining({ booster_pack_pool: pool }),
     }));
-    persistence.loadDraftRun.mockResolvedValueOnce(stagedRun);
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
     // A later same-labelled cube must never replace an already bound source.
     if (pool !== undefined) wasm.booster_pack_pool_for_game.mockReturnValue(["Other cube"]);
     await useDraftStore.getState().launchMatch(navigate);
@@ -1866,6 +1869,48 @@ describe("draft store workspace authority", () => {
     await useDraftStore.getState().resumeDraft();
     expect(useDraftStore.getState().phase).toBe("launching");
     expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
+  it("saves an immediate Bo3 choice when initial publication fails before the durable run write", async () => {
+    const pool = [card("human", "Forest")];
+    wasm.start_quick_draft.mockReturnValue({ ...view(pool), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    useDraftStore.getState().setRunFormat("bo3");
+    persistence.publishInitialDraftMatch.mockRejectedValueOnce(new Error("session write failed"));
+    const snapshotWrite = deferred<void>();
+    persistence.persistQuickDraftSnapshot.mockReturnValueOnce(snapshotWrite.promise);
+    const navigate = vi.fn();
+    let settled = false;
+    const launch = useDraftStore.getState().launchMatch(navigate).finally(() => { settled = true; });
+
+    await vi.waitFor(() => expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce());
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(persistence.loadDraftRun).toHaveBeenCalledTimes(2);
+    expect(settled).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    const snapshot = persistence.persistQuickDraftSnapshot.mock.calls[0];
+    expect(snapshot[2]).toMatchObject({ phase: "launching", workspace: useDraftStore.getState().workspaceState });
+    expect(snapshot[3]).toMatchObject({ phase: "launching", runFormat: "bo3" });
+    snapshotWrite.resolve();
+    await expect(launch).rejects.toThrow("session write failed");
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runState).toBeNull();
+
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(snapshot[3]);
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: snapshot[1], mainDeck: ["Forest"], landCounts: {}, poolSortMode: "color",
+      poolPanelOpen: true, workspace: (snapshot[2] as { workspace: unknown }).workspace,
+    });
+    wasm.import_draft_session.mockReturnValue({ ...view(pool), status: "Pairing", match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().resumeDraft();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    expect(useDraftStore.getState().runState).toBeNull();
   });
 
   it("publishes an immediate nondefault Sealed Full Run choice and reloads it from the durable run", async () => {
