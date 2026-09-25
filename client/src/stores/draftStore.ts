@@ -1002,17 +1002,83 @@ async function preflightMatchPayload(
   }
 }
 
-function pickBotSeat(usedSeats: number[], view: DraftPlayerView): number {
-  const botSeats = view.seats.filter((seat) => seat.is_bot).map((seat) => seat.seat_index);
-  const candidates = botSeats.length > 0 ? botSeats : [1, 2, 3, 4, 5, 6, 7];
-  const available = candidates.filter((seat) => !usedSeats.includes(seat));
-  const choices = available.length > 0 ? available : candidates;
-  return choices[Math.floor(Math.random() * choices.length)] ?? 1;
+function orderedBotSeats(usedSeats: readonly number[], view: DraftPlayerView): number[] {
+  const roster = [...new Set(view.seats.filter((seat) => seat.is_bot).map((seat) => seat.seat_index))];
+  const candidates = roster.length > 0 ? roster : [1, 2, 3, 4, 5, 6, 7];
+  const unused = candidates.filter((seat) => !usedSeats.includes(seat));
+  const used = candidates.filter((seat) => usedSeats.includes(seat));
+  const preferred = unused.length > 0 ? unused : used;
+  const start = Math.floor(Math.random() * preferred.length);
+  return [...preferred.slice(start), ...preferred.slice(0, start), ...(unused.length > 0 ? used : [])];
 }
 
 function expandSuggestedDeck(deck: SuggestedDeck): string[] {
   return [...deck.main_deck, ...Object.entries(deck.lands).flatMap(([name, count]) =>
     Array<string>(normalizeVirtualBasicCount(count)).fill(name))];
+}
+
+async function selectViableOpponent(
+  playerDeck: string[],
+  usedSeats: readonly number[],
+  view: DraftPlayerView,
+  selectedMatchType: MatchType,
+  fresh: () => boolean,
+): Promise<{ botSeat: number; opponentDeck: string[] }> {
+  const draftSetCodes = [...(view.draft_set_codes ?? [])];
+  const player = { main_deck: [...playerDeck], sideboard: [], commander: [] };
+  let playerAccepted = false;
+  let lastOpponentReason = "No eligible bot opponent is available";
+
+  for (const botSeat of orderedBotSeats(usedSeats, view)) {
+    if (!fresh()) throw new Error("Stale draft match launch");
+    let botDeck: SuggestedDeck;
+    try {
+      botDeck = await withDraftEngineOperation((lease) => {
+        if (!fresh()) throw new Error("Stale draft match launch");
+        return lease.getBotDeck(botSeat);
+      });
+    } catch (error) {
+      if (!fresh()) throw new Error("Stale draft match launch");
+      lastOpponentReason = error instanceof Error ? error.message : String(error);
+      continue;
+    }
+    if (!fresh()) throw new Error("Stale draft match launch");
+    const opponentDeck = expandSuggestedDeck(botDeck);
+    const opponent = { main_deck: opponentDeck, sideboard: [], commander: [] };
+    if (!playerAccepted) {
+      const [playerResult, opponentResult] = await Promise.allSettled([
+        evaluateLimitedDeck(player, draftSetCodes, selectedMatchType),
+        evaluateLimitedDeck(opponent, draftSetCodes, selectedMatchType),
+      ]);
+      if (!fresh()) throw new Error("Stale draft match launch");
+      if (playerResult.status === "rejected") {
+        const message = playerResult.reason instanceof Error ? playerResult.reason.message : String(playerResult.reason);
+        throw new Error(message || "Deck format validation is unavailable");
+      }
+      if (opponentResult.status === "rejected") {
+        const message = opponentResult.reason instanceof Error ? opponentResult.reason.message : String(opponentResult.reason);
+        throw new Error(message || "Deck format validation is unavailable");
+      }
+      const playerReason = gateReason(playerResult.value, "player");
+      if (playerReason) throw new Error(playerReason);
+      playerAccepted = true;
+      const opponentReason = gateReason(opponentResult.value, "opponent");
+      if (opponentReason) {
+        lastOpponentReason = opponentReason;
+        continue;
+      }
+    } else {
+      const verdict = await evaluateLimitedDeck(opponent, draftSetCodes, selectedMatchType);
+      if (!fresh()) throw new Error("Stale draft match launch");
+      const opponentReason = gateReason(verdict, "opponent");
+      if (opponentReason) {
+        lastOpponentReason = opponentReason;
+        continue;
+      }
+    }
+    return { botSeat, opponentDeck };
+  }
+  throw new Error(lastOpponentReason);
 }
 
 function navigateToMatch(
@@ -1462,17 +1528,18 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         if (!fresh()) throw new Error("Stale draft match launch");
         run = withBoosterPackPool(durableRun, boosterPackPool);
       } else {
-        const botSeat = pickBotSeat([], state.view);
         const prepared = await withDraftEngineOperation((lease) => {
           if (!fresh()) throw new Error("Stale draft match launch");
           return {
             sessionJson: lease.exportSession(),
-            botDeck: lease.getBotDeck(botSeat),
             boosterPackPool: lease.boosterPackPoolForGame(),
           };
         });
         sessionJson = prepared.sessionJson;
-        const opponentDeck = expandSuggestedDeck(prepared.botDeck);
+        const { botSeat, opponentDeck } = await selectViableOpponent(
+          playerDeck, [], state.view, selectedMatchType, fresh,
+        );
+        if (!fresh()) throw new Error("Stale draft match launch");
         const gameId = crypto.randomUUID();
         run = {
           format: selectedRunFormat,
@@ -1495,7 +1562,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const localState = { ...state, runState: run };
       const meta = makeMeta(localState, "playing", gameId);
       const payload = matchPayload(run);
-      await preflightMatchPayload(payload, state.view.draft_set_codes ?? [], selectedMatchType);
+      if (durableRun) {
+        await preflightMatchPayload(payload, state.view.draft_set_codes ?? [], selectedMatchType);
+      }
       if (!fresh()) throw new Error("Stale draft match launch");
       publicationStarted = true;
       if (sessionJson !== null) {
@@ -1622,12 +1691,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           throw new Error("Conflicting staged draft match");
         }
       } else {
-        const botSeat = pickBotSeat(durableRun.usedBotSeats, state.view);
-        const botDeck = await withDraftEngineOperation((lease) => {
-          if (!fresh()) throw new Error("Stale next match launch");
-          return lease.getBotDeck(botSeat);
-        });
-        const opponentDeck = expandSuggestedDeck(botDeck);
+        const { botSeat, opponentDeck } = await selectViableOpponent(
+          playerDeck, durableRun.usedBotSeats, state.view, selectedMatchType, fresh,
+        );
+        if (!fresh()) throw new Error("Stale next match launch");
         const gameId = crypto.randomUUID();
         const usedBotSeats = durableRun.usedBotSeats.includes(botSeat)
           ? durableRun.usedBotSeats
@@ -1650,7 +1717,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const gameId = run.activeMatch!.gameId;
       const meta = makeMeta({ ...state, runState: run }, "playing", gameId);
       const payload = matchPayload(run);
-      await preflightMatchPayload(payload, state.view.draft_set_codes ?? [], selectedMatchType);
+      if (durableRun.activeMatch) {
+        await preflightMatchPayload(payload, state.view.draft_set_codes ?? [], selectedMatchType);
+      }
       if (!fresh()) return;
       await publishStagedDraftMatch({
         draftId: state.draftId,

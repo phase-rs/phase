@@ -119,6 +119,14 @@ function cardWithCmc(instanceId: string, cmc: number): DraftCardInstance {
   return { ...card(instanceId), cmc };
 }
 
+function botSeat(seat_index: number): DraftPlayerView["seats"][number] {
+  return {
+    seat_index, display_name: `Bot ${seat_index}`, is_bot: true,
+    connected: true, has_submitted_deck: true, pick_status: "NotDrafting",
+    active_pack_count: 0, drafted_card_count: 0, face_up_draft_cards: [],
+  };
+}
+
 function view(pool: DraftCardInstance[] = []): DraftPlayerView {
   return {
     status: "Drafting",
@@ -136,7 +144,7 @@ function view(pool: DraftCardInstance[] = []): DraftPlayerView {
       workspace_capabilities: { rarity_group_order: null },
       workspace_row_classification: { creature_instance_ids: [], noncreature_instance_ids: [] },
     },
-    seats: [],
+    seats: [botSeat(1)],
     current_pack_number: 1,
     pick_number: 1,
     pass_direction: "Left",
@@ -171,6 +179,15 @@ function deferred<T>() {
 async function start(pool: DraftCardInstance[] = []): Promise<void> {
   wasm.start_quick_draft.mockReturnValue(view(pool));
   await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+}
+
+async function startLaunchWithBotSeats(indices: number[]): Promise<void> {
+  await start([card("human", "Forest")]);
+  useDraftStore.setState((state) => ({
+    phase: "launching",
+    view: { ...state.view!, seats: indices.map(botSeat) },
+  }));
+  persistence.loadDraftRun.mockResolvedValue(null);
 }
 
 async function settleTimers(): Promise<void> {
@@ -1831,6 +1848,183 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().phase).toBe("launching");
   });
 
+  it("tries a second bot after an exact opponent refusal and publishes only that seat", async () => {
+    await startLaunchWithBotSeats([1, 2]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    vi.spyOn(crypto, "randomUUID").mockReturnValue("00000000-0000-4000-8000-000000000222");
+    wasm.get_bot_deck.mockImplementation((seat: number) => ({
+      main_deck: [seat === 1 ? "Rejected Bot" : "Legal Bot"], lands: { Forest: 39 },
+    }));
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] !== "Rejected Bot",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Rejected Bot"
+        ? ["opponent rejected"] : [],
+    }));
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([1, 2]);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    expect(formatGate.evaluate).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      main_deck: ["Forest"], sideboard: [], selected_format: "Limited", selected_match_type: "Bo1",
+    }));
+    expect(formatGate.evaluate).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      main_deck: ["Rejected Bot", ...Array<string>(39).fill("Forest")], sideboard: [],
+    }));
+    expect(formatGate.evaluate).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      main_deck: ["Legal Bot", ...Array<string>(39).fill("Forest")], sideboard: [],
+    }));
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    const published = persistence.publishInitialDraftMatch.mock.calls[0][0] as {
+      run: DraftRunState; payload: { opponent: { main_deck: string[] } }; gameId: string;
+    };
+    expect(published.run.usedBotSeats).toEqual([2]);
+    expect(published.run.activeMatch).toMatchObject({ botSeat: 2, gameId: published.gameId });
+    expect(published.run.opponentDeck).toEqual(published.payload.opponent.main_deck);
+    expect(published.payload.opponent.main_deck[0]).toBe("Legal Bot");
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("keeps first-valid selection finite and leaves an all-invalid run unpublished", async () => {
+    await startLaunchWithBotSeats([1, 2]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    wasm.get_bot_deck.mockImplementation((seat: number) => ({ main_deck: [`Bot ${seat}`], lands: {} }));
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([1]);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+
+    useDraftStore.getState().reset();
+    await startLaunchWithBotSeats([1, 2]);
+    wasm.get_bot_deck.mockClear();
+    persistence.publishInitialDraftMatch.mockClear();
+    navigate.mockClear();
+    formatGate.evaluate.mockClear();
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] === "Forest",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Forest" ? [] : ["opponent rejected"],
+    }));
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("opponent rejected");
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([1, 2]);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toBeNull();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("tries the next bot after generation failure but aborts on gate transport or player refusal", async () => {
+    await startLaunchWithBotSeats([]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    wasm.get_bot_deck.mockImplementation((seat: number) => {
+      if (seat === 1) throw new Error("card database unavailable");
+      return { main_deck: ["Legal Bot"], lands: {} };
+    });
+    await useDraftStore.getState().launchMatch(vi.fn());
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([1, 2]);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+
+    for (const failure of ["transport", "malformed", "player"] as const) {
+      useDraftStore.getState().reset();
+      await startLaunchWithBotSeats([1, 2]);
+      wasm.get_bot_deck.mockReset();
+      wasm.get_bot_deck.mockReturnValue({ main_deck: ["Legal Bot"], lands: {} });
+      formatGate.evaluate.mockReset();
+      formatGate.evaluate.mockImplementation(async (request: unknown) => {
+        if (failure === "transport") throw new Error("gate transport failed");
+        if (failure === "malformed") return {} as { compatible: boolean; reasons: string[] };
+        return (request as { main_deck: string[] }).main_deck[0] === "Forest"
+          ? { compatible: false, reasons: ["player rejected"] }
+          : { compatible: true, reasons: [] };
+      });
+      persistence.publishInitialDraftMatch.mockClear();
+      await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toThrow(
+        failure === "transport" ? "gate transport failed"
+          : failure === "malformed" ? "Deck format validation is unavailable" : "player rejected",
+      );
+      expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+      expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rematches a previously used legal seat after the unused seat fails", async () => {
+    await startLaunchWithBotSeats([1, 2]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    useDraftStore.getState().setRunFormat("run");
+    const draftId = useDraftStore.getState().draftId!;
+    const prior: DraftRunState = {
+      format: "run", results: [{ gameId: "finished", result: "win" }],
+      playerDeck: ["Forest"], opponentDeck: ["Old Bot"], usedBotSeats: [1],
+    };
+    useDraftStore.setState({ phase: "playing", runState: prior });
+    persistence.loadDraftRun.mockResolvedValue(prior);
+    wasm.get_bot_deck.mockImplementation((seat: number) => ({
+      main_deck: [seat === 2 ? "Bad Bot" : "Returning Bot"], lands: {},
+    }));
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] !== "Bad Bot",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Bad Bot" ? ["bad bot deck"] : [],
+    }));
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([2, 1]);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    const published = (persistence.publishStagedDraftMatch.mock.calls as unknown as Array<[unknown]>)[0][0] as {
+      run: DraftRunState; payload: { opponent: { main_deck: string[] } };
+    };
+    expect(published.run.activeMatch).toMatchObject({ draftId, botSeat: 1, resultCountAtLaunch: 1 });
+    expect(published.run.usedBotSeats).toEqual([1]);
+    expect(published.run.results).toEqual(prior.results);
+    expect(published.payload.opponent.main_deck).toEqual(["Returning Bot"]);
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a next-match run unchanged when every distinct bot seat is refused", async () => {
+    await startLaunchWithBotSeats([1, 2, 2]);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    useDraftStore.getState().setRunFormat("run");
+    const prior: DraftRunState = {
+      format: "run", results: [{ gameId: "finished", result: "win" }],
+      playerDeck: ["Forest"], opponentDeck: ["Old Bot"], usedBotSeats: [1],
+    };
+    useDraftStore.setState({ phase: "playing", runState: prior });
+    persistence.loadDraftRun.mockResolvedValue(prior);
+    wasm.get_bot_deck.mockImplementation((seat: number) => ({ main_deck: [`Bad Bot ${seat}`], lands: {} }));
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] === "Forest",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Forest" ? [] : ["no legal bot deck"],
+    }));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("no legal bot deck");
+    expect(wasm.get_bot_deck.mock.calls.map(([seat]) => seat)).toEqual([2, 1]);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toBe(prior);
+    expect(useDraftStore.getState().runState?.usedBotSeats).toEqual([1]);
+    expect(useDraftStore.getState().runState?.results).toEqual(prior.results);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps Bo3 unpublished on the player's exact sideboard refusal even with another bot", async () => {
+    await startLaunchWithBotSeats([1, 2]);
+    useDraftStore.setState((state) => ({
+      view: { ...state.view!, match_config: { match_type: "Bo3" } },
+    }));
+    useDraftStore.getState().setRunFormat("bo3");
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Legal Bot"], lands: {} });
+    formatGate.evaluate.mockResolvedValue({ compatible: false, reasons: ["BO3 requires a sideboard"] });
+    await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toThrow("BO3 requires a sideboard");
+    expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo3", sideboard: [] });
+    }
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
   it("keeps a selected Bo3 first match unpublished and saves the choice before immediate resume", async () => {
     const pool = [card("human", "Forest")];
     wasm.start_quick_draft.mockReturnValue({ ...view(pool), match_config: { match_type: "Bo3" } });
@@ -2129,7 +2323,7 @@ describe("draft store workspace authority", () => {
     await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
     useDraftStore.getState().reset();
     pending.resolve({ compatible: false, reasons: ["engine rejected"] });
-    await expect(launch).rejects.toThrow("engine rejected");
+    await expect(launch).rejects.toThrow("Stale draft match launch");
     expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
     expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
   });

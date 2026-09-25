@@ -6903,11 +6903,25 @@ mod deck_list_seat_validation_tests {
         }
     }
 
+    fn forest() -> CardFace {
+        CardFace {
+            name: "Forest".to_string(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+            },
+            color_identity: vec![ManaColor::Green],
+            ..CardFace::default()
+        }
+    }
+
     fn test_db() -> CardDatabase {
         let faces = vec![
             legendary_creature(LEGEND_A),
             legendary_creature(LEGEND_B),
             plains(),
+            forest(),
         ];
         let mut entries = BTreeMap::new();
         for f in faces {
@@ -7027,6 +7041,56 @@ mod deck_list_seat_validation_tests {
             player,
             opponent,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn limited_initializer_seat_validation_rejects_short_and_unresolved_decks() {
+        let db = test_db();
+        assert!(db.get_face_by_name("Forest").is_some());
+        let legal = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 40).collect(),
+            ..Default::default()
+        };
+        let short = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 39).collect(),
+            ..Default::default()
+        };
+        let mut unknown_main = legal.clone();
+        unknown_main.main_deck[0] = "Unknown Limited Probe".to_string();
+        let mut unknown_side = legal.clone();
+        unknown_side.sideboard = vec!["Unknown Limited Probe".to_string()];
+        let check = |player, opponent| {
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(player, opponent),
+                &FormatConfig::limited(),
+                Some(MatchType::Bo1),
+                2,
+            )
+        };
+
+        assert_eq!(check(legal.clone(), legal.clone()), None);
+        for (seat, player, opponent, reason) in [
+            ("Player", short.clone(), legal.clone(), "at least 40"),
+            (
+                "Player",
+                unknown_main.clone(),
+                legal.clone(),
+                "Unknown cards",
+            ),
+            ("AI opponent", legal.clone(), short, "at least 40"),
+            ("AI opponent", legal.clone(), unknown_main, "Unknown cards"),
+            ("AI opponent", legal.clone(), unknown_side, "Unknown cards"),
+        ] {
+            let refused = check(player, opponent).expect("the exact seat must be refused");
+            assert!(
+                refused
+                    .iter()
+                    .any(|entry| entry.starts_with(&format!("{seat} deck:"))
+                        && entry.contains(reason)),
+                "{seat}: {refused:?}"
+            );
         }
     }
 

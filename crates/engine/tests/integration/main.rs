@@ -995,6 +995,7 @@ mod lightning_dart_disjunctive_color_instead;
 mod liliana_dreadhorde_multi_dies;
 mod liliana_waker_cross_scope_decline;
 mod liminal_copy_token_etb_observers;
+mod limited_deck_format_gate;
 mod living_armor_target_mana_value_1375;
 mod living_death_replacement_redirect_2932;
 mod living_death_sacrificed_this_way_lifegain_2932;
