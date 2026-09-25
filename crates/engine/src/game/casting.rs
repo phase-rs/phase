@@ -22458,7 +22458,13 @@ fn activation_cost_passes_early_affordability_gate(
     cost: &AbilityCost,
     ability_index: usize,
 ) -> bool {
-    if find_one_of_cost(cost).is_some() {
+    if let Some(locked) =
+        super::costs::lock_half_life_activation_cost(state, player, source_id, cost)
+    {
+        // CR 601.2f + CR 602.2b: Refuse an unaffordable locked cost before
+        // target prompts or mana abilities can mutate the activation state.
+        can_pay_ability_cost_now(state, player, source_id, &locked, Some(ability_index))
+    } else if find_one_of_cost(cost).is_some() {
         can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index))
     } else {
         // CR 106.6: the tag reaches the payability gate for the same reason it
@@ -24413,6 +24419,20 @@ fn activate_with_cost_carrier(
         // here — it must fall through to the general target-first path below
         // (CR 601.2c: targets are chosen before costs are paid), where the
         // mana-first `Composite` ordering keeps the post-target payment atomic.
+        // CR 601.2f + CR 602.2b: Announcement choices above are complete.
+        // Lock the no-target half-life cost before any mana or payment detour;
+        // the borrowed cost flows through those paths, while the local ability
+        // definition supplies the same fixed cost to final payment.
+        let locked_cost = if !has_effect_targets && find_one_of_cost(cost).is_none() {
+            super::costs::lock_half_life_activation_cost(state, player, source_id, cost)
+        } else {
+            None
+        };
+        let cost = locked_cost.as_ref().unwrap_or(cost);
+        if let Some(locked) = locked_cost.as_ref() {
+            ability_def.cost = Some(locked.clone());
+        }
+
         let loyalty_no_targets =
             crate::types::ability::is_loyalty_ability_cost(cost) && !has_effect_targets;
         if !has_effect_targets

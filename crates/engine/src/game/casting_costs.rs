@@ -5332,9 +5332,16 @@ pub(crate) fn handle_exile_materials_for_cost(
 pub(crate) fn finish_activated_ability_at_payment_boundary(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2f + CR 601.2g + CR 602.2b: Targets are announced; keep the
+    // fixed total cost on this pending root before any mana-ability detour.
+    if let Some(locked) = pending.activation_cost.as_ref().and_then(|cost| {
+        super::costs::lock_half_life_activation_cost(state, player, pending.object_id, cost)
+    }) {
+        pending.activation_cost = Some(locked);
+    }
     let ability_index = pending.activation_ability_index.ok_or_else(|| {
         EngineError::InvalidAction(
             "activation payment boundary missing an ability index".to_string(),
