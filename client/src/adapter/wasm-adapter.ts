@@ -11,6 +11,7 @@ import type {
   EngineSnapshot,
   FormatConfig,
   GameAction,
+  GameEvent,
   GameState,
   LegalActionsResult,
   LlmDecisionRequestResult,
@@ -22,6 +23,7 @@ import type {
   RestoredStackAutomationPresentation,
   SubmitResult,
   ViewerSnapshot,
+  ViewerTransitionSnapshot,
 } from "./types";
 import type {
   InteractionPreview,
@@ -616,6 +618,21 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         : await this.fallback!.getViewerSnapshot(viewerId);
       // The `state` field needs the same client-side unwrap as `getFilteredState`
       // to normalize serde-wasm-bindgen oddities (Map-as-Object conversion etc).
+      return { ...wrapped, state: unwrapClientGameState(wrapped.state) };
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  async getViewerTransitionSnapshot(
+    viewerId: number,
+    events: GameEvent[],
+  ): Promise<ViewerTransitionSnapshot> {
+    this.assertInitialized("getViewerTransitionSnapshot");
+    try {
+      const wrapped = this.engine
+        ? await this.engine.getViewerTransitionSnapshot(viewerId, events)
+        : await this.fallback!.getViewerTransitionSnapshot(viewerId, events);
       return { ...wrapped, state: unwrapClientGameState(wrapped.state) };
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
@@ -1405,6 +1422,10 @@ interface MainThreadFallback {
   getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }>;
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
+  getViewerTransitionSnapshot(
+    viewerId: number,
+    events: GameEvent[],
+  ): Promise<ViewerTransitionSnapshot>;
   getAiActionProposal(difficulty: string, playerId: number): Promise<AiActionProposal | null>;
   getAiTacticalActionProposal(difficulty: string, playerId: number): Promise<AiActionProposal | null>;
   getAiActionProposalWithDiagnostics(
@@ -1591,6 +1612,16 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.get_viewer_snapshot_js(viewerId);
         if (r === null) throw new Error("NOT_INITIALIZED: get_viewer_snapshot_js returned null");
         return r as ViewerSnapshot;
+      }),
+
+    getViewerTransitionSnapshot: (viewerId: number, events: GameEvent[]) =>
+      enqueue(() => {
+        const r = wasm.get_viewer_transition_snapshot_js(viewerId, events);
+        if (typeof r === "string") throw new Error(r);
+        if (r === null) {
+          throw new Error("NOT_INITIALIZED: get_viewer_transition_snapshot_js returned null");
+        }
+        return r as ViewerTransitionSnapshot;
       }),
 
     getAiActionProposal: (difficulty: string, playerId: number) =>

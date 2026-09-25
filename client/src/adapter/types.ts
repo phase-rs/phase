@@ -4636,6 +4636,14 @@ export interface ViewerSnapshot {
 }
 
 /**
+ * ViewerSnapshot paired with the engine-filtered events from the same
+ * transition. The legacy state-only snapshot remains unchanged.
+ */
+export interface ViewerTransitionSnapshot extends ViewerSnapshot {
+  events: GameEvent[];
+}
+
+/**
  * Engine-authored display summary for the one explicit automation run that
  * follows loading a persisted game. The state in `RestoredGameStateResult` is
  * authoritative; this bounded tail only explains that one transition.

@@ -11,6 +11,7 @@ import type {
   AiProposalSubmission,
   FormatConfig,
   GameAction,
+  GameEvent,
   GameState,
   LegalActionsResult,
   LlmDecisionRequestResult,
@@ -19,6 +20,7 @@ import type {
   RestoredStackAutomationPresentation,
   SubmitResult,
   ViewerSnapshot,
+  ViewerTransitionSnapshot,
 } from "./types";
 import {
   actionRejectionError,
@@ -384,6 +386,16 @@ export class EngineWorkerClient {
   async getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot> {
     return this.request<ViewerSnapshot>(
       { type: "getViewerSnapshot", viewerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async getViewerTransitionSnapshot(
+    viewerId: number,
+    events: GameEvent[],
+  ): Promise<ViewerTransitionSnapshot> {
+    return this.request<ViewerTransitionSnapshot>(
+      { type: "getViewerTransitionSnapshot", viewerId, events },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

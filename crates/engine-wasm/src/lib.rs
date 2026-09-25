@@ -32,15 +32,17 @@ use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_for
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
-    evaluate_deck_compatibility, filter_state_for_viewer, is_brawl_commander_eligible,
-    is_commander_eligible, is_freeform_commander_eligible, is_tiny_leader_eligible,
-    load_and_hydrate_decks, max_deck_copies, rehydrate_game_from_card_db_with_finalization,
-    resolve_deck_list, signature_spell_selection_policy, start_game,
-    start_game_with_starting_player, validate_name_deck_for_format_full, BracketEstimate,
-    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
+    evaluate_deck_compatibility, filter_events_for_viewer, filter_state_for_viewer,
+    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
+    is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
+    rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
+    signature_spell_selection_policy, start_game, start_game_with_starting_player,
+    validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
+    PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
+use engine::types::events::GameEvent;
 use engine::types::format::{
     validate_starting_life_bounds, DeckCopyLimit, FormatConfig, GameFormat,
 };
@@ -2395,6 +2397,17 @@ struct ViewerSnapshot<'a> {
     viewer_interaction: engine::types::interaction::ViewerInteraction,
 }
 
+/// ViewerSnapshot plus the event slice that belongs to the same caller-owned
+/// transition. Keeping this as a distinct wire type preserves the legacy
+/// state-only endpoint while making event filtering an engine-owned operation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewerTransitionSnapshot<'a> {
+    #[serde(flatten)]
+    snapshot: ViewerSnapshot<'a>,
+    events: Vec<GameEvent>,
+}
+
 fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsResult {
     let (actions, spell_costs, legal_actions_by_object) = legal_actions_for_viewer(state, viewer);
     let auto_pass_recommended = auto_pass_recommended_for_viewer(state, viewer, &actions);
@@ -2419,6 +2432,50 @@ fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> Legal
         viewer_interaction: engine::game::interaction::derive_viewer_interaction(
             state, state, viewer,
         ),
+    }
+}
+
+fn viewer_snapshot<'a>(
+    state: &GameState,
+    filtered: &'a GameState,
+    viewer: PlayerId,
+) -> ViewerSnapshot<'a> {
+    let legal = legal_actions_result_for_viewer(state, viewer);
+    let viewer_interaction =
+        engine::game::interaction::derive_viewer_interaction(state, filtered, viewer);
+    ViewerSnapshot {
+        state: engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+            state,
+            filtered,
+            Some(viewer),
+        ),
+        actions: legal.actions,
+        auto_pass_recommended: legal.auto_pass_recommended,
+        end_continuous_effect_offers: legal.end_continuous_effect_offers,
+        mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
+        spell_costs: legal.spell_costs,
+        legal_actions_by_object: legal.legal_actions_by_object,
+        activation_block_reasons: legal.activation_block_reasons,
+        stuck_diagnostic: legal.stuck_diagnostic,
+        viewer_interaction,
+    }
+}
+
+fn viewer_player_id(player_id: u32) -> Result<PlayerId, String> {
+    u8::try_from(player_id)
+        .map(PlayerId)
+        .map_err(|_| format!("INVALID_VIEWER_ID: {player_id} exceeds u8 range"))
+}
+
+fn viewer_transition_snapshot<'a>(
+    state: &GameState,
+    filtered: &'a GameState,
+    viewer: PlayerId,
+    events: &[GameEvent],
+) -> ViewerTransitionSnapshot<'a> {
+    ViewerTransitionSnapshot {
+        snapshot: viewer_snapshot(state, filtered, viewer),
+        events: filter_events_for_viewer(events, state, viewer),
     }
 }
 
@@ -2463,6 +2520,22 @@ mod viewer_priority_tests {
             !controlled_result.auto_pass_recommended,
             "the controlled viewer is not authorized to act and must receive false"
         );
+
+        let controller_filtered = filter_state_for_viewer(&state, controller);
+        let controller_snapshot =
+            viewer_transition_snapshot(&state, &controller_filtered, controller, &[]);
+        assert!(controller_snapshot
+            .snapshot
+            .actions
+            .iter()
+            .any(|action| matches!(action, GameAction::PassPriority)));
+        assert!(controller_snapshot.snapshot.viewer_interaction.can_submit);
+
+        let controlled_filtered = filter_state_for_viewer(&state, controlled);
+        let controlled_snapshot =
+            viewer_transition_snapshot(&state, &controlled_filtered, controlled, &[]);
+        assert!(controlled_snapshot.snapshot.actions.is_empty());
+        assert!(!controlled_snapshot.snapshot.viewer_interaction.can_submit);
     }
 
     #[test]
@@ -2481,6 +2554,78 @@ mod viewer_priority_tests {
             "normal P2P must not receive the debug-library capability"
         );
     }
+
+    #[test]
+    fn viewer_transition_projects_hidden_state_and_filters_face_down_exile_events() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let card = engine::game::zones::create_object(
+            &mut state,
+            engine::types::identifiers::CardId(7),
+            owner,
+            "Hidden Exile".to_string(),
+            engine::types::zones::Zone::Exile,
+        );
+        {
+            let object = state.objects.get_mut(&card).expect("created object");
+            object.face_down = true;
+            object.foretold = true;
+        }
+        let record = state.objects[&card].snapshot_for_zone_change(
+            card,
+            Some(engine::types::zones::Zone::Library),
+            engine::types::zones::Zone::Exile,
+        );
+        let events = vec![
+            GameEvent::CardDrawn {
+                player_id: owner,
+                object_id: card,
+                nth_in_turn: 1,
+                nth_in_step: 1,
+            },
+            GameEvent::ZoneChanged {
+                object_id: card,
+                from: Some(engine::types::zones::Zone::Library),
+                to: engine::types::zones::Zone::Exile,
+                record: Box::new(record),
+            },
+        ];
+
+        let opponent = PlayerId(0);
+        let opponent_filtered = filter_state_for_viewer(&state, opponent);
+        let opponent_snapshot =
+            viewer_transition_snapshot(&state, &opponent_filtered, opponent, &events);
+        assert_eq!(opponent_snapshot.events, Vec::<GameEvent>::new());
+        assert_eq!(
+            opponent_snapshot.snapshot.state.state.objects[&card].name,
+            "Hidden Card"
+        );
+
+        let owner_filtered = filter_state_for_viewer(&state, owner);
+        let owner_snapshot = viewer_transition_snapshot(&state, &owner_filtered, owner, &events);
+        assert_eq!(owner_snapshot.events, events);
+        assert_eq!(
+            owner_snapshot.snapshot.state.state.objects[&card].name,
+            "Hidden Exile"
+        );
+
+        let legacy = serde_json::to_value(&opponent_snapshot.snapshot)
+            .expect("legacy viewer snapshot serializes");
+        assert!(legacy.get("events").is_none());
+        let transition = serde_json::to_value(&opponent_snapshot)
+            .expect("viewer transition snapshot serializes");
+        assert_eq!(transition["events"], serde_json::json!([]));
+        assert!(transition.get("state").is_some());
+    }
+
+    #[test]
+    fn viewer_transition_rejects_unrepresentable_viewer_ids() {
+        assert_eq!(viewer_player_id(255), Ok(PlayerId(255)));
+        assert_eq!(
+            viewer_player_id(256),
+            Err("INVALID_VIEWER_ID: 256 exceeds u8 range".to_string())
+        );
+    }
 }
 
 #[wasm_bindgen]
@@ -2489,27 +2634,35 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
         engine::game::layers::flush_layers(state);
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
-        let legal = legal_actions_result_for_viewer(state, viewer);
-        let viewer_interaction =
-            engine::game::interaction::derive_viewer_interaction(state, &filtered, viewer);
-        to_js(&ViewerSnapshot {
-            state: engine::game::derived_views::ClientGameStateRef::wrap_filtered(
-                state,
-                &filtered,
-                Some(viewer),
-            ),
-            actions: legal.actions,
-            auto_pass_recommended: legal.auto_pass_recommended,
-            end_continuous_effect_offers: legal.end_continuous_effect_offers,
-            mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
-            spell_costs: legal.spell_costs,
-            legal_actions_by_object: legal.legal_actions_by_object,
-            activation_block_reasons: legal.activation_block_reasons,
-            stuck_diagnostic: legal.stuck_diagnostic,
-            viewer_interaction,
-        })
+        to_js(&viewer_snapshot(state, &filtered, viewer))
     }) {
         Ok(val) => val,
+        Err(_) => JsValue::NULL,
+    }
+}
+
+/// Combined viewer projection and event slice for one engine transition.
+/// Unlike the legacy state-only endpoint, this path validates the viewer id
+/// before narrowing it to the engine's representable PlayerId domain.
+#[wasm_bindgen]
+pub fn get_viewer_transition_snapshot_js(player_id: u32, events: JsValue) -> JsValue {
+    let events: Vec<GameEvent> = match serde_wasm_bindgen::from_value(events) {
+        Ok(events) => events,
+        Err(error) => return JsValue::from_str(&format!("INVALID_TRANSITION_EVENTS: {error}")),
+    };
+    let viewer = match viewer_player_id(player_id) {
+        Ok(viewer) => viewer,
+        Err(error) => return JsValue::from_str(&error),
+    };
+
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let filtered = filter_state_for_viewer(state, viewer);
+        to_js(&viewer_transition_snapshot(
+            state, &filtered, viewer, &events,
+        ))
+    }) {
+        Ok(value) => value,
         Err(_) => JsValue::NULL,
     }
 }
