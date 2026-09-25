@@ -266,8 +266,8 @@ describe("flashInGameRolls", () => {
     const d = useUiStore.getState().diceRoll;
     expect(d).toMatchObject({ kind: "die", sides: 20, context: "ability" });
     expect(d?.kind === "die" && d.rolls).toEqual([
-      { playerId: 0, value: 14 },
-      { playerId: 0, value: 4, ignored: true },
+      { playerId: 0, value: 14, sides: 20 },
+      { playerId: 0, value: 4, sides: 20, ignored: true },
     ]);
   });
 
@@ -275,6 +275,16 @@ describe("flashInGameRolls", () => {
     flashInGameRolls([ignoredDie(0, 20, 4)]);
     const d = useUiStore.getState().diceRoll;
     expect(d).toMatchObject({ kind: "die", sides: 20, context: "ability" });
-    expect(d?.kind === "die" && d.rolls).toEqual([{ playerId: 0, value: 4, ignored: true }]);
+    expect(d?.kind === "die" && d.rolls).toEqual([{ playerId: 0, value: 4, sides: 20, ignored: true }]);
+  });
+
+  it("preserves each die shape when a result branch rolls a different die", () => {
+    flashInGameRolls([ignoredDie(0, 6, 2), die(0, 6, 5), die(0, 20, 17)]);
+    const d = useUiStore.getState().diceRoll;
+    expect(d?.kind === "die" && d.rolls).toEqual([
+      { playerId: 0, value: 2, sides: 6, ignored: true },
+      { playerId: 0, value: 5, sides: 6 },
+      { playerId: 0, value: 17, sides: 20 },
+    ]);
   });
 });

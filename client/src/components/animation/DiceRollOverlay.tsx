@@ -429,7 +429,7 @@ function InGameDice({
             animate ? (
               <Suspense fallback={<DiePlaceholder label={String(roll.value)} />}>
                 <Dice3D
-                  sides={payload.sides}
+                  sides={roll.sides ?? payload.sides}
                   result={roll.value}
                   speedMultiplier={speedMultiplier}
                   size={DIE_SIZE}

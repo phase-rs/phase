@@ -26,9 +26,10 @@ use crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_r
 /// die, decide which are ignored from the NATURALS, and only THEN emit
 /// `DieRolled` — carrying the post-modifier value — for the survivors. An
 /// ignored roll "is considered to have never happened" (CR 706.6), so it must
-/// never reach the event log, which is also what keeps every events-slice reader
-/// correct: the die-roll trigger layer, `game/contraptions.rs`, and
-/// `game/effects/effect.rs`'s CR 611.2d snapshot.
+/// never emit `DieRolled`; only the display-only `DieRollIgnored` mirror reaches
+/// the event log. Rules-facing readers (`game/trigger_matchers.rs`,
+/// `game/contraptions.rs`, and the CR 611.2d snapshot in
+/// `game/effects/effect.rs`) exclude that mirror.
 ///
 /// `sides == 0` names no die and no distribution. `rand`'s `random_range`
 /// asserts on an empty range, so it would panic mid-resolution; callers are
@@ -486,8 +487,8 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
 /// the no-prompt fast path calls straight into here.
 ///
 /// `ignore_indices` names the rolls that "never happened" (CR 706.6): they emit
-/// no event, receive no modifier, run no results branch, and contribute nothing
-/// to the aggregate.
+/// only a display mirror, receive no modifier, run no results branch, and
+/// contribute nothing to the aggregate.
 ///
 /// Returns `Ok(Some(wf))` when a results branch re-suspended for another
 /// interactive choice, and `Ok(None)` when the whole instruction completed; the
@@ -1496,8 +1497,6 @@ mod tests {
     /// assertions pin that the mirror changes nothing else.
     #[test]
     fn ignored_rolls_emit_display_mirror_alongside_survivors() {
-        use crate::types::resolution::PendingDieRoll;
-
         let mut state = GameState::new_two_player(42);
         let pending = PendingDieRoll {
             source_id: ObjectId(1),
@@ -1514,6 +1513,7 @@ mod tests {
             running_total: 0,
             rolled_any: false,
             forced_ignored: vec![],
+            chain_root_targets: vec![],
         };
         let mut events = Vec::new();
         let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events).unwrap();

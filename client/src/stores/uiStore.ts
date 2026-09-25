@@ -45,7 +45,7 @@ export type DiceRollPayload =
        *  (decisive) round — kept for the no-rounds fallback and overlay keying.
        *  `ignored` marks a CR 706.6-ignored die (engine `DieRollIgnored` event):
        *  shown so players see what the lowest roll was, never a rules roll. */
-      rolls: { playerId: PlayerId; value: number; ignored?: boolean }[];
+      rolls: { playerId: PlayerId; value: number; sides?: number; ignored?: boolean }[];
       context: "startingPlayer" | "ability";
       /** Starting-player contest: the high roller who takes the first turn. */
       winner?: PlayerId;
