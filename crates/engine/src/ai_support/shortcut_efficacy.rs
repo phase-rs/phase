@@ -664,6 +664,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         // the pipeline leaves marks intact, and no runtime path reaches such a tree.
         // See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        face_down_in_exile: _,
     } = def;
 
     let mut acc = effect_window_reach(effect);

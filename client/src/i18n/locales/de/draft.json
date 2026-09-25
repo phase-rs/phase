@@ -572,7 +572,20 @@
     "tabs": {
       "set": "Edition",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Die Lobby konnte nicht erreicht werden, um diesen Pod aufzulisten. Schalte „$t(draft:podSetup.listInLobby)“ aus, um per Raumcode zu hosten.",
+    "listingHostNameTooLong": "Um diesen Pod in der Lobby aufzulisten, verwende einen Anzeigenamen mit höchstens {{max}} Zeichen.",
+    "listingRoomNameTooLong": "Um diesen Pod in der Lobby aufzulisten, verwende einen Raumnamen mit höchstens {{max}} Zeichen.",
+    "listingCubeNameTooLong": "Um diesen Pod in der Lobby aufzulisten, verwende einen Cube-Namen mit höchstens {{max}} Zeichen.",
+    "listingPasswordTooLong": "Um diesen Pod in der Lobby aufzulisten, verwende ein kürzeres Passwort.",
+    "listInLobby": "In Lobby listen",
+    "listingSeatLimit": "Die Lobby-Liste unterstützt Pods mit bis zu {{max}} Spielern.",
+    "setPassword": "Passwort festlegen",
+    "passwordPlaceholder": "Pod-Passwort",
+    "roomName": "Raumname",
+    "optional": "(optional)",
+    "roomNameHelp": "Wird Spielern angezeigt, die die Lobby durchsuchen.",
+    "roomNamePlaceholder": "z. B. Freitagabend-Cube"
   },
   "podPhaseView": {
     "tournamentPairings": "Turnierpaarungen",

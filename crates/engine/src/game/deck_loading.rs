@@ -1271,21 +1271,7 @@ pub fn load_and_hydrate_decks(
     };
     load_deck_into_state(state, payload);
     match db {
-        Some(db) => {
-            super::printed_cards::rehydrate_game_from_card_db(state, db);
-            // CR 205.3m: Seed the creature subtype vocabulary from the full
-            // card corpus (not just loaded decks) so token-only types like
-            // Saproling and not-in-this-deck types like Golem are recognized
-            // by `SharesQuality::CreatureType` (Coat of Arms #1471), the
-            // Changeling expansion, and `ChoiceType::CreatureType` (Morophon
-            // #1472). The deck-only union performed by `load_deck_into_state`
-            // remains as a safety net for the `db == None` path below.
-            let mut merged: HashSet<String> = state.all_creature_types.drain(..).collect();
-            merged.extend(db.creature_type_vocabulary().iter().cloned());
-            let mut sorted: Vec<String> = merged.into_iter().collect();
-            sorted.sort();
-            state.all_creature_types = sorted;
-        }
+        Some(db) => hydrate_loaded_game_from_card_db(state, db),
         None => {
             // Latch the warning so a long-running desktop session that
             // starts many games doesn't spam the log on each match.
@@ -1304,6 +1290,29 @@ pub fn load_and_hydrate_decks(
             }
         }
     }
+}
+
+/// Hydrate a game whose decks `load_deck_into_state` has just loaded: printed
+/// faces and the card-database-derived registries (`rehydrate_game_from_card_db`)
+/// plus the full-corpus creature subtype vocabulary.
+///
+/// The second half of [`load_and_hydrate_decks`], shared with the between-games
+/// rebuild (`match_flow`), which reloads decks already synthesized by game one
+/// and must not re-run the payload synthesis above.
+pub(crate) fn hydrate_loaded_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
+    super::printed_cards::rehydrate_game_from_card_db(state, db);
+    // CR 205.3m: Seed the creature subtype vocabulary from the full
+    // card corpus (not just loaded decks) so token-only types like
+    // Saproling and not-in-this-deck types like Golem are recognized
+    // by `SharesQuality::CreatureType` (Coat of Arms #1471), the
+    // Changeling expansion, and `ChoiceType::CreatureType` (Morophon
+    // #1472). The deck-only union performed by `load_deck_into_state`
+    // remains as a safety net for the `db == None` path.
+    let mut merged: HashSet<String> = state.all_creature_types.drain(..).collect();
+    merged.extend(db.creature_type_vocabulary().iter().cloned());
+    let mut sorted: Vec<String> = merged.into_iter().collect();
+    sorted.sort();
+    state.all_creature_types = sorted;
 }
 
 #[cfg(test)]

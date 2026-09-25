@@ -26,9 +26,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
     CastingPermission, ChoiceType, Chooser, ContinuousModification, ControllerRef,
     CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigSource, Duration, Effect,
-    EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp, ForEachCategoryAction,
-    LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody, FaceDownProfile, FilterProp,
+    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
+    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     ThisWayCause, TypeFilter, TypedFilter,
 };
@@ -172,6 +172,37 @@ fn is_search_result_reveal_clause(lower: &str) -> bool {
         lower.trim().trim_end_matches('.'),
         "reveal that card" | "reveal those cards" | "reveal the card" | "reveal them" | "reveal it"
     )
+}
+
+/// CR 701.23a + CR 406.3: compose the optional continuation connector, the
+/// searched-card reference, and the concealment suffix. `all_consuming` is
+/// intentional: a later rider (for example, a counter instruction) belongs to
+/// a different parser and must not be silently swallowed by this continuation.
+fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
+    let input = lower.trim();
+    all_consuming(map(
+        (
+            opt(terminated(
+                alt((tag::<_, _, OracleError<'_>>("and then"), tag("then"))),
+                multispace1,
+            )),
+            tag("exile"),
+            multispace1,
+            alt((
+                tag::<_, _, OracleError<'_>>("those cards"),
+                tag("that card"),
+                tag("the card"),
+                tag("them"),
+                tag("it"),
+            )),
+            opt(tag(" face down")),
+            opt(tag(".")),
+        ),
+        |(_, _, _, _, face_down, _)| face_down.is_some(),
+    ))
+    .parse(input)
+    .ok()
+    .map(|(_, face_down)| face_down)
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
@@ -5304,6 +5335,11 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::SearchResultClauseHandled => {}
+        ContinuationAst::ExileSearchResultFaceDown => {
+            if let Some(previous) = defs.last_mut() {
+                previous.face_down_in_exile = ExileConcealment::FaceDown;
+            }
+        }
         ContinuationAst::PutChoiceRemainderOnBottom => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -6069,6 +6105,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
         ContinuationAst::SearchResultClauseHandled => true,
+        ContinuationAst::ExileSearchResultFaceDown => true,
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
@@ -7460,6 +7497,19 @@ pub(super) fn parse_followup_continuation_ast(
     previous_effect: &Effect,
     ctx: &mut ParseContext,
 ) -> Option<ContinuationAst> {
+    parse_followup_continuation_ast_with_search_destination(text, previous_effect, ctx, false)
+}
+
+/// Variant used by the effect-chain assembler when the effective previous
+/// effect was produced by a structural `SearchDestination` continuation. The
+/// provenance is needed because multi-zone searches deliberately lower their
+/// move with `origin: None`.
+pub(super) fn parse_followup_continuation_ast_with_search_destination(
+    text: &str,
+    previous_effect: &Effect,
+    ctx: &mut ParseContext,
+    previous_is_search_destination_exile: bool,
+) -> Option<ContinuationAst> {
     let lower = text.to_lowercase();
     let face_down_profile_spec =
         parse_theyre_face_down_profile(&lower).or_else(|| parse_its_face_down_profile(&lower));
@@ -8159,22 +8209,22 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::SearchResultClauseHandled)
         }
         Effect::ChangeZone {
-            origin: Some(Zone::Library),
+            origin,
             destination: Zone::Exile,
             ..
-        } if matches!(
-            lower.trim(),
-            "exile it"
-                | "exile it face down"
-                | "exile that card"
-                | "exile that card face down"
-                | "exile the card"
-                | "exile the card face down"
-                | "exile them"
-                | "exile them face down"
-                | "exile those cards"
-                | "exile those cards face down"
-        ) =>
+        } if (matches!(origin, Some(Zone::Library))
+            || (origin.is_none() && previous_is_search_destination_exile))
+            && parse_exile_search_result_clause(&lower) == Some(true) =>
+        {
+            Some(ContinuationAst::ExileSearchResultFaceDown)
+        }
+        Effect::ChangeZone {
+            origin,
+            destination: Zone::Exile,
+            ..
+        } if (matches!(origin, Some(Zone::Library))
+            || (origin.is_none() && previous_is_search_destination_exile))
+            && parse_exile_search_result_clause(&lower) == Some(false) =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)
         }
@@ -9963,6 +10013,91 @@ mod tests {
         let result =
             parse_followup_continuation_ast("exile them", &previous, &mut ParseContext::default());
         assert_eq!(result, Some(ContinuationAst::SearchResultClauseHandled));
+    }
+
+    #[test]
+    fn search_exile_face_down_followup_uses_compositional_reference_grammar() {
+        let previous = Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        for phrase in [
+            "exile it face down",
+            "then exile it face down",
+            "exile that card face down",
+            "then exile that card face down",
+            "exile them face down",
+            "exile those cards face down",
+        ] {
+            assert_eq!(
+                parse_followup_continuation_ast(phrase, &previous, &mut ParseContext::default()),
+                Some(ContinuationAst::ExileSearchResultFaceDown),
+                "expected face-down search continuation for {phrase:?}"
+            );
+        }
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "exile it face down with a hatching counter on it",
+                &previous,
+                &mut ParseContext::default()
+            ),
+            None,
+            "a suffix-bearing clause must not be claimed by the plain face-down grammar"
+        );
+        assert_eq!(
+            parse_followup_continuation_ast("exile it", &previous, &mut ParseContext::default()),
+            Some(ContinuationAst::SearchResultClauseHandled)
+        );
+    }
+
+    #[test]
+    fn multi_zone_search_face_down_exile_preserves_concealment_intent() {
+        let def = super::super::parse_effect_chain(
+            "search your graveyard, hand, and/or library for a card, then exile it face down",
+            AbilityKind::Spell,
+        );
+        let mut node = Some(&def);
+        let mut saw_multi_zone_search = false;
+        let mut saw_originless_exile = false;
+        let mut saw_face_down_intent = false;
+        while let Some(current) = node {
+            if let Effect::SearchLibrary { source_zones, .. } = &*current.effect {
+                saw_multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
+            }
+            if let Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                ..
+            } = &*current.effect
+            {
+                saw_originless_exile = true;
+            }
+            saw_face_down_intent |= current.face_down_in_exile.is_face_down();
+            node = current.sub_ability.as_deref();
+        }
+        assert!(
+            saw_multi_zone_search,
+            "the parser must retain the searched non-library zones"
+        );
+        assert!(
+            saw_originless_exile,
+            "multi-zone SearchDestination must use origin=None"
+        );
+        assert!(
+            saw_face_down_intent,
+            "the face-down exile continuation must mark the generated move"
+        );
     }
 
     /// CR 701.23a + CR 701.18a (cluster 35 / Mana Severance): comma-split

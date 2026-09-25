@@ -572,7 +572,20 @@
     "tabs": {
       "set": "Dodatek",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Nie udało się połączyć z poczekalnią, aby wystawić ten pod. Wyłącz „$t(draft:podSetup.listInLobby)”, aby hostować za pomocą kodu pokoju.",
+    "listingHostNameTooLong": "Aby wystawić ten pod w poczekalni, użyj wyświetlanej nazwy o długości maksymalnie {{max}} znaków.",
+    "listingRoomNameTooLong": "Aby wystawić ten pod w poczekalni, użyj nazwy pokoju o długości maksymalnie {{max}} znaków.",
+    "listingCubeNameTooLong": "Aby wystawić ten pod w poczekalni, użyj nazwy Cube'a o długości maksymalnie {{max}} znaków.",
+    "listingPasswordTooLong": "Aby wystawić ten pod w poczekalni, użyj krótszego hasła.",
+    "listInLobby": "Wyświetl w poczekalni",
+    "listingSeatLimit": "Lista poczekalni obsługuje pody liczące do {{max}} graczy.",
+    "setPassword": "Ustaw hasło",
+    "passwordPlaceholder": "Hasło poda",
+    "roomName": "Nazwa pokoju",
+    "optional": "(opcjonalnie)",
+    "roomNameHelp": "Wyświetlana graczom przeglądającym poczekalnię.",
+    "roomNamePlaceholder": "np. Piątkowy wieczór Cube"
   },
   "podPhaseView": {
     "tournamentPairings": "Pary turniejowe",

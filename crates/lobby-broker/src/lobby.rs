@@ -73,6 +73,7 @@ pub struct JoinTargetInfo {
     pub is_p2p: bool,
     pub reservation_token: Option<String>,
     pub reservation_expires_at_ms: Option<u64>,
+    pub draft_metadata: Option<DraftLobbyMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -507,6 +508,7 @@ impl LobbyManager {
             is_p2p,
             reservation_token: None,
             reservation_expires_at_ms: None,
+            draft_metadata: meta.draft_metadata.clone(),
         })
     }
 
@@ -1452,6 +1454,7 @@ mod tests {
                 is_p2p: true,
                 reservation_token: None,
                 reservation_expires_at_ms: None,
+                draft_metadata: None,
             })
         );
     }
@@ -1487,6 +1490,7 @@ mod tests {
                 is_p2p: false,
                 reservation_token: None,
                 reservation_expires_at_ms: None,
+                draft_metadata: None,
             })
         );
         assert!(lobby.has_game("GAME01"));

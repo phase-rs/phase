@@ -178,6 +178,18 @@ pub(crate) struct ProductKnowledgeState {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub(crate) library_epochs: Vec<u64>,
+    /// Engine-only action-scoped Library boundary generations. Kept beside the
+    /// boxed durable knowledge state so it adds no `GameState` stack footprint;
+    /// it is not serialized and does not participate in product-knowledge
+    /// disclosure semantics.
+    #[serde(skip)]
+    pub(crate) action_library_knowledge_generations: Vec<u64>,
+    /// Engine-only event-time receipts for exact library zone-change
+    /// occurrences. This sidecar is kept beside the boxed knowledge state
+    /// solely to keep the hot `GameState` stack footprint unchanged; it is
+    /// not durable ProductKnowledge authority and is redacted from viewers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) zone_change_library_knowledge_stamps: Vec<ZoneChangeLibraryKnowledgeStamp>,
 }
 
 /// Serde module for `HashMap<(ObjectId, usize), u32>` — JSON requires string keys,
@@ -3784,19 +3796,61 @@ pub struct PendingZoneChangeDelivery {
     /// CR 406.3: A batch delivery requested concealment on an Exile landing.
     /// It survives the replacement-choice pause so the settled member is hidden
     /// before the next batch member is attempted.
-    #[serde(default)]
-    pub face_down_in_exile: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+    )]
+    pub face_down_in_exile: crate::types::ability::ExileConcealment,
+}
+
+/// Exact-incarnation audience provenance retained across one completed search
+/// delivery action. This is an engine-only carrier: event filtering consumes it
+/// by the exact source incarnation, while viewer projections redact it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenSearchAudience {
+    pub identity: ObjectIncarnationRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audience: Vec<PlayerId>,
+}
+
+/// Action-scoped library-knowledge boundary generation captured at one engine
+/// seam. This is event provenance only; durable ProductKnowledge remains the
+/// authority for remembered card identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LibraryKnowledgeStamp {
+    pub(crate) library_owner: PlayerId,
+    pub(crate) boundary_generation: u64,
+}
+
+/// Action-scoped provenance for a zone-change occurrence that touches a
+/// library. The occurrence key is the same `(turn, index)` pair assigned to
+/// `ZoneChangeRecord`; source and destination are both optional for serde
+/// compatibility, though normal production moves have at most one endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ZoneChangeLibraryKnowledgeStamp {
+    pub(crate) recorded_turn_number: u32,
+    pub(crate) turn_zone_change_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<LibraryKnowledgeStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) destination: Option<LibraryKnowledgeStamp>,
 }
 
 impl PendingZoneChangeDelivery {
     pub fn new(member: ObjectIncarnationRef, expected_event: ProposedEvent) -> Self {
+        let face_down_in_exile = match &expected_event {
+            ProposedEvent::ZoneChange {
+                face_down_in_exile, ..
+            } => *face_down_in_exile,
+            _ => crate::types::ability::ExileConcealment::Public,
+        };
         Self {
             member,
             expected_event,
             delivery_events: Vec::new(),
             terminal_completion: None,
             count: PausedZoneChangeDeliveryCount::NeedsCount,
-            face_down_in_exile: false,
+            face_down_in_exile,
         }
     }
 
@@ -3947,6 +4001,12 @@ pub struct PendingChangeZoneIteration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
+    /// Typed SearchLibrary intent carried across a replacement pause.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+    )]
+    pub face_down_in_exile: crate::types::ability::ExileConcealment,
     /// CR 608.2c: Optional mass-move count carried by `ChangeZoneAll` resume
     /// paths so a paused Aura host choice still leaves "that many" chained
     /// effects with the same count the uninterrupted mass path records.
@@ -5717,8 +5777,11 @@ pub struct PendingBatchZoneMoveRequest {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub face_down_in_exile: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+    )]
+    pub face_down_in_exile: crate::types::ability::ExileConcealment,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -5929,6 +5992,18 @@ pub(crate) fn settle_dig_delivery_outcome(
             ..
         } => rest_delivery.settle_from_logical_group(state, group),
         _ => {}
+    }
+}
+
+impl BatchCompletion {
+    pub(crate) fn hidden_search_audiences(&self) -> Option<&[HiddenSearchAudience]> {
+        match self {
+            Self::LibrarySearchDeliverySettled { resume }
+            | Self::SearchPartitionPrimaryDelivered { resume, .. } => {
+                Some(resume.hidden_search_audiences())
+            }
+            _ => None,
+        }
     }
 }
 
@@ -6345,6 +6420,11 @@ pub struct PendingResolutionCompletion {
 pub enum LibrarySearchDeliveryResume {
     Standard {
         searcher: PlayerId,
+        /// Exact search incarnations and the viewers who learned them. The
+        /// carrier survives the replacement-resume action boundary so cleanup
+        /// cannot discard the audience before event filtering runs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hidden_search_audiences: Vec<HiddenSearchAudience>,
     },
     Scoped {
         player: PlayerId,
@@ -6463,6 +6543,18 @@ impl PendingEffectResolved {
                 PendingEffectResolutionEvent::Suppress
             )
             && self.player_action.is_none()
+    }
+}
+
+impl LibrarySearchDeliveryResume {
+    pub(crate) fn hidden_search_audiences(&self) -> &[HiddenSearchAudience] {
+        match self {
+            Self::Standard {
+                hidden_search_audiences,
+                ..
+            } => hidden_search_audiences,
+            Self::Scoped { .. } => &[],
+        }
     }
 }
 
@@ -7826,6 +7918,26 @@ impl GameState {
 
     pub(crate) fn advance_library_knowledge_epoch(&mut self, owner: PlayerId) {
         let index = owner.0 as usize;
+        if self
+            .product_knowledge_state
+            .action_library_knowledge_generations
+            .len()
+            <= index
+        {
+            self.product_knowledge_state
+                .action_library_knowledge_generations
+                .resize(index + 1, 0);
+        }
+        self.product_knowledge_state
+            .action_library_knowledge_generations[index] = self
+            .product_knowledge_state
+            .action_library_knowledge_generations[index]
+            .wrapping_add(1);
+
+        // ProductKnowledge remains the durable remembered-identity authority.
+        // The action-scoped generation above is intentionally independent of
+        // its canonicalization so ordinary hidden searches still observe every
+        // Library mutation boundary.
         if self.product_knowledge_state.library_epochs.len() <= index {
             self.product_knowledge_state
                 .library_epochs
@@ -7842,9 +7954,17 @@ impl GameState {
         self.canonicalize_library_knowledge_epoch(owner);
     }
 
-    fn library_knowledge_epoch(&self, owner: PlayerId) -> u64 {
+    pub(crate) fn library_knowledge_epoch(&self, owner: PlayerId) -> u64 {
         self.product_knowledge_state
             .library_epochs
+            .get(owner.0 as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn library_knowledge_boundary_generation(&self, owner: PlayerId) -> u64 {
+        self.product_knowledge_state
+            .action_library_knowledge_generations
             .get(owner.0 as usize)
             .copied()
             .unwrap_or_default()
@@ -13568,6 +13688,14 @@ pub enum WaitingFor {
         owner_library: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         track_exiled_by_source: bool,
+        /// CR 406.3: typed hidden-Exile intent carried across an interactive
+        /// `EffectZoneChoice` pause. Legacy state still serializes this as a
+        /// boolean through `ExileConcealment`'s compatibility serde.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+        )]
+        face_down_in_exile: crate::types::ability::ExileConcealment,
         /// CR 708.2a + CR 708.3: face-down entry profile carried across the
         /// `EffectZoneChoice` round-trip so a selected `ChangeZone` card that
         /// must enter face down (Yedora-style "return it face down ... It's a
@@ -19881,6 +20009,11 @@ declare_game_state! {
     /// ChangeZone drain consumes the same value after its final member lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_library_search_delivery: Option<LibrarySearchDeliveryResume>,
+    /// Exact-incarnation audience provenance from a search delivery that
+    /// settled in the current action. It is cleared at the next outer action
+    /// boundary and never appears in a viewer projection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) completed_hidden_search_audiences: Vec<HiddenSearchAudience>,
     /// CR 616.1: search-found replacement batch parked across a choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_search_found_batch: Option<PendingSearchFoundBatch>,
@@ -22478,6 +22611,62 @@ const _: fn() = || {
     assert_send_sync::<GameState>();
 };
 
+#[derive(Clone, Copy)]
+struct PausedExileOccurrence {
+    ledger_index: usize,
+    recorded_turn_number: u32,
+}
+
+/// CR 406.3: A card exiled face down cannot be examined unless the instruction
+/// allows it. Finds the terminal zone-change event for one paused delivery and
+/// annotates that event's own record. The delivery slice is the only event
+/// history this helper may inspect: a later same-id incarnation in global state
+/// is not a valid fallback. A final move out of Exile also prevents an earlier
+/// Exile event in the same slice from being treated as the settled destination.
+fn annotate_paused_exile_event(
+    delivery_events: &mut [GameEvent],
+    member: ObjectIncarnationRef,
+) -> Option<PausedExileOccurrence> {
+    let (_, event) = delivery_events
+        .iter_mut()
+        .enumerate()
+        .rev()
+        .find(|(_, event)| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == member.object_id
+            )
+        })?;
+    let GameEvent::ZoneChanged {
+        object_id,
+        to,
+        record,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if *object_id != member.object_id
+        || *to != Zone::Exile
+        || record.object_id != member.object_id
+        || record.to_zone != Zone::Exile
+        || record
+            .trigger_source_context()
+            .is_some_and(|context| context.identity.reference != member)
+    {
+        return None;
+    }
+
+    let occurrence = PausedExileOccurrence {
+        ledger_index: record.turn_zone_change_index,
+        recorded_turn_number: record.recorded_turn_number,
+    };
+    if let Some(context) = record.trigger_source_context.as_mut() {
+        context.face_down = true;
+    }
+    Some(occurrence)
+}
+
 impl GameState {
     /// Returns the active continuation only when its typed frame is the stack
     /// top. A buried continuation is an invalid nesting dependency, not a
@@ -24144,6 +24333,125 @@ impl GameState {
             .map(|subject| subject.snapshot)
     }
 
+    /// Clears the event-filtering sidecar at the next outer action boundary.
+    pub(crate) fn clear_completed_hidden_search_audiences(&mut self) {
+        self.completed_hidden_search_audiences.clear();
+        self.product_knowledge_state
+            .zone_change_library_knowledge_stamps
+            .clear();
+        self.product_knowledge_state
+            .action_library_knowledge_generations
+            .clear();
+    }
+
+    /// Records the action-scoped library-knowledge boundary generation observed
+    /// at one exact zone-change occurrence. The record has already received its
+    /// stable `(turn, index)` key when this is called.
+    pub(crate) fn record_zone_change_library_knowledge_stamp(&mut self, record: &ZoneChangeRecord) {
+        let source = (record.from_zone == Some(Zone::Library)).then(|| LibraryKnowledgeStamp {
+            library_owner: record.owner,
+            boundary_generation: self.library_knowledge_boundary_generation(record.owner),
+        });
+        let destination = (record.to_zone == Zone::Library).then(|| LibraryKnowledgeStamp {
+            library_owner: record.owner,
+            boundary_generation: self.library_knowledge_boundary_generation(record.owner),
+        });
+        if source.is_none() && destination.is_none() {
+            return;
+        }
+
+        let stamp = ZoneChangeLibraryKnowledgeStamp {
+            recorded_turn_number: record.recorded_turn_number,
+            turn_zone_change_index: record.turn_zone_change_index,
+            source,
+            destination,
+        };
+        if let Some(existing) = self
+            .product_knowledge_state
+            .zone_change_library_knowledge_stamps
+            .iter_mut()
+            .find(|existing| {
+                existing.recorded_turn_number == stamp.recorded_turn_number
+                    && existing.turn_zone_change_index == stamp.turn_zone_change_index
+            })
+        {
+            *existing = stamp;
+        } else {
+            self.product_knowledge_state
+                .zone_change_library_knowledge_stamps
+                .push(stamp);
+        }
+    }
+
+    /// Reads the event-time receipt for a source or destination library
+    /// endpoint. Missing provenance is intentionally distinguishable from a
+    /// generation of zero so hidden-search lineage can fail closed.
+    pub(crate) fn library_knowledge_stamp_for_zone_change(
+        &self,
+        record: &ZoneChangeRecord,
+        source: bool,
+    ) -> Option<LibraryKnowledgeStamp> {
+        let stamp = self
+            .product_knowledge_state
+            .zone_change_library_knowledge_stamps
+            .iter()
+            .find(|stamp| {
+                stamp.recorded_turn_number == record.recorded_turn_number
+                    && stamp.turn_zone_change_index == record.turn_zone_change_index
+            })?;
+        if source {
+            stamp.source
+        } else {
+            stamp.destination
+        }
+    }
+
+    pub(crate) fn record_completed_hidden_search_audience(
+        &mut self,
+        identity: ObjectIncarnationRef,
+        audience: &[PlayerId],
+    ) {
+        if audience.is_empty() {
+            return;
+        }
+        let entry = self
+            .completed_hidden_search_audiences
+            .iter_mut()
+            .find(|entry| entry.identity == identity);
+        let Some(entry) = entry else {
+            let mut audience = audience.to_vec();
+            audience.sort_unstable();
+            audience.dedup();
+            self.completed_hidden_search_audiences
+                .push(HiddenSearchAudience { identity, audience });
+            return;
+        };
+        entry.audience.extend(audience.iter().copied());
+        entry.audience.sort_unstable();
+        entry.audience.dedup();
+    }
+
+    pub(crate) fn record_completed_hidden_search_audiences_for_events(
+        &mut self,
+        entries: &[HiddenSearchAudience],
+        events: &[GameEvent],
+    ) {
+        for event in events {
+            let GameEvent::ZoneChanged { record, .. } = event else {
+                continue;
+            };
+            let Some(source) = record
+                .trigger_source_context()
+                .map(|context| context.identity.reference)
+            else {
+                continue;
+            };
+            for entry in entries.iter().filter(|entry| entry.identity == source) {
+                self.record_completed_hidden_search_audience(source, &entry.audience);
+            }
+        }
+    }
+
     /// Builds the exact paused-delivery key from the replacement record before
     /// that record is consumed. Only a `ZoneChange` can belong to either
     /// logical zone-change owner.
@@ -24159,6 +24467,51 @@ impl GameState {
         Some(PendingZoneChangeDelivery::new(member, expected_event))
     }
 
+    /// CR 406.3: Preserve the face-down Exile concealment required for a card
+    /// that may not be examined by players outside the allowed audience.
+    /// Applies concealment to the exact ledger row named by a paused delivery's
+    /// event record. Any mismatch fails closed; this helper never searches for a
+    /// different row by object id or destination.
+    fn apply_exact_paused_exile_concealment(
+        &mut self,
+        member: ObjectIncarnationRef,
+        occurrence: PausedExileOccurrence,
+    ) -> bool {
+        let current_turn = self.turn_number;
+        let valid = self
+            .zone_changes_this_turn
+            .get(occurrence.ledger_index)
+            .is_some_and(|record| {
+                record.turn_zone_change_index == occurrence.ledger_index
+                    && record.recorded_turn_number == occurrence.recorded_turn_number
+                    && record.recorded_turn_number == current_turn
+                    && record.object_id == member.object_id
+                    && record.to_zone == Zone::Exile
+                    && record
+                        .trigger_source_context()
+                        .is_none_or(|context| context.identity.reference == member)
+                    && self
+                        .objects
+                        .get(&member.object_id)
+                        .is_some_and(|object| object.zone == Zone::Exile)
+            });
+        if !valid {
+            return false;
+        }
+
+        if let Some(record) = self.zone_changes_this_turn.get_mut(occurrence.ledger_index) {
+            if let Some(context) = record.trigger_source_context.as_mut() {
+                context.face_down = true;
+            }
+        }
+        let object = self
+            .objects
+            .get_mut(&member.object_id)
+            .expect("validated settled paused pile member exists");
+        object.face_down = true;
+        true
+    }
+
     /// Appends one explicitly-bounded resumed-delivery slice to its sole
     /// matching logical owner. Callers retain the key captured before the
     /// replacement record was consumed; this rejects a same-id new incarnation
@@ -24170,51 +24523,52 @@ impl GameState {
         delivery_events: &[GameEvent],
         terminal_completion: ZoneMoveCompletion,
     ) -> bool {
-        let settled_in_exile = delivery_events.iter().any(|event| {
-            matches!(
-                event,
-                GameEvent::ZoneChanged {
-                    object_id,
-                    to: Zone::Exile,
-                    ..
-                } if *object_id == member.object_id
-            )
-        });
-        if let Some(paused) = self
+        let mut occurrence = None;
+        let matched = if let Some(paused) = self
             .active_change_zone_frame_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            let conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
-            if conceal {
-                self.objects
-                    .get_mut(&member.object_id)
-                    .expect("settled paused pile member exists")
-                    .face_down = true;
+            if paused.face_down_in_exile.is_face_down() {
+                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
+            }
+            true
+        } else {
+            false
+        };
+        if matched {
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
             }
             return true;
         }
-        if let Some(paused) = self
+
+        occurrence = None;
+        let matched = if let Some(paused) = self
             .resolution_stack
             .active_batch_delivery_or_post_replacement_child_mut()
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
-            let conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
-            if conceal {
-                self.objects
-                    .get_mut(&member.object_id)
-                    .expect("settled paused pile member exists")
-                    .face_down = true;
+            if paused.face_down_in_exile.is_face_down() {
+                occurrence = annotate_paused_exile_event(&mut paused.delivery_events, member);
+            }
+            true
+        } else {
+            false
+        };
+        if matched {
+            if let Some(exile_occurrence) = occurrence {
+                self.apply_exact_paused_exile_concealment(member, exile_occurrence);
             }
             return true;
         }
@@ -25422,6 +25776,7 @@ impl GameState {
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
+            completed_hidden_search_audiences: Vec::new(),
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
@@ -26459,6 +26814,20 @@ impl GameState {
         // CR 603.5: the "may"-answer journal belongs to the LIVE window, not to a stored
         // position sample. Cleared with the ring, on this same receiver.
         clone.loop_answer_journal = None;
+        // Hidden-search privacy provenance is action-scoped event-filtering state,
+        // not recurring game-position state. Keep it on the live state so the
+        // current action can still apply its exact lineage receipts, but omit it
+        // from loop-equivalence snapshots so a completed action cannot suppress a
+        // genuine shortcut on the next recurrence.
+        clone.completed_hidden_search_audiences.clear();
+        clone
+            .product_knowledge_state
+            .action_library_knowledge_generations
+            .clear();
+        clone
+            .product_knowledge_state
+            .zone_change_library_knowledge_stamps
+            .clear();
         // Private shortcut capabilities are live interaction state, never part
         // of a CR 104.4b position sample.
         clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
@@ -27807,6 +28176,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
         pending_library_search_delivery: _,
+        completed_hidden_search_audiences: _,
         pending_search_found_batch: _,
         pending_die_roll_instruction: _,
         post_replacement_token_substitution_count: _,
@@ -28036,6 +28406,8 @@ impl PartialEq for GameState {
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
             && self.pending_library_search_delivery == other.pending_library_search_delivery
+            && self.completed_hidden_search_audiences
+                == other.completed_hidden_search_audiences
             && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_die_roll_instruction == other.pending_die_roll_instruction
             && self.pending_cost_move_resume == other.pending_cost_move_resume
@@ -30292,6 +30664,143 @@ mod tests {
             ZoneMoveCompletion::Prevented,
             "an explicit replacement outcome remains authoritative over slice inference"
         );
+    }
+
+    #[test]
+    fn paused_face_down_exile_marks_only_the_delivered_occurrence() {
+        let mut state = GameState::new_two_player(42);
+        let object = create_object(
+            &mut state,
+            CardId(7_101),
+            PlayerId(0),
+            "Repeated exile object".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut first_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, object, Zone::Exile, &mut first_events);
+        crate::game::zones::move_to_zone(&mut state, object, Zone::Battlefield, &mut first_events);
+
+        let mut later_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, object, Zone::Exile, &mut later_events);
+        let later_record = later_events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == object => Some(record),
+                _ => None,
+            })
+            .expect("the resumed delivery has an authoritative Exile record");
+        let member = later_record
+            .trigger_source_context()
+            .expect("the production zone move carries source identity")
+            .identity
+            .reference;
+        let later_index = later_record.turn_zone_change_index;
+        assert_eq!(state.objects[&object].zone, Zone::Exile);
+        assert_eq!(
+            state
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| record.object_id == object && record.to_zone == Zone::Exile)
+                .count(),
+            2,
+            "the fixture must contain two same-id Exile occurrences"
+        );
+
+        // A later same-id occurrence can already be present when the paused
+        // delivery settles. The old reverse `(ObjectId, Exile)` lookup would
+        // mutate this shadow row instead of the event's exact index.
+        let mut later_shadow = (**later_record).clone();
+        later_shadow.turn_zone_change_index = state.zone_changes_this_turn.len();
+        later_shadow
+            .trigger_source_context
+            .as_mut()
+            .expect("the shadow occurrence keeps source identity")
+            .identity
+            .reference = ObjectIncarnationRef::of(object, member.incarnation + 99);
+        state.zone_changes_this_turn.push_back(later_shadow);
+
+        let expected_event =
+            ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Exile, Some(object));
+        let mut paused = PendingZoneChangeDelivery::new(member, expected_event.clone());
+        paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
+        state.push_change_zone_iteration(PendingChangeZoneIteration {
+            logical_zone_change_group,
+            paused_current: Some(paused),
+            remaining: Vec::new(),
+            source_id: object,
+            controller: PlayerId(0),
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            enter_transformed: false,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_under_player: None,
+            enters_attacking: false,
+            enter_with_counters: Vec::new(),
+            conditional_enter_with_counters: Vec::new(),
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::FaceDown,
+            moved_count: None,
+            face_down_profile: None,
+            library_placement: None,
+            enters_modified_if: None,
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZone,
+        });
+
+        assert!(state.capture_paused_zone_change_delivery(
+            member,
+            &expected_event,
+            &later_events,
+            ZoneMoveCompletion::Moved,
+        ));
+        assert!(state.objects[&object].face_down);
+        let exile_records: Vec<_> = state
+            .zone_changes_this_turn
+            .iter()
+            .filter(|record| record.object_id == object && record.to_zone == Zone::Exile)
+            .collect();
+        assert_eq!(exile_records.len(), 3);
+        assert!(
+            !exile_records[0]
+                .trigger_source_context()
+                .expect("first occurrence keeps its source context")
+                .face_down,
+            "the earlier same-id Exile row must remain public"
+        );
+        let later_ledger = state
+            .zone_changes_this_turn
+            .get(later_index)
+            .expect("the exact delivered index remains in the current-turn ledger");
+        assert!(
+            later_ledger
+                .trigger_source_context()
+                .expect("later occurrence keeps its source context")
+                .face_down,
+            "only the exact paused occurrence is concealed"
+        );
+        assert!(
+            !exile_records[2]
+                .trigger_source_context()
+                .expect("the later shadow occurrence keeps its source context")
+                .face_down,
+            "a later same-id Exile row must not be selected by reverse search"
+        );
+        let delivered_event = state
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+            .and_then(|pending| pending.paused_current.as_ref())
+            .and_then(|paused| paused.delivery_events.last())
+            .and_then(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => record.trigger_source_context(),
+                _ => None,
+            })
+            .expect("the paused delivery retains its annotated event record");
+        assert!(delivered_event.face_down);
     }
 
     #[test]
@@ -36980,6 +37489,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -37414,6 +37924,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -37515,6 +38026,7 @@ mod tests {
             conditional_enter_with_counters: vec![],
             duration: None,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             // CR 708.2a + CR 708.3: the face-down profile must survive the
             // pause/resume serde round-trip so a paused face-down return
@@ -37999,6 +38511,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             // CR 708.2a + CR 708.3: a face-down `ChangeZone` selection must keep
             // its profile across the `EffectZoneChoice` round-trip.
             face_down_profile: Some(crate::types::ability::FaceDownProfile {

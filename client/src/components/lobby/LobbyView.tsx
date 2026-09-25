@@ -405,7 +405,7 @@ export function LobbyView({
 
   const filteredEntries = useMemo(() => {
     return entries.filter(({ game: g }) => {
-      if (formatFilter && (g.format ?? "Standard") !== formatFilter) return false;
+      if (formatFilter && (g.draft_metadata != null || (g.format ?? "Standard") !== formatFilter)) return false;
       if (roomTypeFilter === "draft" && g.draft_metadata == null) return false;
       if (roomTypeFilter === "p2p" && g.is_p2p !== true) return false;
       if (roomTypeFilter === "server" && g.is_p2p === true) return false;

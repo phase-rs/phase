@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router";
 
-import type { GameFormat } from "../adapter/types";
+import type { GameFormat, JoinTargetInfo } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { DiscordBadge } from "../components/chrome/DiscordBadge";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
@@ -52,6 +52,7 @@ import {
 } from "../stores/multiplayerStore";
 import { DEFAULT_MULTIPLAYER_SERVER_URL, OFFICIAL_MULTIPLAYER_SERVER_URL } from "../config/multiplayerServer";
 import {
+  isMultiplayerDraftPodLive,
   useMultiplayerDraftStore,
   type MultiplayerDraftPhase,
 } from "../stores/multiplayerDraftStore";
@@ -438,33 +439,29 @@ function MultiplayerPageContent({
    * Guest-path P2P resolve loop. Tries `resolveGuest` over the shared
    * subscription socket, prompts for a password on `password_required`
    * and retries on the same socket, surfaces explicit UI for
-   * `build_mismatch` / `connection_lost` / etc., and navigates on
-   * success. No `throw`-based control flow: failures come back as a
-   * discriminated `ResolveResult`.
+   * `build_mismatch` / `connection_lost` / etc., and returns the stripped
+   * host peer id to dial on success, or `null` once the failure's own UI
+   * has been shown. No `throw`-based control flow: failures come back as
+   * a discriminated `ResolveResult`.
    *
-   * Declared above `executeAction` so the deck-select → re-dispatch
-   * path can route LobbyOnly joins through the broker too. `setJoinErrorDialog`
-   * is referenced as an identifier (stable across renders via React).
+   * `setJoinErrorDialog` is referenced as an identifier (stable across
+   * renders via React).
    */
-  const joinP2PRoom = useCallback(
+  const resolveP2PDialTarget = useCallback(
     async (
       code: string,
       origin: LobbySource,
       initialPassword?: string,
-    ): Promise<boolean> => {
+    ): Promise<string | null> => {
       let password = initialPassword;
       while (true) {
         const result = await resolveGuestFromStore(code, origin, password);
         if (result.ok) {
-          const gameId = crypto.randomUUID();
-          useGameStore.setState({ gameId });
-          const roomCode = stripPeerIdPrefix(result.peerInfo.host_peer_id);
-          navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}`);
-          return true;
+          return stripPeerIdPrefix(result.peerInfo.host_peer_id);
         }
         if (result.reason === "password_required") {
           const entered = window.prompt(t("page.passwordPrompt"));
-          if (!entered) return false;
+          if (!entered) return null;
           password = entered;
           continue;
         }
@@ -477,7 +474,7 @@ function MultiplayerPageContent({
               onClick: () => void refreshToLatestBuild(),
             },
           });
-          return false;
+          return null;
         }
         if (
           result.reason === "not_found" ||
@@ -487,13 +484,31 @@ function MultiplayerPageContent({
             title: t("page.joinErrorCantJoinTitle"),
             message: result.message,
           });
-          return false;
+          return null;
         }
         showToast(result.message);
-        return false;
+        return null;
       }
     },
-    [navigate, refreshToLatestBuild, resolveGuestFromStore, showToast, t],
+    [refreshToLatestBuild, resolveGuestFromStore, showToast, t],
+  );
+
+  // Declared above `executeAction` so the deck-select → re-dispatch
+  // path can route LobbyOnly joins through the broker too.
+  const joinP2PRoom = useCallback(
+    async (
+      code: string,
+      origin: LobbySource,
+      initialPassword?: string,
+    ): Promise<boolean> => {
+      const roomCode = await resolveP2PDialTarget(code, origin, initialPassword);
+      if (roomCode === null) return false;
+      const gameId = crypto.randomUUID();
+      useGameStore.setState({ gameId });
+      navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}`);
+      return true;
+    },
+    [navigate, resolveP2PDialTarget],
   );
 
   // Execute a pending action (host or join) with the currently active deck.
@@ -590,26 +605,21 @@ function MultiplayerPageContent({
 
         const store = useMultiplayerStore.getState();
         // A dedicated game server and the lobby broker can both be connected.
-        // Preserve a custom broker anchor, but never use a Full server for
-        // P2P registration. Unknown custom endpoints are probed before deciding.
         // A Discord host (`requestedCode`) registers on the build's official
         // broker regardless of the browsing anchor: that is the broker its
         // guest links name.
-        const anchor = store.hostingServer;
-        let target = action.connectionMode === "p2p"
-          ? action.settings.requestedCode !== undefined
-            ? OFFICIAL_MULTIPLAYER_SERVER_URL
-            : anchor !== null && store.sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
-              ? anchor
-              : OFFICIAL_MULTIPLAYER_SERVER_URL
-          : action.serverUrl;
-        let socket = target === null
-          ? null
-          : await store.ensureSubscriptionSocket(target);
-        if (action.connectionMode === "p2p" && socket?.serverInfo.mode === "Full") {
-          target = OFFICIAL_MULTIPLAYER_SERVER_URL;
-          socket = await store.ensureSubscriptionSocket(target);
-        }
+        const resolved = action.connectionMode === "p2p"
+          ? await store.resolveP2PBroker(
+              action.settings.requestedCode !== undefined
+                ? OFFICIAL_MULTIPLAYER_SERVER_URL
+                : store.hostingServer,
+            )
+          : {
+              url: action.serverUrl,
+              socket: action.serverUrl === null ? null : await store.ensureSubscriptionSocket(action.serverUrl),
+            };
+        const target = resolved.url;
+        const socket = resolved.socket;
 
         if (action.connectionMode === "p2p") {
           if (socket?.serverInfo.mode !== "LobbyOnly") {
@@ -705,19 +715,39 @@ function MultiplayerPageContent({
     navigate("/draft?mode=multiplayer");
   }, [navigate]);
 
-  // Join a draft pod from the lobby. Draft entries carry `draft_metadata`
-  // and are always P2P — the guest joins via PeerJS room code.
+  // Join a P2P draft pod from the lobby. A row's `game_code` names the
+  // broker listing, not the host's PeerJS room — the room to dial is the
+  // host peer the broker returns from `resolveP2PDialTarget`.
   const handleJoinDraftFromLobby = useCallback(
-    async (code: string, _context?: LobbyGame) => {
+    async (
+      code: string,
+      origin: LobbySource | null,
+      password: string | undefined,
+      target: Pick<LobbyGame, "is_p2p">,
+    ) => {
+      if (target.is_p2p !== true) {
+        showToast(t("page.serverDraftJoinUnsupported"));
+        return;
+      }
+      if (isMultiplayerDraftPodLive(useMultiplayerDraftStore.getState())) {
+        showToast(t("page.alreadyInDraftPod"));
+        return;
+      }
+      if (origin === null) {
+        showToast(t("page.joinNeedsServer"));
+        return;
+      }
+      const roomCode = await resolveP2PDialTarget(code, origin, password);
+      if (roomCode === null) return;
       const playerName = useMultiplayerStore.getState().displayName ?? "Player";
       try {
-        await joinDraft({ kind: "new", roomCode: code, displayName: playerName });
+        await joinDraft({ kind: "new", roomCode, displayName: playerName });
         setView("draft-lobby");
       } catch {
         showToast(t("page.failedToJoinDraft"));
       }
     },
-    [joinDraft, showToast, t],
+    [joinDraft, resolveP2PDialTarget, showToast, t],
   );
 
   const handleSpectate = useCallback(
@@ -728,22 +758,28 @@ function MultiplayerPageContent({
         showToast(t("page.joinNeedsServer"));
         return;
       }
+      // Every spectate navigation carries the origin — the draft-spectator
+      // socket opens on it exactly as the game socket does.
+      const spectatorParams = new URLSearchParams({ code, server: origin.url });
+      const watchDraft = (target: Pick<LobbyGame, "is_p2p">) => {
+        if (target.is_p2p === true) {
+          showToast(t("page.p2pDraftSpectateUnsupported"));
+          return;
+        }
+        navigate(`/draft-spectator?${spectatorParams.toString()}`);
+      };
       // Scoped to the authority being watched (non-null past the guard): a
       // `game_code` is unique per server, so an unscoped rescan could pick a
       // colliding row from another source and route a game to the draft
       // spectator (or the reverse).
       const resolved = context ?? findLobbyGameByCode(code, origin.url)?.game;
-      // Every spectate navigation carries the origin — the draft-spectator
-      // socket opens on it exactly as the game socket does.
-      const spectatorParams = new URLSearchParams({ code, server: origin.url });
       if (resolved?.draft_metadata) {
-        navigate(`/draft-spectator?${spectatorParams.toString()}`);
+        watchDraft(resolved);
         return;
       }
-      // Past the branch above, `resolved` carries no draft metadata. Typed
-      // codes skip lobby-row context entirely, and a draft that is not in the
-      // public lobby still resolves via SpectateDraft when lookup reports
-      // not_found.
+      // Past the branch above, `resolved` carries no draft metadata. A draft
+      // that is not in the public lobby still resolves via SpectateDraft when
+      // lookup reports not_found.
       const lookup = await lookupJoinTargetFromStore(code, origin);
       if (!lookup.ok && lookup.reason === "not_found") {
         navigate(`/draft-spectator?${spectatorParams.toString()}`);
@@ -751,6 +787,10 @@ function MultiplayerPageContent({
       }
       if (!lookup.ok) {
         showToast(lookup.message);
+        return;
+      }
+      if (lookup.info.draft_metadata) {
+        watchDraft(lookup.info);
         return;
       }
       const gameId = crypto.randomUUID();
@@ -772,14 +812,20 @@ function MultiplayerPageContent({
       context?: LobbyGame,
       onNotFound?: () => void,
     ) => {
+      const trimmedCode = code.trim();
+
       // Draft entries bypass the normal join-with-deck flow entirely — draft
-      // pods handle their own deck building after the draft completes.
-      if (context?.draft_metadata) {
-        void handleJoinDraftFromLobby(code, context);
+      // pods handle their own deck building after the draft completes. A
+      // row click already carries `context`; a typed code of a listed pod
+      // is recovered from the join origin's own listing, mirroring
+      // `handleSpectate`'s scoped `findLobbyGameByCode` lookup.
+      const listed =
+        context ?? (origin !== null ? findLobbyGameByCode(trimmedCode, origin.url)?.game : undefined);
+      if (listed?.draft_metadata) {
+        void handleJoinDraftFromLobby(trimmedCode, origin, password, listed);
         return;
       }
 
-      const trimmedCode = code.trim();
       const directP2PCode = parseRoomCode(trimmedCode);
 
       // Raw 5-character room codes are direct PeerJS joins with no server
@@ -804,41 +850,40 @@ function MultiplayerPageContent({
         return;
       }
 
-      // Typed-code path (no lobby-row context) uses the read-only
-      // `LookupJoinTarget` RPC so the deck picker can filter by format
+      // The read-only `LookupJoinTarget` RPC lets the deck picker filter by format
       // without accidentally consuming a seat on Full servers.
-      let resolvedFormat = format;
       let resolvedPassword = password;
-      let resolvedIsP2P = context?.is_p2p === true;
-      const result = await lookupJoinTargetFromStore(code, origin, resolvedPassword);
-      if (result.ok) {
-        resolvedFormat = result.info.format_config?.format ?? resolvedFormat;
-        resolvedIsP2P = result.info.is_p2p;
-      } else if (result.reason === "password_required") {
+      let info: JoinTargetInfo;
+      const first = await lookupJoinTargetFromStore(code, origin, resolvedPassword);
+      if (first.ok) {
+        info = first.info;
+      } else if (first.reason === "password_required") {
         const entered = window.prompt(t("page.passwordPrompt"));
         if (!entered) return;
         resolvedPassword = entered;
         const retry = await lookupJoinTargetFromStore(code, origin, resolvedPassword);
-        if (retry.ok) {
-          resolvedFormat = retry.info.format_config?.format ?? resolvedFormat;
-          resolvedIsP2P = retry.info.is_p2p;
-        } else {
+        if (!retry.ok) {
           showToast(retry.message);
           return;
         }
-      } else if (result.reason === "not_found" && onNotFound) {
+        info = retry.info;
+      } else if (first.reason === "not_found" && onNotFound) {
         onNotFound();
         return;
       } else {
-        showToast(result.message);
+        showToast(first.message);
+        return;
+      }
+      if (info.draft_metadata) {
+        void handleJoinDraftFromLobby(trimmedCode, origin, resolvedPassword, info);
         return;
       }
       const action: PendingAction = {
         type: "join",
         code,
         password: resolvedPassword,
-        format: resolvedFormat,
-        isP2P: resolvedIsP2P,
+        format: info.format_config?.format ?? format,
+        isP2P: info.is_p2p,
         origin,
         context,
       };

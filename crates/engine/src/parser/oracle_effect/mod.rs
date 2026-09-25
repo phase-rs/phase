@@ -101,8 +101,9 @@ use super::oracle_target::{
     resolve_singular_exiled_card_target, TargetSyntax,
 };
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_count_expr, parse_creature_subtype,
-    parse_mana_symbols, parse_number, split_around, starts_with_possessive, strip_after, TextPair,
+    contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
+    parse_creature_subtype, parse_mana_symbols, parse_number, split_around, starts_with_possessive,
+    strip_after, TextPair,
 };
 use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
@@ -1632,6 +1633,62 @@ fn parse_dealt_damage_this_way_dies_trigger(
 /// Delegates to the shared word-boundary scanning primitive in `oracle_nom::primitives`.
 fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
+}
+
+/// CR 608.2d (override) + CR 701.9b (analogous): locate the "at random"
+/// selection qualifier at any WORD BOUNDARY and split the text around it,
+/// returning `(before, after)`.
+///
+/// This is the authority for the AS-ENTERS CHOICE axis specifically: the
+/// `Choose(Player)` arm in `parse_target_player_relative_clause` (which needs
+/// only the mode) and [`excise_selection_qualifier`] (which needs the split).
+///
+/// **Scope of that claim, stated honestly.** It is NOT yet the only reader of
+/// the phrase corpus-wide — `oracle_effect/imperative.rs`, `oracle_modal.rs` and
+/// `oracle_trigger.rs` still ask `scan_contains(.., "at random")` for their own
+/// unrelated clause shapes. Those sites only need the boolean and do not excise,
+/// so they are behaviourally equivalent today; converging them is a later,
+/// unrelated refactor, not something this doc may claim as already done.
+///
+/// Behaviour-identical to the `scan_contains(text, "at random")` it replaced:
+/// `scan_preceded` runs the same word-boundary loop with the same `tag`, and
+/// only additionally preserves the surrounding slices.
+pub(crate) fn scan_at_random(text: &str) -> Option<(&str, &str)> {
+    nom_primitives::scan_preceded(text, |input| {
+        tag::<_, _, OracleError<'_>>("at random").parse(input)
+    })
+    .map(|(before, _, after)| (before, after))
+}
+
+/// CR 608.2d (override) + CR 614.1c: remove an "at random" selection qualifier
+/// from a choice clause, bounded to the clause's OWN SENTENCE.
+///
+/// **The single authority for the EXCISION, not merely for the scan.** The
+/// as-enters classifier (`oracle_classifier::is_as_enters_choose_pattern`) and
+/// the as-enters builder (`oracle_replacement::parse_as_enters_choose`) must
+/// agree byte-for-byte on the phrase they hand to the choice-object table; a
+/// second copy of this arithmetic is precisely the classifier/builder drift that
+/// made every `all_consuming` object arm invisible whenever a qualifier was
+/// printed. One function, two callers.
+///
+/// BOUNDED TO THE CLAUSE'S OWN SENTENCE: a choice clause runs to the end of the
+/// LINE, not the end of the sentence (Camato Scout's is "a basic land type at
+/// random. ~ has landwalk of the chosen type"), so an unbounded scan would let a
+/// LATER sentence's "at random" retarget this choice's selection mode.
+///
+/// Returns `None` when the clause's own sentence carries no qualifier, so
+/// callers can keep their pre-existing path bit-identical for every other line.
+/// On `Some`, only the qualifier is removed — every other byte, including any
+/// following sentence, is preserved.
+pub(crate) fn excise_selection_qualifier(clause: &str) -> Option<String> {
+    let sentence = first_sentence(clause);
+    let (before, after) = scan_at_random(sentence)?;
+    Some(format!(
+        "{}{}{}",
+        before.trim_end(),
+        after,
+        &clause[sentence.len()..]
+    ))
 }
 
 /// CR 115.7 + CR 113.3b / CR 113.3c: locate the stack-object target grammar
@@ -9217,7 +9274,10 @@ fn try_parse_choose_player_to_verb(
     // The "at random" qualifier is the tail after the head noun (e.g. before a
     // following ". When you do" sentence has already been split off), recorded as
     // a typed `TargetSelectionMode`.
-    let selection = if nom_primitives::scan_contains(after_player, "at random") {
+    // Routed through the shared `scan_at_random` authority rather than an inline
+    // scan, so every choice arm reads the qualifier the same way. This arm needs
+    // only the mode, so the split is discarded.
+    let selection = if scan_at_random(after_player).is_some() {
         TargetSelectionMode::Random
     } else {
         TargetSelectionMode::Chosen
@@ -29788,6 +29848,49 @@ fn parse_creature_type_enumeration(rest: &str) -> Option<Vec<String>> {
     }
 }
 
+/// CR 107.1 + CR 107.1a: a printed enumeration of whole numbers ("choose 2, 3,
+/// or 4" — Haktos the Unscarred) states an explicit candidate set of integers.
+/// Returns the enumeration's `(min, max)` when `rest` is a 2+-element ascending
+/// run of consecutive numbers, else `None`.
+///
+/// The engine's numeric choice carrier is a bounded RANGE
+/// (`ChoiceType::NumberRange`), so only a CONTIGUOUS ascending run can be
+/// represented without inventing or discarding a legal option. Lowering
+/// "2, 3, or 4" to `2..=4` is therefore a DELIBERATE lowering, not an
+/// equivalence — and a non-contiguous set ("1, 3, or 5") DECLINES here rather
+/// than collapsing to a range that would admit an option the card never printed.
+///
+/// The numeric sibling of [`parse_creature_type_enumeration`]: same separator
+/// axis, same `all_consuming` + `len() >= 2` gates, different item parser.
+fn parse_number_enumeration(rest: &str) -> Option<(u32, u32)> {
+    fn separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((tag(", or "), tag(", "), tag(" or "))).parse(input)
+    }
+    let rest = rest.trim_end_matches('.').trim_end();
+    let items = match all_consuming(nom::multi::separated_list1(
+        separator,
+        nom_primitives::parse_number,
+    ))
+    .parse(rest)
+    {
+        Ok((_, items)) if items.len() >= 2 => items,
+        _ => return None,
+    };
+    // Contiguity: ascending with a step of exactly 1. `windows(2)` rather than an
+    // index loop. `checked_add` rather than `+`: `parse_number` yields a `u32`
+    // parsed from arbitrary printed digits, so a pathological literal at
+    // `u32::MAX` would panic on overflow in a debug build. A successor that
+    // cannot be represented is by definition not the next element, so `None`
+    // folds to "not contiguous" — the same refusal every other gap takes.
+    if items
+        .windows(2)
+        .any(|pair| pair[0].checked_add(1) != Some(pair[1]))
+    {
+        return None;
+    }
+    Some((items[0], *items.last()?))
+}
+
 /// Match "choose a creature type", "choose a color", "choose odd or even",
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
 /// CR 608.2d + CR 608.2e: Parse an "an opponent guesses ..." / "defending player
@@ -30062,6 +30165,34 @@ pub(crate) fn parse_named_choice_object_with_provenance(
     .is_ok()
     {
         Some(ChoiceType::CardName)
+    } else if let Some((min, max)) = parse_number_enumeration(rest) {
+        // CR 107.1: "choose 2, 3, or 4" (Haktos the Unscarred) — an explicit
+        // printed integer candidate set. Grouped with the other `NumberRange`
+        // producers below so every numeric choice shape lowers in one place.
+        //
+        // Placed ABOVE the generic `try_parse_labeled_choice` fallback at the end
+        // of this chain: without this arm a bare numeric enumeration reaches that
+        // fallback and becomes `ChoiceType::Labeled { options: ["2","3","4"] }` —
+        // a presentation-level choice that no numeric consumer can read. It
+        // cannot capture any earlier arm's text, because it is `all_consuming`
+        // over digits and every earlier arm's phrase begins with a letter.
+        Some(ChoiceType::NumberRange {
+            min,
+            max: Some(max),
+            // CR 608.2d: a player can't choose an illegal or impossible option,
+            // which is the rule a "that hasn't been chosen" clause expresses.
+            //
+            // This call is NOT parse-detection: `parse_number_enumeration` is
+            // `all_consuming`, so an enumeration leaves no tail and there is
+            // nothing to detect. It is routed through the shared detector purely
+            // so the DEFAULT comes from one place — the same
+            // `NumberDistinctness::Repeatable` its "a number between" sibling
+            // resolves to — instead of being restated here. If a distinctness
+            // clause ever appears on an enumeration, the arm's `all_consuming`
+            // gate declines the whole phrase first, so it would have to be
+            // handled before this point, not here.
+            distinctness: parse_number_distinctness(""),
+        })
     } else if let Ok((range_rest, _)) = tag::<_, _, E>("a number between ").parse(rest) {
         // "choose a number between 1 and 5 [that hasn't been chosen]"
         let mut parts = range_rest.splitn(3, ' ');
@@ -40344,11 +40475,28 @@ pub(crate) fn parse_effect_chain_ir(
             .rev()
             .filter(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
             .collect();
+        let effective_prev_is_search_destination_exile = absorbed_choice_prev.is_none()
+            && non_absorbed.first().is_some_and(|previous| {
+                matches!(
+                    previous.disposition.intrinsic(),
+                    Some(ContinuationAst::SearchDestination {
+                        destination: Zone::Exile,
+                        ..
+                    })
+                )
+            });
         let effective_prev_effect =
             absorbed_choice_prev.or_else(|| non_absorbed.first().map(|c| effective_effect_of(c)));
         let followup_continuation = effective_prev_effect
             .as_ref()
-            .and_then(|eff| parse_followup_continuation_ast(normalized_text, eff, ctx))
+            .and_then(|eff| {
+                sequence::parse_followup_continuation_ast_with_search_destination(
+                    normalized_text,
+                    eff,
+                    ctx,
+                    effective_prev_is_search_destination_exile,
+                )
+            })
             .or_else(|| {
                 // CR 608.2c: when the nearest non-absorbed clause is
                 // lookback-transparent (e.g. `Sacrifice` — Birthing Ritual),
@@ -43871,5 +44019,190 @@ fn is_valid_card_target_filter(filter: &TargetFilter, clauses: &[ClauseIr]) -> b
             .iter()
             .any(|f| is_valid_card_target_filter(f, clauses)),
         other => !other.is_player_scope(),
+    }
+}
+
+/// Rows 1.F (parser/AST half) and 1.I — the literal numeric enumeration arm.
+///
+/// Row 1.F's three-field `NumberRange` triple is asserted HERE, at the
+/// parser/AST layer, and deliberately NOT from card-data: `ChoiceType` elides
+/// the `NumberDistinctness::Repeatable` default on the wire, so at that layer a
+/// correct `Repeatable` is byte-indistinguishable from an absent field and the
+/// assertion could not fail for the reason it exists.
+#[cfg(test)]
+mod number_enumeration_choice_tests {
+    use super::{parse_named_choice_object, parse_number_enumeration};
+    use crate::types::ability::{ChoiceType, NumberDistinctness};
+
+    /// Row 1.F — Haktos the Unscarred's printed candidate set, with ALL THREE
+    /// fields of the range triple named. An arm that set `distinctness` wrongly
+    /// would pass a two-field assertion and fails this one.
+    #[test]
+    fn haktos_enumeration_lowers_to_the_full_number_range_triple() {
+        assert_eq!(
+            parse_named_choice_object("2, 3, or 4"),
+            Some(ChoiceType::NumberRange {
+                min: 2,
+                max: Some(4),
+                distinctness: NumberDistinctness::Repeatable,
+            }),
+            "Haktos' text carries no distinctness clause, so the parse-detected \
+             distinctness must be Repeatable"
+        );
+    }
+
+    /// ADJACENT-BUT-WRONG GUARD (finding P1). At base this exact input produced
+    /// `ChoiceType::Labeled` over the option strings — a presentation-level
+    /// choice no numeric consumer can read. That is also precisely the shape
+    /// landing the at-random excision BEFORE this arm would have produced, which
+    /// is why the unit order is 1b before 1a.
+    #[test]
+    fn the_enumeration_is_not_claimed_by_the_labeled_fallback() {
+        let parsed = parse_named_choice_object("2, 3, or 4");
+        assert!(
+            !matches!(parsed, Some(ChoiceType::Labeled { .. })),
+            "a numeric enumeration must not lower to a presentation-level \
+             Labeled choice; got {parsed:?}"
+        );
+    }
+
+    /// THE P1 SAFETY PROPERTY, asserted permanently rather than argued.
+    ///
+    /// The un-excised object phrase must STILL be refused. The numeric arm is
+    /// `all_consuming` so it declines on the trailing qualifier, and the labeled
+    /// fallback rejects the three-word final label. The excision therefore has to
+    /// happen in the as-enters builder, and an arm that grew tolerant of a
+    /// trailing qualifier here would silently re-admit the wrong parse.
+    #[test]
+    fn the_unexcised_at_random_object_is_still_refused() {
+        assert_eq!(parse_named_choice_object("2, 3, or 4 at random"), None);
+    }
+
+    /// Row 1.I (i) — a NON-CONTIGUOUS set fails closed rather than collapsing to
+    /// a range that would admit options the card never printed.
+    #[test]
+    fn a_non_contiguous_enumeration_declines() {
+        assert_eq!(parse_number_enumeration("1, 3, or 5"), None);
+        assert_eq!(parse_number_enumeration("2, 4"), None);
+        // Descending and repeating runs are equally unrepresentable.
+        assert_eq!(parse_number_enumeration("4, 3, or 2"), None);
+        assert_eq!(parse_number_enumeration("2, 2, or 3"), None);
+    }
+
+    /// Row 1.I — PAIRED POSITIVE REACH-GUARD. Without it the refusal above could
+    /// be satisfied by a combinator that is simply inert.
+    #[test]
+    fn a_contiguous_enumeration_is_accepted() {
+        assert_eq!(parse_number_enumeration("1, 2, or 3"), Some((1, 3)));
+        assert_eq!(parse_number_enumeration("2, 3, or 4"), Some((2, 4)));
+        assert_eq!(parse_number_enumeration("7 or 8"), Some((7, 8)));
+        assert_eq!(
+            parse_named_choice_object("1, 2, or 3"),
+            Some(ChoiceType::NumberRange {
+                min: 1,
+                max: Some(3),
+                distinctness: NumberDistinctness::Repeatable,
+            })
+        );
+    }
+
+    /// Row 1.I (ii), corrected per finding P4 — `parse_named_choice_object` does
+    /// NOT return `None` for a non-contiguous set. The pre-existing labeled
+    /// catch-all claims it, exactly as at base. What the row requires is that
+    /// the RANGE LOWERING must not claim it, and that the value is BYTE-IDENTICAL
+    /// to its measured base value (a refusal, never a silent widening).
+    #[test]
+    fn a_non_contiguous_enumeration_keeps_its_measured_base_value() {
+        let parsed = parse_named_choice_object("1, 3, or 5");
+        assert_eq!(
+            parsed,
+            Some(ChoiceType::Labeled {
+                options: vec!["1".to_string(), "3".to_string(), "5".to_string()],
+            }),
+            "measured at base: the labeled catch-all owns this text, and this \
+             phase must not move it"
+        );
+        assert!(!matches!(parsed, Some(ChoiceType::NumberRange { .. })));
+    }
+
+    /// SIBLING — the arm did not capture the labeled fallback's own text.
+    #[test]
+    fn a_word_enumeration_still_reaches_the_labeled_fallback() {
+        assert_eq!(
+            parse_named_choice_object("Abzan or Mardu"),
+            Some(ChoiceType::Labeled {
+                options: vec!["Abzan".to_string(), "Mardu".to_string()],
+            })
+        );
+    }
+
+    /// SIBLING — the pre-existing `NumberRange` producer is untouched, proving
+    /// the new arm was inserted above it without shadowing it.
+    #[test]
+    fn the_a_number_between_sibling_is_unchanged() {
+        assert_eq!(
+            parse_named_choice_object("a number between 1 and 5"),
+            Some(ChoiceType::NumberRange {
+                min: 1,
+                max: Some(5),
+                distinctness: NumberDistinctness::Repeatable,
+            })
+        );
+    }
+
+    /// A single value is not a choice, and prose must not be mined for digits.
+    #[test]
+    fn single_values_and_prose_decline() {
+        assert_eq!(parse_number_enumeration("4"), None);
+        assert_eq!(parse_number_enumeration(""), None);
+        assert_eq!(parse_number_enumeration("2, 3, or a creature type"), None);
+        assert_eq!(parse_number_enumeration("draw 1, 2, or 3 cards"), None);
+    }
+}
+
+/// Row 1.G (sibling half) — `scan_at_random` is the single at-random authority,
+/// and lifting the `Choose(Player)` arm onto it is behaviour-preserving.
+#[cfg(test)]
+mod scan_at_random_authority_tests {
+    use super::scan_at_random;
+    use crate::parser::oracle_nom::primitives as nom_primitives;
+
+    /// The lift's core claim: the authority agrees with the `scan_contains`
+    /// boolean it replaced on every shape, including the word-boundary
+    /// false-positive cases that motivated `scan_contains` in the first place.
+    #[test]
+    fn agrees_with_the_scan_contains_boolean_it_replaced() {
+        for text in [
+            "a player at random",
+            "at random",
+            "a basic land type at random",
+            "a basic land type at random. ~ has landwalk of the chosen type",
+            "a color",
+            "",
+            "randomly",
+            "at randomness",
+            "scattered at random intervals",
+        ] {
+            assert_eq!(
+                scan_at_random(text).is_some(),
+                nom_primitives::scan_contains(text, "at random"),
+                "scan_at_random must agree with scan_contains on {text:?}"
+            );
+        }
+    }
+
+    /// The split is what the as-enters consumer needs and `scan_contains` cannot
+    /// provide: everything before the qualifier, and everything after it.
+    #[test]
+    fn splits_around_the_qualifier() {
+        assert_eq!(
+            scan_at_random("a basic land type at random"),
+            Some(("a basic land type ", ""))
+        );
+        assert_eq!(
+            scan_at_random("2, 3, or 4 at random"),
+            Some(("2, 3, or 4 ", ""))
+        );
+        assert_eq!(scan_at_random("a color"), None);
     }
 }

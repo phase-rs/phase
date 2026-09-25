@@ -960,6 +960,8 @@ pub enum ServerMessage {
         reservation_token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_expires_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft_metadata: Option<DraftLobbyMetadata>,
     },
     PlayerSlotsUpdate {
         slots: Vec<PlayerSlotInfo>,
@@ -2471,6 +2473,7 @@ mod tests {
             filled_seats: 2,
             reservation_token: None,
             reservation_expires_at_ms: None,
+            draft_metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();

@@ -573,6 +573,11 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 12 — JoinTargetInfo gains an optional `draft_metadata`, the shape LobbyGame
+ *      already carries — the "a lobby field is added" trigger.
+ *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2 and no capability floor is
+ *      added: against a pre-12 broker the field is absent and this client
+ *      classifies a typed code from its lobby snapshot alone.
  * 11 — Prospective: no lobby variant or field changes shape in this bump.
  *      Moved ahead of new GameFormat variants — see LOBBY_PROTOCOL_VERSION's
  *      own `/// 11` entry in
@@ -686,7 +691,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 11;
+export const LOBBY_PROTOCOL_VERSION = 12;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.

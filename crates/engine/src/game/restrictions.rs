@@ -648,6 +648,7 @@ pub fn record_zone_change(
     record.recorded_turn_number = state.turn_number;
     record.turn_zone_change_index = turn_zone_change_index;
     state.zone_changes_this_turn.push_back(record.clone());
+    state.record_zone_change_library_knowledge_stamp(record);
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);

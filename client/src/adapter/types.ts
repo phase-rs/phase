@@ -507,6 +507,7 @@ export interface JoinTargetInfo {
   filled_seats: number;
   reservation_token?: string | null;
   reservation_expires_at_ms?: number | null;
+  draft_metadata?: DraftLobbyMetadata | null;
 }
 
 // ── Match / Series ───────────────────────────────────────────────────────

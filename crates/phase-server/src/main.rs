@@ -4708,6 +4708,7 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             filled_seats,
             reservation_token,
             reservation_expires_at_ms,
+            draft_metadata,
         } => ServerMessage::JoinTargetInfo {
             game_code,
             is_p2p,
@@ -4717,6 +4718,7 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             filled_seats,
             reservation_token,
             reservation_expires_at_ms,
+            draft_metadata,
         },
         L::Pong { timestamp } => ServerMessage::Pong { timestamp },
         L::PeerInfo {
@@ -9628,6 +9630,7 @@ async fn handle_client_message(
                 .min(info.max_players) as u8,
                 reservation_token,
                 reservation_expires_at_ms,
+                draft_metadata: info.draft_metadata,
             };
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
@@ -14386,7 +14389,8 @@ mod issue_4548_full_create_tests {
     use futures_util::{SinkExt, StreamExt};
     use phase_ai::config::AiDifficulty;
     use server_core::protocol::{
-        AiSeatRequest, ClientMessage, DeckChoice, DeckData, ServerErrorCode, ServerMessage,
+        AiSeatRequest, ClientMessage, DeckChoice, DeckData, DraftLobbyMetadata, ServerErrorCode,
+        ServerMessage,
     };
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -14595,6 +14599,116 @@ mod issue_4548_full_create_tests {
             result.is_ok(),
             "full-mode create deadlocked before slot broadcast"
         );
+    }
+
+    /// Reads raw text frames as untyped JSON until one carries the
+    /// `JoinTargetInfo` tag, returning it alongside the tags of any frames
+    /// skipped along the way.
+    async fn recv_join_target_info_value<S>(
+        socket: &mut WebSocketStream<S>,
+    ) -> (serde_json::Value, Vec<String>)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let mut skipped = Vec::new();
+        loop {
+            let msg = socket
+                .next()
+                .await
+                .expect("websocket message")
+                .expect("websocket frame");
+            let WsMessage::Text(text) = msg else {
+                panic!("expected text server message, got {msg:?}");
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(&text).expect("server message json");
+            if value["type"] == "JoinTargetInfo" {
+                return (value, skipped);
+            }
+            skipped.push(value["type"].as_str().unwrap_or("?").to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_lookup_reports_draft_metadata_over_the_wire() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+
+        app_state.lobby.lock().await.lobby_mut().register_game(
+            "DRAFT001",
+            RegisterGameRequest {
+                host_name: "Host".to_string(),
+                public: true,
+                draft_metadata: Some(DraftLobbyMetadata {
+                    set_code: "MKM".to_string(),
+                    draft_kind: "Premier".to_string(),
+                    cube_name: None,
+                }),
+                ..Default::default()
+            },
+            &SysEnv,
+        );
+        app_state.lobby.lock().await.lobby_mut().register_game(
+            "CONSTR001",
+            RegisterGameRequest {
+                host_name: "Host2".to_string(),
+                public: true,
+                ..Default::default()
+            },
+            &SysEnv,
+        );
+
+        let mut socket = connect_and_hello(url).await;
+
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&ClientMessage::LookupJoinTarget {
+                    game_code: "DRAFT001".to_string(),
+                    password: None,
+                    reserve: false,
+                    display_name: None,
+                    release_reservation_token: None,
+                })
+                .expect("lookup json")
+                .into(),
+            ))
+            .await
+            .expect("send lookup");
+        let (draft, draft_skipped) = recv_join_target_info_value(&mut socket).await;
+        assert_eq!(
+            draft_skipped,
+            Vec::<String>::new(),
+            "frames preceding the DRAFT001 reply"
+        );
+        assert_eq!(draft["data"]["is_p2p"], false);
+        assert_eq!(draft["data"]["draft_metadata"]["setCode"], "MKM");
+
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&ClientMessage::LookupJoinTarget {
+                    game_code: "CONSTR001".to_string(),
+                    password: None,
+                    reserve: false,
+                    display_name: None,
+                    release_reservation_token: None,
+                })
+                .expect("lookup json")
+                .into(),
+            ))
+            .await
+            .expect("send lookup");
+        let (constructed, constructed_skipped) = recv_join_target_info_value(&mut socket).await;
+        assert_eq!(
+            constructed_skipped,
+            Vec::<String>::new(),
+            "frames preceding the CONSTR001 reply"
+        );
+        assert_eq!(constructed["type"], "JoinTargetInfo", "reach guard");
+        assert!(
+            constructed["data"].get("draft_metadata").is_none(),
+            "constructed listing must carry no draft_metadata key: {constructed}"
+        );
+
+        server.abort();
     }
 
     #[tokio::test]
@@ -16556,6 +16670,31 @@ mod mode_gate_tests {
             panic!("expected CreateGameWithSettings, got {projected:?}");
         };
         assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+    }
+
+    /// `to_server_message`'s `L::JoinTargetInfo` arm forwards `draft_metadata`
+    /// rather than dropping it.
+    #[test]
+    fn join_target_draft_metadata_survives_the_server_projection() {
+        let msg = lobby_broker::LobbyServerMessage::JoinTargetInfo {
+            game_code: "ABC123".to_string(),
+            is_p2p: true,
+            format_config: None,
+            match_config: Default::default(),
+            player_count: 4,
+            filled_seats: 1,
+            reservation_token: None,
+            reservation_expires_at_ms: None,
+            draft_metadata: Some(lobby_broker::protocol::DraftLobbyMetadata {
+                set_code: "MKM".to_string(),
+                draft_kind: "Premier".to_string(),
+                cube_name: None,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_string(&to_server_message(msg.clone())).unwrap(),
+            serde_json::to_string(&msg).unwrap(),
+        );
     }
 
     /// The server direction. `to_server_message` is wildcard-free, so a

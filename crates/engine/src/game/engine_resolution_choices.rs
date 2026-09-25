@@ -1160,6 +1160,28 @@ fn continuation_exiles_found_set(chain: &ResolvedAbility) -> bool {
     false
 }
 
+fn hidden_search_audiences_for_search(
+    state: &GameState,
+    searcher: crate::types::player::PlayerId,
+) -> Vec<crate::types::game_state::HiddenSearchAudience> {
+    state
+        .active_library_searches
+        .get(&searcher)
+        .map(|search| {
+            search
+                .looked_at()
+                .iter()
+                .map(
+                    |(_, _, identity)| crate::types::game_state::HiddenSearchAudience {
+                        identity: *identity,
+                        audience: search.learned_audience().to_vec(),
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Finalize the ordinary (non-partitioned) SearchChoice continuation. This is
 /// the single authority for both the synchronous selection path and a
 /// SearchFound batch resumed after one or more nested replacement pauses.
@@ -1246,8 +1268,12 @@ fn finalize_standard_search_selection(
         propagate_targets_through_search_shuffle(&mut continuation.pending.chain, &targets);
     }
     if has_delivery {
+        let hidden_search_audiences = hidden_search_audiences_for_search(state, player);
         state.pending_library_search_delivery = Some(
-            crate::types::game_state::LibrarySearchDeliveryResume::Standard { searcher: player },
+            crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+                searcher: player,
+                hidden_search_audiences,
+            },
         );
     } else {
         // CR 701.23a + CR 701.24a: no leading found-card movement belongs to
@@ -1327,6 +1353,9 @@ fn apply_search_partition(
                     source_id,
                     resume: crate::types::game_state::LibrarySearchDeliveryResume::Standard {
                         searcher: controller,
+                        hidden_search_audiences: hidden_search_audiences_for_search(
+                            state, controller,
+                        ),
                     },
                 },
             ),
@@ -1922,6 +1951,13 @@ pub(super) fn handle_resolution_choice(
                 scry_bottom_count: Some(bottom_cards.len() as u32),
                 scry_top_count: Some(all_cards.len() as u32 - bottom_cards.len() as u32),
             });
+            // CR 701.22a + CR 701.22d: the scry is complete only once the choice is
+            // made; it is published here, outside any chain window, so record it here.
+            crate::game::effects::record_player_action_this_turn(
+                state,
+                player,
+                crate::types::events::PlayerActionKind::Scry,
+            );
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`
             // static must be re-evaluated — self-gated so it's a no-op otherwise.
@@ -5584,6 +5620,7 @@ pub(super) fn handle_resolution_choice(
                 enters_attacking,
                 owner_library,
                 track_exiled_by_source,
+                face_down_in_exile,
                 face_down_profile,
                 enter_with_counters,
                 conditional_enter_with_counters,
@@ -6105,6 +6142,7 @@ pub(super) fn handle_resolution_choice(
                             // single-candidate shortcut (issue #4235 review).
                             duration: duration.clone(),
                             track_exiled_by_source,
+                            face_down_in_exile,
                             // CR 708.2a + CR 708.3: thread the face-down profile that
                             // was carried across the `EffectZoneChoice` round-trip into
                             // the move ctx, so a selected face-down `ChangeZone` card
@@ -6125,6 +6163,7 @@ pub(super) fn handle_resolution_choice(
                                 *card_id,
                                 ctx.destination,
                                 ctx.source_id,
+                                ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
@@ -6188,6 +6227,7 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: tracks_player_action_completion.then(|| {
                                                 i32::try_from(
                                                     effects::change_zone::count_selected_zone_arrivals(
@@ -6270,6 +6310,7 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: tracks_player_action_completion.then(|| {
                                                 i32::try_from(
                                                     effects::change_zone::count_selected_zone_arrivals(
@@ -6599,6 +6640,7 @@ pub(super) fn handle_resolution_choice(
                         // producers) is deliberately not threaded here.
                         duration: None,
                         track_exiled_by_source,
+                        face_down_in_exile,
                         face_down_profile: face_down_profile.clone(),
                         library_placement: None,
                         // CR 614.12: cost-payment exile carries no enter-modifier
@@ -6621,6 +6663,7 @@ pub(super) fn handle_resolution_choice(
                                 *card_id,
                                 ctx.destination,
                                 ctx.source_id,
+                                ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
@@ -6667,6 +6710,7 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
@@ -6723,6 +6767,7 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
+                                        face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
                                         library_placement: ctx.library_placement.clone(),
@@ -9462,7 +9507,14 @@ pub(crate) fn run_batch_completion(
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::LibrarySearchDeliverySettled { resume } => match resume {
-            crate::types::game_state::LibrarySearchDeliveryResume::Standard { searcher } => {
+            crate::types::game_state::LibrarySearchDeliveryResume::Standard {
+                searcher,
+                hidden_search_audiences,
+            } => {
+                state.record_completed_hidden_search_audiences_for_events(
+                    &hidden_search_audiences,
+                    events,
+                );
                 state.active_library_searches.remove(&searcher);
                 state.active_search_decision_controls.remove(&searcher);
                 crate::game::zone_pipeline::BatchMoveResult::Done
@@ -10109,8 +10161,49 @@ mod tests {
             source,
             player,
         );
+        let mut delivery = delivery;
+        delivery.context.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         state.park_ability_continuation(PendingContinuation::new(Box::new(delivery), &state));
         (state, found)
+    }
+
+    fn multi_card_standard_delivery_state() -> (GameState, ObjectId, ObjectId) {
+        let (mut state, first) = standard_delivery_state();
+        let second = create_object(
+            &mut state,
+            CardId(90_085),
+            PlayerId(0),
+            "Second standard found card".to_string(),
+            Zone::Library,
+        );
+        state.active_library_searches = Default::default();
+        state.active_search_decision_controls = Default::default();
+        let source = state
+            .objects
+            .values()
+            .find(|object| object.name == "Standard search source")
+            .expect("standard search source exists")
+            .id;
+        effects::search_library::resolve(
+            &mut state,
+            &ResolvedAbility::new(
+                Effect::SearchLibrary {
+                    filter: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones: vec![Zone::Library],
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            ),
+            &mut Vec::new(),
+        )
+        .expect("ordinary two-card SearchLibrary enters its production choice state");
+        (state, first, second)
     }
 
     #[test]
@@ -10142,7 +10235,7 @@ mod tests {
         assert!(state.active_library_searches.get(&PlayerId(0)).is_some());
         assert!(state.pending_library_search_delivery.is_some());
 
-        super::super::engine::apply_as_current(
+        let resumed = super::super::engine::apply_as_current(
             &mut state,
             GameAction::ChooseReplacement { index: 1 },
         )
@@ -10151,6 +10244,112 @@ mod tests {
         assert_eq!(state.objects[&found].zone, Zone::Exile);
         assert!(state.active_library_searches.is_empty());
         assert!(state.pending_library_search_delivery.is_none());
+        let p0 =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(0));
+        let p1 =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(1));
+        let spectator =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(2));
+        let is_hidden_delivery = |event: &GameEvent| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Exile,
+                    record,
+                } if *object_id == found
+                    && record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_some_and(|context| context.face_down)
+            )
+        };
+        assert!(
+            p0.iter().any(is_hidden_delivery),
+            "the search audience must retain the resumed private delivery"
+        );
+        assert!(!p1.iter().any(is_hidden_delivery));
+        assert!(!spectator.iter().any(is_hidden_delivery));
+    }
+
+    #[test]
+    fn paused_multi_card_standard_delivery_filters_each_identity_after_resume() {
+        let (mut state, first, second) = multi_card_standard_delivery_state();
+        let expected_identities = [
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&first]),
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&second]),
+        ];
+        let redirect = install_moved_exile_redirect(&mut state, Zone::Hand, true);
+        state.objects[&redirect].replacement_definitions[0].valid_card =
+            Some(TargetFilter::SpecificObject { id: first });
+
+        super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![first, second],
+            },
+        )
+        .expect("the two-card SearchChoice must pause for the first replacement");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+
+        let resumed = super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("declining the first-card redirect must resume the complete batch");
+
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(state.active_library_searches.is_empty());
+        assert!(state.pending_library_search_delivery.is_none());
+
+        let p0 =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(0));
+        let p1 =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(1));
+        let spectator =
+            crate::game::visibility::filter_events_for_viewer(&resumed.events, &state, PlayerId(2));
+        let is_hidden_delivery =
+            |event: &GameEvent, expected: crate::types::identifiers::ObjectIncarnationRef| {
+                matches!(
+                        event,
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from: Some(Zone::Library),
+                        to: Zone::Exile,
+                        record,
+                    } if *object_id == expected.object_id
+                        && record.trigger_source_context().is_some_and(|context| {
+                            context.face_down && context.identity.reference == expected
+                        })
+                )
+            };
+
+        for expected in expected_identities {
+            assert!(
+                resumed
+                    .events
+                    .iter()
+                    .any(|event| is_hidden_delivery(event, expected)),
+                "the resumed action must carry the hidden delivery for {expected:?}"
+            );
+            assert!(
+                p0.iter().any(|event| is_hidden_delivery(event, expected)),
+                "the search audience must retain the resumed private delivery for {expected:?}"
+            );
+            assert!(!p1.iter().any(|event| is_hidden_delivery(event, expected)));
+            assert!(!spectator
+                .iter()
+                .any(|event| is_hidden_delivery(event, expected)));
+        }
     }
 
     #[test]
@@ -11906,6 +12105,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],

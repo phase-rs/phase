@@ -2027,7 +2027,11 @@ fn laezels_acrobatics_inline_die_table_is_owned_by_nonterminal_roll() {
         "Exile all nontoken creatures you control, then roll a d20.\n1—9 | Return those cards to the battlefield under their owner's control at the beginning of the next end step.\n10—20 | Return those cards to the battlefield under their owner's control, then exile them again. Return those cards to the battlefield under their owner's control at the beginning of the next end step.",
         "Lae'zel's Acrobatics",
         &["Instant"],
-        1,
+        // CR 706.3b: BOTH printed rows. This pin read 1 while the card prints 2,
+        // because the spell-resolution continuation loop swallowed the `1—9` row
+        // before the attach pass could collect it. The continuation guard
+        // restores the collector's precondition, so the whole table now attaches.
+        2,
     );
 }
 
@@ -2037,7 +2041,11 @@ fn overwhelming_encounter_inline_die_table_is_owned_by_nonterminal_roll() {
         "Creatures you control gain vigilance and trample until end of turn. Roll a d20.\n1—9 | Creatures you control get +2/+2 until end of turn.\n10—19 | Put two +1/+1 counters on each creature you control.\n20 | Put four +1/+1 counters on each creature you control.",
         "Overwhelming Encounter",
         &["Sorcery"],
-        2,
+        // CR 706.3b: ALL THREE printed rows. Same cause as Lae'zel's above — the
+        // swallowed `1—9` row now attaches, and it lowers to the mass
+        // `PumpAll{Typed{Creature, controller: You}}` the print states, not the
+        // single-target `Pump{Any}` the swallowed sibling used to produce.
+        3,
     );
 }
 
@@ -3145,4 +3153,129 @@ mod diagnostic_snapshots {
     // for cascade-diff detection in swallow_check.rs but no current Oracle text
     // triggers it. A test will be added when a card that produces this diagnostic
     // is identified.
+}
+
+/// Row 1.C — restored result rows must carry the CONCRETE effect the print
+/// states, not merely "something that is not a failure marker".
+///
+/// `assert_inline_die_table` above checks only `results.len()`, so it cannot
+/// distinguish the mass `PumpAll` the card prints from the single-target
+/// `Pump { target: Any }` the swallowed sibling used to produce. That exact
+/// wrong shape is what the row loss emitted before the continuation guard
+/// landed, so a regression to it would restore the row COUNT and still be wrong.
+/// These assertions are what fail in that case.
+fn die_branches(
+    def: &crate::types::ability::AbilityDefinition,
+) -> Option<&[crate::types::ability::DieResultBranch]> {
+    match def.effect.as_ref() {
+        Effect::RollDie { results, .. } => Some(results.as_slice()),
+        _ => def
+            .sub_ability
+            .as_deref()
+            .and_then(die_branches)
+            .or_else(|| def.else_ability.as_deref().and_then(die_branches)),
+    }
+}
+
+#[test]
+fn overwhelming_encounter_restored_row_is_a_mass_pump_not_a_single_target_pump() {
+    use crate::types::ability::{ControllerRef, PtValue, TargetFilter, TypeFilter};
+
+    let (_, lowered) = parse_two_layer(
+        "Creatures you control gain vigilance and trample until end of turn. Roll a d20.\n1—9 | Creatures you control get +2/+2 until end of turn.\n10—19 | Put two +1/+1 counters on each creature you control.\n20 | Put four +1/+1 counters on each creature you control.",
+        "Overwhelming Encounter",
+        &["Sorcery"],
+        &[],
+    );
+    let branches = die_branches(&lowered.abilities[0]).expect("the roll must own its table");
+    assert_eq!(branches.len(), 3);
+    assert_eq!((branches[0].min, branches[0].max), (1, 9));
+
+    // THE DISCRIMINATOR. `Pump { target: Any }` — the swallowed sibling's shape —
+    // would satisfy any "not Unimplemented" check and fails here.
+    match branches[0].effect.effect.as_ref() {
+        Effect::PumpAll {
+            power,
+            toughness,
+            target,
+            ..
+        } => {
+            assert_eq!(*power, PtValue::Fixed(2));
+            assert_eq!(*toughness, PtValue::Fixed(2));
+            match target {
+                TargetFilter::Typed(typed) => {
+                    assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+                    assert_eq!(typed.controller, Some(ControllerRef::You));
+                }
+                other => panic!("the restored row must pump a TYPED creature set, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "the restored 1—9 row must be a MASS pump (PumpAll), not a single-target \
+             Pump — got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn farideh_fireball_restored_rows_carry_distinct_damage_scopes() {
+    use crate::types::ability::PlayerFilter;
+
+    let (_, lowered) = parse_two_layer(
+        "Farideh's Fireball deals 5 damage to target creature or planeswalker. Roll a d20.\n1—9 | Farideh's Fireball deals 2 damage to each player.\n10—20 | Farideh's Fireball deals 2 damage to each opponent.",
+        "Farideh's Fireball",
+        &["Sorcery"],
+        &[],
+    );
+    let branches = die_branches(&lowered.abilities[0]).expect("the roll must own its table");
+    assert_eq!(branches.len(), 2);
+    assert_eq!((branches[0].min, branches[0].max), (1, 9));
+    assert_eq!((branches[1].min, branches[1].max), (10, 20));
+
+    // The two rows must have DIFFERENT player scopes — that difference is the
+    // whole rules content of the card, and the runtime branch-selection test
+    // depends on it.
+    let scope = |b: &crate::types::ability::DieResultBranch| match b.effect.effect.as_ref() {
+        Effect::DamageEachPlayer { player_filter, .. } => player_filter.clone(),
+        other => panic!("expected DamageEachPlayer, got {other:?}"),
+    };
+    assert_eq!(scope(&branches[0]), PlayerFilter::All);
+    assert_eq!(scope(&branches[1]), PlayerFilter::Opponent);
+}
+
+/// Druid of the Emerald Grove reaches the P-D **trigger** attach path
+/// (`attach_trigger_die_result_branches`), which the seam tests in `oracle.rs`
+/// deliberately do NOT cover — those reconstruct the P-B spell path. This is the
+/// only end-to-end pin that the `"N or less"` row arm and the trigger attach path
+/// compose correctly for a real card.
+#[test]
+fn druid_of_the_emerald_grove_trigger_owns_all_three_printed_rows() {
+    let (_, lowered) = parse_two_layer(
+        "When this creature enters, search your library for up to two basic land cards and reveal them, then roll a d20.\n9 or less | Put those cards into your hand, then shuffle.\n10—19 | Put one of those cards onto the battlefield tapped and the other into your hand, then shuffle.\n20+ | Put those cards onto the battlefield tapped, then shuffle.",
+        "Druid of the Emerald Grove",
+        &["Creature"],
+        &["Druid"],
+    );
+    assert_eq!(
+        lowered.triggers.len(),
+        1,
+        "the printed line is one ETB trigger"
+    );
+    let branches = die_branches(
+        lowered.triggers[0]
+            .execute
+            .as_deref()
+            .expect("the ETB trigger must carry an execute body"),
+    )
+    .expect("the trigger's terminal roll must own the table");
+    assert_eq!(
+        branches
+            .iter()
+            .map(|b| (b.min, b.max))
+            .collect::<Vec<(u8, u8)>>(),
+        vec![(0, 9), (10, 19), (20, u8::MAX)],
+        "all three printed rows, including the \"9 or less\" wording (resolvable \
+         lower bound 0, because CR 706.2 selects on the post-modifier result and \
+         `apply_modifier` clamps it to 0) and the open-ended \"20+\" (u8::MAX)"
+    );
 }

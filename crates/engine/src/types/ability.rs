@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::ops::ControlFlow;
+use std::ops::{BitOrAssign, ControlFlow};
 use std::sync::Arc;
 
 use serde::de;
@@ -38,6 +38,68 @@ use crate::types::events::{ClashResult, PlayerActionKind};
 // ---------------------------------------------------------------------------
 // Supporting types
 // ---------------------------------------------------------------------------
+
+/// CR 406.3 + CR 701.23a: delivery visibility for a searched card that is
+/// moved to exile. This is intentionally distinct from [`FaceDownProfile`],
+/// which describes a battlefield object's characteristics rather than hidden
+/// exile information.
+///
+/// The serde representation remains the legacy boolean (`false` omitted by
+/// the surrounding fields, `true` when concealed), so existing ability and
+/// resolution payloads remain wire-compatible while the semantic state is no
+/// longer duplicated as an untyped bool in the parser/runtime hand-off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ExileConcealment {
+    #[default]
+    Public,
+    FaceDown,
+}
+
+impl ExileConcealment {
+    pub fn is_face_down(&self) -> bool {
+        matches!(self, Self::FaceDown)
+    }
+
+    pub fn is_public(&self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
+impl From<bool> for ExileConcealment {
+    fn from(face_down: bool) -> Self {
+        if face_down {
+            Self::FaceDown
+        } else {
+            Self::Public
+        }
+    }
+}
+
+impl From<ExileConcealment> for bool {
+    fn from(concealment: ExileConcealment) -> Self {
+        concealment.is_face_down()
+    }
+}
+
+impl BitOrAssign for ExileConcealment {
+    fn bitor_assign(&mut self, rhs: Self) {
+        if rhs.is_face_down() {
+            *self = Self::FaceDown;
+        }
+    }
+}
+
+impl Serialize for ExileConcealment {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(self.is_face_down())
+    }
+}
+
+impl<'de> Deserialize<'de> for ExileConcealment {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer).map(Self::from)
+    }
+}
 
 /// CR 608.2c-e: Who makes a choice during an effect's resolution (controller by
 /// default per CR 608.2c; opponent/APNAP ordering per CR 608.2e). Not CR 700.2 —
@@ -19788,6 +19850,30 @@ pub enum Effect {
     },
 }
 
+/// The edge a nested [`AbilityDefinition`] hangs from in
+/// [`Effect::for_each_nested_definition`].
+///
+/// One variant per definition-carrying field, not per carrying effect: a
+/// coin flip's win branch and its lose branch are different edges because a
+/// consumer that reports which payload it found must be able to name it.
+/// Consumers that do not care destructure with `|_, definition|`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NestedDefinitionEdge {
+    VotePerChoice,
+    VoteObjectOutcome,
+    SeparateIntoPilesChosen,
+    SeparateIntoPilesUnchosen,
+    RevealFromHandOnDecline,
+    CreateDelayedTriggerEffect,
+    RollDieResult,
+    FlipCoinWin,
+    FlipCoinLose,
+    FlipCoinsWin,
+    FlipCoinsLose,
+    FlipCoinUntilLoseWin,
+    ChooseOneOfBranch,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StickerTicketCostPayment {
@@ -23263,6 +23349,354 @@ impl Effect {
         }
     }
 
+    /// Every [`AbilityDefinition`] this effect carries as a DIRECT executable
+    /// payload, together with the [`NestedDefinitionEdge`] it hangs from.
+    ///
+    /// "Direct" means the definition is a field of the effect itself and runs as
+    /// part of resolving it: a delayed trigger's body, a results-table
+    /// striation, a coin-flip branch, a vote's per-choice outcome, a pile
+    /// effect. Definitions reached through a `GenericEffect`'s granted
+    /// abilities, a token's static abilities, or a replacement's payloads are
+    /// deliberately NOT included — those are separate structures with their own
+    /// traversals, and a consumer that needs them composes this visitor with
+    /// those rather than having them silently folded in here.
+    ///
+    /// ONE LEVEL ONLY: this does not recurse. A consumer that wants the whole
+    /// tree recurses through the definitions it is handed, which leaves it free
+    /// to decide how to treat each definition's own `sub_ability` /
+    /// `else_ability` / `mode_abilities` chain — those belong to the
+    /// definition, not to this effect.
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added `Effect` variant
+    /// that carries a definition must be classified here rather than silently
+    /// hiding a nested payload from every consumer (same convention as
+    /// [`Effect::for_each_quantity_expr`] and `count_expr`). That guarantee is
+    /// the entire point of this visitor: a wildcard is invisible, and the defect
+    /// it produces is a card reporting support it does not have, which is worse
+    /// than a card honestly reporting a gap.
+    pub fn for_each_nested_definition<'a>(
+        &'a self,
+        f: &mut dyn FnMut(NestedDefinitionEdge, &'a AbilityDefinition),
+    ) {
+        match self {
+            // CR 701.38: a vote picks one choice from a list. Each listed
+            // choice carries its own outcome; CR 701.38b admits object choices,
+            // whose shared outcome template is the second edge here.
+            Effect::Vote {
+                per_choice_effect,
+                subject,
+                ..
+            } => {
+                for effect in per_choice_effect {
+                    f(NestedDefinitionEdge::VotePerChoice, effect);
+                }
+                if let VoteSubject::Objects {
+                    outcome_template, ..
+                } = subject
+                {
+                    f(NestedDefinitionEdge::VoteObjectOutcome, outcome_template);
+                }
+            }
+            // CR 700.3: objects temporarily grouped into piles. The chosen
+            // pile's effect, and the unchosen pile's when the card gives one.
+            Effect::SeparateIntoPiles {
+                chosen_pile_effect,
+                unchosen_pile_effect,
+                ..
+            } => {
+                f(
+                    NestedDefinitionEdge::SeparateIntoPilesChosen,
+                    chosen_pile_effect,
+                );
+                if let Some(unchosen_pile_effect) = unchosen_pile_effect {
+                    f(
+                        NestedDefinitionEdge::SeparateIntoPilesUnchosen,
+                        unchosen_pile_effect,
+                    );
+                }
+            }
+            // CR 701.20: reveal. This is the branch taken when the player
+            // DECLINES to reveal, so it is a payload rather than the reveal.
+            Effect::RevealFromHand { on_decline, .. } => {
+                if let Some(on_decline) = on_decline {
+                    f(NestedDefinitionEdge::RevealFromHandOnDecline, on_decline);
+                }
+            }
+            // CR 603.7a: the delayed triggered ability's own body.
+            Effect::CreateDelayedTrigger { effect, .. } => {
+                f(NestedDefinitionEdge::CreateDelayedTriggerEffect, effect)
+            }
+            // CR 706.3a: one payload per results-table striation.
+            Effect::RollDie { results, .. } => {
+                for result in results {
+                    f(NestedDefinitionEdge::RollDieResult, &result.effect);
+                }
+            }
+            // CR 705.1: coin-flip branches. Each side is its own edge.
+            Effect::FlipCoin {
+                win_effect,
+                lose_effect,
+                ..
+            } => {
+                if let Some(win_effect) = win_effect {
+                    f(NestedDefinitionEdge::FlipCoinWin, win_effect);
+                }
+                if let Some(lose_effect) = lose_effect {
+                    f(NestedDefinitionEdge::FlipCoinLose, lose_effect);
+                }
+            }
+            Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } => {
+                if let Some(win_effect) = win_effect {
+                    f(NestedDefinitionEdge::FlipCoinsWin, win_effect);
+                }
+                if let Some(lose_effect) = lose_effect {
+                    f(NestedDefinitionEdge::FlipCoinsLose, lose_effect);
+                }
+            }
+            Effect::FlipCoinUntilLose { win_effect } => {
+                f(NestedDefinitionEdge::FlipCoinUntilLoseWin, win_effect)
+            }
+            // CR 608.2d: each choice's body, offered while applying the effect.
+            Effect::ChooseOneOf { branches, .. } => {
+                for branch in branches {
+                    f(NestedDefinitionEdge::ChooseOneOfBranch, branch);
+                }
+            }
+            // Effects that carry no direct executable definition. Listed rather
+            // than wildcarded so adding a definition-carrying variant is a
+            // compile error here.
+            Effect::StartYourEngines { .. }
+            | Effect::ChangeSpeed { .. }
+            | Effect::DealDamage { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::Draw { .. }
+            | Effect::Pump { .. }
+            | Effect::PairWith { .. }
+            | Effect::Destroy { .. }
+            | Effect::Regenerate { .. }
+            | Effect::RemoveAllDamage { .. }
+            | Effect::Counter { .. }
+            | Effect::CounterAll { .. }
+            | Effect::Token { .. }
+            | Effect::GainLife { .. }
+            | Effect::LoseLife { .. }
+            | Effect::SetTapState { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::Sacrifice { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::Mill { .. }
+            | Effect::Scry { .. }
+            | Effect::PumpAll { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Dig { .. }
+            | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::Attach { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Surveil { .. }
+            | Effect::Fight { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            | Effect::Investigate
+            | Effect::Tribute { .. }
+            | Effect::TimeTravel
+            | Effect::BecomeMonarch { .. }
+            | Effect::NoOp
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::Populate
+            | Effect::Clash
+            | Effect::Behold { .. }
+            | Effect::EndTheTurn
+            | Effect::EndCombatPhase
+            | Effect::SwitchPT { .. }
+            | Effect::CopySpell { .. }
+            | Effect::EpicCopy { .. }
+            | Effect::CastCopyOfCard { .. }
+            | Effect::CopyTokenOf { .. }
+            | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::Myriad
+            | Effect::Encore
+            | Effect::CombineHost { .. }
+            | Effect::ChooseAugmentAndCombineWithHost { .. }
+            | Effect::Meld { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::ChoosePermanent { .. }
+            | Effect::GainActivatedAbilitiesOfTarget { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::PutCounter { .. }
+            | Effect::ChooseCounterKind { .. }
+            | Effect::PutChosenCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::ChooseCounterAdjustment { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::ReproduceEventCounters { .. }
+            | Effect::Animate { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::GenericEffect { .. }
+            | Effect::Cleanup { .. }
+            | Effect::Mana { .. }
+            | Effect::Discard { .. }
+            | Effect::Shuffle { .. }
+            | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
+            | Effect::SearchLibrary { .. }
+            | Effect::SearchOutsideGame { .. }
+            | Effect::OpenBoosterPack { .. }
+            | Effect::RevealHand { .. }
+            | Effect::Reveal { .. }
+            | Effect::RevealChosenNumbers { .. }
+            | Effect::RevealTop { .. }
+            | Effect::ExileTop { .. }
+            | Effect::ExileFaceDownPile { .. }
+            | Effect::TargetOnly { .. }
+            | Effect::Choose { .. }
+            | Effect::OpponentGuess { .. }
+            | Effect::SwapChosenLabels { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::Suspect { .. }
+            | Effect::Unsuspect { .. }
+            | Effect::Connive { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::ForceAttack { .. }
+            | Effect::SolveCase
+            | Effect::BecomePrepared { .. }
+            | Effect::BecomeUnprepared { .. }
+            | Effect::BecomeSaddled { .. }
+            | Effect::SetClassLevel { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::AddPendingETBCounters { .. }
+            | Effect::AddPendingEntersModifications { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::PayCost { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::FreeCastFromZones { .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+            | Effect::PreventDamage { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
+            | Effect::LoseTheGame { .. }
+            | Effect::WinTheGame { .. }
+            | Effect::RingTemptsYou
+            | Effect::VentureIntoDungeon
+            | Effect::VentureInto { .. }
+            | Effect::TakeTheInitiative
+            | Effect::ArrangePlanarDeckTop { .. }
+            | Effect::Planeswalk
+            | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
+            | Effect::RedistributeLifeTotals
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::AssembleContraptions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::CrankContraptions { .. }
+            | Effect::ReassembleContraption { .. }
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::ProcessRadCounters
+            | Effect::GrantCastingPermission { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::RememberCard { .. }
+            | Effect::NoteManaSpent
+            | Effect::ForEachCategory { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
+            | Effect::Exploit { .. }
+            | Effect::GainEnergy { .. }
+            | Effect::GivePlayerCounter { .. }
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::Discover { .. }
+            | Effect::Heist { .. }
+            | Effect::HeistExile
+            | Effect::Cascade
+            | Effect::Ripple { .. }
+            | Effect::MiracleCast { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::Goad { .. }
+            | Effect::GoadAll { .. }
+            | Effect::Detain { .. }
+            | Effect::SetRoomDoorLock { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::Manifest { .. }
+            | Effect::ManifestDread
+            | Effect::Cloak { .. }
+            | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::GrantExtraLoyaltyActivations { .. }
+            | Effect::SkipNextTurn { .. }
+            | Effect::SkipNextStep { .. }
+            | Effect::AdditionalPhase { .. }
+            | Effect::Double { .. }
+            | Effect::RuntimeHandled { .. }
+            | Effect::Incubate { .. }
+            | Effect::Amass { .. }
+            | Effect::EmpowerJace { .. }
+            | Effect::Monstrosity { .. }
+            | Effect::Specialize
+            | Effect::Renown { .. }
+            | Effect::Bolster { .. }
+            | Effect::Adapt { .. }
+            | Effect::Learn
+            | Effect::Forage
+            | Effect::CompletePlayerAction { .. }
+            | Effect::Harness
+            | Effect::CollectEvidence { .. }
+            | Effect::Endure { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::Seek { .. }
+            | Effect::SetLifeTotal { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::GiveControl { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::BecomeBlocked { .. }
+            | Effect::Conjure { .. }
+            | Effect::ApplyPerpetual { .. }
+            | Effect::Intensify { .. }
+            | Effect::DraftFromSpellbook { .. }
+            | Effect::Unimplemented { .. } => {}
+        }
+    }
+
     /// CR 107.3 + CR 608.2c: Returns the `QuantityExpr` carrying this effect's
     /// primary count/amount, for the full class of count- and amount-bearing
     /// effects (token creation, counters, draws, damage, mill, discard, etc.).
@@ -25185,6 +25619,10 @@ pub struct AbilityDefinition {
     pub sibling_condition: SiblingCondition,
     /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
     pub unlowered_guard: Option<UnloweredGuard>,
+    /// Typed intent for SearchLibrary clauses that exile the found card face down.
+    /// This is deliberately separate from `FaceDownProfile`, which describes
+    /// battlefield characteristics only.
+    pub face_down_in_exile: ExileConcealment,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -25268,6 +25706,8 @@ struct AbilityDefinitionRepr<'a> {
     sibling_condition: SiblingCondition,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlowered_guard: &'a Option<UnloweredGuard>,
+    #[serde(skip_serializing_if = "ExileConcealment::is_public")]
+    face_down_in_exile: ExileConcealment,
 }
 
 impl Serialize for AbilityDefinition {
@@ -25316,6 +25756,7 @@ impl Serialize for AbilityDefinition {
             iteration_kind_binding,
             sibling_condition,
             unlowered_guard,
+            face_down_in_exile,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -25359,6 +25800,7 @@ impl Serialize for AbilityDefinition {
             iteration_kind_binding,
             sibling_condition: *sibling_condition,
             unlowered_guard,
+            face_down_in_exile: *face_down_in_exile,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -25475,6 +25917,8 @@ struct AbilityDefinitionDe {
     sibling_condition: SiblingCondition,
     #[serde(default)]
     unlowered_guard: Option<UnloweredGuard>,
+    #[serde(default)]
+    face_down_in_exile: ExileConcealment,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -25528,6 +25972,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             iteration_kind_binding: de.iteration_kind_binding,
             sibling_condition: de.sibling_condition,
             unlowered_guard: de.unlowered_guard,
+            face_down_in_exile: de.face_down_in_exile,
         })
     }
 }
@@ -25787,6 +26232,7 @@ impl AbilityDefinition {
             iteration_kind_binding: None,
             sibling_condition: SiblingCondition::Dependent,
             unlowered_guard: None,
+            face_down_in_exile: ExileConcealment::Public,
         }
     }
 
@@ -27143,6 +27589,11 @@ impl ForwardedResultContext {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// Typed SearchLibrary intent for a face-down Exile destination.
+    /// This is carried in the existing resolution context so it survives
+    /// ordinary ability-chain handoffs without widening every ability literal.
+    #[serde(default, skip_serializing_if = "ExileConcealment::is_public")]
+    pub face_down_in_exile: ExileConcealment,
     /// CR 608.2c: The immediate `forward_result` producer's complete ordered
     /// result. `None` means no producer has run in this resolution; `Some([])`
     /// is a completed producer that moved no objects and intentionally blocks
@@ -36587,6 +37038,42 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn exile_concealment_keeps_legacy_boolean_wire_shape() {
+        assert_eq!(
+            serde_json::to_string(&ExileConcealment::Public).unwrap(),
+            "false"
+        );
+        assert_eq!(
+            serde_json::to_string(&ExileConcealment::FaceDown).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            serde_json::from_str::<ExileConcealment>("false").unwrap(),
+            ExileConcealment::Public
+        );
+        assert_eq!(
+            serde_json::from_str::<ExileConcealment>("true").unwrap(),
+            ExileConcealment::FaceDown
+        );
+
+        let mut public = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Unimplemented {
+                name: "compatibility probe".to_string(),
+                description: None,
+            },
+        );
+        let public_json = serde_json::to_value(&public).unwrap();
+        assert!(public_json.get("face_down_in_exile").is_none());
+
+        public.face_down_in_exile = ExileConcealment::FaceDown;
+        let concealed_json = serde_json::to_value(&public).unwrap();
+        assert_eq!(concealed_json["face_down_in_exile"], true);
+        let round_trip: AbilityDefinition = serde_json::from_value(concealed_json).unwrap();
+        assert_eq!(round_trip.face_down_in_exile, ExileConcealment::FaceDown);
     }
 
     #[test]

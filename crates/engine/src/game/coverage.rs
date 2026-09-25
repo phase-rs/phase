@@ -31,12 +31,12 @@ use crate::types::ability::{
     ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
     SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
     SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
@@ -7454,338 +7454,32 @@ fn visit_face_modifications(face: &CardFace, visit: &mut impl FnMut(&ContinuousM
 /// `GenericEffect`. Consumers that need to inspect an ability tree use this
 /// enumeration in addition to their existing traversal for those separate
 /// structures.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum DirectEffectPayloadEdge {
-    VotePerChoice,
-    VoteObjectOutcome,
-    SeparateIntoPilesChosen,
-    SeparateIntoPilesUnchosen,
-    RevealFromHandOnDecline,
-    CreateDelayedTriggerEffect,
-    RollDieResult,
-    FlipCoinWin,
-    FlipCoinLose,
-    FlipCoinsWin,
-    FlipCoinsLose,
-    FlipCoinUntilLoseWin,
-    ChooseOneOfBranch,
-}
+///
+/// This is an alias, not a second enumeration: the edge set is owned by
+/// [`NestedDefinitionEdge`] in `types/ability.rs`, beside the visitor that
+/// emits it. Two independent lists over one edge set is exactly the drift this
+/// module's traversal used to risk — the parser's own continuation gate had a
+/// bounded copy that silently omitted four carriers, which is the defect
+/// `Effect::for_each_nested_definition` was introduced to close.
+use crate::types::ability::NestedDefinitionEdge as DirectEffectPayloadEdge;
 
 /// Visits the one-level executable ability payloads embedded directly in an effect.
+///
+/// Thin adapter over [`Effect::for_each_nested_definition`], the single
+/// authority for which effects carry a direct executable payload. The traversal
+/// and its exhaustiveness guarantee live in the AST layer; this wrapper exists
+/// only so coverage's many call sites keep their `impl FnMut` call style rather
+/// than each spelling out `&mut`.
+///
+/// Because the AST-layer match is exhaustive and wildcard-free, a newly added
+/// definition-carrying `Effect` variant is a compile error there — and every
+/// consumer in this module inherits that guarantee instead of needing its own
+/// arm list to be kept in sync by hand.
 fn visit_direct_effect_ability_payloads<'a>(
     effect: &'a Effect,
     mut visit: impl FnMut(DirectEffectPayloadEdge, &'a AbilityDefinition),
 ) {
-    match effect {
-        Effect::Vote {
-            per_choice_effect,
-            subject,
-            ..
-        } => {
-            for effect in per_choice_effect {
-                visit(DirectEffectPayloadEdge::VotePerChoice, effect);
-            }
-            if let VoteSubject::Objects {
-                outcome_template, ..
-            } = subject
-            {
-                visit(DirectEffectPayloadEdge::VoteObjectOutcome, outcome_template);
-            }
-        }
-        Effect::SeparateIntoPiles {
-            chosen_pile_effect,
-            unchosen_pile_effect,
-            ..
-        } => {
-            visit(
-                DirectEffectPayloadEdge::SeparateIntoPilesChosen,
-                chosen_pile_effect,
-            );
-            if let Some(unchosen_pile_effect) = unchosen_pile_effect {
-                visit(
-                    DirectEffectPayloadEdge::SeparateIntoPilesUnchosen,
-                    unchosen_pile_effect,
-                );
-            }
-        }
-        Effect::RevealFromHand {
-            on_decline: Some(on_decline),
-            ..
-        } => {
-            visit(DirectEffectPayloadEdge::RevealFromHandOnDecline, on_decline);
-        }
-        Effect::CreateDelayedTrigger { effect, .. } => {
-            visit(DirectEffectPayloadEdge::CreateDelayedTriggerEffect, effect);
-        }
-        Effect::RollDie { results, .. } => {
-            for result in results {
-                visit(DirectEffectPayloadEdge::RollDieResult, &result.effect);
-            }
-        }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(win_effect) = win_effect {
-                visit(DirectEffectPayloadEdge::FlipCoinWin, win_effect);
-            }
-            if let Some(lose_effect) = lose_effect {
-                visit(DirectEffectPayloadEdge::FlipCoinLose, lose_effect);
-            }
-        }
-        Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(win_effect) = win_effect {
-                visit(DirectEffectPayloadEdge::FlipCoinsWin, win_effect);
-            }
-            if let Some(lose_effect) = lose_effect {
-                visit(DirectEffectPayloadEdge::FlipCoinsLose, lose_effect);
-            }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            visit(DirectEffectPayloadEdge::FlipCoinUntilLoseWin, win_effect);
-        }
-        Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches {
-                visit(DirectEffectPayloadEdge::ChooseOneOfBranch, branch);
-            }
-        }
-        // Keep this exhaustive: direct ability payloads must be classified above
-        // when a new `Effect` variant is introduced.
-        Effect::StartYourEngines { .. }
-        | Effect::ChangeSpeed { .. }
-        | Effect::DealDamage { .. }
-        | Effect::ApplyPostReplacementDamage { .. }
-        | Effect::EachDealsDamageEqualToPower { .. }
-        | Effect::EachSourceDealsDamage { .. }
-        | Effect::Draw { .. }
-        | Effect::Pump { .. }
-        | Effect::PairWith { .. }
-        | Effect::Destroy { .. }
-        | Effect::Regenerate { .. }
-        | Effect::RemoveAllDamage { .. }
-        | Effect::Counter { .. }
-        | Effect::CounterAll { .. }
-        | Effect::Token { .. }
-        | Effect::GainLife { .. }
-        | Effect::LoseLife { .. }
-        | Effect::SetTapState { .. }
-        | Effect::RemoveCounter { .. }
-        | Effect::Sacrifice { .. }
-        | Effect::DiscardCard { .. }
-        | Effect::Mill { .. }
-        | Effect::Scry { .. }
-        | Effect::PumpAll { .. }
-        | Effect::DamageAll { .. }
-        | Effect::DamageEachPlayer { .. }
-        | Effect::DestroyAll { .. }
-        | Effect::ChangeZone { .. }
-        | Effect::ChangeZoneAll { .. }
-        | Effect::Dig { .. }
-        | Effect::GainControl { .. }
-        | Effect::GainControlAll { .. }
-        | Effect::ControlNextTurn { .. }
-        | Effect::Attach { .. }
-        | Effect::UnattachAll { .. }
-        | Effect::Surveil { .. }
-        | Effect::Fight { .. }
-        | Effect::Bounce { .. }
-        | Effect::BounceAll { .. }
-        | Effect::Explore
-        | Effect::ExploreAll { .. }
-        | Effect::Investigate
-        | Effect::Tribute { .. }
-        | Effect::TimeTravel
-        | Effect::BecomeMonarch { .. }
-        | Effect::NoOp
-        | Effect::Proliferate
-        | Effect::ProliferateTarget { .. }
-        | Effect::Populate
-        | Effect::Clash
-        | Effect::Behold { .. }
-        | Effect::EndTheTurn
-        | Effect::EndCombatPhase
-        | Effect::SwitchPT { .. }
-        | Effect::CopySpell { .. }
-        | Effect::EpicCopy { .. }
-        | Effect::CastCopyOfCard { .. }
-        | Effect::CopyTokenOf { .. }
-        | Effect::CreateTokenCopyFromPool { .. }
-        | Effect::Myriad
-        | Effect::Encore
-        | Effect::CombineHost { .. }
-        | Effect::ChooseAugmentAndCombineWithHost { .. }
-        | Effect::Meld { .. }
-        | Effect::ExileHaunting { .. }
-        | Effect::HideawayConceal { .. }
-        | Effect::CopyTokenBlockingAttacker { .. }
-        | Effect::BecomeCopy { .. }
-        | Effect::ChoosePermanent { .. }
-        | Effect::GainActivatedAbilitiesOfTarget { .. }
-        | Effect::ChooseCard { .. }
-        | Effect::PutCounter { .. }
-        | Effect::ChooseCounterKind { .. }
-        | Effect::PutChosenCounter { .. }
-        | Effect::PutCounterAll { .. }
-        | Effect::MultiplyCounter { .. }
-        | Effect::ChooseCounterAdjustment { .. }
-        | Effect::DoublePT { .. }
-        | Effect::DoublePTAll { .. }
-        | Effect::MoveCounters { .. }
-        | Effect::ReproduceEventCounters { .. }
-        | Effect::Animate { .. }
-        | Effect::ReturnAsAura { .. }
-        | Effect::RegisterBending { .. }
-        | Effect::GenericEffect { .. }
-        | Effect::Cleanup { .. }
-        | Effect::Mana { .. }
-        | Effect::Discard { .. }
-        | Effect::Shuffle { .. }
-        | Effect::Transform { .. }
-        | Effect::FlipPermanent { .. }
-        | Effect::SearchLibrary { .. }
-        | Effect::SearchOutsideGame { .. }
-        // CR 400.11b: carries no nested ability definition.
-        | Effect::OpenBoosterPack { .. }
-        | Effect::RevealHand { .. }
-        | Effect::RevealFromHand {
-            on_decline: None, ..
-        }
-        | Effect::Reveal { .. }
-        | Effect::RevealTop { .. }
-        | Effect::ExileTop { .. }
-        | Effect::ExileFaceDownPile { .. }
-        | Effect::TargetOnly { .. }
-        | Effect::Choose { .. }
-        | Effect::OpponentGuess { .. }
-        | Effect::SwapChosenLabels { .. }
-        | Effect::RevealChosenNumbers { .. }
-        | Effect::ChooseDamageSource { .. }
-        | Effect::Suspect { .. }
-        | Effect::Unsuspect { .. }
-        | Effect::Connive { .. }
-        | Effect::PhaseOut { .. }
-        | Effect::PhaseIn { .. }
-        | Effect::ForceBlock { .. }
-        | Effect::ForceAttack { .. }
-        | Effect::SolveCase
-        | Effect::BecomePrepared { .. }
-        | Effect::BecomeUnprepared { .. }
-        | Effect::BecomeSaddled { .. }
-        | Effect::SetClassLevel { .. }
-        | Effect::AddTargetReplacement { .. }
-        | Effect::AddRestriction { .. }
-        | Effect::ReduceNextSpellCost { .. }
-        | Effect::GrantNextSpellAbility { .. }
-        | Effect::AddPendingETBCounters { .. }
-        | Effect::AddPendingEntersModifications { .. }
-        | Effect::CreateEmblem { .. }
-        | Effect::PayCost { .. }
-        | Effect::CastFromZone { .. }
-        | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-        | Effect::PreventDamage { .. }
-        | Effect::CreateDamageReplacement { .. }
-        | Effect::CreateDrawReplacement { .. }
-        | Effect::CreatePlaneswalkReplacement { .. }
-        | Effect::LoseTheGame { .. }
-        | Effect::WinTheGame { .. }
-        | Effect::RingTemptsYou
-        | Effect::VentureIntoDungeon
-        | Effect::VentureInto { .. }
-        | Effect::TakeTheInitiative
-        | Effect::ArrangePlanarDeckTop { .. }
-        | Effect::Planeswalk
-        | Effect::ChaosEnsues
-        | Effect::ReverseTurnOrder
-        | Effect::RedistributeLifeTotals
-        | Effect::OpenAttractions { .. }
-        | Effect::RollToVisitAttractions
-        | Effect::AssembleContraptions { .. }
-        | Effect::AssembleContraptionsFromRollDifference
-        | Effect::CrankContraptions { .. }
-        | Effect::ReassembleContraption { .. }
-        | Effect::AssembleContraptionOnSprocket { .. }
-        | Effect::ReassembleContraptionOnSprocket { .. }
-        | Effect::PutSticker { .. }
-        | Effect::ApplySticker { .. }
-        | Effect::ProcessRadCounters
-        | Effect::GrantCastingPermission { .. }
-        | Effect::ChooseFromZone { .. }
-        | Effect::RememberCard { .. }
-        | Effect::NoteManaSpent
-        | Effect::ForEachCategory { .. }
-        | Effect::ChooseObjectsIntoTrackedSet { .. }
-        | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::EachPlayerCopyChosen { .. }
-        | Effect::Exploit { .. }
-        | Effect::GainEnergy { .. }
-        | Effect::GivePlayerCounter { .. }
-        | Effect::LoseAllPlayerCounters { .. }
-        | Effect::ExileFromTopUntil { .. }
-        | Effect::RevealUntil { .. }
-        | Effect::Discover { .. }
-        | Effect::Heist { .. }
-        | Effect::HeistExile
-        | Effect::Cascade
-        | Effect::Ripple { .. }
-        | Effect::MiracleCast { .. }
-        | Effect::MadnessCast { .. }
-        | Effect::PutAtLibraryPosition { .. }
-        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
-        | Effect::PutOnTopOrBottom { .. }
-        | Effect::GiftDelivery { .. }
-        | Effect::Goad { .. }
-        | Effect::GoadAll { .. }
-        | Effect::Detain { .. }
-        | Effect::SetRoomDoorLock { .. }
-        | Effect::ExchangeControl { .. }
-        | Effect::ChangeTargets { .. }
-        | Effect::Manifest { .. }
-        | Effect::ManifestDread
-        | Effect::Cloak { .. }
-        | Effect::TurnFaceUp { .. }
-        | Effect::TurnFaceDown { .. }
-        | Effect::ExtraTurn { .. }
-        | Effect::GrantExtraLoyaltyActivations { .. }
-        | Effect::SkipNextTurn { .. }
-        | Effect::SkipNextStep { .. }
-        | Effect::AdditionalPhase { .. }
-        | Effect::Double { .. }
-        | Effect::RuntimeHandled { .. }
-        | Effect::Incubate { .. }
-        | Effect::Amass { .. }
-        | Effect::EmpowerJace { .. }
-        | Effect::Monstrosity { .. }
-        | Effect::Specialize
-        | Effect::Renown { .. }
-        | Effect::Bolster { .. }
-        | Effect::Adapt { .. }
-        | Effect::Learn
-        | Effect::Forage
-        | Effect::CompletePlayerAction { .. }
-        | Effect::Harness
-        | Effect::CollectEvidence { .. }
-        | Effect::Endure { .. }
-        | Effect::BlightEffect { .. }
-        | Effect::Seek { .. }
-        | Effect::SetLifeTotal { .. }
-        | Effect::ExchangeLifeWithStat { .. }
-        | Effect::ExchangeLifeTotals { .. }
-        | Effect::SetDayNight { .. }
-        | Effect::GiveControl { .. }
-        | Effect::RemoveFromCombat { .. }
-        | Effect::BecomeBlocked { .. }
-        | Effect::Conjure { .. }
-        | Effect::ApplyPerpetual { .. }
-        | Effect::Intensify { .. }
-        | Effect::DraftFromSpellbook { .. }
-        | Effect::Unimplemented { .. } => {}
-    }
+    effect.for_each_nested_definition(&mut visit);
 }
 
 /// Recursively visit modifications inside an ability's effect graph.
@@ -9218,6 +8912,33 @@ enum StructuralFeature {
     AdditionalCost,
     CostReduction,
     TriggerCondition,
+    /// TRACKED-SET-RETURN-DEFECT: a delayed trigger that moves a tracked set
+    /// with a SINGULAR `ChangeZone` while its `uses_tracked_set` flag is false.
+    ///
+    /// The published set is fine — it holds live ids, and `filter.rs` evaluates
+    /// `TargetFilter::TrackedSet` as a bare id-membership test. The CONSUME side
+    /// is what fails: with the flag false the eager bind in
+    /// `delayed_trigger.rs` never rewrites the singular move into a
+    /// `ChangeZoneAll`, so `change_zone.rs:1982` — which re-derives scan zones
+    /// only for `ChangeZoneAll { origin: None, .. }` — leaves it scanning the
+    /// BATTLEFIELD for members sitting in EXILE. It moves nothing and the
+    /// objects are stranded permanently.
+    ///
+    /// The card PARSES correctly and every effect is a real variant, so nothing
+    /// else in coverage can see it. This is exactly the "parses fine but the
+    /// runtime cannot execute it" case `ResolverFeature` exists for.
+    TrackedSetReturnAfterBattlefieldExit,
+    /// A `Protection` grant whose quality fell through the parser's untyped
+    /// `ProtectionTarget::CardType` catch-all and names something that is not a
+    /// card type at all, so `source_matches_card_type` can never match it and
+    /// the grant is INERT. The card parses, exports a real `AddKeyword`
+    /// modification, and protects from nothing — Haktos the Unscarred's
+    /// "each mana value other than the chosen number".
+    ///
+    /// The repo already documents this hazard class in `types/keywords.rs`'s
+    /// `parse_protection_target_monocolored_is_quality_not_card_type`, which
+    /// notes that such a grant "would do nothing".
+    InertProtectionQualityGrant,
 }
 
 impl StructuralFeature {
@@ -9237,6 +8958,10 @@ impl StructuralFeature {
             AdditionalCost => "structural:additional_cost",
             CostReduction => "structural:cost_reduction",
             TriggerCondition => "structural:trigger_condition",
+            TrackedSetReturnAfterBattlefieldExit => {
+                "structural:tracked_set_return_after_battlefield_exit"
+            }
+            InertProtectionQualityGrant => "structural:inert_protection_quality_grant",
         }
     }
 
@@ -9249,6 +8974,18 @@ impl StructuralFeature {
             Condition | ElseAbility | RepeatFor | ForwardResult | Duration | OptionalFor
             | MultiTarget | Distribute | AbilityModal | SpellModal | AdditionalCost
             | CostReduction | TriggerCondition => FeatureSupport::Handled,
+            // MEASURED UNHANDLED. Lae'zel's Acrobatics was driven through the
+            // real cast pipeline at this tip and its creatures are permanently
+            // stranded in exile. The paired control is Sudden Disappearance —
+            // same publisher, same singular-`ChangeZone` consumer, but with the
+            // flag TRUE — which was driven through the same pipeline and DOES
+            // return its creatures. That pair is why the FLAG, not the effect
+            // shape, is the discriminator.
+            TrackedSetReturnAfterBattlefieldExit => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED. `source_matches_card_type` compares the quality
+            // only against core-type words and parseable subtypes, so a quality
+            // outside both can never match any source and the grant does nothing.
+            InertProtectionQualityGrant => FeatureSupport::Unhandled,
         }
     }
 }
@@ -9259,6 +8996,10 @@ impl StructuralFeature {
 /// via exhaustive matches on the source enum, so adding a new variant is a
 /// compile error until it is explicitly classified.
 fn extract_card_features(face: &CardFace, features: &mut HashMap<String, FeatureSupport>) {
+    // The stranded tracked-set detector runs inside the shared ability walk
+    // (`extract_ability_features_with_token_statics`), so printed abilities,
+    // trigger executes, replacement payloads, AND granted payloads are all
+    // covered with no per-loop call.
     for def in face.abilities.iter() {
         extract_ability_features(def, features);
     }
@@ -9274,12 +9015,192 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
     for stat in &face.static_abilities {
         extract_static_features(stat, features, TokenStaticTraversal::Include);
     }
+    // CR 702.16: the same inert-grant check for a PRINTED keyword line, which
+    // lands on the face rather than inside a static's modifications.
+    for keyword in &face.keywords {
+        if keyword_is_inert_protection_grant(keyword) {
+            emit_structural(features, StructuralFeature::InertProtectionQualityGrant);
+        }
+    }
     if face.additional_cost.is_some() {
         emit_structural(features, StructuralFeature::AdditionalCost);
     }
     if face.modal.is_some() {
         emit_structural(features, StructuralFeature::SpellModal);
     }
+}
+
+/// TRACKED-SET-RETURN-DEFECT detector — see
+/// [`StructuralFeature::TrackedSetReturnAfterBattlefieldExit`].
+///
+/// Fires on ONE precise shape: a `CreateDelayedTrigger` whose `uses_tracked_set`
+/// flag is FALSE and whose body is a SINGULAR `Effect::ChangeZone` moving a
+/// tracked set.
+///
+/// That flag is the whole discriminator, and it is mechanical rather than
+/// heuristic:
+///
+/// * flag TRUE — `delayed_trigger.rs`'s eager bind runs and its `ChangeZone` arm
+///   REWRITES the singular move into an `Effect::ChangeZoneAll`, which then takes
+///   the WORKING scan-zone re-derivation branch at `change_zone.rs:1982`.
+/// * flag FALSE — the eager bind never runs, the effect stays a singular
+///   `ChangeZone`, and `change_zone.rs:1982` gates its re-derivation on
+///   `Effect::ChangeZoneAll { origin: None, .. }`. The singular move falls to the
+///   `else` branch, keeps the battlefield default, scans the BATTLEFIELD for
+///   members sitting in EXILE, and moves nothing. `extract_in_zone`
+///   (`types/ability.rs:19644`) cannot correct the default because it has no
+///   tracked-set arm — the same gap `put_on_top.rs:341` already documents.
+///
+/// MEASURED, both directions, at this tip:
+///
+/// * flag FALSE → 2 cards, Lae'zel's Acrobatics and Kharasha Foothills. Lae'zel's
+///   was driven through the real cast pipeline and its creatures are permanently
+///   stranded in exile.
+/// * flag TRUE → 16 cards. Sudden Disappearance was driven through the same
+///   pipeline and its creatures DO return. Planar Guide, Storm Herald, Rally the
+///   Ancestors and the rest of that set are green and must stay green.
+///
+/// An earlier revision of this detector keyed on "a battlefield-exit publisher
+/// plus any tracked-set consumer". That was too broad and was withdrawn after
+/// Sudden Disappearance — same publisher, same singular-`ChangeZone` consumer —
+/// was measured WORKING. Marking a working card red is the same honesty
+/// violation as leaving a broken one green.
+///
+/// The counts above were measured when the detector was introduced; the
+/// card-data coverage gate re-verifies them on every head.
+///
+/// EMISSION: the detector runs at the top of the shared ability walk
+/// (`extract_ability_features_with_token_statics`), so granted payloads
+/// (GrantAbility/GrantTrigger/GrantReplacement bodies) strand exactly like
+/// printed ones. An explicit `ChangeZone` origin selects the scan zone but
+/// cannot preserve which tracked set the delayed return refers to.
+/// TRAVERSAL: every executable payload edge, with the enclosing "inside an
+/// unbound delayed trigger" state propagated through all of them.
+///
+/// Descent reuses [`visit_direct_effect_ability_payloads`] rather than
+/// hand-rolling a second walk, so the census cannot drift from the repo's own
+/// definition of "nested executable payload" — `Vote`, `SeparateIntoPiles`,
+/// `RevealFromHand`, the flip branches and `ChooseOneOf` are all reached, not
+/// just `CreateDelayedTrigger` and `RollDie`.
+///
+/// The state is propagated rather than tested only at the delayed trigger's
+/// IMMEDIATE effect: a return nested in the body's `sub_ability` (or in any
+/// payload beneath it) strands its objects exactly the same way.
+fn scan_stranded_tracked_set(def: &AbilityDefinition, inside_unbound_delayed: bool) -> bool {
+    // An explicit origin fixes the scan zone, but an unbound delayed return
+    // still resolves its sentinel against the latest set when it fires. A
+    // later publisher can replace the set the creating effect meant.
+    if inside_unbound_delayed
+        && matches!(
+            &*def.effect,
+            Effect::ChangeZone { target, .. } if matches!(
+                target,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+            )
+        )
+    {
+        return true;
+    }
+
+    // Entering THIS effect's delayed-trigger payload turns the state on when the
+    // trigger is unbound, and leaves it otherwise untouched so a bound trigger
+    // nested inside an unbound one is still evaluated on its own merits.
+    let delayed_payload_is_unbound = matches!(
+        &*def.effect,
+        Effect::CreateDelayedTrigger {
+            uses_tracked_set: false,
+            ..
+        }
+    );
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |edge, payload| {
+        let payload_state = match edge {
+            DirectEffectPayloadEdge::CreateDelayedTriggerEffect => delayed_payload_is_unbound,
+            _ => inside_unbound_delayed,
+        };
+        found |= scan_stranded_tracked_set(payload, payload_state);
+    });
+    // Replacement-owned payloads carry the same executable bodies: an unbound
+    // delayed tracked-set return nested in an `AddTargetReplacement` body
+    // strands its objects exactly like one in a direct payload (see
+    // `visit_effect_replacement_ability_payloads`: the inner replacement is
+    // registered for a later event, but its bodies stay on the card's
+    // coverage surface). Reuses that visitor — the single authority for
+    // effect-owned replacement edges — rather than matching the variant here.
+    // State passes through unchanged: entering a replacement body neither
+    // enters nor exits a delayed trigger.
+    visit_effect_replacement_ability_payloads(&def.effect, |_, payload| {
+        found |= scan_stranded_tracked_set(payload, inside_unbound_delayed);
+    });
+
+    found
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| scan_stranded_tracked_set(sub, inside_unbound_delayed))
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(|branch| scan_stranded_tracked_set(branch, inside_unbound_delayed))
+        || def
+            .mode_abilities
+            .iter()
+            .any(|mode| scan_stranded_tracked_set(mode, inside_unbound_delayed))
+}
+
+fn delayed_trigger_strands_a_tracked_set(def: &AbilityDefinition) -> bool {
+    scan_stranded_tracked_set(def, false)
+}
+
+/// TRACKED-SET-RETURN-DEFECT's sibling honesty marker: a `Protection` grant the
+/// runtime can never satisfy.
+///
+/// `ProtectionTarget::CardType(s)` is the parser's catch-all for a protection
+/// quality it could not type (`types/keywords.rs`), and
+/// `game::keywords::source_matches_card_type` can only ever match `s` against a
+/// core type word or a parseable subtype. Any other string — "each mana value
+/// other than the chosen number" (Haktos the Unscarred), "each color", "that
+/// player" — makes the grant INERT: the card parses, exports a real
+/// `AddKeyword` modification, and grants nothing at runtime.
+///
+/// The predicate below mirrors `source_matches_card_type`'s two acceptance paths
+/// exactly, so the two cannot drift.
+fn protection_card_type_is_satisfiable(quality: &str) -> bool {
+    const CORE_TYPE_WORDS: [&str; 14] = [
+        "artifact",
+        "artifacts",
+        "creature",
+        "creatures",
+        "enchantment",
+        "enchantments",
+        "instant",
+        "instants",
+        "sorcery",
+        "sorceries",
+        "planeswalker",
+        "planeswalkers",
+        "land",
+        "lands",
+    ];
+    if CORE_TYPE_WORDS
+        .iter()
+        .any(|word| quality.eq_ignore_ascii_case(word))
+    {
+        return true;
+    }
+    // Same subtype gate `source_subtype_matches_protection_quality` applies:
+    // the quality must parse as a subtype and be fully consumed.
+    let lowered = quality.to_ascii_lowercase();
+    crate::parser::oracle_util::parse_subtype(&lowered)
+        .is_some_and(|(_, consumed)| consumed == lowered.len())
+}
+
+fn keyword_is_inert_protection_grant(keyword: &Keyword) -> bool {
+    matches!(
+        keyword,
+        Keyword::Protection(ProtectionTarget::CardType(quality))
+            if !protection_card_type_is_satisfiable(quality)
+    )
 }
 
 fn emit_structural(features: &mut HashMap<String, FeatureSupport>, s: StructuralFeature) {
@@ -9340,6 +9261,19 @@ fn extract_ability_features_with_token_statics(
     features: &mut HashMap<String, FeatureSupport>,
     token_static_traversal: TokenStaticTraversal,
 ) {
+    // TRACKED-SET-RETURN-DEFECT: run the stranded-set detector on EVERY
+    // ability definition this walk reaches — including GrantAbility,
+    // GrantTrigger, and GrantReplacement payloads reached through static
+    // carriers — not just top-level abilities. Emitting here (one tag key,
+    // idempotent) keeps a single authority instead of one call per census
+    // loop; a stranded return nested in a granted trigger must strand.
+    if delayed_trigger_strands_a_tracked_set(def) {
+        emit_structural(
+            features,
+            StructuralFeature::TrackedSetReturnAfterBattlefieldExit,
+        );
+    }
+
     // Condition
     if let Some(ref cond) = def.condition {
         emit_structural(features, StructuralFeature::Condition);
@@ -9441,6 +9375,15 @@ fn extract_modification_features(
     features: &mut HashMap<String, FeatureSupport>,
     token_static_traversal: TokenStaticTraversal,
 ) {
+    // CR 702.16: a protection grant whose quality never lowered to a typed
+    // target is inert at runtime. Checked here rather than at the card level so
+    // it also covers grants nested inside `GrantAbility` payloads, which
+    // `walk_self_and_granted` routes through this same function.
+    if let ContinuousModification::AddKeyword { keyword } = modification {
+        if keyword_is_inert_protection_grant(keyword) {
+            emit_structural(features, StructuralFeature::InertProtectionQualityGrant);
+        }
+    }
     match modification {
         ContinuousModification::GrantAbility { definition } => {
             extract_ability_features_with_token_statics(
@@ -13185,6 +13128,260 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+    /// Fixture shared by the replacement-payload stranding tests: an unbound
+    /// delayed tracked-set return nested in an `AddTargetReplacement` execute
+    /// body — the minimal carrier for the shape CodeRabbit's Major flagged as
+    /// invisible to the census.
+    fn tracked_return_mid(
+        uses_tracked_set: bool,
+        origin: Option<Zone>,
+    ) -> crate::types::ability::AbilityDefinition {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, TargetFilter,
+        };
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::phase::Phase;
+        use crate::types::zones::{EtbTapState, Zone};
+
+        let inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(inner),
+                uses_tracked_set,
+            },
+        )
+    }
+
+    fn replacement_owned_tracked_return(
+        uses_tracked_set: bool,
+        origin: Option<Zone>,
+    ) -> crate::types::ability::AbilityDefinition {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mid = tracked_return_mid(uses_tracked_set, origin);
+        let repl = ReplacementDefinition {
+            execute: Some(Box::new(mid)),
+            ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        };
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddTargetReplacement {
+                replacement: Box::new(repl),
+                target: TargetFilter::Any,
+            },
+        )
+    }
+
+    /// CodeRabbit Major on the pushed head: the census never descended into
+    /// replacement-owned payloads. Without the `visit_effect_replacement_`
+    /// edge in the scan, this returns false and the card reports support it
+    /// does not have.
+    #[test]
+    fn replacement_owned_unbound_delayed_tracked_return_is_stranded() {
+        assert!(
+            super::delayed_trigger_strands_a_tracked_set(&replacement_owned_tracked_return(
+                false, None
+            )),
+            "unbound delayed tracked-set return inside a replacement execute body must strand"
+        );
+    }
+
+    /// PAIRED GUARD: the bound flag is the discriminator, not the shape. Same
+    /// carrier with `uses_tracked_set: true` must not strand — otherwise the
+    /// assertion above could pass because the detector is true-by-default.
+    #[test]
+    fn replacement_owned_bound_delayed_tracked_return_is_not_stranded() {
+        assert!(
+            !super::delayed_trigger_strands_a_tracked_set(&replacement_owned_tracked_return(
+                true, None
+            )),
+            "bound delayed trigger rebinds the set eagerly, so nothing strands"
+        );
+    }
+
+    /// The `face.replacements` census loop runs the same detector over
+    /// replacement execute/decline payloads: a stranded shape on a face must
+    /// surface the structural tag, and a clean face must not.
+    #[test]
+    fn face_replacement_payloads_emit_the_stranded_tracked_set_tag() {
+        use crate::types::card::CardFace;
+        use std::collections::HashMap;
+
+        const TAG: &str = "structural:tracked_set_return_after_battlefield_exit";
+        let stranded = match &replacement_owned_tracked_return(false, None)
+            .effect
+            .as_ref()
+        {
+            crate::types::ability::Effect::AddTargetReplacement { replacement, .. } => {
+                (**replacement).clone()
+            }
+            other => panic!("fixture must be AddTargetReplacement, got {other:?}"),
+        };
+        let face = CardFace {
+            replacements: vec![stranded],
+            ..Default::default()
+        };
+        let mut features = HashMap::new();
+        super::extract_card_features(&face, &mut features);
+        assert!(
+            features.contains_key(TAG),
+            "a stranded return in a face replacement payload must emit the tag"
+        );
+        let mut clean_features = HashMap::new();
+        super::extract_card_features(&CardFace::default(), &mut clean_features);
+        assert!(
+            !clean_features.contains_key(TAG),
+            "reach-guard: a face with no replacements must not emit the tag"
+        );
+    }
+
+    /// The review's "execute/decline" half: the visitor yields decline bodies
+    /// through the same edge, so a stranded return living ONLY in a decline
+    /// payload must strand and tag exactly like one in an execute body.
+    /// Removing the decline arm from `visit_replacement_ability_payloads`
+    /// flips both assertions.
+    #[test]
+    fn replacement_decline_payload_stranding_is_detected_and_tagged() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementMode, TargetFilter,
+        };
+        use crate::types::card::CardFace;
+        use std::collections::HashMap;
+
+        const TAG: &str = "structural:tracked_set_return_after_battlefield_exit";
+        let decline_only = match &replacement_owned_tracked_return(false, None)
+            .effect
+            .as_ref()
+        {
+            Effect::AddTargetReplacement { replacement, .. } => {
+                let mut decline_only = (**replacement).clone();
+                let stranded = decline_only.execute.take();
+                decline_only.mode = ReplacementMode::Optional { decline: stranded };
+                decline_only
+            }
+            other => panic!("fixture must be AddTargetReplacement, got {other:?}"),
+        };
+        assert!(
+            super::delayed_trigger_strands_a_tracked_set(&AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(decline_only.clone()),
+                    target: TargetFilter::Any,
+                },
+            )),
+            "a stranded return in a decline-only payload must strand"
+        );
+        let face = CardFace {
+            replacements: vec![decline_only],
+            ..Default::default()
+        };
+        let mut features = HashMap::new();
+        super::extract_card_features(&face, &mut features);
+        assert!(
+            features.contains_key(TAG),
+            "a stranded return in a face replacement decline payload must emit the tag"
+        );
+    }
+
+    /// An explicit Exile origin can retrieve the intended set when it is still
+    /// the latest, but does not preserve that identity across a later publisher.
+    #[test]
+    fn explicit_origin_unbound_tracked_set_return_is_unsupported() {
+        assert!(
+            super::delayed_trigger_strands_a_tracked_set(&tracked_return_mid(
+                false,
+                Some(crate::types::zones::Zone::Exile)
+            )),
+            "an explicit Exile origin does not preserve the intended tracked set"
+        );
+        assert!(
+            !super::delayed_trigger_strands_a_tracked_set(&tracked_return_mid(
+                true,
+                Some(crate::types::zones::Zone::Exile)
+            )),
+            "a bound delayed return preserves its intended tracked set"
+        );
+    }
+
+    /// Review HIGH (granted payloads): the stranded-set detector runs inside
+    /// the shared ability walk, so a stranded return nested in a GRANTED
+    /// trigger's execute body strands exactly like a printed one. Removing
+    /// the walk-top detector call flips the first assertion while the bound
+    /// control stays green.
+    #[test]
+    fn granted_trigger_stranding_is_detected_and_tagged() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition, TriggerDefinition};
+        use crate::types::card::CardFace;
+        use crate::types::statics::StaticMode;
+        use crate::types::triggers::TriggerMode;
+        use std::collections::HashMap;
+
+        fn granted_face(uses_tracked_set: bool) -> CardFace {
+            let mut trigger = TriggerDefinition::new(TriggerMode::StateCondition);
+            trigger.execute = Some(Box::new(tracked_return_mid(uses_tracked_set, None)));
+            CardFace {
+                static_abilities: vec![StaticDefinition {
+                    mode: StaticMode::Continuous,
+                    affected: None,
+                    modifications: vec![ContinuousModification::GrantTrigger {
+                        trigger: Box::new(trigger),
+                    }],
+                    condition: None,
+                    per_player_condition: None,
+                    affected_zone: None,
+                    effect_zone: None,
+                    active_zones: vec![],
+                    characteristic_defining: false,
+                    description: None,
+                    attack_defended: None,
+                    source_controller: None,
+                    source_object: None,
+                    bypass_beneficiary: None,
+                    protection_does_not_remove: None,
+                    room_door: None,
+                }],
+                ..Default::default()
+            }
+        }
+
+        const TAG: &str = "structural:tracked_set_return_after_battlefield_exit";
+        let mut features = HashMap::new();
+        super::extract_card_features(&granted_face(false), &mut features);
+        assert!(
+            features.contains_key(TAG),
+            "a stranded return in a granted trigger execute body must emit the tag"
+        );
+        let mut bound_features = HashMap::new();
+        super::extract_card_features(&granted_face(true), &mut bound_features);
+        assert!(
+            !bound_features.contains_key(TAG),
+            "bound control: a bound granted return must not emit the tag"
+        );
+    }
 
     /// The coverage receipt exists so a reviewer can see a parser/semantic
     /// change at card granularity. A formatter that drops a behavior-bearing
@@ -13817,7 +14014,7 @@ mod tests {
         AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
         CounterTransferMode, DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope,
         PreventionAmount, PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter,
-        TriggerConstraint, VoteTally, VoteVisibility, VoterScope,
+        TriggerConstraint, VoteSubject, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};

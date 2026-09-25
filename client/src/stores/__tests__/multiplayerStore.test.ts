@@ -1088,6 +1088,42 @@ describe("multiplayerStore", () => {
     },
   );
 
+  it.each([
+    ["a string", "yes"],
+    ["a number", 1],
+    ["null", null],
+  ])("hydrates %s remembered pod listing choice as never chosen", (_label, stored) => {
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({ state: { lastPodListingPublic: stored }, version: 6 }),
+    );
+
+    act(() => useMultiplayerStore.persist.rehydrate());
+
+    expect(useMultiplayerStore.getState().lastPodListingPublic).toBeNull();
+  });
+
+  it.each([true, false])(
+    "hydrates a stored %s pod listing choice",
+    (stored) => {
+      localStorage.setItem(
+        "phase-multiplayer",
+        JSON.stringify({ state: { lastPodListingPublic: stored }, version: 6 }),
+      );
+
+      act(() => useMultiplayerStore.persist.rehydrate());
+
+      expect(useMultiplayerStore.getState().lastPodListingPublic).toBe(stored);
+    },
+  );
+
+  it("persists the remembered pod listing choice", () => {
+    act(() => useMultiplayerStore.getState().rememberPodListingPublic(false));
+
+    const persisted = JSON.parse(localStorageItems.get("phase-multiplayer") ?? "null");
+    expect(persisted?.state?.lastPodListingPublic).toBe(false);
+  });
+
   it("strips AI seats from team-based server host settings", async () => {
     useMultiplayerStore.getState().startHosting(
       hostingSettings({
