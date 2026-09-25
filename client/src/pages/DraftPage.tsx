@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
@@ -78,7 +78,9 @@ function subscribePickInteraction(listener: () => void): () => void {
   });
 }
 
-function FormatPicker({ onLaunch, supportsBo3 }: { onLaunch: () => void; supportsBo3: boolean }) {
+function FormatPicker({
+  onLaunch, supportsBo3, pending, error,
+}: { onLaunch: () => void; supportsBo3: boolean; pending: boolean; error: string | null }) {
   const { t } = useTranslation("draft");
   const runFormat = useDraftStore((s) => s.runFormat);
   const setRunFormat = useDraftStore((s) => s.setRunFormat);
@@ -96,6 +98,7 @@ function FormatPicker({ onLaunch, supportsBo3 }: { onLaunch: () => void; support
             key={opt.value}
             type="button"
             onClick={() => setRunFormat(opt.value)}
+            disabled={pending}
             className={`group flex w-full cursor-pointer items-start gap-4 rounded-card border surface-card p-4 text-left transition-all duration-150 ${
               runFormat === opt.value
                 ? "border-jade/45 ring-1 ring-jade/20 shadow-panel"
@@ -126,17 +129,22 @@ function FormatPicker({ onLaunch, supportsBo3 }: { onLaunch: () => void; support
       <button
         type="button"
         onClick={onLaunch}
-        className={menuButtonClass({ tone: "emerald", size: "lg" })}
+        disabled={pending}
+        aria-busy={pending}
+        className={menuButtonClass({ tone: "emerald", size: "lg", disabled: pending })}
       >
-        {t("formatPicker.startMatch")}
+        {t("formatPicker.startMatch")}{pending ? "…" : ""}
       </button>
+      {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
     </div>
   );
 }
 
 // ── Between Matches ───────────────────────────────────────────────────
 
-function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => void }) {
+function BetweenMatches({
+  onNext, onEnd, pending, error,
+}: { onNext: () => void; onEnd: () => void; pending: boolean; error: string | null }) {
   const { t } = useTranslation("draft");
   const runState = useDraftStore((s) => s.runState);
   const runFormat = useDraftStore((s) => s.runFormat);
@@ -161,9 +169,11 @@ function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => vo
         <button
           type="button"
           onClick={onNext}
-          className={menuButtonClass({ tone: "emerald", size: "lg" })}
+          disabled={pending}
+          aria-busy={pending}
+          className={menuButtonClass({ tone: "emerald", size: "lg", disabled: pending })}
         >
-          {t("run.nextMatch")}
+          {t("run.nextMatch")}{pending ? "…" : ""}
         </button>
         <button
           type="button"
@@ -173,6 +183,7 @@ function BetweenMatches({ onNext, onEnd }: { onNext: () => void; onEnd: () => vo
           {t("run.endRun")}
         </button>
       </div>
+      {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
     </div>
   );
 }
@@ -362,6 +373,9 @@ export function DraftPage() {
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
+  const [launchPending, setLaunchPending] = useState(false);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const launchInFlight = useRef(false);
   const [workspacePreferences, setWorkspacePreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
   const [responsiveViewport, setResponsiveViewport] = useState(() => ({
     width: window.innerWidth,
@@ -475,13 +489,25 @@ export function DraftPage() {
     [setupMode],
   );
 
-  const handleLaunchMatch = useCallback(async () => {
-    await useDraftStore.getState().launchMatch(navigate);
+  const handleLaunch = useCallback(async (next: boolean) => {
+    if (launchInFlight.current) return;
+    launchInFlight.current = true;
+    setLaunchPending(true);
+    setLaunchError(null);
+    try {
+      if (next) await useDraftStore.getState().launchNextMatch(navigate);
+      else await useDraftStore.getState().launchMatch(navigate);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLaunchError(message);
+    } finally {
+      launchInFlight.current = false;
+      setLaunchPending(false);
+    }
   }, [navigate]);
 
-  const handleLaunchNextMatch = useCallback(async () => {
-    await useDraftStore.getState().launchNextMatch(navigate);
-  }, [navigate]);
+  const handleLaunchMatch = useCallback(() => { void handleLaunch(false); }, [handleLaunch]);
+  const handleLaunchNextMatch = useCallback(() => { void handleLaunch(true); }, [handleLaunch]);
 
   const handleEndRun = useCallback(async () => {
     await useDraftStore.getState().endRun();
@@ -809,11 +835,18 @@ export function DraftPage() {
           <FormatPicker
             onLaunch={handleLaunchMatch}
             supportsBo3={draftView?.match_config.match_type === "Bo3"}
+            pending={launchPending}
+            error={launchError}
           />
         )}
 
         {!resumeLoading && phase === "playing" && (
-          <BetweenMatches onNext={handleLaunchNextMatch} onEnd={handleEndRun} />
+          <BetweenMatches
+            onNext={handleLaunchNextMatch}
+            onEnd={handleEndRun}
+            pending={launchPending}
+            error={launchError}
+          />
         )}
 
         {!resumeLoading && phase === "complete" && (

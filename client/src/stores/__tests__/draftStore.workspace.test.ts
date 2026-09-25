@@ -81,8 +81,16 @@ const persistence = vi.hoisted(() => ({
   )),
 }));
 
+const formatGate = vi.hoisted(() => ({
+  evaluate: vi.fn(async (_request: unknown) => ({ compatible: true, reasons: [] as string[] })),
+}));
+
 vi.mock("@wasm/draft", () => wasm);
 vi.mock("../../services/quickDraftPersistence", () => persistence);
+vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../adapter/wasm-adapter")>(),
+  getSharedAdapter: () => ({ evaluateDeckFormatGate: formatGate.evaluate }),
+}));
 
 import {
   useDraftStore,
@@ -174,6 +182,7 @@ describe("draft store workspace authority", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
     // Module state, so it survives `reset()` and would otherwise leak the
     // geometry one test publishes into the next.
@@ -1735,5 +1744,348 @@ describe("draft store workspace authority", () => {
       run: expect.objectContaining({ booster_pack_pool: pool }),
       payload: expect.objectContaining({ booster_pack_pool: pool }),
     }));
+  });
+
+  it("rejects an ante human deck before SubmitDeck while admitting its legal sibling", async () => {
+    const pool = [card("ante", "Contract from Below"), card("legal", "Forest")];
+    await start(pool);
+    const reason = "Can't be in a deck or sideboard unless the game is played for ante: Contract from Below";
+    formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: [reason] });
+    await expect(useDraftStore.getState().submitDeck()).rejects.toThrow(reason);
+    expect(formatGate.evaluate).toHaveBeenCalledWith(expect.objectContaining({
+      main_deck: ["Contract from Below", "Forest"], sideboard: [], commander: [],
+      draft_set_codes: [], selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
+    }));
+    expect(wasm.submit_deck).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().phase).toBe("drafting");
+
+    useDraftStore.getState().setWorkspacePlacement("ante", { zone: "sideboard", row: 0, column: 0, order: 0 });
+    wasm.submit_deck.mockReturnValue({ ...view(pool), status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    expect(formatGate.evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ main_deck: ["Forest"] }));
+    expect(wasm.submit_deck).toHaveBeenCalledOnce();
+    expect(useDraftStore.getState().phase).toBe("launching");
+  });
+
+  it("fails closed on unavailable submission gates and invalidates an edited pending deck", async () => {
+    await start([card("first", "Forest")]);
+    formatGate.evaluate.mockRejectedValueOnce(new Error("gate transport failed"));
+    await expect(useDraftStore.getState().submitDeck()).rejects.toThrow("gate transport failed");
+    expect(wasm.submit_deck).not.toHaveBeenCalled();
+
+    const delayed = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(delayed.promise);
+    const submission = useDraftStore.getState().submitDeck();
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    useDraftStore.setState({ workspaceState: { ...useDraftStore.getState().workspaceState! } });
+    delayed.resolve({ compatible: true, reasons: [] });
+    await expect(submission).rejects.toThrow("Stale draft deck submission");
+    expect(wasm.submit_deck).not.toHaveBeenCalled();
+  });
+
+  it("preflights both exact Bo1 seats before initial publication and rejects an invalid opponent", async () => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    const published = persistence.publishInitialDraftMatch.mock.calls[0][0] as {
+      payload: { player: { main_deck: string[]; sideboard: string[]; commander: string[] }; opponent: { main_deck: string[]; sideboard: string[]; commander: string[] } };
+      run: DraftRunState; meta: { runFormat: string };
+    };
+    expect(published.payload.player.main_deck).toEqual(["Forest"]);
+    expect(published.payload.opponent.main_deck).toEqual(["Opponent"]);
+    for (const deck of [published.payload.player, published.payload.opponent]) {
+      expect(formatGate.evaluate).toHaveBeenCalledWith(expect.objectContaining({
+        main_deck: deck.main_deck, sideboard: deck.sideboard, commander: deck.commander,
+        selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
+      }));
+      expect(deck.sideboard).toEqual([]);
+    }
+    expect(published.run.format).toBe("run");
+    expect(published.run.activeMatch?.format).toBe("run");
+    expect(published.meta.runFormat).toBe("run");
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
+
+    useDraftStore.getState().reset();
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    persistence.publishInitialDraftMatch.mockClear();
+    navigate.mockClear();
+    formatGate.evaluate.mockClear();
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { main_deck: string[] }).main_deck[0] !== "Opponent",
+      reasons: (request as { main_deck: string[] }).main_deck[0] === "Opponent" ? ["opponent rejected"] : [],
+    }));
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("opponent rejected");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().phase).toBe("launching");
+  });
+
+  it("keeps a selected Bo3 first match unpublished and saves the choice before immediate resume", async () => {
+    const pool = [card("human", "Forest")];
+    wasm.start_quick_draft.mockReturnValue({ ...view(pool), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    useDraftStore.getState().setRunFormat("bo3");
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { selected_match_type: string }).selected_match_type !== "Bo3",
+      reasons: (request as { selected_match_type: string }).selected_match_type === "Bo3"
+        ? ["BO3 requires a sideboard"] : [],
+    }));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo3", sideboard: [] });
+    }
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce();
+    const snapshot = persistence.persistQuickDraftSnapshot.mock.calls[0];
+    expect(snapshot[3].runFormat).toBe("bo3");
+    expect(snapshot[2]).toMatchObject({ workspace: useDraftStore.getState().workspaceState });
+
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(snapshot[3]);
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: snapshot[1], mainDeck: ["Forest"], landCounts: {}, poolSortMode: "color",
+      poolPanelOpen: true, workspace: (snapshot[2] as { workspace: unknown }).workspace,
+    });
+    wasm.import_draft_session.mockReturnValue({ ...view(pool), status: "Pairing", match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().resumeDraft();
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
+  it("publishes an immediate nondefault Sealed Full Run choice and reloads it from the durable run", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+    const sealedView = { ...view([card("human", "Forest")]), kind: "Sealed" as const, status: "Deckbuilding" as const };
+    wasm.start_sealed_draft.mockReturnValue(sealedView);
+    await useDraftStore.getState().startSealedDraft("pool", "TST", "Test", 2);
+    useDraftStore.getState().completeSealedOpening();
+    wasm.submit_deck.mockReturnValue({ ...sealedView, status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    expect(useDraftStore.getState().runFormat).toBe("single");
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    formatGate.evaluate.mockClear();
+    useDraftStore.getState().setRunFormat("run");
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo1", sideboard: [] });
+    }
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    const published = persistence.publishInitialDraftMatch.mock.calls[0][0] as unknown as {
+      run: DraftRunState; meta: ActiveQuickDraftMeta; sessionJson: string;
+      snapshot: { mainDeck: string[]; landCounts: Record<string, number>; poolSortMode: string;
+        poolPanelOpen: boolean; workspace: unknown };
+    };
+    expect(published.run.format).toBe("run");
+    expect(published.run.activeMatch?.format).toBe("run");
+    expect(published.meta.runFormat).toBe("run");
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
+
+    useDraftStore.getState().reset();
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(published.meta);
+    persistence.loadQuickDraftSession.mockResolvedValue({ sessionJson: published.sessionJson, ...published.snapshot });
+    persistence.loadDraftRun.mockResolvedValue(published.run);
+    wasm.import_draft_session.mockReturnValue({ ...sealedView, status: "Pairing" });
+    await useDraftStore.getState().resumeDraft();
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(useDraftStore.getState().runState?.format).toBe("run");
+  });
+
+  it("freezes the first-match choice across a pending gate and permits a new choice after rejection", async () => {
+    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const navigate = vi.fn();
+    const launch = useDraftStore.getState().launchMatch(navigate);
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    const timerCount = vi.getTimerCount();
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(vi.getTimerCount()).toBe(timerCount);
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    pending.resolve({ compatible: true, reasons: [] });
+    await launch;
+    expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { selected_match_type: string }).selected_match_type)).toEqual(["Bo1", "Bo1"]);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    const published = persistence.publishInitialDraftMatch.mock.calls[0][0] as unknown as {
+      run: DraftRunState; meta: { runFormat: string };
+    };
+    expect(published.run.format).toBe("run");
+    expect(published.run.activeMatch?.format).toBe("run");
+    expect(published.meta.runFormat).toBe("run");
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
+
+    useDraftStore.setState({ phase: "launching", runState: null });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { selected_match_type: string }).selected_match_type !== "Bo3",
+      reasons: (request as { selected_match_type: string }).selected_match_type === "Bo3" ? ["BO3 requires a sideboard"] : [],
+    }));
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ selected_match_type: "Bo3", sideboard: [] }));
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["staged-retry", "next-match"] as const)("freezes %s through both exact Bo1 seat gates", async (branch) => {
+    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    const draftId = useDraftStore.getState().draftId!;
+    const staged: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId, gameId: "staged", format: "run", resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    if (branch === "staged-retry") useDraftStore.setState({ phase: "launching" });
+    else {
+      staged.results = [{ gameId: "finished", result: "win" }];
+      staged.activeMatch = undefined;
+      useDraftStore.setState({ phase: "playing", runState: staged });
+      wasm.get_bot_deck.mockReturnValue({ main_deck: ["New Opponent"], lands: {} });
+    }
+    persistence.loadDraftRun.mockResolvedValue(staged);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const navigate = vi.fn();
+    const launch = branch === "staged-retry"
+      ? useDraftStore.getState().launchMatch(navigate)
+      : useDraftStore.getState().launchNextMatch(navigate);
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    if (branch === "next-match") {
+      await useDraftStore.getState().launchNextMatch(navigate);
+      expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    }
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    pending.resolve({ compatible: true, reasons: [] });
+    await launch;
+    expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { selected_match_type: string }).selected_match_type)).toEqual(["Bo1", "Bo1"]);
+    const published = (persistence.publishStagedDraftMatch.mock.calls as unknown as Array<[unknown]>)[0][0] as {
+      payload: { player: { main_deck: string[] }; opponent: { main_deck: string[] } };
+      meta: { runFormat: string }; run?: DraftRunState;
+    };
+    expect(published.payload.player.main_deck).toEqual(["Forest"]);
+    expect(published.payload.opponent.main_deck).toEqual(branch === "staged-retry" ? ["Opponent"] : ["New Opponent"]);
+    expect(published.meta.runFormat).toBe("run");
+    expect(published.run?.activeMatch?.format ?? staged.activeMatch?.format).toBe("run");
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("match=bo1"));
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["staged-retry", "next-match"] as const)("refuses empty-sideboard Bo3 %s before stage publication", async (branch) => {
+    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    const draftId = useDraftStore.getState().draftId!;
+    const run: DraftRunState = {
+      format: "bo3", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId, gameId: "staged", format: "bo3", resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    useDraftStore.getState().setRunFormat("bo3");
+    if (branch === "staged-retry") useDraftStore.setState({ phase: "launching" });
+    else {
+      run.results = [{ gameId: "finished", result: "draw" }];
+      run.activeMatch = undefined;
+      useDraftStore.setState({ phase: "playing", runState: run });
+      wasm.get_bot_deck.mockReturnValue({ main_deck: ["New Opponent"], lands: {} });
+    }
+    persistence.loadDraftRun.mockResolvedValue(run);
+    formatGate.evaluate.mockImplementation(async () => ({ compatible: false, reasons: ["BO3 requires a sideboard"] }));
+    const navigate = vi.fn();
+    const launch = branch === "staged-retry"
+      ? useDraftStore.getState().launchMatch(navigate)
+      : useDraftStore.getState().launchNextMatch(navigate);
+    await expect(launch).rejects.toThrow("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo3", sideboard: [] });
+    }
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
+  it("rejects a non-action choice mutation after a positive gate without publishing", async () => {
+    wasm.start_quick_draft.mockReturnValue({ ...view([card("human", "Forest")]), match_config: { match_type: "Bo3" } });
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const navigate = vi.fn();
+    const launch = useDraftStore.getState().launchMatch(navigate);
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    useDraftStore.setState({ runFormat: "bo3" });
+    pending.resolve({ compatible: true, reasons: [] });
+    await expect(launch).rejects.toThrow("Stale draft match launch");
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+  });
+
+  it("saves the current workspace on first-launch rejection and reports a failed choice save", async () => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const launch = useDraftStore.getState().launchMatch(vi.fn());
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    const currentWorkspace = { ...useDraftStore.getState().workspaceState! };
+    useDraftStore.setState({ workspaceState: currentWorkspace });
+    pending.resolve({ compatible: false, reasons: ["engine rejected"] });
+    await expect(launch).rejects.toThrow("engine rejected");
+    expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce();
+    expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), expect.objectContaining({ workspace: currentWorkspace }), expect.any(Object),
+    );
+
+    persistence.persistQuickDraftSnapshot.mockClear();
+    persistence.persistQuickDraftSnapshot.mockRejectedValueOnce(new Error("disk unavailable"));
+    formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: ["engine rejected"] });
+    await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toThrow(
+      "engine rejected; format choice could not be saved: disk unavailable",
+    );
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+  });
+
+  it("does not write an abandoned first-launch failure snapshot after session replacement", async () => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    const pending = deferred<{ compatible: boolean; reasons: string[] }>();
+    formatGate.evaluate.mockReturnValueOnce(pending.promise);
+    const launch = useDraftStore.getState().launchMatch(vi.fn());
+    await vi.waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    useDraftStore.getState().reset();
+    pending.resolve({ compatible: false, reasons: ["engine rejected"] });
+    await expect(launch).rejects.toThrow("engine rejected");
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
   });
 });

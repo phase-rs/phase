@@ -44,6 +44,8 @@ const wasm = vi.hoisted(() => ({
   submit_deck: vi.fn(),
   suggest_deck: vi.fn(),
   suggest_lands: vi.fn(),
+  get_bot_deck: vi.fn(() => ({ main_deck: ["Opponent"], lands: {} })),
+  booster_pack_pool_for_game: vi.fn(() => []),
   export_draft_session: vi.fn(() => "session"),
 }));
 
@@ -58,6 +60,10 @@ const persistence = vi.hoisted(() => ({
   publishStagedDraftMatch: vi.fn(async () => undefined),
   recordDraftMatchResult: vi.fn(async () => null),
   runLimits: vi.fn(() => ({ maxWins: 1, maxLosses: 1 })),
+}));
+
+const formatGate = vi.hoisted(() => ({
+  evaluate: vi.fn(async (_request: unknown) => ({ compatible: true, reasons: [] as string[] })),
 }));
 
 // Captures the controller DraftPage hands the deckbuilder so the wiring back
@@ -79,6 +85,10 @@ const arrivingPreferences = vi.hoisted(() => vi.fn());
 
 vi.mock("@wasm/draft", () => wasm);
 vi.mock("../../services/quickDraftPersistence", () => persistence);
+vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../adapter/wasm-adapter")>(),
+  getSharedAdapter: () => ({ evaluateDeckFormatGate: formatGate.evaluate }),
+}));
 vi.mock("../../services/engineRuntime", () => ({
   ensureCardDatabase: vi.fn(async () => 0),
   ensureCardLocale: vi.fn(async () => new Map()),
@@ -186,6 +196,7 @@ function view(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
 describe("DraftPage local deckbuilding wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
     captured.local = null;
     captured.preview = null;
     captured.menuShell = null;
@@ -236,6 +247,56 @@ describe("DraftPage local deckbuilding wiring", () => {
     wasm.submit_deck.mockReturnValue(view({ status: "Pairing" }));
     await act(async () => { await controller!.onSubmitDeck(); });
     expect(wasm.submit_deck).toHaveBeenCalledWith(JSON.stringify(["Grizzly Bears", "Plains"]), JSON.stringify([]));
+  });
+
+  it("shows a strict Bo3 launch reason, keeps the choice, and allows a later legal retry", async () => {
+    wasm.start_quick_draft.mockReturnValue(view({
+      pool: [card("forest", "Forest")],
+      match_config: { match_type: "Bo3" },
+    }));
+    await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
+    act(() => useDraftStore.setState({ phase: "launching" }));
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { selected_match_type: string }).selected_match_type !== "Bo3",
+      reasons: (request as { selected_match_type: string }).selected_match_type === "Bo3" ? ["BO3 requires a sideboard"] : [],
+    }));
+    render(<MemoryRouter><DraftPage /></MemoryRouter>);
+
+    fireEvent.click(screen.getByRole("button", { name: /Best of Three/ }));
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    fireEvent.click(screen.getByRole("button", { name: "Start Match" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    expect(screen.getByRole("button", { name: "Start Match" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Full Run/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Start Match" }));
+    await waitFor(() => expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce());
+    expect(formatGate.evaluate).toHaveBeenLastCalledWith(expect.objectContaining({ selected_match_type: "Bo1" }));
+  });
+
+  it("disables the start action and format picker while a strict launch gate is pending", async () => {
+    wasm.start_quick_draft.mockReturnValue(view({
+      pool: [card("forest", "Forest")],
+      match_config: { match_type: "Bo3" },
+    }));
+    await act(async () => useDraftStore.getState().startDraft("pool", "TST", "Test", 2));
+    act(() => useDraftStore.setState({ phase: "launching" }));
+    let release!: (result: { compatible: boolean; reasons: string[] }) => void;
+    formatGate.evaluate.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    render(<MemoryRouter><DraftPage /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "Start Match" }));
+    await waitFor(() => expect(formatGate.evaluate).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "Start Match…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Best of Three/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /Best of Three/ }));
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    release({ compatible: false, reasons: ["temporarily rejected"] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("temporarily rejected");
+    expect(screen.getByRole("button", { name: "Start Match" })).toBeEnabled();
   });
 
   it("forwards global draft visual preferences while drafting", async () => {

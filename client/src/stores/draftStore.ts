@@ -66,6 +66,8 @@ import {
   type DraftRunState,
 } from "../services/quickDraftPersistence";
 import { useGameStore } from "./gameStore";
+import { getSharedAdapter } from "../adapter/wasm-adapter";
+import type { GameFormat, MatchType } from "../adapter/types";
 
 export type DraftPhase = "setup" | "drafting" | "opening" | "deckbuilding" | "launching" | "playing" | "complete";
 
@@ -303,11 +305,15 @@ function schedulePersistence(delay = 500): void {
   }, delay);
 }
 
-async function persistDraft(generation: number): Promise<void> {
+async function persistDraft(
+  generation: number,
+  options: { propagateFailure?: boolean; canPersist?: () => boolean } = {},
+): Promise<void> {
   const state = useDraftStore.getState();
   const { adapter, draftId, view, workspaceState, selectedSet, phase } = state;
   if (!adapter || !draftId || !view || !workspaceState || !selectedSet
-    || phase === "setup" || phase === "playing" || phase === "complete") return;
+    || phase === "setup" || phase === "playing" || phase === "complete"
+    || options.canPersist?.() === false) return;
   const lifecycle = lifecycleGeneration;
   const revision = workspaceRevision;
   try {
@@ -318,7 +324,12 @@ async function persistDraft(generation: number): Promise<void> {
       }
       return lease.exportSession();
     });
-    if (generation !== persistenceGeneration || lifecycle !== lifecycleGeneration) return;
+    if (options.canPersist?.() === false) return;
+    if (generation !== persistenceGeneration || lifecycle !== lifecycleGeneration
+      || revision !== workspaceRevision || useDraftStore.getState().adapter !== adapter) {
+      if (options.propagateFailure) throw new Error("Stale draft persistence request");
+      return;
+    }
     await persistQuickDraftSnapshot(draftId, sessionJson, {
       phase,
       ...workspaceFacades(workspaceState, view),
@@ -327,6 +338,7 @@ async function persistDraft(generation: number): Promise<void> {
       workspace: workspaceState,
     }, makeMeta(state, phase));
   } catch (error) {
+    if (options.propagateFailure) throw error;
     if (generation === persistenceGeneration && lifecycle === lifecycleGeneration) {
       console.warn("[persistDraft] failed:", error);
     }
@@ -937,6 +949,59 @@ function matchPayload(run: DraftRunState): DraftMatchPayload {
   };
 }
 
+type FormatGateVerdict = { compatible: boolean; reasons?: string[] };
+
+async function evaluateLimitedDeck(
+  deck: DraftMatchPayload["player"],
+  draftSetCodes: readonly string[],
+  selectedMatchType: MatchType,
+): Promise<FormatGateVerdict> {
+  const selectedFormat: GameFormat = "Limited";
+  const result = await getSharedAdapter().evaluateDeckFormatGate({
+    main_deck: deck.main_deck,
+    sideboard: deck.sideboard,
+    commander: deck.commander,
+    companion: [],
+    planar_deck: [],
+    scheme_deck: [],
+    signature_spell: [],
+    draft_set_codes: [...draftSetCodes],
+    selected_format: selectedFormat,
+    selected_match_type: selectedMatchType,
+    player_count: 2,
+  });
+  if (result === null || typeof result !== "object"
+    || typeof (result as FormatGateVerdict).compatible !== "boolean") {
+    throw new Error("Deck format validation is unavailable");
+  }
+  return result as FormatGateVerdict;
+}
+
+function gateReason(verdict: FormatGateVerdict, seat: "player" | "opponent"): string | null {
+  if (verdict.compatible === true) return null;
+  return verdict.reasons?.find((reason) => typeof reason === "string" && reason.length > 0)
+    ?? `${seat === "player" ? "Your" : "Opponent"} deck is not legal in Limited`;
+}
+
+async function preflightMatchPayload(
+  payload: DraftMatchPayload,
+  draftSetCodes: readonly string[],
+  selectedMatchType: MatchType,
+): Promise<void> {
+  const results = await Promise.allSettled([
+    evaluateLimitedDeck(payload.player, draftSetCodes, selectedMatchType),
+    evaluateLimitedDeck(payload.opponent, draftSetCodes, selectedMatchType),
+  ]);
+  for (const [index, result] of results.entries()) {
+    if (result.status === "rejected") {
+      const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      throw new Error(message || "Deck format validation is unavailable");
+    }
+    const reason = gateReason(result.value, index === 0 ? "player" : "opponent");
+    if (reason) throw new Error(reason);
+  }
+}
+
 function pickBotSeat(usedSeats: number[], view: DraftPlayerView): number {
   const botSeats = view.seats.filter((seat) => seat.is_bot).map((seat) => seat.seat_index);
   const candidates = botSeats.length > 0 ? botSeats : [1, 2, 3, 4, 5, 6, 7];
@@ -953,9 +1018,10 @@ function expandSuggestedDeck(deck: SuggestedDeck): string[] {
 function navigateToMatch(
   state: DraftStoreState,
   gameId: string,
+  selectedMatchType: MatchType,
   navigate: (path: string) => void,
 ): void {
-  const matchType = state.view?.match_config.match_type === "Bo3" && state.runFormat === "bo3" ? "bo3" : "bo1";
+  const matchType = selectedMatchType === "Bo3" ? "bo3" : "bo1";
   const difficulty = DIFFICULTY_NAMES[state.difficulty] ?? "Medium";
   useGameStore.setState({ gameId });
   navigate(`/game/${gameId}?mode=ai&difficulty=${difficulty}&format=Limited&match=${matchType}&source=draft&draftId=${state.draftId}`);
@@ -1306,12 +1372,23 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     }
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
+    const playerDeck = projectDeckNames(state.workspaceState, state.view.pool);
+    const fresh = () => isExclusive(token, "submit")
+      && lifecycle === lifecycleGeneration && revision === workspaceRevision
+      && get().adapter === state.adapter && get().draftId === state.draftId
+      && get().view === state.view && get().workspaceState === state.workspaceState;
     try {
+      const verdict = await evaluateLimitedDeck(
+        { main_deck: playerDeck, sideboard: [], commander: [] },
+        state.view.draft_set_codes ?? [],
+        "Bo1",
+      );
+      const reason = gateReason(verdict, "player");
+      if (reason) throw new Error(reason);
+      if (!fresh()) throw new Error("Stale draft deck submission");
       const view = await withDraftEngineOperation((lease) => {
-        if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) {
-          throw new Error("Stale draft deck submission");
-        }
-        return lease.submitDeck(projectDeckNames(state.workspaceState!, state.view!.pool), []);
+        if (!fresh()) throw new Error("Stale draft deck submission");
+        return lease.submitDeck(playerDeck, []);
       });
       if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration) return;
       retireExclusive(token);
@@ -1337,7 +1414,11 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
   // The picker selection is the resume authority before the first match (the
   // run record only appears at launch), so persist it — otherwise reloading on
   // the launching screen restores the stale default. Mirrors setPoolSortMode.
-  setRunFormat: (runFormat) => { set({ runFormat }); schedulePersistence(); },
+  setRunFormat: (runFormat) => {
+    if (exclusiveToken?.kind === "launch") return;
+    set({ runFormat });
+    schedulePersistence();
+  },
 
   launchMatch: async (navigate) => {
     const token = admitExclusive("launch");
@@ -1350,25 +1431,38 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     }
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
+    const selectedRunFormat = state.runFormat;
+    const selectedMatchType: MatchType = state.view.match_config.match_type === "Bo3"
+      && selectedRunFormat === "bo3" ? "Bo3" : "Bo1";
+    const fresh = () => isExclusive(token, "launch")
+      && lifecycle === lifecycleGeneration && revision === workspaceRevision
+      && get().draftId === state.draftId && get().adapter === state.adapter
+      && get().runFormat === selectedRunFormat;
+    const samePreRunSession = () => lifecycle === lifecycleGeneration
+      && get().draftId === state.draftId && get().adapter === state.adapter
+      && get().selectedSet === state.selectedSet && get().phase === "launching"
+      && get().runFormat === selectedRunFormat && get().runState === null;
     const playerDeck = projectDeckNames(state.workspaceState, state.view.pool);
     const legacyFacades = workspaceFacades(state.workspaceState, state.view);
+    let durableRun: DraftRunState | null | undefined;
+    let publicationStarted = false;
+    let launchError: unknown = null;
+    let launchFailed = false;
     try {
-      const durableRun = await loadDraftRun(state.draftId);
-      if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) return;
+      durableRun = await loadDraftRun(state.draftId);
+      if (!fresh()) throw new Error("Stale draft match launch");
       let run: DraftRunState;
       let sessionJson: string | null = null;
       if (durableRun) {
-        if (!unresolvedStageMatches(durableRun, state.draftId, state.runFormat, playerDeck)
+        if (!unresolvedStageMatches(durableRun, state.draftId, selectedRunFormat, playerDeck)
           || durableRun.results.length !== 0) throw new Error("Conflicting staged draft match");
         const boosterPackPool = await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
-        if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) return;
+        if (!fresh()) throw new Error("Stale draft match launch");
         run = withBoosterPackPool(durableRun, boosterPackPool);
       } else {
         const botSeat = pickBotSeat([], state.view);
         const prepared = await withDraftEngineOperation((lease) => {
-          if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) {
-            throw new Error("Stale draft match launch");
-          }
+          if (!fresh()) throw new Error("Stale draft match launch");
           return {
             sessionJson: lease.exportSession(),
             botDeck: lease.getBotDeck(botSeat),
@@ -1379,7 +1473,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         const opponentDeck = expandSuggestedDeck(prepared.botDeck);
         const gameId = crypto.randomUUID();
         run = {
-          format: state.runFormat,
+          format: selectedRunFormat,
           booster_pack_pool: prepared.boosterPackPool,
           results: [],
           playerDeck,
@@ -1388,7 +1482,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           activeMatch: {
             draftId: state.draftId,
             gameId,
-            format: state.runFormat,
+            format: selectedRunFormat,
             resultCountAtLaunch: 0,
             botSeat,
             opponentDeck,
@@ -1398,6 +1492,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const gameId = run.activeMatch!.gameId;
       const localState = { ...state, runState: run };
       const meta = makeMeta(localState, "playing", gameId);
+      const payload = matchPayload(run);
+      await preflightMatchPayload(payload, state.view.draft_set_codes ?? [], selectedMatchType);
+      if (!fresh()) throw new Error("Stale draft match launch");
+      publicationStarted = true;
       if (sessionJson !== null) {
         await publishInitialDraftMatch({
           draftId: state.draftId,
@@ -1411,7 +1509,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           },
           run,
           gameId,
-          payload: matchPayload(run),
+          payload,
           meta,
         });
       } else {
@@ -1419,18 +1517,35 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           draftId: state.draftId,
           run: run !== durableRun ? run : undefined,
           gameId,
-          payload: matchPayload(run),
+          payload,
           meta,
         });
       }
-      if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) return;
+      if (!fresh()) return;
       set({ phase: "playing", runState: run });
-      navigateToMatch({ ...get(), runState: run }, gameId, navigate);
-      retireExclusive(token);
+      navigateToMatch({ ...get(), runState: run }, gameId, selectedMatchType, navigate);
     } catch (error) {
+      launchError = error;
+      launchFailed = true;
+    } finally {
+      const owned = isExclusive(token, "launch");
       retireExclusive(token);
-      throw error;
+      if (owned && durableRun === null && !publicationStarted && samePreRunSession()) {
+        try {
+          await persistDraft(persistenceGeneration, {
+            propagateFailure: true,
+            canPersist: samePreRunSession,
+          });
+        } catch (saveError) {
+          const cause = launchError instanceof Error ? launchError.message
+            : launchError === null ? "Draft match launch stopped" : String(launchError);
+          const saveReason = saveError instanceof Error ? saveError.message : String(saveError);
+          launchError = new Error(`${cause}; format choice could not be saved: ${saveReason}`);
+          launchFailed = true;
+        }
+      }
     }
+    if (launchFailed) throw launchError;
   },
 
   recordMatchResult: async (gameId, result) => {
@@ -1475,26 +1590,32 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     }
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
+    const selectedRunFormat = state.runFormat;
+    const selectedMatchType: MatchType = state.view.match_config.match_type === "Bo3"
+      && selectedRunFormat === "bo3" ? "Bo3" : "Bo1";
+    const fresh = () => isExclusive(token, "launch")
+      && lifecycle === lifecycleGeneration && revision === workspaceRevision
+      && get().draftId === state.draftId && get().adapter === state.adapter
+      && get().runFormat === selectedRunFormat;
     try {
       const savedRun = await loadDraftRun(state.draftId);
       if (!savedRun) throw new Error("Missing durable draft run");
       const boosterPackPool = await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
-      if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) return;
+      if (!fresh()) return;
       const durableRun = withBoosterPackPool(savedRun, boosterPackPool);
       const playerDeck = projectDeckNames(state.workspaceState, state.view.pool);
       if (draftRunPhase(durableRun) === "complete") throw new Error("Draft run is complete");
+      if (durableRun.format !== selectedRunFormat) throw new Error("Conflicting staged draft match");
       let run = durableRun;
       let saveRun = durableRun !== savedRun;
       if (durableRun.activeMatch) {
-        if (!unresolvedStageMatches(durableRun, state.draftId, state.runFormat, playerDeck)) {
+        if (!unresolvedStageMatches(durableRun, state.draftId, selectedRunFormat, playerDeck)) {
           throw new Error("Conflicting staged draft match");
         }
       } else {
         const botSeat = pickBotSeat(durableRun.usedBotSeats, state.view);
         const botDeck = await withDraftEngineOperation((lease) => {
-          if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) {
-            throw new Error("Stale next match launch");
-          }
+          if (!fresh()) throw new Error("Stale next match launch");
           return lease.getBotDeck(botSeat);
         });
         const opponentDeck = expandSuggestedDeck(botDeck);
@@ -1509,7 +1630,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           activeMatch: {
             draftId: state.draftId,
             gameId,
-            format: state.runFormat,
+            format: selectedRunFormat,
             resultCountAtLaunch: durableRun.results.length,
             botSeat,
             opponentDeck,
@@ -1519,20 +1640,21 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       }
       const gameId = run.activeMatch!.gameId;
       const meta = makeMeta({ ...state, runState: run }, "playing", gameId);
+      const payload = matchPayload(run);
+      await preflightMatchPayload(payload, state.view.draft_set_codes ?? [], selectedMatchType);
+      if (!fresh()) return;
       await publishStagedDraftMatch({
         draftId: state.draftId,
         run: saveRun ? run : undefined,
         gameId,
-        payload: matchPayload(run),
+        payload,
         meta,
       });
-      if (!isExclusive(token, "launch") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) return;
+      if (!fresh()) return;
       set({ phase: "playing", runState: run });
-      navigateToMatch({ ...get(), runState: run }, gameId, navigate);
+      navigateToMatch({ ...get(), runState: run }, gameId, selectedMatchType, navigate);
+    } finally {
       retireExclusive(token);
-    } catch (error) {
-      retireExclusive(token);
-      throw error;
     }
   },
 

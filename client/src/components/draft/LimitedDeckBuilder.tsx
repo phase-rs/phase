@@ -17,7 +17,7 @@ import { menuButtonClass } from "../menu/buttonStyles";
 import { PopoverMenu } from "../menu/PopoverMenu";
 import { CommanderPanel } from "../deck-builder/CommanderPanel";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
-import type { GameFormat } from "../../adapter/types";
+import type { GameFormat, MatchType } from "../../adapter/types";
 import type { DeckEntry } from "../../services/deckParser";
 import type { ParsedDeck } from "../../services/deckParser";
 import {
@@ -409,20 +409,20 @@ function useCommanderDesignation({
   };
 }
 
-type CommanderDraftCompatibilityState =
+type DraftDeckCompatibilityState =
   | { key: string; status: "pending" }
   | { key: string; status: "resolved"; result: DeckCompatibilityResult }
   | { key: string; status: "error" };
 
-function useCommanderDraftCompatibility({
-  enforceCompatibility,
+function useDraftDeckCompatibility({
   selectedFormat,
+  selectedMatchType,
   draftSetCodes,
   main,
   commanders,
 }: {
-  enforceCompatibility: boolean;
-  selectedFormat: "CommanderDraft" | null;
+  selectedFormat: GameFormat;
+  selectedMatchType: MatchType | null;
   draftSetCodes: readonly string[];
   main: DeckEntry[];
   commanders: string[];
@@ -434,6 +434,7 @@ function useCommanderDraftCompatibility({
   }), [main, commanders]);
   const key = useMemo(() => JSON.stringify({
     selectedFormat,
+    selectedMatchType,
     draftSetCodes,
     main,
     sideboard: [],
@@ -442,14 +443,18 @@ function useCommanderDraftCompatibility({
     schemeDeck: [],
     signatureSpell: [],
     companion: null,
-  }), [selectedFormat, draftSetCodes, main, commanders]);
-  const [state, setState] = useState<CommanderDraftCompatibilityState | null>(null);
+  }), [selectedFormat, selectedMatchType, draftSetCodes, main, commanders]);
+  const [state, setState] = useState<DraftDeckCompatibilityState | null>(null);
   const generationRef = useRef(0);
 
   useEffect(() => {
     const generation = ++generationRef.current;
     setState({ key, status: "pending" });
-    evaluateDeckCompatibility(request, { selectedFormat, draftSetCodes })
+    evaluateDeckCompatibility(request, {
+      selectedFormat,
+      draftSetCodes,
+      ...(selectedMatchType ? { selectedMatchType } : {}),
+    })
       .then((result) => {
         if (generation === generationRef.current) {
           setState({ key, status: "resolved", result });
@@ -458,7 +463,7 @@ function useCommanderDraftCompatibility({
       .catch(() => {
         if (generation === generationRef.current) setState({ key, status: "error" });
       });
-    // `draftSetCodes` and `selectedFormat` are deliberately absent from this
+    // `draftSetCodes`, `selectedFormat`, and `selectedMatchType` are deliberately absent from this
     // dependency array: both ride in the `key` memo above, whose value is a
     // JSON.stringify string, and React compares dependencies with Object.is,
     // which is by value for strings — so a re-render handing this hook a
@@ -474,10 +479,11 @@ function useCommanderDraftCompatibility({
   const currentState = state?.key === key ? state : null;
   const result = currentState?.status === "resolved" ? currentState.result : null;
   return {
-    compatible: !enforceCompatibility || result?.selected_format_compatible === true,
+    compatible: result?.selected_format_compatible === true,
     reasons: result?.selected_format_reasons ?? [],
-    pending: enforceCompatibility && currentState?.status === "pending",
-    unavailable: enforceCompatibility && currentState?.status === "error",
+    pending: currentState === null || currentState.status === "pending",
+    unavailable: currentState?.status === "error"
+      || (currentState?.status === "resolved" && result?.selected_format_compatible == null),
     colorDistribution: result?.color_distribution ?? [],
   };
 }
@@ -736,10 +742,9 @@ function ControlledDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft" && designationRequired;
-  const compatibility = useCommanderDraftCompatibility({
-    enforceCompatibility: commanderDraftCompatibilityActive,
-    selectedFormat: deckFormat,
+  const compatibility = useDraftDeckCompatibility({
+    selectedFormat: deckFormat ?? "Limited",
+    selectedMatchType: deckFormat ? null : "Bo1",
     draftSetCodes,
     main: commanderDeckEntries,
     commanders,
@@ -793,7 +798,7 @@ function ControlledDeckBuilder({
   }, [mainDeck, landCounts]);
 
   const handleSubmit = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || !deckValid) return;
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
@@ -1004,6 +1009,14 @@ function ControlledDeckBuilder({
             </section>
           )}
 
+          {!designationRequired && (
+            <div aria-live="polite" className="space-y-1">
+              {compatibility.pending && <p role="status" className="text-xs text-white/55">{t("limitedDeck.compatibilityPending")}</p>}
+              {compatibility.unavailable && <p role="alert" className="text-xs text-amber-300/80">{t("limitedDeck.compatibilityUnavailable")}</p>}
+              {compatibility.reasons.map((reason) => <p key={reason} role="alert" className="text-xs text-amber-300/80">{reason}</p>)}
+            </div>
+          )}
+
           {/* Mana curve */}
           <section>
             <ManaCurve pool={pool} cards={mainDeck} colorDistribution={colorDistribution} />
@@ -1130,10 +1143,9 @@ function WorkspaceDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  const commanderDraftCompatibilityActive = deckFormat === "CommanderDraft";
-  const compatibility = useCommanderDraftCompatibility({
-    enforceCompatibility: commanderDraftCompatibilityActive,
-    selectedFormat: deckFormat,
+  const compatibility = useDraftDeckCompatibility({
+    selectedFormat: deckFormat ?? "Limited",
+    selectedMatchType: deckFormat ? null : "Bo1",
     draftSetCodes,
     main: commanderDeckEntries,
     commanders,
@@ -1183,7 +1195,7 @@ function WorkspaceDeckBuilder({
   };
 
   const handleSubmit = async () => {
-    if (isSubmitting) return;
+    if (isSubmitting || !deckValid) return;
     setLocalSubmissionError(null);
     setIsSubmitting(true);
     try {
@@ -1379,6 +1391,13 @@ function WorkspaceDeckBuilder({
       {displayedSubmissionError}
     </p>
   );
+  const compatibilityFeedback = !designationRequired && (
+    <div aria-live="polite" className="space-y-1">
+      {compatibility.pending && <p role="status" className="text-xs text-white/55">{t("limitedDeck.compatibilityPending")}</p>}
+      {compatibility.unavailable && <p role="alert" className="text-xs text-amber-300/80">{t("limitedDeck.compatibilityUnavailable")}</p>}
+      {compatibility.reasons.map((reason) => <p key={reason} role="alert" className="text-xs text-amber-300/80">{reason}</p>)}
+    </div>
+  );
   const workspaceBoard = (
     <DraftWorkspace
       pool={pool}
@@ -1491,6 +1510,7 @@ function WorkspaceDeckBuilder({
         mobileLayout="compact"
         onDismiss={() => handleHover(null)}
       />
+      {compatibilityFeedback}
       {!phoneLayout && (
         <>
         <div
@@ -1683,7 +1703,7 @@ function WorkspaceDeckBuilder({
                         ? t("limitedDeck.compatibilityPending")
                         : compatibility.unavailable
                           ? t("limitedDeck.compatibilityUnavailable")
-                          : t("limitedDeck.commanderRequired"))
+                          : t("limitedDeck.compatibilityUnavailable"))
               }
             </span>
           </div>
