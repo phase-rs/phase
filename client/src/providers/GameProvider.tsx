@@ -1477,10 +1477,17 @@ export function GameProvider({
           controller.start();
           if (cancelled) return;
           audioManager.setContext("battlefield");
-          if (sessionStorage.getItem(draftDeckKey) === raw) sessionStorage.removeItem(draftDeckKey);
         } catch (error) {
           console.error("Draft deck validation failed:", error);
           reportDraftError(error);
+          return;
+        }
+        try {
+          if (sessionStorage.getItem(draftDeckKey) === raw) sessionStorage.removeItem(draftDeckKey);
+        } catch (error) {
+          // A playable game has started. Keep the handoff for a later cleanup
+          // attempt when storage is unavailable instead of reporting a failed start.
+          console.warn("Could not consume draft deck handoff:", error);
         }
       };
       const startExactDraftStage = async () => {
@@ -1515,14 +1522,16 @@ export function GameProvider({
           reportDraftError(error);
         }
       };
-      let draftDeckRaw: string | null;
-      try {
-        draftDeckRaw = sessionStorage.getItem(draftDeckKey);
-      } catch (error) {
-        reportDraftError(error);
-        return;
+      let draftDeckRaw: string | null = null;
+      if (soloDraft) {
+        try {
+          draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+        } catch (error) {
+          reportDraftError(error);
+          return;
+        }
       }
-      if (soloDraft && draftDeckRaw !== null) {
+      if (draftDeckRaw !== null) {
         await startDraftDeck(draftDeckRaw);
         return;
       }
@@ -1629,6 +1638,14 @@ export function GameProvider({
       // No saved state — start a new game.
       // Quick drafts and local Commander pods publish their full engine payload
       // in sessionStorage, including opaque original cube metadata.
+      if (!soloDraft) {
+        try {
+          draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+        } catch (error) {
+          reportDraftError(error);
+          return;
+        }
+      }
       if (draftDeckRaw !== null) {
         await startDraftDeck(draftDeckRaw);
         return;

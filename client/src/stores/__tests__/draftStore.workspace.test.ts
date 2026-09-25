@@ -891,6 +891,33 @@ describe("draft store workspace authority", () => {
     localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
   });
 
+  it("uses stored Bo3 format for run-only preflight and refuses unsupported empty sideboards", async () => {
+    const run: DraftRunState = { format: "bo3", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId: "bo3-run", gameId: "bo3-game", format: "bo3",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "bo3-run", setCode: "custom-cube", difficulty: 2, kind: "Quick", phase: "playing",
+    });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "bo3-run" });
+    formatGate.evaluate.mockImplementation(async (request: unknown) => ({
+      compatible: (request as { selected_match_type: string }).selected_match_type !== "Bo3",
+      reasons: ["BO3 requires a sideboard"],
+    }));
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("BO3 requires a sideboard");
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) {
+      expect(request).toMatchObject({ selected_format: "Limited", selected_match_type: "Bo3", sideboard: [] });
+    }
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+  });
+
   it.each([5, 2.5])("refuses persisted finite invalid difficulty %s while retaining the run ID", async (difficulty) => {
     const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
       opponentDeck: ["Opponent"], usedBotSeats: [1], booster_pack_pool: [] };

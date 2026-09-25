@@ -460,6 +460,54 @@ describe("GameProvider native AI routing", () => {
     expect(sessionStorage.getItem(key)).toBe(raw);
   });
 
+  it.each(["consume read", "consume removal"])("keeps a playable draft started when the %s throws", async (failure) => {
+    const key = `phase:draft-deck:${failure}`;
+    const raw = JSON.stringify({ player: { main_deck: ["Player"] },
+      opponent: { main_deck: ["Opponent"] }, ai_decks: [] });
+    sessionStorage.setItem(key, raw);
+    const originalGetItem = sessionStorage.getItem.bind(sessionStorage);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation((item) => {
+      if (failure === "consume read" && item === key && gameStoreState.initGame.mock.calls.length > 0) {
+        throw new Error("consume read failed");
+      }
+      return originalGetItem(item);
+    });
+    const removal = vi.spyOn(sessionStorage, "removeItem").mockImplementation(() => {
+      if (failure === "consume removal") throw new Error("consume removal failed");
+    });
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId={failure} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => {
+      const controllers = vi.mocked(createGameLoopController).mock.results;
+      expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+    });
+    expect(gameStoreState.initGame).toHaveBeenCalledOnce();
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect(originalGetItem(key)).toBe(raw);
+    read.mockRestore();
+    removal.mockRestore();
+  });
+
+  it.each([
+    { label: "ordinary local", source: undefined, mode: "local" as const },
+    { label: "Commander", source: "multiplayer" as const, mode: "ai" as const },
+  ])("restores a saved $label game when handoff storage cannot be read", async ({ source, mode }) => {
+    const savedState = { players: [{}, {}] } as never;
+    vi.mocked(loadGame).mockResolvedValueOnce(savedState);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation(() => {
+      throw new Error("session read failed");
+    });
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="saved-local" mode={mode} source={source} onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledWith("saved-local", expect.anything(), savedState));
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    read.mockRestore();
+  });
+
   it("keeps new handoff bytes written while the old initialization waits", async () => {
     const key = "phase:draft-deck:in-flight";
     const oldRaw = JSON.stringify({ player: { main_deck: ["Old"] }, opponent: { main_deck: ["Opponent"] }, ai_decks: [] });

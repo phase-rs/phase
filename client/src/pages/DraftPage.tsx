@@ -380,7 +380,7 @@ export function DraftPage() {
   const [resumeLoading, setResumeLoading] = useState(false);
   const [launchPending, setLaunchPending] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
-  const [resumeProblem, setResumeProblem] = useState<{ draftId: string; reason: string } | null>(null);
+  const [resumeProblem, setResumeProblem] = useState<{ draftId?: string; reason: string } | null>(null);
   const [endPending, setEndPending] = useState(false);
   const [endError, setEndError] = useState<string | null>(null);
   const launchInFlight = useRef(false);
@@ -464,7 +464,9 @@ export function DraftPage() {
     } catch (error) {
       if (isCancelled()) return;
       const draftId = useDraftStore.getState().draftId;
-      if (draftId) setResumeProblem({ draftId, reason: error instanceof Error ? error.message : String(error) });
+      const routeDraftId = typeof routeError?.draftId === "string" ? routeError.draftId : undefined;
+      setResumeProblem({ draftId: draftId ?? routeDraftId,
+        reason: error instanceof Error ? error.message : String(error) });
     } finally {
       if (!isCancelled()) setResumeLoading(false);
     }
@@ -877,10 +879,12 @@ export function DraftPage() {
                 className={menuButtonClass({ tone: "emerald", size: "md", disabled: endPending || resumeLoading })}>
                 {t("run.retryResume")}
               </button>
-              <button type="button" onClick={() => void handleEndRun()} disabled={endPending}
-                className={menuButtonClass({ tone: "neutral", size: "md", disabled: endPending })}>
-                {endError ? t("run.retryEndRun") : t("run.endRun")}
-              </button>
+              {resumeProblem.draftId && (
+                <button type="button" onClick={() => void handleEndRun()} disabled={endPending}
+                  className={menuButtonClass({ tone: "neutral", size: "md", disabled: endPending })}>
+                  {endError ? t("run.retryEndRun") : t("run.endRun")}
+                </button>
+              )}
             </div>
           </div>
         )}

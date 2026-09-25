@@ -1740,7 +1740,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
     const selectedRunFormat = state.runFormat;
-    const selectedMatchType: MatchType = (!runOnly && state.view?.match_config.match_type === "Bo3")
+    const selectedMatchType: MatchType = (runOnly || state.view?.match_config.match_type === "Bo3")
       && selectedRunFormat === "bo3" ? "Bo3" : "Bo1";
     const fresh = () => isExclusive(token, "launch")
       && lifecycle === lifecycleGeneration && revision === workspaceRevision

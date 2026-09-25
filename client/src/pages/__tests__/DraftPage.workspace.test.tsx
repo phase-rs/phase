@@ -616,6 +616,35 @@ describe("DraftPage local deckbuilding wiring", () => {
     expect(screen.queryByText("Storage read failed")).toBeNull();
   });
 
+  it.each([
+    { routeId: "route-run", endRun: true },
+    { routeId: undefined, endRun: false },
+  ])("shows Retry Resume after metadata inspection rejects with route ID $routeId", async ({ routeId, endRun }) => {
+    const run = { format: "run" as const, results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    persistence.inspectActiveQuickDraftLifecycle
+      .mockRejectedValueOnce(new Error("Metadata read failed"))
+      .mockResolvedValue({ id: "route-run", setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    render(<MemoryRouter initialEntries={[{ pathname: "/draft/quick", search: "?resume=1",
+      state: routeId ? { draftId: routeId } : null }]}><DraftPage /></MemoryRouter>);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Metadata read failed");
+    expect(screen.getByRole("button", { name: "Retry Resume" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "End Run" }) !== null).toBe(endRun);
+    expect(useDraftStore.getState().draftId).toBeNull();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    if (endRun) {
+      fireEvent.click(screen.getByRole("button", { name: "End Run" }));
+      await waitFor(() => expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledWith("route-run"));
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "Retry Resume" }));
+      expect(await screen.findByRole("button", { name: "Next Match" })).toBeEnabled();
+      expect(persistence.loadDraftRun).toHaveBeenCalledWith("route-run");
+      expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    }
+  });
+
   it("excludes double-clicked Next Match while publication waits and retries after rejection", async () => {
     const run = { format: "run" as const, results: [], playerDeck: ["Player"],
       opponentDeck: ["Opponent"], usedBotSeats: [1],
