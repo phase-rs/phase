@@ -33,6 +33,7 @@
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
+use engine::parser::oracle_ir::diagnostic::ClauseGapKind;
 use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -1218,16 +1219,30 @@ fn flanking_licid_is_absorbed_and_its_unimplemented_move_clause_survives() {
         "the mandatory PayCost must be gone for Flanking Licid too"
     );
     // (c) — coverage honesty: this change must not silently "fix" or drop the
-    // pre-existing unsupported move clause.
-    assert!(
-        effects_of(ability).iter().any(|e| matches!(
-            e,
-            Effect::Unimplemented { name, .. } if name == "move"
-        )),
-        "the move clause was unsupported before this change and must stay \
-         unsupported after it — no Oracle text is newly accepted with deferred \
-         semantics: {:?}",
-        effects_of(ability)
+    // pre-existing unsupported move clause. The gap is identified by the clause it
+    // RECORDS and by the parser's verdict on it — "move" is in neither verb vocabulary,
+    // so the verdict is `UnrecognizedHead`. This venue is a separate crate, so it
+    // asserts the `pub` wire-name half plus the fragment; the phrase half of the verdict
+    // is covered in-crate by the `gap_diagnosis` table over the same function.
+    const MOVE_CLAUSE: &str = "Move ~ onto target creature";
+    let move_gap = effects_of(ability)
+        .into_iter()
+        .find(|e| e.unimplemented_description() == Some(MOVE_CLAUSE))
+        .unwrap_or_else(|| {
+            panic!(
+                "the move clause was unsupported before this change and must stay \
+                 unsupported after it — no Oracle text is newly accepted with deferred \
+                 semantics: {:?}",
+                effects_of(ability)
+            )
+        });
+    let Effect::Unimplemented { name, .. } = &move_gap else {
+        unreachable!("selected by unimplemented_description above")
+    };
+    assert_eq!(
+        ClauseGapKind::from_unimplemented_name(name),
+        Some(ClauseGapKind::UnrecognizedHead),
+        "the recorded name must decode to the verdict this clause earns, got {name}"
     );
 }
 

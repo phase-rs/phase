@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "winstonTitle": "Winston Draft",
     "commanderTitle": "Commander Draft",
     "subtitle": "Voici comment ça fonctionne",
     "startDrafting": "Commencer le draft",
@@ -21,7 +22,11 @@
       "minimumDeckCards_one": "{{count, number}} carte",
       "minimumDeckCards_few": "{{count, number}} cartes",
       "minimumDeckCards_many": "{{count, number}} cartes",
-      "minimumDeckCards_other": "{{count, number}} cartes"
+      "minimumDeckCards_other": "{{count, number}} cartes",
+      "pilesDealt_one": "{{count, number}} tas d'une carte",
+      "pilesDealt_few": "{{count, number}} tas d'une carte",
+      "pilesDealt_many": "{{count, number}} tas d'une carte",
+      "pilesDealt_other": "{{count, number}} tas d'une carte"
     },
     "packPassing_one": "Ce draft ne comporte qu'une seule manche de boosters, donc le sens de passage n'alterne pas",
     "packPassing_few": "Le sens de passage change à chaque manche",
@@ -38,6 +43,13 @@
       "step2": "Ouvrez {{packs}} ; chaque booster contient {{cardsPerPack}} — choisissez une carte, puis passez le reste",
       "step2Mixed": "Ouvrez {{packs}} de tailles différentes, dans cet ordre : {{packSizes, list}} — choisissez une carte, puis passez le reste",
       "step4": "Après le draft, construisez un deck d'au moins {{minimumDeckCards}} et jouez des matchs de tournoi"
+    },
+    "winston": {
+      "step2": "Les {{packs}} de chaque joueur sont ouverts sans que personne ne les regarde, et toutes les cartes sont mélangées en une seule pile face cachée",
+      "step2Mixed": "Les {{packs}} de tailles différentes de chaque joueur, dans cet ordre : {{packSizes, list}}, sont ouverts sans que personne ne les regarde et mélangés en une seule pile face cachée",
+      "step3": "{{piles}} sont distribués du dessus. À votre tour, regardez le premier tas : prenez-le, ou refusez-le et passez au suivant",
+      "step4": "Refuser place la carte du dessus de la pile sur le tas refusé. Refusez-les tous et vous prenez la carte du dessus de la pile sans la voir",
+      "step5": "Les tours alternent jusqu'à épuisement des cartes ; construisez ensuite un deck d'au moins {{minimumDeckCards}} et jouez des matchs de tournoi"
     },
     "commander": {
       "step2": "Ouvrez {{packs}} ; chaque booster contient {{cardsPerPack}} — choisissez deux cartes, puis passez le reste",
@@ -79,6 +91,13 @@
     "label": "Minuteur de sélection",
     "seconds": "{{count}} s"
   },
+  "pickStatus": {
+    "Pending": "Choisit",
+    "Picked": "A choisi",
+    "Waiting": "En attente",
+    "TimedOut": "Temps écoulé",
+    "NotDrafting": "Hors draft"
+  },
   "scoreBadge": {
     "label": "Score : {{count}} victoires"
   },
@@ -92,7 +111,11 @@
     "activePackCount_one": "{{count}} booster chez {{player}}",
     "activePackCount_few": "{{count}} boosters chez {{player}}",
     "activePackCount_many": "{{count}} boosters chez {{player}}",
-    "activePackCount_other": "{{count}} boosters chez {{player}}"
+    "activePackCount_other": "{{count}} boosters chez {{player}}",
+    "draftedCardCount_one": "{{count}} carte draftée par {{player}}",
+    "draftedCardCount_few": "{{count}} cartes draftées par {{player}}",
+    "draftedCardCount_many": "{{count}} cartes draftées par {{player}}",
+    "draftedCardCount_other": "{{count}} cartes draftées par {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",
@@ -160,6 +183,7 @@
     "packProgress": "Booster {{current}} sur {{total}}",
     "openPack": "Ouvrir le booster",
     "openPackArt": "Ouvrir l’illustration du booster",
+    "openAllPacks": "Ouvrir tous les boosters",
     "pulls": "Vos cartes",
     "nextPack": "Booster suivant",
     "viewPool": "Voir votre pool",
@@ -366,6 +390,10 @@
       "title": "Commander Draft",
       "description": "Draftez deux cartes à la fois dans un pod, construisez un deck Commander de 60 cartes, puis jouez une partie multijoueur."
     },
+    "winstonDraft": {
+      "title": "Winston Draft",
+      "description": "Deux joueurs se partagent une pile face cachée répartie en trois tas : prenez un tas ou refusez-le, puis construisez et jouez."
+    },
     "podInProgress": "Pod Draft en cours",
     "guestPodInProgress": "Pod rejoint prêt à se reconnecter",
     "podLabel": "Pod {{kind}}",
@@ -515,6 +543,8 @@
     "kindSealedDesc": "Ouvrez six boosters directement dans la réserve de chaque joueur, puis construisez un deck de tournoi en meilleur des un.",
     "kindCommanderDraft": "Commander",
     "kindCommanderDraftDesc": "Chaque joueur drafte deux cartes à la fois et construit un deck Commander de 60 cartes, puis le pod joue une partie multijoueur.",
+    "kindWinston": "Winston",
+    "kindWinstonDesc": "De deux à quatre joueurs draftent une pile commune face cachée répartie en trois tas : à votre tour, regardez un tas et prenez-le, ou refusez-le et ajoutez-y une carte.",
     "tournamentFormat": "Format du tournoi",
     "tournamentSwiss": "Suisse",
     "tournamentSwissDesc": "Tout le monde continue de jouer sur trois manches, même après une défaite.",
@@ -542,7 +572,20 @@
     "tabs": {
       "set": "Extension",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Impossible de joindre le salon pour lister ce pod. Désactivez « $t(draft:podSetup.listInLobby) » pour héberger par code de salle.",
+    "listingHostNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom affiché d'au plus {{max}} caractères.",
+    "listingRoomNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom de salle d'au plus {{max}} caractères.",
+    "listingCubeNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom de Cube d'au plus {{max}} caractères.",
+    "listingPasswordTooLong": "Pour lister ce pod dans le salon, utilisez un mot de passe plus court.",
+    "listInLobby": "Répertorier dans le salon",
+    "listingSeatLimit": "Le salon peut lister des pods jusqu'à {{max}} joueurs.",
+    "setPassword": "Définir un mot de passe",
+    "passwordPlaceholder": "Mot de passe du pod",
+    "roomName": "Nom de la salle",
+    "optional": "(facultatif)",
+    "roomNameHelp": "Affiché aux joueurs qui parcourent le salon.",
+    "roomNamePlaceholder": "ex. Cube du vendredi soir"
   },
   "podPhaseView": {
     "tournamentPairings": "Appariements du tournoi",
@@ -597,6 +640,53 @@
     "hostLeft": "L'hôte a quitté le draft",
     "connection": "Erreur de connexion",
     "retry": "Réessayer la connexion"
+  },
+  "winston": {
+    "heading": "Winston Draft",
+    "yourTurn": "À vous de jouer — tas {{index}}",
+    "otherSeatTurn": "{{name}} décide",
+    "seatFallback": "Siège {{index}}",
+    "turnHint": "Prenez le tas ou refusez-le. Un refus y ajoute une carte de la pile principale et vous passez au tas suivant ; si vous refusez le dernier tas, vous piochez la carte du dessus de la pile principale.",
+    "mainStackRemaining_one": "{{count, number}} carte face cachée dans la pile principale",
+    "mainStackRemaining_few": "{{count, number}} cartes face cachée dans la pile principale",
+    "mainStackRemaining_many": "{{count, number}} cartes face cachée dans la pile principale",
+    "mainStackRemaining_other": "{{count, number}} cartes face cachée dans la pile principale",
+    "cardsLeft_one": "{{count, number}} carte restante dans le draft",
+    "cardsLeft_few": "{{count, number}} cartes restantes dans le draft",
+    "cardsLeft_many": "{{count, number}} cartes restantes dans le draft",
+    "cardsLeft_other": "{{count, number}} cartes restantes dans le draft",
+    "stackShare": "Part des cartes restantes du draft encore face cachée dans la pile principale",
+    "pileLabel": "Tas {{index}}",
+    "pileTotal_one": "{{count, number}} carte",
+    "pileTotal_few": "{{count, number}} cartes",
+    "pileTotal_many": "{{count, number}} cartes",
+    "pileTotal_other": "{{count, number}} cartes",
+    "pileFaceDown": "Face cachée",
+    "deciding": "Décision sur ce tas",
+    "hiddenPiles": "Les tas restent face cachée jusqu'à votre tour.",
+    "take": "Prendre",
+    "takeAria": "Prendre le tas {{index}}",
+    "decline": "Refuser",
+    "declineAria": "Refuser le tas {{index}}",
+    "spreadPile": "Étaler le tas {{index}}",
+    "stackPile": "Empiler le tas {{index}}",
+    "refusal": {
+      "PileNotActive": "Vous ne décidez pas sur ce tas.",
+      "PileEmpty": "Ce tas est vide, il n'y a rien à prendre.",
+      "NoGuaranteedCard": "Refuser ne peut plus vous garantir une carte ce tour-ci : prendre ce tas est votre seul coup légal."
+    },
+    "refusalUnpublished": "Le draft n'a publié aucun verdict pour cette décision.",
+    "playFirstChooser": "{{name}} choisit qui joue en premier dans les parties qui suivent le draft.",
+    "scale": "Échelle des tas",
+    "scaleDecrease": "Réduire l'échelle des tas",
+    "scaleReset": "Réinitialiser l'échelle des tas",
+    "scaleIncrease": "Augmenter l'échelle des tas",
+    "faceDownStack_one": "{{count, number}} carte face cachée",
+    "faceDownStack_few": "{{count, number}} cartes face cachée",
+    "faceDownStack_many": "{{count, number}} cartes face cachée",
+    "faceDownStack_other": "{{count, number}} cartes face cachée",
+    "forcedDraw": "Vous avez refusé tous les tas, vous avez donc pioché {{name}} sur le dessus de la pile principale.",
+    "forcedDrawLabel": "Piochée sur la pile principale"
   },
   "lobby": {
     "title": "Salon du Draft Pod",

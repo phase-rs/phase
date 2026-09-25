@@ -25,18 +25,41 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
     socket.onclose = (event) => {
       if (this.closeQueued) return;
       this.closeQueued = true;
-      this.receiveQueue = this.receiveQueue.then(() => {
-        this.onclose?.(event);
-        for (const [listener, once] of this.closeListeners) {
-          listener(event);
-          if (once) this.closeListeners.delete(listener);
-        }
-      });
+      this.receiveQueue = this.receiveQueue
+        .then(() => {
+          // The loop is cleanup and must not be skipped by a throwing
+          // `onclose`: callers may assign one and the emitter does not catch.
+          try {
+            this.onclose?.(event);
+          } finally {
+            for (const [listener, once] of this.closeListeners) {
+              listener(event);
+              if (once) this.closeListeners.delete(listener);
+            }
+          }
+        })
+        .catch(() => undefined);
     };
     socket.onmessage = (event) => {
       this.receiveQueue = this.receiveQueue
-        .then(async () => this.decodeIncoming(event.data as unknown))
-        .then((json) => {
+        .then(async () => {
+          let json: string;
+          try {
+            json = await this.decodeIncoming(event.data as unknown);
+          } catch {
+            // A frame we cannot decode is a broken transport, not a droppable
+            // message: mirror `send()` so the drop is observable and
+            // `withReconnect` gets its close event. Deliberately scoped to the
+            // decode call — the terminal catch below still swallows listener
+            // exceptions, because the unwrapped plain-text transport does not
+            // close on those either.
+            try {
+              this.onerror?.(new Event("error"));
+            } finally {
+              this.socket.close();
+            }
+            return;
+          }
           const decoded = new MessageEvent<string>("message", { data: json });
           this.onmessage?.(decoded);
           for (const [listener, once] of this.messageListeners) {
@@ -59,9 +82,15 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
         (this.socket as unknown as { send(data: Uint8Array): void }).send(encoded);
       })
       .catch(() => {
-        this.onerror?.(new Event("error"));
-        this.socket.close();
-      });
+        // The close is what `withReconnect` recovers from, so it must survive a
+        // throwing error handler: `ws-adapter`'s `emit` does not catch.
+        try {
+          this.onerror?.(new Event("error"));
+        } finally {
+          this.socket.close();
+        }
+      })
+      .catch(() => undefined);
   }
 
   close(): void {

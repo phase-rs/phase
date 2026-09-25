@@ -222,6 +222,10 @@
     "identity": "Identité :",
     "setAsCommander": "Définir comme commandant :",
     "cardCount": "{{count}}/{{expected}} cartes",
+    "cardCountNoMinimum_one": "{{count}} carte",
+    "cardCountNoMinimum_few": "{{count}} cartes",
+    "cardCountNoMinimum_many": "{{count}} cartes",
+    "cardCountNoMinimum_other": "{{count}} cartes",
     "singletonViolations": "Violations du singleton : {{cards}}",
     "colorViolations": "Violations de l'identité de couleur : {{cards}}",
     "signatureSpell": {

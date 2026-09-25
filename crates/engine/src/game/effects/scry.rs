@@ -162,9 +162,9 @@ pub(crate) fn apply_scry_after_replacement_with_source(
 fn apply_scry_after_replacement_without_draw(
     state: &mut GameState,
     event: ProposedEvent,
-    _events: &mut Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
-    let (player_id, count) = match event {
+    let (player_id, instructed) = match event {
         ProposedEvent::Scry {
             player_id, count, ..
         } => (player_id, count),
@@ -174,16 +174,25 @@ fn apply_scry_after_replacement_without_draw(
     let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
         return ReplacementResult::Execute(ProposedEvent::Scry {
             player_id,
-            count,
+            count: instructed,
             applied: HashSet::new(),
         });
     };
 
-    let count = (count as usize).min(player.library.len());
+    let count = (instructed as usize).min(player.library.len());
     if count == 0 {
-        // No `PlayerPerformedAction::Scry` event is emitted below in this
-        // case, so "whenever you scry" does not fire and no look count is
-        // carried — a zero-card look is not a scry event to observe.
+        // CR 701.22b: an instruction to scry 0 is no scry event. CR 701.22d: an
+        // instruction of 1 or more with an empty library still completes a
+        // scry, so it publishes one with nothing looked at.
+        if instructed > 0 {
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id,
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(0),
+                scry_bottom_count: Some(0),
+                scry_top_count: Some(0),
+            });
+        }
         return ReplacementResult::Execute(ProposedEvent::Scry {
             player_id,
             count: 0,
@@ -370,8 +379,12 @@ mod tests {
         }
     }
 
+    /// CR 701.22d: an instructed scry against an empty library still completes
+    /// the scry (no `ScryChoice` is offered, since there is nothing to choose),
+    /// and publishes a `PlayerPerformedAction::Scry` event with nothing looked
+    /// at, so "whenever you scry" triggers.
     #[test]
-    fn test_scry_with_empty_library_does_nothing() {
+    fn test_scry_with_empty_library_still_scries_without_prompt() {
         let mut state = GameState::new_two_player(42);
         assert!(state.players[0].library.is_empty());
 
@@ -382,6 +395,45 @@ mod tests {
         assert!(result.is_ok());
         // Should NOT set ScryChoice when library is empty
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(0),
+                scry_bottom_count: Some(0),
+                scry_top_count: Some(0),
+            }
+        )));
+    }
+
+    /// CR 701.22b: an instructed scry of 0 is not a scry event at all.
+    #[test]
+    fn test_scry_zero_emits_no_scry_event() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let ability = make_scry_ability(0);
+        let mut events = Vec::new();
+
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::Scry,
+                ..
+            }
+        )));
     }
 
     #[test]

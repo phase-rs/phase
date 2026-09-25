@@ -3,7 +3,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, PendingCast, PendingCostMoveResume, StackEntry, StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
@@ -297,8 +297,11 @@ pub fn handle_activate_loyalty(
             &target_slots,
             &target_constraints,
         )?;
-        let mut pending = PendingCast::new(pw_id, CardId(0), resolved, ManaCost::NoCost);
-        pending.activation_ability_index = Some(ability_index);
+        // CR 606.1: the mana-free loyalty fast path carries no cost-modifier
+        // snapshot — no reduction can touch a bare loyalty cost, and any raise
+        // routes the ability to the general flow instead.
+        let mut pending =
+            PendingCast::for_activation(pw_id, resolved, ManaCost::NoCost, ability_index, None);
         pending.target_constraints = target_constraints;
         // CR 606.4: Loyalty cost is paid after targets are chosen.
         // Stored here so handle_select_targets can call pay_ability_cost and
@@ -464,16 +467,17 @@ fn complete_loyalty_activation(
     );
     super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
 
-    super::restrictions::record_ability_activation(state, pw_id, ability_index);
-    // CR 117.1b: Priority permits unbounded activation. `pending_activations`
-    // is a per-priority-window AI-guard — see `GameState::pending_activations`.
-    state.pending_activations.push((pw_id, ability_index));
-    events.push(GameEvent::AbilityActivated {
-        player_id: player,
-        source_id: pw_id,
-        // CR 606.2: This is the non-targeted loyalty-activation path.
-        kind: activated_ability_kind(state, pw_id, ability_index),
-    });
+    // CR 606.2: `record_activated_ability_placed` classifies this as the
+    // non-targeted loyalty-activation path. A loyalty ability is never
+    // boast-tagged, so its boast emission is a no-op here.
+    super::casting::record_activated_ability_placed(
+        state,
+        player,
+        pw_id,
+        ability_index,
+        entry_id,
+        events,
+    );
     state.lands_tapped_for_mana.remove(&player);
     priority::clear_priority_passes(state);
 

@@ -38,6 +38,7 @@ mod tests {
     };
     use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use engine::types::mana::ManaCost;
+    use engine::types::match_config::MatchScore;
     use engine::types::resolution::PendingProliferateActions;
     use engine::types::zones::Zone;
     use proptest::prelude::*;
@@ -277,11 +278,43 @@ mod tests {
             .iter()
             .find(|pool| pool.player == PlayerId(1))
             .unwrap();
-        assert!(!own.registered_main.is_empty());
+        // Outside the sideboarding prompt the viewer's own pool is registration
+        // data nothing reads, so it is blanked alongside every opponent's.
+        assert!(own.registered_main.is_empty());
+        assert!(own.registered_sideboard.is_empty());
+        assert!(own.current_main.is_empty());
         assert!(opp.registered_main.is_empty());
         assert!(opp.registered_sideboard.is_empty());
         assert!(opp.current_main.is_empty());
         assert!(opp.current_sideboard.is_empty());
+
+        // CR 100.4: while this player's own between-games sideboarding prompt is
+        // live, their pool survives the projection — it is what the prompt is
+        // answered from — and every other seat's stays blank.
+        state.waiting_for = WaitingFor::BetweenGamesSideboard {
+            player: PlayerId(0),
+            game_number: 2,
+            score: MatchScore::default(),
+            min_main_deck_size: 0,
+            max_sideboard_size: Some(15),
+        };
+        let filtered = filter_state_for_player(&state, PlayerId(0));
+        let own = filtered
+            .deck_pools
+            .iter()
+            .find(|pool| pool.player == PlayerId(0))
+            .unwrap();
+        let opp = filtered
+            .deck_pools
+            .iter()
+            .find(|pool| pool.player == PlayerId(1))
+            .unwrap();
+        assert!(!own.registered_main.is_empty());
+        assert!(!own.registered_sideboard.is_empty());
+        assert!(!own.current_main.is_empty());
+        assert!(opp.registered_main.is_empty());
+        assert!(opp.registered_sideboard.is_empty());
+        assert!(opp.current_main.is_empty());
     }
 
     #[test]
@@ -377,6 +410,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -456,6 +490,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],

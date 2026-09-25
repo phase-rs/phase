@@ -208,8 +208,15 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   saveQuickDraftRun: vi.fn(),
   deleteQuickDraftRun: vi.fn(),
 }));
-// Type-only in `multiplayerDraftStore`, so this cannot disturb the real store.
-vi.mock("../../adapter/draft-adapter", () => ({ createDraftAdapter: vi.fn() }));
+// Spreads the real module rather than replacing it: the store's graph reaches
+// `draftPersistence`, whose kind guard folds `draft-adapter`'s `DRAFT_KINDS`
+// tuple at module scope, so a total factory leaves that export undefined.
+// The real module's top level is types plus a DYNAMIC `import("@wasm/draft")`,
+// so importing it loads no wasm and still cannot disturb the real store.
+vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../adapter/draft-adapter")>()),
+  createDraftAdapter: vi.fn(),
+}));
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 

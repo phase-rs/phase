@@ -2116,6 +2116,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
+        decision_subject_id: None,
         source_id,
         description: None,
         may_trigger_key: None,
@@ -2168,6 +2169,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
     });
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
+        decision_subject_id: None,
         remaining: vec![],
         source_id,
         description: None,
@@ -2978,6 +2980,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
@@ -3055,6 +3058,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
@@ -3107,6 +3111,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],

@@ -93,11 +93,16 @@ fn continuation_search_exile_then_shuffle() {
     let Some(change_zone) = def.sub_ability.as_ref() else {
         panic!("search should chain into the exile destination");
     };
+    assert!(
+        change_zone.face_down_in_exile.is_face_down(),
+        "face-down SearchLibrary exile must use the typed intent carrier"
+    );
     match &*change_zone.effect {
         Effect::ChangeZone {
             origin: Some(Zone::Library),
             destination: Zone::Exile,
             target: TargetFilter::Any,
+            face_down_profile: None,
             ..
         } => {}
         other => panic!("expected library-to-exile search destination, got {other:?}"),

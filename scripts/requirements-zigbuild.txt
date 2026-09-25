@@ -1,0 +1,30 @@
+# Hash-locked zig cross-toolchain for the musl phase-server builds, installed
+# with --require-hashes by the workflows that cross-compile and by the
+# Dockerfile's compile stage.
+#
+# The pins name particular wheels, not merely versions, and PyPI permits wheels
+# to be added to an already-published version. A hash mismatch here is therefore
+# far more likely to be a new upload than tampering.
+#
+# pip reports that as HashMismatch, printing the Expected sha256 from this file
+# beside the Got hexdigest of what it downloaded. Do not paste the Got digest in:
+# it is the hash of whatever actually arrived, which is equally what a tampered
+# artifact would present. Verify the digest against PyPI's published file listing
+# for that version first, then add it.
+#
+# Neither package publishes an sdist, so pip can never build from source here --
+# which is why this set is complete rather than happy-path, and why
+# --require-hashes cannot trip over an unlisted build dependency such as
+# setuptools or wheel.
+#
+# manylinux x86_64 and aarch64 wheels. Only the zigbuild matrix leg installs this
+# file, and it runs on x86_64; the Dockerfile's compile stage follows its build
+# host, which may be either. Both install hosts are glibc, which is why manylinux
+# covers them -- cargo-zigbuild publishes no musllinux wheel at all, so this set
+# would not serve a musl host.
+cargo-zigbuild==0.23.0 \
+    --hash=sha256:3a2e021435a5e3c8b3a70bfc490580a3af6952185aa5ffb722b005d1fbe000c9 \
+    --hash=sha256:d984af93da7a230606452ef5f6df47e6a081b12dcead8a3e8e5ff024728c94f0
+ziglang==0.16.0 \
+    --hash=sha256:9fcda73f62b851dd72a54b710ad40a209896db14cfb13649e62191243556342b \
+    --hash=sha256:e27d409812b11e0fb89ed0200cf2e55b6464d43f9461553104e4a4f9a94a1fd5

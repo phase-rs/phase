@@ -24,6 +24,7 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
 
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useEngineCardData: () => null,
+  useLocalizedCardName: (name: string | null) => name,
   useCardParseDetails: () => null,
   useCardRulings: () => [],
 }));

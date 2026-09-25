@@ -131,7 +131,9 @@
       "feed": "Feed",
       "user": "User",
       "precon": "Precon"
-    }
+    },
+    "brain": "Driven by",
+    "brainEngine": "Engine AI"
   },
   "feedManager": {
     "title": "Manage Feeds",

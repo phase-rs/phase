@@ -962,7 +962,6 @@ export function GameProvider({
               const store = useMultiplayerStore.getState();
               const result = await store.openBroker({
                 hostPeerId: host.peer.id,
-                deck: deckList.player,
                 displayName: store.displayName || "Host",
                 public: true,
                 password: null,
@@ -970,7 +969,6 @@ export function GameProvider({
                 playerCount: effectivePlayerCount,
                 matchConfig: matchConfig ?? { match_type: "Bo1" },
                 formatConfig: formatConfig ?? null,
-                aiSeats: [],
                 roomName: roomName ?? null,
                 draftMetadata: null,
               });

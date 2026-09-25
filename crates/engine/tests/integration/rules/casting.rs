@@ -212,6 +212,7 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             amount: ManaCost::generic(2),
             spell_filter: None,
             dynamic_count: None,
+            reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         })
         .affected(TargetFilter::SelfRef)
         .condition(StaticCondition::AdditionalCostPaid)

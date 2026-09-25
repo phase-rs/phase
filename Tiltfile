@@ -64,6 +64,29 @@ ENGINE_SRC = [
     'crates/engine/Cargo.toml',
 ]
 ENGINE_TESTS = ['crates/engine/tests/']
+# `crates/engine/src/types/format.rs` `include_str!`s the first two files
+# below into `phase-engine`'s own test binary (mirror-drift assertions), and
+# `tests/integration/interaction_contract.rs`, compiled into the crate's
+# separate `integration` test binary, `include_str!`s the third -- both
+# binaries are built by every one of the three resources below. A
+# client-only edit to any of them is therefore an ENGINE compile-input
+# change same as anything in ENGINE_SRC.
+#
+# `resource_deps` orders STARTUP only, it does not retrigger on a file change
+# -- MEASURED on Tilt 0.37.7 with a live `tilt up` against a scratch
+# two-resource Tiltfile (`downstream` naming `upstream` in `resource_deps`):
+# editing `upstream`'s own dep re-ran only `upstream`, never `downstream`
+# (positive control: editing `downstream`'s own dep did re-run it). So
+# 'test-engine', 'build-native' and 'clippy' each need this list in their OWN
+# `deps` -- naming it only on 'build-native' and relying on 'test-engine'
+# depending on 'build-native' via `resource_deps` would NOT propagate a
+# client-only edit to 'test-engine', which is what holds the mirror-drift
+# assertions.
+CLIENT_ENGINE_INPUTS = [
+    'client/src/adapter/types.ts',
+    'client/src/data/formatRegistry.ts',
+    'client/src/adapter/generated/interaction/index.ts',
+]
 AI_SRC = ['crates/phase-ai/src/']
 AI_TESTS = ['crates/phase-ai/tests/']
 WASM_SRC = ['crates/engine-wasm/src/']
@@ -206,7 +229,7 @@ local_resource('server',
 # force a rebuild.
 local_resource('build-native',
     cmd = 'cargo nextest run -p phase-engine -p phase-ai --no-run',
-    deps = ENGINE_SRC + ENGINE_TESTS + AI_SRC + AI_TESTS,
+    deps = ENGINE_SRC + ENGINE_TESTS + AI_SRC + AI_TESTS + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     allow_parallel = True,
     auto_init = 'test' in enabled,
@@ -215,7 +238,7 @@ local_resource('build-native',
 
 local_resource('test-engine',
     cmd = 'cargo nextest run -p phase-engine',
-    deps = ENGINE_SRC + ENGINE_TESTS,
+    deps = ENGINE_SRC + ENGINE_TESTS + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     resource_deps = ['build-native'],
     allow_parallel = True,
@@ -253,11 +276,19 @@ local_resource('test-frontend',
 # mutually invalidating artifacts (rebuild thrash). A separate CARGO_TARGET_DIR
 # also gives it its own build lock, so it never queues behind the native test
 # builds. Cost: a second debug tree on disk (reclaimed by cargo-sweep).
+# `--all-targets` compiles the same `phase-engine` test lib as `build-native`/
+# `test-engine`, including the `include_str!` mirror-drift assertions above
+# `format.rs` -- MEASURED: editing only `client/src/data/formatRegistry.ts`
+# forces a `Compiling phase-engine` rebuild of that lib-test target. So this
+# resource needs CLIENT_ENGINE_INPUTS in its own `deps` too, for the same
+# reason `test-engine` does above -- without it, renaming or deleting any of
+# those client files leaves the engine failing to compile while clippy stays
+# green until an unrelated `crates/` edit fires it.
 local_resource('clippy',
     # List-form cmd: see the 'wasm' resource above for why (a STRING 'bash -c "..."'
     # gets its quotes mangled by cmd.exe on Windows; list-form bypasses that).
     cmd = ['bash', '-c', 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings && CARGO_TARGET_DIR=target/clippy ./scripts/check-interaction-bindings.sh --check'],
-    deps = ['crates/', 'client/src/adapter/generated/interaction/index.ts', 'scripts/check-interaction-bindings.sh'],
+    deps = ['crates/', 'scripts/check-interaction-bindings.sh'] + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     auto_init = 'lint' in enabled,
     allow_parallel = True,
@@ -322,6 +353,34 @@ local_resource('lobby-servers',
             'crates/lobby-broker/src/directory.rs',
             'crates/lobby-broker/src/protocol.rs',
             'deploy/helm/phase-server/templates/ingress.yaml'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
+# scripts/check-prelowered-ratchet.sh is a pre-commit AND CI gate whose failure
+# modes are all silent-pass: it was written with `declare -A`, so on macOS bash
+# 3.2 it aborted before checking anything (and took the rest of the hook with
+# it, since contributors then commit --no-verify), and a repeated ledger path
+# used to resolve to whichever row the lookup happened to reach first. Neither
+# shows up as a red gate -- they show up as a green one that measured nothing.
+#
+# scripts/prelowered-ratchet.txt is deliberately NOT a dep: the tests build
+# their own ledgers in a mktemp dir, and watching the real one would re-run this
+# on every burn-down tranche for no signal.
+#
+# Same venue and limits as pnpm-preflight and lobby-servers above: Tilt under
+# the 'lint' label, local-only. CI runs the gate itself (ci.yml), not these
+# tests -- enrolling them needs a .github/workflows/** edit, a hard stop for
+# agent changes.
+#
+# No CARGO_TARGET_DIR and no cargo: bash and ripgrep against fixture trees in a
+# mktemp dir, so it cannot contend for a build lock.
+local_resource('prelowered-ratchet',
+    cmd = 'bash scripts/lib/prelowered_ratchet_tests.sh',
+    deps = ['scripts/check-prelowered-ratchet.sh',
+            'scripts/lib/prelowered_ratchet_tests.sh'],
     ignore = TMP_IGNORE,
     allow_parallel = True,
     auto_init = 'lint' in enabled,

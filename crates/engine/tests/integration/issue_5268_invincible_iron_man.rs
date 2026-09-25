@@ -69,7 +69,9 @@ fn invincible_iron_man_trigger_parses_attach_to_source_not_self() {
         .as_ref()
         .expect("Equipment attach follow-up");
     match attach.effect.as_ref() {
-        Effect::Attach { attachment, target } => {
+        Effect::Attach {
+            attachment, target, ..
+        } => {
             assert_eq!(*attachment, TargetFilter::SelfRef);
             assert_eq!(*target, TargetFilter::ParentTarget);
         }

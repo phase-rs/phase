@@ -132,6 +132,64 @@ pub struct MintedCredential {
     pub expires_at_ms: u64,
 }
 
+/// The result of [`TournamentCredential::renew`]. `Minted` and `Replayed` both
+/// carry the secret to relay to the holder; they are kept distinct so the
+/// caller (and tests) can tell a fresh rotation from an idempotent lost-reply
+/// recovery, even though the broker relays either identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenewOutcome {
+    /// A fresh secret was minted; the authority advanced. Reached only by
+    /// presenting the live current secret.
+    Minted(MintedCredential),
+    /// The last rotation was replayed: the already-committed current secret is
+    /// returned unchanged. Reached by presenting that rotation's superseded
+    /// secret together with its nonce.
+    Replayed(MintedCredential),
+    /// The presented secret matched but the credential has expired.
+    Expired,
+    /// The presented secret is neither the current secret nor a replayable
+    /// superseded-secret + nonce pair.
+    Mismatch,
+}
+
+/// The read-only classification [`TournamentCredential::renew_kind`] returns:
+/// what a renewal *would* do, with no minted secret and no mutation. Distinct
+/// from [`RenewOutcome`] because a probe cannot (and must not) mint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenewKind {
+    /// `presented` is the live current secret: a renewal would mint.
+    Mintable,
+    /// `presented`+`nonce` match the last rotation: a renewal would replay.
+    Replayable,
+    /// `presented` is recognised (current, or the replay pair) but expired.
+    Expired,
+    /// `presented` is not recognised.
+    Mismatch,
+}
+
+/// The record of the LAST rotation, kept so a lost renewal reply can be
+/// recovered by an idempotent REPLAY rather than by minting a second credential.
+///
+/// When [`TournamentCredential::renew`] rotates the current secret to a fresh
+/// one, it records the secret it *superseded* alongside the client-minted
+/// `nonce` that drove the rotation. If that rotation's reply is lost, the client
+/// retries with the SAME `nonce` and the SAME (now-superseded) secret; the
+/// broker recognises the pair and returns the already-committed current secret
+/// again — no second mint, no change of authority.
+///
+/// **This is what makes recovery safe against takeover.** A superseded secret
+/// can NEVER mint a new primary; it can only replay the one rotation it was the
+/// input to, and only when accompanied by that rotation's nonce. A holder of a
+/// merely-stolen superseded secret (without the nonce, or with a fresh one)
+/// gets [`CredentialVerdict::Mismatch`] — it cannot obtain a fresh credential
+/// and cannot invalidate the legitimate holder's current one. The nonce is
+/// compared in constant time, like the secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RotationRecord {
+    superseded_secret: String,
+    nonce: String,
+}
+
 /// One tournament bearer credential: the secret, and the instant it stops
 /// being accepted.
 ///
@@ -142,23 +200,32 @@ pub struct MintedCredential {
 /// injected [`BrokerEnv`] clock, never `SystemTime`, so the identical logic
 /// runs in the native shell and the Durable Object.
 ///
-/// **Both fields are private and neither has an accessor.** The plaintext
-/// secret and the expiry leave this type exactly once, in the
-/// [`MintedCredential`] that [`Self::mint`] returns; afterwards the only
-/// question anyone may ask is [`Self::verdict`] (or its
-/// [`Self::accepts`] shorthand). That is what makes this a single authority
-/// rather than a struct with a policy bolted beside it: no call site can spell
-/// a plaintext `==` against the secret, and none can forget the expiry
-/// conjunct.
+/// **All fields are private and none has an accessor.** The plaintext secret
+/// and the expiry leave this type exactly twice — in the [`MintedCredential`]
+/// that [`Self::mint`] and [`Self::renew`] return; afterwards the only question
+/// anyone may ask is [`Self::verdict`] (or its [`Self::accepts`] shorthand).
+/// That is what makes this a single authority rather than a struct with a policy
+/// bolted beside it: no call site can spell a plaintext `==` against the secret,
+/// and none can forget the expiry conjunct.
 ///
 /// **The expiry boundary is EXCLUSIVE.** [`Self::accepts`] is `true` while
 /// `now_ms < expires_at_ms` and `false` at `now_ms == expires_at_ms`: the
 /// instant named by `expires_at_ms` is the first instant the credential is
 /// refused, not the last it is accepted.
+///
+/// **Only the current secret authorizes.** [`Self::verdict`] accepts the current
+/// secret alone. A superseded secret is NOT accepted for actions; its sole
+/// remaining power is to REPLAY the one rotation it fed, via [`Self::renew`] with
+/// the matching nonce — see [`RotationRecord`]. That is what makes a lost-reply
+/// recovery safe: it can never become a fresh authority.
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct TournamentCredential {
     secret: String,
     expires_at_ms: u64,
+    /// The last rotation's record, enabling idempotent replay of a lost renewal
+    /// reply. `None` until the first [`Self::renew`] rotation; overwritten by
+    /// each subsequent one (only the most recent rotation is replayable).
+    last_rotation: Option<RotationRecord>,
 }
 
 impl TournamentCredential {
@@ -175,12 +242,116 @@ impl TournamentCredential {
             Self {
                 secret: secret.clone(),
                 expires_at_ms,
+                last_rotation: None,
             },
             MintedCredential {
                 secret,
                 expires_at_ms,
             },
         )
+    }
+
+    /// Renew the credential, either MINTING a fresh secret (when `presented` is
+    /// the live current secret) or idempotently REPLAYING the last rotation (when
+    /// `presented` is the secret that rotation superseded and `nonce` matches it).
+    ///
+    /// The two paths are what make a lost renewal reply recoverable WITHOUT
+    /// letting a superseded secret become a fresh authority:
+    ///
+    /// - **Mint** — `presented` is the current secret and not expired. A new
+    ///   secret is minted, the outgoing secret is recorded in [`RotationRecord`]
+    ///   beside `nonce`, and the credential advances. Returns
+    ///   [`RenewOutcome::Minted`]. This is the only path that changes the
+    ///   authority, and it requires the CURRENT secret.
+    /// - **Replay** — `presented` matches the recorded superseded secret AND
+    ///   `nonce` matches the recorded nonce. The already-committed current secret
+    ///   is returned unchanged ([`RenewOutcome::Replayed`]); nothing is minted and
+    ///   the authority does not move. This is the retry a client runs when its
+    ///   first rotation's reply was lost: same nonce, same (now-superseded) token,
+    ///   same secret back.
+    /// - Anything else — a superseded secret with a wrong/absent nonce, an
+    ///   unrelated secret, or an expired credential — mints nothing and returns
+    ///   [`RenewOutcome::Mismatch`]/[`RenewOutcome::Expired`]. A merely-stolen
+    ///   superseded secret therefore can neither mint nor receive a credential.
+    ///
+    /// Both secret and nonce are compared in constant time.
+    pub fn renew(&mut self, presented: &str, nonce: &str, env: &impl BrokerEnv) -> RenewOutcome {
+        let now_ms = env.now_ms();
+        match self.renew_kind(presented, nonce, now_ms) {
+            // Mint path: only the live current secret rotates the authority.
+            RenewKind::Mintable => {
+                let secret = env.new_token();
+                let expires_at_ms = now_ms + TOURNAMENT_CREDENTIAL_TTL_MS;
+                let superseded = std::mem::replace(&mut self.secret, secret.clone());
+                self.expires_at_ms = expires_at_ms;
+                // Only a NON-EMPTY nonce yields a replayable record. An empty
+                // nonce (an omitted/`#[serde(default)]` field, or a nonce-less
+                // client) mints but records nothing — otherwise the record would
+                // be `(superseded, "")` and anyone holding the superseded secret
+                // could recover the new one by omitting the nonce, which is the
+                // very takeover the nonce exists to prevent. A prior record is
+                // cleared so a superseded secret cannot replay across this mint.
+                self.last_rotation = if nonce.is_empty() {
+                    None
+                } else {
+                    Some(RotationRecord {
+                        superseded_secret: superseded,
+                        nonce: nonce.to_owned(),
+                    })
+                };
+                RenewOutcome::Minted(MintedCredential {
+                    secret,
+                    expires_at_ms,
+                })
+            }
+            // Replay path: the superseded input to the last rotation, with its
+            // nonce, recovers the already-committed current secret. No mint, no
+            // advance — the returned secret IS the current one.
+            RenewKind::Replayable => RenewOutcome::Replayed(MintedCredential {
+                secret: self.secret.clone(),
+                expires_at_ms: self.expires_at_ms,
+            }),
+            RenewKind::Expired => RenewOutcome::Expired,
+            RenewKind::Mismatch => RenewOutcome::Mismatch,
+        }
+    }
+
+    /// Read-only classification of what [`Self::renew`] would do for
+    /// `(presented, nonce)` at `now_ms`, WITHOUT minting or mutating.
+    ///
+    /// Its reason for existing is the player-credential scan in
+    /// [`TournamentManager::renew_credential`]: resolving which entrant owns a
+    /// presented token needs a read-only probe before taking the `&mut` borrow to
+    /// actually renew, and — critically — a REPLAY presents a superseded secret,
+    /// which [`Self::verdict`] reports as [`CredentialVerdict::Mismatch`], so the
+    /// scan cannot use `verdict` alone or it would fail to attribute a lost-reply
+    /// retry to its owner. Both secret and nonce are compared in constant time.
+    pub fn renew_kind(&self, presented: &str, nonce: &str, now_ms: u64) -> RenewKind {
+        match self.verdict(presented, now_ms) {
+            CredentialVerdict::Accepted => return RenewKind::Mintable,
+            CredentialVerdict::Expired => return RenewKind::Expired,
+            // Not the current secret — consider the replay record.
+            CredentialVerdict::Mismatch => {}
+        }
+        // An empty nonce never replays. A non-empty-nonce mint is the only thing
+        // that records a replay record (see `renew`), so `record.nonce` is always
+        // non-empty; this guard is the belt-and-suspenders half that makes the
+        // "empty nonce cannot recover a bearer" invariant hold at BOTH the record
+        // and the match, independent of how the record was written.
+        if !nonce.is_empty() {
+            if let Some(record) = &self.last_rotation {
+                if constant_time_eq(record.superseded_secret.as_bytes(), presented.as_bytes())
+                    && constant_time_eq(record.nonce.as_bytes(), nonce.as_bytes())
+                {
+                    return if now_ms >= self.expires_at_ms {
+                        RenewKind::Expired
+                    } else {
+                        RenewKind::Replayable
+                    };
+                }
+            }
+        }
+        RenewKind::Mismatch
     }
 
     /// Compare `presented` against the stored secret and the expiry, in that
@@ -203,6 +374,9 @@ impl TournamentCredential {
         if self.secret.is_empty() || presented.is_empty() {
             return CredentialVerdict::Mismatch;
         }
+        // Only the CURRENT secret authorizes. A superseded secret is never
+        // accepted here — its sole residual power is an idempotent replay through
+        // [`Self::renew`] with the matching nonce, which mints nothing.
         if !constant_time_eq(self.secret.as_bytes(), presented.as_bytes()) {
             return CredentialVerdict::Mismatch;
         }
@@ -234,6 +408,7 @@ impl TournamentCredential {
         Self {
             secret: secret.into(),
             expires_at_ms,
+            last_rotation: None,
         }
     }
 }
@@ -247,6 +422,8 @@ impl TournamentCredential {
 /// so the derive would exist whether or not anyone meant it to.
 impl PartialEq for TournamentCredential {
     fn eq(&self, other: &Self) -> bool {
+        // Equality is over the current secret and its expiry — a credential's
+        // identity — not the transient replay record beside it.
         self.expires_at_ms == other.expires_at_ms
             && constant_time_eq(self.secret.as_bytes(), other.secret.as_bytes())
     }
@@ -2017,15 +2194,19 @@ impl TournamentManager {
         Ok(minted)
     }
 
-    /// Rotate one credential: refuse `presented` unless it is currently
-    /// accepted, then replace it with a freshly minted secret and return that.
+    /// Renew one credential: either MINT a fresh secret from the presented
+    /// current one, or idempotently REPLAY the last rotation when `presented` is
+    /// that rotation's superseded secret and `nonce` matches. Delegates the
+    /// decision to [`TournamentCredential::renew`] / [`TournamentCredential::renew_kind`].
     ///
-    /// **Rotation, not extension.** Re-minting the secret bounds a stolen
-    /// credential even against a thief who keeps renewing, because the
-    /// legitimate holder's next renewal locks the thief out — and vice versa,
-    /// which turns silent indefinite shared access into a detectable,
-    /// reportable failure. Extending the expiry in place would give a thief
-    /// exactly the indefinite access this whole mechanism exists to bound.
+    /// **Recoverable, but never a takeover.** A minting rotation requires the
+    /// live CURRENT secret; presenting a superseded secret can only replay the
+    /// one rotation it fed (returning the already-committed current secret,
+    /// minting nothing) and only with that rotation's nonce. So a lost renewal
+    /// reply is recovered by the client retrying with the same token+nonce, while
+    /// a holder of a merely-stolen superseded secret can neither mint a new
+    /// credential nor obtain the current one — the legitimate holder's authority
+    /// stays put. The client mints `nonce`; see the client renew path.
     ///
     /// `role` is the [`TournamentRole`] axis rather than two sibling methods,
     /// per "parameterize, don't proliferate".
@@ -2050,43 +2231,33 @@ impl TournamentManager {
         code: &str,
         role: TournamentRole,
         presented: &str,
+        nonce: &str,
         env: &impl BrokerEnv,
     ) -> Result<MintedCredential, String> {
         let now_ms = env.now_ms();
-        let (credential, minted) = TournamentCredential::mint(env);
         let meta = self.meta_mut(code)?;
-        match role {
-            TournamentRole::Organizer => {
-                match meta.organizer_token.verdict(presented, now_ms) {
-                    CredentialVerdict::Accepted => {}
-                    CredentialVerdict::Expired => {
-                        return Err(format!(
-                            "Organizer credential for tournament {code} has expired and can no longer be renewed"
-                        ))
-                    }
-                    CredentialVerdict::Mismatch => {
-                        return Err(format!("Invalid organizer token for tournament {code}"))
-                    }
-                }
-                meta.organizer_token = credential;
-            }
+        let outcome = match role {
+            TournamentRole::Organizer => meta.organizer_token.renew(presented, nonce, env),
             TournamentRole::Player => {
-                // The scan resolves the token to its owner rather than merely
-                // testing it, exactly as the broker's player authority does:
-                // "some valid token exists" is the check that would let one
-                // entrant rotate another's credential.
+                // Resolve which entrant owns the presented token BEFORE taking the
+                // &mut borrow to renew it. The probe recognises both a current
+                // secret (a fresh rotation) and a superseded-secret + nonce pair
+                // (a lost-reply replay), so a retry is attributed to its owner
+                // rather than read as a mismatch. Resolving to an owner — not just
+                // "some valid token exists" — is what stops one entrant renewing
+                // another's credential.
                 let mut expired = false;
-                let player = meta.players.iter_mut().find(|p| {
-                    match p.player_token.verdict(presented, now_ms) {
-                        CredentialVerdict::Accepted => true,
-                        CredentialVerdict::Expired => {
+                let idx = meta.players.iter().position(|p| {
+                    match p.player_token.renew_kind(presented, nonce, now_ms) {
+                        RenewKind::Mintable | RenewKind::Replayable => true,
+                        RenewKind::Expired => {
                             expired = true;
                             false
                         }
-                        CredentialVerdict::Mismatch => false,
+                        RenewKind::Mismatch => false,
                     }
                 });
-                let Some(player) = player else {
+                let Some(idx) = idx else {
                     return Err(if expired {
                         format!(
                             "Player credential for tournament {code} has expired and can no longer be renewed"
@@ -2095,13 +2266,29 @@ impl TournamentManager {
                         format!("Invalid player token for tournament {code}")
                     });
                 };
-                if player.dropped {
+                if meta.players[idx].dropped {
                     return Err(format!("Player has dropped from tournament {code}"));
                 }
-                player.player_token = credential;
+                meta.players[idx].player_token.renew(presented, nonce, env)
             }
+        };
+        match outcome {
+            RenewOutcome::Minted(minted) | RenewOutcome::Replayed(minted) => Ok(minted),
+            RenewOutcome::Expired => Err(match role {
+                TournamentRole::Organizer => format!(
+                    "Organizer credential for tournament {code} has expired and can no longer be renewed"
+                ),
+                TournamentRole::Player => format!(
+                    "Player credential for tournament {code} has expired and can no longer be renewed"
+                ),
+            }),
+            RenewOutcome::Mismatch => Err(match role {
+                TournamentRole::Organizer => {
+                    format!("Invalid organizer token for tournament {code}")
+                }
+                TournamentRole::Player => format!("Invalid player token for tournament {code}"),
+            }),
         }
-        Ok(minted)
     }
 
     /// Generates the next round's pairings and returns their ids.
@@ -5400,11 +5587,13 @@ mod tests {
         assert!(!credential.accepts("", env.now_ms()));
     }
 
-    /// V10, hostile. A rotated-away secret is refused afterwards even while it
-    /// is still inside its original TTL — rotation, not expiry, is what
-    /// invalidates it.
+    /// V10. Only the CURRENT secret authorizes an action. A rotated-away secret
+    /// stops being accepted the instant it is superseded — there is no overlap
+    /// window for actions; its sole residual power is an idempotent replay
+    /// through `renew` (covered separately). The freshly minted secret
+    /// authorizes in its place.
     #[test]
-    fn a_rotated_away_secret_is_refused_while_still_inside_its_original_ttl() {
+    fn a_rotated_away_secret_stops_authorizing_immediately() {
         let env = FakeEnv::new();
         let mut mgr = TournamentManager::new();
         let original = mgr
@@ -5425,7 +5614,7 @@ mod tests {
             .expect("create");
 
         let rotated = mgr
-            .renew_credential("T", TournamentRole::Organizer, &original.secret, &env)
+            .renew_credential("T", TournamentRole::Organizer, &original.secret, "n1", &env)
             .expect("renew");
 
         let now = env.now_ms();
@@ -5434,16 +5623,22 @@ mod tests {
             "the fixture must still be inside the original TTL, or this proves nothing"
         );
         let stored = &mgr.get("T").expect("event").organizer_token;
-        assert!(
-            !stored.accepts(&original.secret, now),
-            "the presented secret must stop being accepted the instant it is rotated"
+
+        // The superseded secret no longer authorizes — instantly, not after any
+        // window. `verdict` accepts the current secret alone.
+        assert_eq!(
+            stored.verdict(&original.secret, now),
+            CredentialVerdict::Mismatch,
+            "a superseded secret must not authorize an action, even for an instant"
         );
+        // The freshly minted secret authorizes in its place.
         assert!(stored.accepts(&rotated.secret, now));
     }
 
-    /// V11. Renewal ROTATES: the presented secret is refused afterwards and the
-    /// returned one is accepted. Extension in place would leave both live,
-    /// which is exactly the indefinite shared access this mechanism bounds.
+    /// V11. Renewal from the CURRENT secret MINTS a NEW secret whose expiry is
+    /// re-derived from the clock, and that new secret authorizes. An
+    /// *already-expired* credential is refused — renewal recovers a live
+    /// credential, it does not resurrect a dead one.
     #[test]
     fn renewal_rotates_both_roles_and_refuses_an_already_expired_credential() {
         let env = FakeEnv::new();
@@ -5476,7 +5671,7 @@ mod tests {
             (TournamentRole::Player, player.secret.clone()),
         ] {
             let fresh = mgr
-                .renew_credential("T", role, &presented, &env)
+                .renew_credential("T", role, &presented, "n1", &env)
                 .expect("renew");
             assert_ne!(fresh.secret, presented, "renewal must mint a NEW secret");
             assert!(
@@ -5485,12 +5680,8 @@ mod tests {
             );
             assert_eq!(fresh.expires_at_ms, now + TOURNAMENT_CREDENTIAL_TTL_MS);
 
-            // The presented secret is dead; only the returned one authorizes.
-            assert!(
-                mgr.renew_credential("T", role, &presented, &env).is_err(),
-                "the rotated-away secret must not renew again"
-            );
-            mgr.renew_credential("T", role, &fresh.secret, &env)
+            // The freshly returned (current) secret authorizes a further renewal.
+            mgr.renew_credential("T", role, &fresh.secret, "n2", &env)
                 .expect("the freshly returned secret still authorizes");
         }
 
@@ -5515,12 +5706,279 @@ mod tests {
             .expect("create");
         env.advance_secs(TOURNAMENT_CREDENTIAL_TTL_MS / 1000);
         let err = mgr
-            .renew_credential("U", TournamentRole::Organizer, &stale.secret, &env)
+            .renew_credential("U", TournamentRole::Organizer, &stale.secret, "n1", &env)
             .expect_err("an expired credential cannot be renewed");
         assert!(
             err.contains("expired"),
             "expected the expiry message, got: {err}"
         );
+    }
+
+    /// V11, replay mechanics, at the type level. A mint from the current secret
+    /// records the superseded secret + nonce; presenting that pair again REPLAYS
+    /// the already-committed secret (no second mint), while a wrong/absent nonce
+    /// or an unrelated secret is a `Mismatch`. This is the whole recovery-without-
+    /// takeover contract, pinned independent of the manager.
+    #[test]
+    fn renew_mints_from_current_then_idempotently_replays_the_same_secret() {
+        let env = FakeEnv::new();
+        let (mut cred, first) = TournamentCredential::mint(&env);
+
+        // Minting rotation from the current secret.
+        let minted = match cred.renew(&first.secret, "nonce-1", &env) {
+            RenewOutcome::Minted(m) => m,
+            other => panic!("expected Minted, got {other:?}"),
+        };
+        assert_ne!(minted.secret, first.secret, "a mint produces a NEW secret");
+        let now = env.now_ms();
+
+        // The superseded secret no longer authorizes an action; the new one does.
+        assert_eq!(
+            cred.verdict(&first.secret, now),
+            CredentialVerdict::Mismatch
+        );
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+
+        // REPLAY: the superseded secret + the SAME nonce returns the
+        // already-committed secret, minting nothing.
+        match cred.renew(&first.secret, "nonce-1", &env) {
+            RenewOutcome::Replayed(m) => {
+                assert_eq!(
+                    m.secret, minted.secret,
+                    "replay returns the committed secret, not a fresh one"
+                );
+                assert_eq!(m.expires_at_ms, minted.expires_at_ms);
+            }
+            other => panic!("expected Replayed, got {other:?}"),
+        }
+        // The current secret is unchanged by the replay.
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+
+        // A superseded secret with a WRONG nonce can neither mint nor replay, and
+        // an unrelated secret is a mismatch regardless of nonce.
+        assert_eq!(
+            cred.renew(&first.secret, "wrong-nonce", &env),
+            RenewOutcome::Mismatch
+        );
+        assert_eq!(
+            cred.renew("never-issued", "nonce-1", &env),
+            RenewOutcome::Mismatch
+        );
+    }
+
+    /// Maintainer [HIGH] #2: an EMPTY nonce must never be replayable. An
+    /// omitted/`#[serde(default)]` nonce would otherwise record `(superseded, "")`
+    /// and let anyone holding the superseded secret recover the new one by
+    /// omitting the nonce. An empty-nonce rotation still mints, but records no
+    /// replay record, and an empty nonce never replays.
+    #[test]
+    fn an_empty_nonce_mints_but_leaves_nothing_replayable() {
+        let env = FakeEnv::new();
+        let (mut cred, first) = TournamentCredential::mint(&env);
+
+        // Minting with an EMPTY nonce succeeds (a nonce-less client can still
+        // rotate) but must leave no replayable record.
+        let minted = match cred.renew(&first.secret, "", &env) {
+            RenewOutcome::Minted(m) => m,
+            other => panic!("expected Minted, got {other:?}"),
+        };
+        let now = env.now_ms();
+
+        // The superseded secret with an empty nonce CANNOT replay — this is the
+        // takeover path the guard closes.
+        assert_eq!(
+            cred.renew(&first.secret, "", &env),
+            RenewOutcome::Mismatch,
+            "a superseded secret + empty nonce must not recover the new secret"
+        );
+        // Nor with any other nonce (no record was kept at all).
+        assert_eq!(
+            cred.renew(&first.secret, "guessed", &env),
+            RenewOutcome::Mismatch
+        );
+        // The minted secret is the sole authority.
+        assert_eq!(
+            cred.verdict(&minted.secret, now),
+            CredentialVerdict::Accepted
+        );
+        assert_eq!(
+            cred.verdict(&first.secret, now),
+            CredentialVerdict::Mismatch
+        );
+    }
+
+    /// The regression the maintainer's [HIGH] asked for: an accepted overlap
+    /// credential must NOT be able to mint or receive a fresh primary. After the
+    /// owner rotates A→B, a holder of the stale A — presenting a fresh nonce, as a
+    /// thief without the original rotation's nonce must — can neither mint a new
+    /// credential nor obtain B. B stays authoritative, and the owner can still
+    /// advance it. This is what the idempotent-replay redesign buys over the
+    /// earlier bounded-overlap model, which permitted exactly this takeover.
+    #[test]
+    fn a_stolen_superseded_secret_cannot_take_over_the_authority() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let created = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
+                    match_type: None,
+                },
+                &env,
+            )
+            .expect("create");
+
+        // Owner rotates A → B with nonce N1; the reply is received, so B is the
+        // authority the owner holds. A is now a stale superseded secret.
+        let a = created.secret;
+        let b = mgr
+            .renew_credential("T", TournamentRole::Organizer, &a, "N1", &env)
+            .expect("owner rotates A -> B");
+        let now = env.now_ms();
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&b.secret, now));
+        assert!(
+            !mgr.get("T").unwrap().organizer_token.accepts(&a, now),
+            "the superseded secret stops authorizing"
+        );
+
+        // Attacker holds only the stale A. With a FRESH nonce (they never had
+        // N1) it can neither mint (A is not current) nor replay (nonce mismatch).
+        let err = mgr
+            .renew_credential("T", TournamentRole::Organizer, &a, "attacker-nonce", &env)
+            .expect_err("a stale superseded secret with a fresh nonce cannot renew");
+        assert!(
+            err.contains("Invalid"),
+            "expected an invalid-token refusal, got: {err}"
+        );
+
+        // B is untouched by the attempt, and the owner can still advance it —
+        // proving the authority never moved to the attacker.
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&b.secret, now));
+        let c = mgr
+            .renew_credential("T", TournamentRole::Organizer, &b.secret, "N2", &env)
+            .expect("owner rotates B -> C");
+        assert_ne!(c.secret, b.secret);
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&c.secret, env.now_ms()));
+    }
+
+    /// The regression the #8782 review asked for, at the server layer: a renewal
+    /// reply lost in transit must not strand the authority. The client retries
+    /// the rotation with the SAME (now-superseded) secret and the SAME nonce, and
+    /// the broker REPLAYS the already-committed secret rather than minting a
+    /// second one — so the holder recovers the exact authority the server holds,
+    /// with no fork and no strand. A retry with a different nonce is refused.
+    #[test]
+    fn a_lost_renewal_reply_is_recovered_by_replaying_the_same_nonce() {
+        let env = FakeEnv::new();
+        let mut mgr = TournamentManager::new();
+        let created = mgr
+            .create_tournament(
+                "T",
+                CreateTournamentRequest {
+                    name: "Test Event".to_string(),
+                    arity: MatchArity::HEAD_TO_HEAD,
+                    scoring: ScoringPolicy::default_for_arity(MatchArity::HEAD_TO_HEAD),
+                    bracket: BracketShape::Swiss,
+                    total_rounds: None,
+                    plus_rounds: None,
+                    format: None,
+                    match_type: None,
+                },
+                &env,
+            )
+            .expect("create");
+        let held = created.secret;
+
+        // Renew: the server commits a new secret, but the reply is LOST — the
+        // organizer never learns it and keeps holding `held` and its nonce `N`.
+        env.advance_secs(60);
+        let committed = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "N", &env)
+            .expect("a live credential renews");
+
+        // The retry with the SAME (held, N) REPLAYS the committed secret rather
+        // than minting a second one — the holder recovers the real authority.
+        let recovered = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "N", &env)
+            .expect("the retry replays the committed secret");
+        assert_eq!(
+            recovered.secret, committed.secret,
+            "replay recovers the SAME secret, not a fresh one"
+        );
+        assert_eq!(recovered.expires_at_ms, committed.expires_at_ms);
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .organizer_token
+            .accepts(&recovered.secret, env.now_ms()));
+
+        // A retry with a DIFFERENT nonce is refused: recovery is bound to the
+        // client's own nonce, not to mere possession of the superseded secret.
+        let err = mgr
+            .renew_credential("T", TournamentRole::Organizer, &held, "other-nonce", &env)
+            .expect_err("a different nonce cannot recover");
+        assert!(
+            err.contains("Invalid"),
+            "expected an invalid-token refusal, got: {err}"
+        );
+    }
+
+    /// The same replay recovery holds on the player path, which carries the
+    /// extra owner-scan and drop guard the organizer path lacks: the scan
+    /// attributes a superseded-secret + nonce retry to its owning entrant (a
+    /// replay presents a secret `verdict` alone would call a mismatch), so a
+    /// seated player whose renewal reply was lost recovers the committed secret.
+    #[test]
+    fn a_lost_renewal_reply_is_recovered_by_replay_on_the_player_path() {
+        let env = FakeEnv::new();
+        let mut mgr = swiss(4, 2, &env);
+        let joined = mgr.join_tournament("T", "p99", "Zoe", &env).expect("join");
+        let held = joined.secret;
+
+        // Renewal commits, reply lost — the player keeps `held` and its nonce.
+        env.advance_secs(60);
+        let committed = mgr
+            .renew_credential("T", TournamentRole::Player, &held, "N", &env)
+            .expect("a seated player renews");
+
+        // The retry with the same (held, N) replays the committed secret, and the
+        // scan still resolves it to this entrant even though `held` is superseded.
+        let recovered = mgr
+            .renew_credential("T", TournamentRole::Player, &held, "N", &env)
+            .expect("the retry replays the committed secret");
+        assert_eq!(recovered.secret, committed.secret);
+        let now = env.now_ms();
+        assert!(mgr
+            .get("T")
+            .unwrap()
+            .players
+            .iter()
+            .any(|p| p.player_token.accepts(&recovered.secret, now)));
     }
 
     /// A credential survives a realistic multi-day between-round gap. The former
@@ -5563,7 +6021,7 @@ mod tests {
                 .accepts(&org.secret, now),
             "a day-old credential must still authorize a live event's actions",
         );
-        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, &env)
+        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, "n1", &env)
             .expect("a day-old credential must still be renewable");
     }
 
@@ -5578,12 +6036,12 @@ mod tests {
 
         // Reach-guard: it renews fine while the entrant is still seated.
         let fresh = mgr
-            .renew_credential("T", TournamentRole::Player, &joined.secret, &env)
+            .renew_credential("T", TournamentRole::Player, &joined.secret, "n1", &env)
             .expect("a seated entrant may rotate");
 
         mgr.drop_player("T", "p99", &env).expect("drop");
         let err = mgr
-            .renew_credential("T", TournamentRole::Player, &fresh.secret, &env)
+            .renew_credential("T", TournamentRole::Player, &fresh.secret, "n2", &env)
             .expect_err("a dropped entrant may not rotate");
         assert!(
             err.contains("dropped"),
@@ -5616,7 +6074,7 @@ mod tests {
         let before = mgr.get("T").expect("event").last_activity_at;
 
         env.advance_secs(60);
-        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, &env)
+        mgr.renew_credential("T", TournamentRole::Organizer, &org.secret, "n1", &env)
             .expect("renew");
 
         assert_eq!(

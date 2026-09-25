@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 import type {
   CounterType,
@@ -370,13 +371,14 @@ function DebugCardContextMenuInner({
         <ZoneSubmenu
           chrome={submenuProps("zone")}
           currentZone={obj.zone}
-          onSelectZone={(zone, libraryPosition) =>
+          onSelectZone={(zone, simulate, libraryPosition) =>
             dispatchDebug({
               type: "MoveToZone",
               data: {
                 object_id: objectId,
                 to_zone: zone,
                 ...(libraryPosition ? { library_position: libraryPosition } : {}),
+                simulate,
               },
             })
           }
@@ -592,27 +594,54 @@ function ZoneSubmenu({
   chrome,
 }: {
   currentZone: Zone;
-  onSelectZone: (zone: Zone, libraryPosition?: LibraryPosition) => void;
+  onSelectZone: (
+    zone: Zone,
+    simulate: boolean,
+    libraryPosition?: LibraryPosition,
+  ) => void;
   chrome: SubmenuChrome;
 }) {
+  const { t } = useTranslation("game");
+  // Off by default: a debug move stages the board raw. On, the engine runs the
+  // real pipeline — ETB replacements and triggers, leave/dies triggers, SBAs.
+  const [runEtb, setRunEtb] = useState(false);
+
   return (
     <Submenu label="Zone" badge={currentZone} {...chrome}>
+      <button
+        role="menuitemcheckbox"
+        type="button"
+        aria-checked={runEtb}
+        onClick={() => setRunEtb((cur) => !cur)}
+        className={
+          "flex w-full items-center gap-2 border-b border-gray-800 px-3 py-1 text-left text-xs transition-colors hover:bg-white/10 " +
+          (runEtb ? "text-cyan-300" : "text-gray-400")
+        }
+      >
+        <span className="w-3 text-center text-[10px]">{runEtb ? "✓" : ""}</span>
+        <span>{t("debugMove.runEtbEffects")}</span>
+      </button>
       {ZONES.filter((z) => z !== currentZone).map((zone) =>
         zone === "Library" ? (
           <div key={zone}>
             <MenuItem
               label="Library (top)"
-              onClick={() => onSelectZone(zone, { type: "Top" })}
+              onClick={() => onSelectZone(zone, runEtb, { type: "Top" })}
               compact
             />
             <MenuItem
               label="Library (bottom)"
-              onClick={() => onSelectZone(zone, { type: "Bottom" })}
+              onClick={() => onSelectZone(zone, runEtb, { type: "Bottom" })}
               compact
             />
           </div>
         ) : (
-          <MenuItem key={zone} label={zone} onClick={() => onSelectZone(zone)} compact />
+          <MenuItem
+            key={zone}
+            label={zone}
+            onClick={() => onSelectZone(zone, runEtb)}
+            compact
+          />
         ),
       )}
     </Submenu>

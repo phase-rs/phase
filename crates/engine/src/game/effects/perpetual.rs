@@ -946,6 +946,7 @@ mod tests {
                     amount: ManaCost::generic(1),
                     spell_filter: None,
                     dynamic_count: None,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 },
             }],
             "the quoted cost body must classify to a self ModifyCost AddStaticMode"

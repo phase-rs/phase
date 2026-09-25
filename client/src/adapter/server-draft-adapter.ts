@@ -33,6 +33,7 @@ import type {
   TournamentFormat,
   PodPolicy,
   DraftKind,
+  SharedStackPileDecision,
 } from "./draft-adapter";
 import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 
@@ -387,14 +388,53 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * Claim the single `draftResolve`/`draftReject` pair for one action.
+   *
+   * THE PAIR IS ONE SLOT, AND EVERY ACTION WANTED IT. `joinDraft`, `submitPick`,
+   * `submitSharedStackDecision` and `submitDeck` each assigned straight into it.
+   * A second action overwrote the first's callbacks, and the next
+   * `DraftStateUpdate` resolved only the survivor and nulled both -- so the
+   * first caller's promise never settled at all. Not a lost result: a
+   * permanently pending `await`, with whatever UI awaited it stuck behind it.
+   *
+   * Single-flight rather than request correlation, because the wire carries no
+   * correlation id: `DraftAction` frames are unlabelled and the server answers
+   * with a bare `DraftStateUpdate`. Adding an id is a protocol change; refusing
+   * to have two in flight is not, and these actions are user-initiated and
+   * mutually exclusive by phase anyway. The refusal is explicit and immediate,
+   * which is the part that matters -- the caller learns now instead of awaiting
+   * forever.
+   *
+   * "In flight" is read off the pair itself rather than a parallel flag, so the
+   * two cannot drift: all sixteen settle sites already null both together, and
+   * each is therefore a release.
+   */
+  private claimDraftAction(
+    action: string,
+    resolve: (view: DraftPlayerView) => void,
+    reject: (error: Error) => void,
+  ): boolean {
+    if (this.draftResolve !== null || this.draftReject !== null) {
+      reject(new AdapterError(
+        "PHASE_ERROR",
+        `Another draft action is still in flight; ${action} was not sent`,
+        false,
+      ));
+      return false;
+    }
+    this.draftResolve = resolve;
+    this.draftReject = reject;
+    return true;
+  }
+
   async joinDraft(
     draftCode: string,
     displayName: string,
     password?: string,
   ): Promise<DraftPlayerView> {
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("JoinDraft", resolve, reject)) return;
 
       if (!isValidWebSocketUrl(this.serverUrl)) {
         reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
@@ -421,8 +461,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("Pick", resolve, reject)) return;
       const sent = this.send({
         type: "DraftAction",
         data: {
@@ -441,13 +480,51 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * One whole shared-stack turn decision on the server-authoritative path.
+   *
+   * This exists because `CreateDraftSettings.kind` is
+   * `Exclude<DraftKind, "Quick">`, which admits `"Winston"` the moment the
+   * union widens — a creatable kind with no way to send its only action would
+   * be a half-extension. No shipped UI drives this path today (a P2P pod is
+   * where Winston is played), but a wire client and any future UI use it.
+   *
+   * `pile` is the optimistic-concurrency check against the engine's cursor;
+   * legality is `shared_stack::refusal_for`'s, server-side.
+   */
+  async submitSharedStackDecision(
+    pile: number,
+    decision: SharedStackPileDecision,
+  ): Promise<DraftPlayerView> {
+    if (this.seatIndex === null || this.draftCode === null) {
+      throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
+    }
+    return new Promise<DraftPlayerView>((resolve, reject) => {
+      if (!this.claimDraftAction("SharedStackDecision", resolve, reject)) return;
+      const sent = this.send({
+        type: "DraftAction",
+        data: {
+          draft_code: this.draftCode,
+          action: {
+            type: "SharedStackDecision",
+            data: { seat: this.seatIndex, pile, decision },
+          },
+        },
+      });
+      if (!sent) {
+        this.draftResolve = null;
+        this.draftReject = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
+      }
+    });
+  }
+
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      this.draftResolve = resolve;
-      this.draftReject = reject;
+      if (!this.claimDraftAction("SubmitDeck", resolve, reject)) return;
       const sent = this.send({
         type: "DraftAction",
         data: {

@@ -3,6 +3,10 @@ import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../../constants/storage";
 import {
   createDefaultDraftWorkspacePreferences,
   DRAFT_WORKSPACE_PACK_SCALE_DEFAULT,
+  DRAFT_WORKSPACE_PILE_SCALE_DEFAULT,
+  DRAFT_WORKSPACE_PILE_SCALE_MAX,
+  DRAFT_WORKSPACE_PILE_SCALE_MIN,
+  DRAFT_WORKSPACE_PILE_SCALE_STEP,
   DRAFT_WORKSPACE_PACK_SCALE_MAX,
   DRAFT_WORKSPACE_PACK_SCALE_MIN,
   DRAFT_WORKSPACE_PACK_SCALE_STEP,
@@ -27,6 +31,7 @@ describe("workspace preferences", () => {
       explicitView: "board",
       cardPreviewMode: "invalid",
       packScale: 3,
+      pileScale: 4,
       pinned: "yes",
       pinnedHeightRatio: 2,
       sideboardCollapsed: false,
@@ -52,6 +57,7 @@ describe("workspace preferences", () => {
       explicitView: "board",
       cardPreviewMode: "none",
       packScale: 2.9,
+      pileScale: 2.9,
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: false,
       phoneDeckVisualColumnCaps: { portrait: 1, landscape: 10 },
@@ -122,6 +128,7 @@ describe("workspace preferences", () => {
       explicitView: null,
       cardPreviewMode: "none",
       packScale: DRAFT_WORKSPACE_PACK_SCALE_DEFAULT,
+      pileScale: DRAFT_WORKSPACE_PILE_SCALE_DEFAULT,
       sideboardCollapsed: null,
       builderPhoneSideboardCollapsed: true,
       phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
@@ -150,10 +157,12 @@ describe("workspace preferences", () => {
     expect(repairDraftWorkspacePreferences({
       ...defaults,
       packScale: Number.NaN,
+      pileScale: Number.NaN,
       deck: { ...defaults.deck, columnCount: 3.5 },
       sideboard: { ...defaults.sideboard, columnCount: Number.POSITIVE_INFINITY },
     })).toMatchObject({
       packScale: 1.65,
+      pileScale: 1.35,
       deck: { columnCount: 7 },
       sideboard: { columnCount: 6 },
     });
@@ -165,6 +174,7 @@ describe("workspace preferences", () => {
       explicitView: "board",
       cardPreviewMode: "follow",
       packScale: 1.8,
+      pileScale: 2.4,
       sideboardCollapsed: false,
       deck: { sort: "type", columnCount: 4, rows: "two", showHeaders: false },
       sideboard: { sort: "color", columnCount: 8, rows: "one", showHeaders: true },
@@ -173,6 +183,7 @@ describe("workspace preferences", () => {
       explicitView: "board",
       cardPreviewMode: "follow",
       packScale: 1.8,
+      pileScale: 2.4,
       sideboardCollapsed: false,
       builderPhoneSideboardCollapsed: true,
       phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
@@ -217,6 +228,31 @@ describe("workspace preferences", () => {
     expect(repairDraftWorkspacePreferences({ ...defaults, packScale: 0.734 }).packScale).toBe(0.73);
     expect(repairDraftWorkspacePreferences({ ...defaults, packScale: 0.735 }).packScale).toBe(0.74);
     expect(repairDraftWorkspacePreferences({ ...defaults, packScale: Number.POSITIVE_INFINITY }).packScale).toBe(1.65);
+    // The pile scale is its own stored number on the same clamp: a blob that
+    // predates it has `undefined` here and takes the default, which is the
+    // whole migration — the schema version deliberately did not move for it.
+    expect(repairDraftWorkspacePreferences({ ...defaults, pileScale: 0.39 }).pileScale).toBe(0.4);
+    expect(repairDraftWorkspacePreferences({ ...defaults, pileScale: 2.91 }).pileScale).toBe(2.9);
+    expect(repairDraftWorkspacePreferences({ ...defaults, pileScale: 0.735 }).pileScale).toBe(0.74);
+    const withoutPileScale = { ...defaults } as Record<string, unknown>;
+    delete withoutPileScale.pileScale;
+    expect(repairDraftWorkspacePreferences(withoutPileScale).pileScale)
+      .toBe(DRAFT_WORKSPACE_PILE_SCALE_DEFAULT);
+    // And the rest of a pre-`pileScale` blob survives that migration intact,
+    // which a schema-version bump would have discarded.
+    expect(repairDraftWorkspacePreferences({ ...withoutPileScale, packScale: 0.85 }).packScale)
+      .toBe(0.85);
+    // The v1 and v2 arms run the same repair, and they are the arms a stored
+    // blob that predates `pileScale` is most likely to be on — a player who has
+    // not opened the draft workspace since either migration.
+    for (const schemaVersion of [1, 2]) {
+      expect(repairDraftWorkspacePreferences({ ...withoutPileScale, schemaVersion }).pileScale)
+        .toBe(DRAFT_WORKSPACE_PILE_SCALE_DEFAULT);
+    }
+    // The pile slider's own notch count, mirroring the pack row above: a step
+    // that does not divide the range leaves the slider unable to reach its ends.
+    expect((DRAFT_WORKSPACE_PILE_SCALE_MAX - DRAFT_WORKSPACE_PILE_SCALE_MIN)
+      / DRAFT_WORKSPACE_PILE_SCALE_STEP).toBeCloseTo(250);
     expect((Math.round(DRAFT_WORKSPACE_PACK_SCALE_MAX * 100) - Math.round(DRAFT_WORKSPACE_PACK_SCALE_MIN * 100))
       / Math.round(DRAFT_WORKSPACE_PACK_SCALE_STEP * 100)).toBe(250);
     expect(DRAFT_WORKSPACE_PACK_SCALE_DEFAULT).toBe(

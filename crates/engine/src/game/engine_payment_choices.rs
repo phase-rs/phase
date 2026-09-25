@@ -359,6 +359,7 @@ fn handle_opponent_may_choice_inner(
     let WaitingFor::OpponentMayChoice {
         player: promptee,
         remaining,
+        decision_subject_id,
         source_id,
         description,
     } = waiting_for
@@ -390,6 +391,7 @@ fn handle_opponent_may_choice_inner(
                 if let Some((&next, rest)) = remaining.split_first() {
                     state.waiting_for = WaitingFor::OpponentMayChoice {
                         player: next,
+                        decision_subject_id,
                         source_id,
                         description,
                         remaining: rest.to_vec(),
@@ -498,6 +500,7 @@ fn handle_opponent_may_choice_inner(
                     let rest = remaining[1..].to_vec();
                     state.waiting_for = WaitingFor::OpponentMayChoice {
                         player: next,
+                        decision_subject_id,
                         source_id,
                         description,
                         remaining: rest,
@@ -533,6 +536,7 @@ fn handle_opponent_may_choice_inner(
         let rest = remaining[1..].to_vec();
         state.waiting_for = WaitingFor::OpponentMayChoice {
             player: next,
+            decision_subject_id,
             source_id,
             description,
             remaining: rest,
@@ -1446,15 +1450,37 @@ pub(super) fn handle_unless_payment(
                 let source = pending_effect.source_id;
                 let ctx =
                     crate::game::filter::FilterContext::from_source_with_controller(source, player);
+                // The zone population is scanned ACROSS ALL PLAYERS — the
+                // parsed `filter` is the single authority for narrowing it
+                // (e.g. "your graveyard" stamps `tf.controller = Some(You)`;
+                // "an opponent's graveyard" stamps `FilterProp::Owned{Opponent}`;
+                // a bare/possessive-less zone phrase, like an unrestricted
+                // "a graveyard", carries no ownership restriction at all — see
+                // `parse_zone_suffix` in `oracle_target.rs`). Pre-restricting
+                // this scan to the payer's own zone (as a prior version did)
+                // silently narrowed an unrestricted source zone to the payer's
+                // own, even though the printed text named no such restriction.
                 let zone_objects: Vec<ObjectId> = match from_zone {
-                    Some(Zone::Graveyard) => state
-                        .players
+                    Some(zone) => state
+                        .objects
                         .iter()
-                        .find(|p| p.id == player)
-                        .map(|p| p.graveyard.iter().copied().collect())
-                        .unwrap_or_default(),
-                    _ => state.battlefield.iter().copied().collect(),
+                        .filter(|(_, obj)| obj.zone == *zone)
+                        .map(|(id, _)| *id)
+                        .collect(),
+                    None => state.battlefield.iter().copied().collect(),
                 };
+                // CR 118.12: eligibility is governed ENTIRELY by the parsed
+                // `filter` (which already encodes whatever ownership/control
+                // restriction the printed text actually specifies — "you
+                // control" via `tf.controller`, a possessive source zone via
+                // `FilterProp::Owned`, or nothing at all for an unrestricted
+                // noun like Drake Familiar's "an enchantment"). Do NOT impose
+                // an additional blanket `obj.controller == player` restriction
+                // here — that duplicated (and for zone-qualified costs,
+                // silently replaced) the filter's own scoping and made an
+                // unrestricted return-cost impossible to pay with an
+                // opponent-controlled object, even though the Oracle text
+                // named no such restriction.
                 let filter_ref = filter.as_ref();
                 let eligible: Vec<ObjectId> = zone_objects
                     .iter()
@@ -1463,8 +1489,7 @@ pub(super) fn handle_unless_payment(
                             .objects
                             .get(id)
                             .map(|obj| {
-                                obj.controller == player
-                                    && !obj.is_emblem
+                                !obj.is_emblem
                                     && filter_ref.is_none_or(|f| {
                                         crate::game::filter::matches_target_filter(
                                             state, **id, f, &ctx,
@@ -2847,11 +2872,7 @@ fn set_active_priority(state: &mut GameState) {
 }
 
 fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> ActionResult {
-    ActionResult {
-        events: std::mem::take(events),
-        waiting_for,
-        log_entries: vec![],
-    }
+    ActionResult::applied(std::mem::take(events), waiting_for)
 }
 
 #[cfg(test)]
@@ -2865,6 +2886,7 @@ mod tests {
         ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, SacrificeCost,
         SubAbilityLink, TriggerDefinition, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::{CardId, ObjectId};
@@ -2876,6 +2898,90 @@ mod tests {
             amount: QuantityExpr::Fixed { value },
             player: TargetFilter::Controller,
         }
+    }
+
+    fn opponent_may_state(effect: Effect, remaining: Vec<PlayerId>) -> GameState {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let mut ability = ResolvedAbility::new(effect, vec![], ObjectId(100), PlayerId(0));
+        ability.optional = true;
+        ability.optional_for = Some(crate::types::ability::OpponentMayScope::AnyPlayer);
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ability),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        });
+        state.waiting_for = WaitingFor::OpponentMayChoice {
+            player: PlayerId(0),
+            decision_subject_id: Some(ObjectId(44)),
+            source_id: ObjectId(100),
+            description: Some("optional test effect".to_string()),
+            remaining,
+        };
+        state
+    }
+
+    #[test]
+    fn opponent_may_reprompts_preserve_latched_subject_until_terminal_resolution() {
+        let mut state = opponent_may_state(gain_life(1), vec![PlayerId(1), PlayerId(2)]);
+
+        for (actor, next) in [(PlayerId(0), PlayerId(1)), (PlayerId(1), PlayerId(2))] {
+            crate::game::engine::apply(
+                &mut state,
+                actor,
+                GameAction::DecideOptionalEffect { accept: false },
+            )
+            .expect("decline advances to the next APNAP participant");
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice {
+                    player,
+                    decision_subject_id: Some(ObjectId(44)),
+                    ..
+                } if player == next
+            ));
+            assert!(
+                state.active_optional_effect_frame().is_some(),
+                "the parked resolution authority remains until the terminal answer"
+            );
+        }
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(2),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("terminal decline resolves the parked frame");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.active_optional_effect_frame().is_none());
+    }
+
+    #[test]
+    fn opponent_may_infeasible_accept_reprompt_preserves_latched_subject() {
+        let effect = Effect::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        };
+        let mut state = opponent_may_state(effect, vec![PlayerId(1)]);
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("an accepted choice with no legal object advances to the next player");
+
+        assert!(matches!(
+            &state.waiting_for,
+            WaitingFor::OpponentMayChoice {
+                player: PlayerId(1),
+                decision_subject_id: Some(ObjectId(44)),
+                remaining,
+                ..
+            } if remaining.is_empty()
+        ));
+        assert!(state.active_optional_effect_frame().is_some());
     }
 
     #[test]
@@ -2898,6 +3004,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -2930,6 +3037,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -2968,6 +3076,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -3003,6 +3112,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -3036,6 +3146,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -3068,6 +3179,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id: ObjectId(100),
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -3100,6 +3212,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: Some(key.clone()),
             same_card_may_trigger_choice_available: false,
@@ -3111,6 +3224,7 @@ mod tests {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id,
+                decision_subject_id: None,
                 description: None,
                 may_trigger_key: Some(key.clone()),
                 same_card_may_trigger_choice_available: false,
@@ -3136,6 +3250,7 @@ mod tests {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id: ObjectId(100),
+                decision_subject_id: None,
                 description: None,
                 may_trigger_key: None,
                 same_card_may_trigger_choice_available: false,

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use strum::EnumCount;
 
 use super::ability::{
-    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter, QuantityExpr,
-    QuantityRef, TargetFilter,
+    AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter,
+    QuantityExpr, QuantityRef, TargetFilter,
 };
 use super::events::ActivatedAbilityKind;
 use super::identifiers::ObjectIncarnationRef;
@@ -488,6 +488,57 @@ impl FromStr for ExileCastTiming {
     }
 }
 
+/// CR 406.6 + CR 607.1: Who a `StaticMode::ExileCastPermission` grants its
+/// play permission to, and which cards of the source's pool each grantee may
+/// use. A typed axis (not a `bool`) so further grantee shapes (e.g. "each
+/// opponent") slot in without a refactor.
+///
+/// - `SourceController` — "*You* may play … from among cards exiled with ~."
+///   The source's controller may use every card in the pool (Maralen, The
+///   Matrix of Time, the Prosper/Tibalt impulse class).
+/// - `EachPlayerOwnExiles` — "*Each player* may play lands and cast spells from
+///   among cards *they* exiled with ~" (Uba Mask). Every player is a grantee,
+///   but each may use only the pool cards they themselves exiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExileCastGrantee {
+    /// Only the source's controller; the whole pool is eligible.
+    #[default]
+    SourceController,
+    /// Each player, restricted to the pool cards that player exiled.
+    ///
+    /// RUNTIME: the pool stays the source-linked set (CR 406.6 + CR 607.2b);
+    /// each player's share is the pool cards whose recorded exiling player
+    /// (`GameObject::exiled_by`) is that player. Ownership plays no part — a
+    /// player who exiled an opponent's card may use it, and its owner may not.
+    /// A pool card with no recorded exiling player is usable by nobody.
+    EachPlayerOwnExiles,
+}
+
+impl fmt::Display for ExileCastGrantee {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExileCastGrantee::SourceController => write!(f, "source_controller"),
+            ExileCastGrantee::EachPlayerOwnExiles => write!(f, "each_player_own_exiles"),
+        }
+    }
+}
+
+impl FromStr for ExileCastGrantee {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "source_controller" => Ok(ExileCastGrantee::SourceController),
+            "each_player_own_exiles" => Ok(ExileCastGrantee::EachPlayerOwnExiles),
+            other => Err(format!("unknown ExileCastGrantee: {other}")),
+        }
+    }
+}
+
+fn is_default_exile_cast_grantee(grantee: &ExileCastGrantee) -> bool {
+    *grantee == ExileCastGrantee::default()
+}
+
 /// CR 118.9 + CR 601.2f: Whether a non-mana cost rider on a graveyard/exile
 /// cast-permission static is an *alternative* cost (paid in lieu of the spell's
 /// mana cost, which is zeroed — CR 118.9) or an *additional* cost (paid on top
@@ -717,6 +768,40 @@ fn cost_modify_mode_reduce() -> CostModifyMode {
 /// directional cost-modification fields (self `CostReduction`, ability statics).
 pub(crate) fn is_cost_modify_mode_reduce(mode: &CostModifyMode) -> bool {
     matches!(mode, CostModifyMode::Reduce)
+}
+
+/// CR 118.7b/c/d: How far a mana-cost REDUCTION reaches when one of its colored
+/// or colorless units finds no matching component left in the cost being reduced.
+///
+/// Orthogonal to [`CostModifyMode`], which is the direction axis. This is the
+/// reach axis, and it is meaningful only for [`CostModifyMode::Reduce`] — a
+/// `Raise` only ever adds mana, and `Minimum` is a floor, so neither can strand
+/// a unit that needs a spillover decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CostReductionReach {
+    /// CR 118.7b/c/d (the rules default): a reduction unit whose color/colorless
+    /// component is absent from the cost (118.7b), or that exceeds what that
+    /// component had left (118.7c/d), reduces GENERIC mana instead. Aang, Master
+    /// of Elements — "Spells you cast cost {W}{U}{B}{R}{G} less to cast. (This
+    /// can reduce generic costs.)" — is the card that makes this visible.
+    #[default]
+    SpillsToGeneric,
+    /// "This effect reduces only the amount of colored mana you pay." The card
+    /// overrides CR 118.7b/c/d: an unmatched or excess unit is simply lost and
+    /// never touches the generic component. Morophon, the Boundless (whose
+    /// ruling spells it out: {4}{R}{W}{W} becomes {4}{W}), Edgewalker and
+    /// Ragemonger (whose reminder text gives worked examples), Bard Class,
+    /// Head of the Class, Nekrataal Avatar, Vorthos, Steward of Myth, and the
+    /// Defiler cycle ("... only the amount of blue mana you pay").
+    ColoredManaOnly,
+}
+
+impl CostReductionReach {
+    /// Serde `skip_serializing_if` for the CR 118.7b default, so card data that
+    /// predates this axis round-trips byte-identically.
+    pub(crate) fn is_spills_to_generic(&self) -> bool {
+        matches!(self, CostReductionReach::SpillsToGeneric)
+    }
 }
 
 /// CR 116.2: Stable registry string for a [`SpecialAction`], used by the
@@ -1176,6 +1261,15 @@ pub enum StaticMode {
             deserialize_with = "super::ability::deserialize_optional_quantity_ref_compat"
         )]
         dynamic_count: Option<QuantityRef>,
+        /// CR 118.7b/c/d: whether an unmatched colored/colorless reduction unit
+        /// spills over into generic mana. Only meaningful for `Reduce`.
+        /// `#[serde(default)]` keeps card data serialized before this axis
+        /// existed reading as the CR 118.7b default.
+        #[serde(
+            default,
+            skip_serializing_if = "CostReductionReach::is_spills_to_generic"
+        )]
+        reach: CostReductionReach,
     },
     /// CR 601.2f + CR 118.8: Imposes an additional non-mana cost on spells or
     /// spells matching `spell_filter`. Distinct from [`StaticMode::ModifyCost`],
@@ -1277,8 +1371,27 @@ pub enum StaticMode {
     /// activated abilities in the specified cost category to be activated at
     /// instant timing. The affected permanent filter lives on `StaticDefinition`.
     /// Canonical class: The Wandering Emperor's same-turn loyalty permission.
+    ///
+    /// `cost_category` alone is coarse: a mana-cost ability class (equip,
+    /// fortify, reconfigure — all `CostCategory::ManaOnly`) would over-grant
+    /// instant-speed permission to every mana-only-cost ability on the
+    /// affected permanent, mana abilities included, and would wrongly *deny*
+    /// the permission to a same-tag ability with a non-mana cost (a
+    /// sacrifice-cost equip-like ability still carries `AbilityTag::Equip`
+    /// per CR 702.6a). `keyword`, when present, replaces the cost-category
+    /// match with an `AbilityTag` match (e.g. `"equip"`) — the tagged class
+    /// is defined by what the ability *is*, not what it costs — mirroring
+    /// `ReduceAbilityCost`'s tag-keyed matching. `cost_category` is then an
+    /// unused placeholder (kept non-`Option` for the untagged case's
+    /// back-compat serialization). `None` keeps the original
+    /// cost-category-only match (Wandering Emperor's loyalty permission,
+    /// where `PaysLoyalty` is already unambiguous). Leonin Shikari's class:
+    /// "You may activate equip abilities any time you could cast an
+    /// instant."
     ActivateAsInstant {
         cost_category: CostCategory,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keyword: Option<AbilityTag>,
     },
     /// CR 118.3 + CR 601.2h + CR 602.2b: The scoped player can't pay a
     /// matching non-mana cost to cast spells or activate abilities.
@@ -1600,6 +1713,12 @@ pub enum StaticMode {
         /// Mirrors `Effect::CastFromZone.enters_with_counter`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_with_counter: Option<super::counter::CounterType>,
+        /// CR 406.6 + CR 607.1: Who the permission is granted to and which pool
+        /// cards each grantee may use. `SourceController` (default) preserves
+        /// every "you may …" shape; `EachPlayerOwnExiles` is the Uba Mask
+        /// "each player may … from among cards they exiled with ~" shape.
+        #[serde(default, skip_serializing_if = "is_default_exile_cast_grantee")]
+        grantee: ExileCastGrantee,
     },
     /// CR 113.6 + CR 601.2a: Marker static identifying a source whose linked
     /// "play a card from exile with a collection counter on it" permission is
@@ -2008,9 +2127,10 @@ pub enum StaticMode {
     LegendRuleDoesntApply,
     /// Speed may increase beyond 4, and 4+ still counts as max speed for that player.
     SpeedCanIncreaseBeyondFour,
-    /// CR 118.12a: Defiler cycle — "As an additional cost to cast [color] permanent
-    /// spells, you may pay [N] life. Those spells cost {C} less to cast."
-    /// Optional life payment during casting with conditional mana reduction.
+    /// CR 118.8 + CR 118.8b: Defiler cycle — "As an additional cost to cast [color]
+    /// permanent spells, you may pay [N] life. Those spells cost {C} less to cast."
+    /// The life payment is an OPTIONAL additional cost (CR 118.8b), announced per
+    /// CR 601.2b, with the conditional mana reduction constrained by CR 118.7b/c/d.
     DefilerCostReduction {
         /// The color of permanent spells this applies to
         color: ManaColor,
@@ -2018,6 +2138,16 @@ pub enum StaticMode {
         life_cost: u32,
         /// Mana cost reduction if life is paid
         mana_reduction: ManaCost,
+        /// CR 118.7b/c/d: all five printed Defilers close with "This effect
+        /// reduces only the amount of [color] mana you pay", which is carried
+        /// here rather than assumed. The parser accepts the template without
+        /// that rider too — MTGJSON sometimes splits the Oracle text across
+        /// lines — and such a shape correctly keeps the CR 118.7b default.
+        #[serde(
+            default,
+            skip_serializing_if = "CostReductionReach::is_spills_to_generic"
+        )]
+        reach: CostReductionReach,
     },
     /// CR 614.1b + CR 614.10: "Skip your [step] step" — replacement effect that replaces
     /// the named step with nothing. Parameterized by Phase to cover draw/untap/upkeep.
@@ -2345,6 +2475,29 @@ pub enum StaticModeKind {
     Other,
 }
 
+/// CR 508.1c + CR 702.3b: which DIRECTION an attack-legality static defers when
+/// its gate names a defending player that no creature-level query can supply.
+///
+/// Not a bool: the two arms are two different rules that happen to defer in
+/// opposite directions, and the deferred verdict for each is the one that leaves
+/// the creature OFFERED so the per-pairing authority
+/// (`combat::attacker_can_attack_target`) can decide.
+///
+/// CR 508.1c checks restrictions against the
+/// DECLARATION, so an unanchored restriction is not yet disobeyed.
+/// CR 702.3b is excepted by a permission, so an unanchored permission is
+/// not yet spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefendingPlayerAnchorPolarity {
+    /// CR 508.1c: "can't attack" — a restriction. Deferred verdict: the static
+    /// does NOT apply at creature level (the creature is not prohibited yet).
+    Prohibition,
+    /// CR 702.3b: "can attack ... as though it didn't have defender" — a
+    /// permission. Deferred verdict: the static DOES apply at creature level
+    /// (the creature is offered, and each pairing is judged on its own).
+    Permission,
+}
+
 impl StaticMode {
     /// Maps this [`StaticMode`] to its fieldless [`StaticModeKind`] discriminant.
     ///
@@ -2500,6 +2653,150 @@ impl StaticMode {
             StaticMode::Other(..) => StaticModeKind::Other,
         }
     }
+
+    /// CR 508.1c + CR 702.3b: this mode's anchored-deferral polarity, or `None`
+    /// when the mode has no defending-player-anchored semantics at all.
+    ///
+    /// EXHAUSTIVE and wildcard-free, mirroring [`StaticMode::as_keyword`] in this
+    /// file: a future combat-legality mode is a COMPILE ERROR here and must be
+    /// classified deliberately. `None` is the FAIL-CLOSED default — an unclassified
+    /// mode never defers and behaves exactly as it does today — and it is a LISTED
+    /// default, not a `_` wildcard, so the default can never be reached by accident.
+    ///
+    /// EVERY ARM ALTERNATIVE NAMES A `StaticMode` VARIANT EXPLICITLY. That is the
+    /// durable property, and it is asserted structurally by
+    /// `defending_player_anchor_polarity_names_every_arm` in this file's tests: no
+    /// `_`, and no bare-binding catch-all (`other => None`) either. Sub-patterns
+    /// INSIDE a variant (`StaticMode::Other(_)`, `StaticMode::Foo { .. }`) are
+    /// deliberately fine — they name the variant.
+    pub(crate) fn defending_player_anchor_polarity(&self) -> Option<DefendingPlayerAnchorPolarity> {
+        match self {
+            StaticMode::CantAttack | StaticMode::CantAttackOrBlock => {
+                Some(DefendingPlayerAnchorPolarity::Prohibition)
+            }
+            StaticMode::CanAttackWithDefender => Some(DefendingPlayerAnchorPolarity::Permission),
+            StaticMode::Indestructible
+            | StaticMode::Shroud
+            | StaticMode::Hexproof
+            | StaticMode::Flying
+            | StaticMode::Vigilance
+            | StaticMode::Menace
+            | StaticMode::Reach
+            | StaticMode::Trample
+            | StaticMode::Deathtouch
+            | StaticMode::Lifelink
+            | StaticMode::Continuous
+            | StaticMode::CantBlock
+            | StaticMode::AttackOnlyNeighbor
+            | StaticMode::CantBecomeSuspected
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
+            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeCast { .. }
+            | StaticMode::CantBeActivated { .. }
+            | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::RestrictLibrarySearchToTop { .. }
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+            | StaticMode::CantCauseSacrificeOrExile { .. }
+            | StaticMode::CantCauseForcedAction { .. }
+            | StaticMode::CastWithFlash
+            | StaticMode::GrantsExtraVote
+            | StaticMode::GrantsExtraVillainousChoice
+            | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CastWithAlternativeCost { .. }
+            | StaticMode::AlternativeKeywordCost { .. }
+            | StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
+            | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::ReduceActionCost { .. }
+            | StaticMode::ModifyActivationLimit { .. }
+            | StaticMode::ActivateAsInstant { .. }
+            | StaticMode::CantPayCost { .. }
+            | StaticMode::CantGainLife
+            | StaticMode::CantLoseLife
+            | StaticMode::PlayerProtection(_)
+            | StaticMode::MustAttack
+            | StaticMode::MustAttackDefender { .. }
+            | StaticMode::MustBlock
+            | StaticMode::MustBlockAttacker { .. }
+            | StaticMode::CantDraw { .. }
+            | StaticMode::DrawFromBottom { .. }
+            | StaticMode::DoubleTriggers { .. }
+            | StaticMode::IgnoreHexproof
+            | StaticMode::ExtraBlockers { .. }
+            | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::RevealHand { .. }
+            | StaticMode::GraveyardCastPermission { .. }
+            | StaticMode::TopOfLibraryCastPermission { .. }
+            | StaticMode::TopOfLibraryHasPlot
+            | StaticMode::TopOfLibraryPlotPermission
+            | StaticMode::CastFromHandFree { .. }
+            | StaticMode::ExileCastPermission { .. }
+            | StaticMode::CountersPersistAcrossZones { .. }
+            | StaticMode::CantBeCountered
+            | StaticMode::CantBeCopied
+            | StaticMode::CantEnterBattlefieldFrom
+            | StaticMode::CantCastFrom { .. }
+            | StaticMode::CantCastDuring { .. }
+            | StaticMode::CantActivateDuring { .. }
+            | StaticMode::PerTurnCastLimit { .. }
+            | StaticMode::PerTurnDrawLimit { .. }
+            | StaticMode::SuppressTriggers { .. }
+            | StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedExceptBy { .. }
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedByMoreThan { .. }
+            | StaticMode::CantBeBlockedUnlessAllBlock
+            | StaticMode::AttachmentRestriction { .. }
+            | StaticMode::Protection
+            | StaticMode::CantBeDestroyed
+            | StaticMode::CantBeRegenerated
+            | StaticMode::FlashBack
+            | StaticMode::CantTap
+            | StaticMode::CantUntap
+            | StaticMode::MustBeBlocked { .. }
+            | StaticMode::MustBeBlockedByAll { .. }
+            | StaticMode::Goaded
+            | StaticMode::MustAttackAwayFromSource
+            | StaticMode::CombatAlone { .. }
+            | StaticMode::CantCrew
+            | StaticMode::CantPhaseIn
+            | StaticMode::CrewContribution { .. }
+            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayLookAtFaceDown
+            | StaticMode::CantBeTurnedFaceUp
+            | StaticMode::MayChooseNotToUntap
+            | StaticMode::AdditionalLandDrop { .. }
+            | StaticMode::EmblemStatic
+            | StaticMode::BlockRestriction { .. }
+            | StaticMode::NoMaximumHandSize
+            | StaticMode::MaximumHandSize { .. }
+            | StaticMode::MayPlayAdditionalLand
+            | StaticMode::CantHaveKeyword { .. }
+            | StaticMode::CantWinTheGame
+            | StaticMode::CantLoseTheGame
+            | StaticMode::LegendRuleDoesntApply
+            | StaticMode::SpeedCanIncreaseBeyondFour
+            | StaticMode::DefilerCostReduction { .. }
+            | StaticMode::SkipStep { .. }
+            | StaticMode::SpendManaAsAnyColor { .. }
+            | StaticMode::PayLifeAsColoredMana { .. }
+            | StaticMode::StepEndUnspentMana { .. }
+            | StaticMode::UnspentManaLossCausesLifeLoss
+            | StaticMode::IgnoreLandwalkForBlocking { .. }
+            | StaticMode::CanActivateAbilitiesAsThoughHaste
+            | StaticMode::CanBlockShadow
+            | StaticMode::AssignNoCombatDamage
+            | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            | StaticMode::MaxUntapPerType { .. }
+            | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::CountersCantBeRemoved { .. }
+            | StaticMode::CountsAsNamed { .. }
+            | StaticMode::LinkedCollectionCounterPlayPermission
+            | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::Other(_) => None,
+        }
+    }
 }
 
 /// O(1) presence index over [`StaticModeKind`] discriminants, populated as a byproduct of the
@@ -2559,8 +2856,12 @@ impl Hash for StaticMode {
                 keyword.hash(state);
                 new_limit.hash(state);
             }
-            StaticMode::ActivateAsInstant { cost_category } => {
+            StaticMode::ActivateAsInstant {
+                cost_category,
+                keyword,
+            } => {
                 cost_category.hash(state);
+                keyword.hash(state);
             }
             StaticMode::CrewContribution { kind, actions } => {
                 kind.hash(state);
@@ -2656,10 +2957,12 @@ impl Hash for StaticMode {
                 mana_spend_permission,
                 grants_flash,
                 extra_cost,
+                grantee,
                 // Collision-safe skip of the enters-with rider (see the
                 // `GraveyardCastPermission` note above).
                 ..
             } => {
+                grantee.hash(state);
                 frequency.hash(state);
                 play_mode.hash(state);
                 pool.hash(state);
@@ -2980,9 +3283,17 @@ impl fmt::Display for StaticMode {
             StaticMode::ModifyActivationLimit { keyword, new_limit } => {
                 write!(f, "ModifyActivationLimit({keyword},{new_limit})")
             }
-            StaticMode::ActivateAsInstant { cost_category } => {
-                write!(f, "ActivateAsInstant({cost_category:?})")
-            }
+            StaticMode::ActivateAsInstant {
+                cost_category,
+                keyword,
+            } => match keyword {
+                Some(kw) => write!(
+                    f,
+                    "ActivateAsInstant({cost_category:?},{})",
+                    kw.keyword_str()
+                ),
+                None => write!(f, "ActivateAsInstant({cost_category:?})"),
+            },
             StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
             StaticMode::CantLoseLife => write!(f, "CantLoseLife"),
@@ -3066,6 +3377,7 @@ impl fmt::Display for StaticMode {
                 mana_spend_permission,
                 grants_flash,
                 extra_cost,
+                grantee,
                 // CR 122.1: enters-with counter payload rides on serde, not the
                 // Display round-trip (see `GraveyardCastPermission` above).
                 ..
@@ -3098,6 +3410,9 @@ impl fmt::Display for StaticMode {
                 }
                 if *grants_flash {
                     write!(f, ",flash")?;
+                }
+                if matches!(grantee, ExileCastGrantee::EachPlayerOwnExiles) {
+                    write!(f, ",grantee={grantee}")?;
                 }
                 // CR 118.9 + CR 601.2f: extra_cost payload preserved through
                 // serde; emit only the mode marker here.
@@ -3364,6 +3679,7 @@ impl FromStr for StaticMode {
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
             },
             s if s.starts_with("ReduceAbilityCost(") => {
                 // Parse "ReduceAbilityCost([+|-]keyword,amount[,minimum_mana])".
@@ -3452,8 +3768,22 @@ impl FromStr for StaticMode {
                 match inner {
                     Some("PaysLoyalty") => StaticMode::ActivateAsInstant {
                         cost_category: CostCategory::PaysLoyalty,
+                        keyword: None,
                     },
-                    _ => StaticMode::Other(s.to_string()),
+                    Some(other) => {
+                        if let Some((category, kw)) = other.split_once(',') {
+                            match (category, AbilityTag::from_keyword_str(kw)) {
+                                ("ManaOnly", Some(tag)) => StaticMode::ActivateAsInstant {
+                                    cost_category: CostCategory::ManaOnly,
+                                    keyword: Some(tag),
+                                },
+                                _ => StaticMode::Other(s.to_string()),
+                            }
+                        } else {
+                            StaticMode::Other(s.to_string())
+                        }
+                    }
+                    None => StaticMode::Other(s.to_string()),
                 }
             }
             "RaiseCost" => StaticMode::ModifyCost {
@@ -3461,6 +3791,7 @@ impl FromStr for StaticMode {
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
             },
             // CR 601.2f: Cost-floor static (Trinisphere class). Legacy unit-string
             // defaults to a zero floor — meaningful instances are constructed via
@@ -3470,6 +3801,7 @@ impl FromStr for StaticMode {
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
             },
             "CantPayCost" => StaticMode::CantPayCost {
                 who: ProhibitionScope::AllPlayers,
@@ -3597,6 +3929,7 @@ impl FromStr for StaticMode {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             s if s.starts_with("ExileCastPermission(") => {
                 // Display form: "ExileCastPermission(<play_mode>,<frequency>[,free]
@@ -3622,6 +3955,7 @@ impl FromStr for StaticMode {
                 let mut timing = ExileCastTiming::AnyTime;
                 let mut mana_spend_permission = None;
                 let mut grants_flash = false;
+                let mut grantee = ExileCastGrantee::SourceController;
                 for seg in parts {
                     if seg == "free" {
                         cost = ExileCastCost::WithoutPayingManaCost;
@@ -3644,6 +3978,10 @@ impl FromStr for StaticMode {
                         if let Ok(t) = scope.parse() {
                             timing = t;
                         }
+                    } else if let Some(scope) = seg.strip_prefix("grantee=") {
+                        if let Ok(g) = scope.parse() {
+                            grantee = g;
+                        }
                     }
                     // CR 118.9 + CR 601.2f: the extra_cost payload rides on serde,
                     // not the Display round-trip — the "extra_cost=<mode>" marker
@@ -3659,6 +3997,7 @@ impl FromStr for StaticMode {
                     grants_flash,
                     extra_cost: None,
                     enters_with_counter: None,
+                    grantee,
                 }
             }
             "CantBeCountered" => StaticMode::CantBeCountered,
@@ -4102,6 +4441,7 @@ fn deserialize_legacy_cost_modify_string(s: &str) -> Option<StaticMode> {
         amount: ManaCost::zero(),
         spell_filter: None,
         dynamic_count: None,
+        reach: CostReductionReach::SpillsToGeneric,
     })
 }
 
@@ -4116,6 +4456,10 @@ struct LegacyModifyCostPayload {
         deserialize_with = "super::ability::deserialize_optional_quantity_ref_compat"
     )]
     dynamic_count: Option<QuantityRef>,
+    /// CR 118.7b: absent in every legacy payload (the axis postdates this
+    /// shape), so it defaults to the rules-default spillover.
+    #[serde(default)]
+    reach: CostReductionReach,
 }
 
 fn deserialize_legacy_modify_cost_object(
@@ -4141,6 +4485,7 @@ fn deserialize_legacy_modify_cost_object(
                 amount: payload.amount,
                 spell_filter: payload.spell_filter,
                 dynamic_count: payload.dynamic_count,
+                reach: payload.reach,
             }
         }),
     )
@@ -4151,6 +4496,183 @@ mod tests {
     use super::*;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+
+    // ===== ROW C — the polarity-typed deferral rule, STRUCTURAL half =====
+
+    /// Flatten `Pat::Or` recursively and unwrap `Pat::Paren`, yielding the
+    /// TOP-LEVEL alternatives of one arm pattern.
+    fn arm_alternatives(pat: &syn::Pat, out: &mut Vec<syn::Pat>) {
+        match pat {
+            syn::Pat::Or(or) => or.cases.iter().for_each(|c| arm_alternatives(c, out)),
+            syn::Pat::Paren(p) => arm_alternatives(&p.pat, out),
+            other => out.push(other.clone()),
+        }
+    }
+
+    /// Does this top-level alternative NAME a `StaticMode` variant explicitly?
+    /// A WHITELIST: it rejects `Pat::Wild` (`_`) and bare-binding `Pat::Ident`
+    /// (`other`) together, without enumerating irrefutable shapes, so it cannot
+    /// be defeated by a future irrefutable spelling nobody listed. Sub-patterns
+    /// INSIDE a `Pat::TupleStruct` / `Pat::Struct` are deliberately out of scope
+    /// — that is what lets `StaticMode::Other(_)` and
+    /// `StaticMode::Foo { .. }` through, which are correct Rust and correct
+    /// design.
+    fn names_a_static_mode_variant(alt: &syn::Pat) -> bool {
+        let path = match alt {
+            syn::Pat::Path(p) => &p.path,
+            syn::Pat::TupleStruct(p) => &p.path,
+            syn::Pat::Struct(p) => &p.path,
+            _ => return false,
+        };
+        path.segments
+            .first()
+            .is_some_and(|s| s.ident == "StaticMode")
+    }
+
+    /// Locate the single top-level `ExprMatch` in an `ImplItemFn` body.
+    fn sole_top_level_match(f: &syn::ImplItemFn) -> &syn::ExprMatch {
+        let matches: Vec<&syn::ExprMatch> = f
+            .block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Expr(syn::Expr::Match(m), _) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "`defending_player_anchor_polarity`'s body must contain EXACTLY ONE \
+             top-level `match` expression, or this row silently reads the wrong \
+             one (or none); found {}",
+            matches.len()
+        );
+        matches[0]
+    }
+
+    /// CR 508.1c + CR 702.3b, STRUCTURAL half: every arm alternative of
+    /// `StaticMode::defending_player_anchor_polarity` NAMES a `StaticMode`
+    /// variant explicitly, so a future `StaticMode` variant is a COMPILE ERROR
+    /// that must be classified deliberately rather than silently falling into
+    /// the `None` default.
+    ///
+    /// A behavioural row (row B) passes identically under `_ => None`; only a
+    /// source-level assertion can buy this. The predicate is a WHITELIST and is
+    /// measured green on `StaticMode::as_keyword`, the in-tree spelling
+    /// precedent this classification is copied from.
+    #[test]
+    fn defending_player_anchor_polarity_names_every_arm() {
+        // ROUTED through the repo's single comment-policy authority
+        // (`crate::source_census`), per `no_source_reading_file_carries_a_private_comment_policy`:
+        // every line's comment half is removed by the SHARED rule before the
+        // source is read, so a doc comment quoting an irrefutable arm cannot be
+        // read as one.
+        let stripped = crate::source_census::code_lines(include_str!("statics.rs"));
+        let file = syn::parse_file(&stripped)
+            .expect("this file must parse as Rust for the structural row to mean anything");
+
+        let mut found: Option<syn::ImplItemFn> = None;
+        for item in &file.items {
+            let syn::Item::Impl(imp) = item else { continue };
+            for sub in &imp.items {
+                let syn::ImplItem::Fn(f) = sub else { continue };
+                if f.sig.ident == "defending_player_anchor_polarity" {
+                    assert!(
+                        found.is_none(),
+                        "exactly one `defending_player_anchor_polarity` must exist"
+                    );
+                    found = Some(f.clone());
+                }
+            }
+        }
+        let f = found.expect(
+            "`StaticMode::defending_player_anchor_polarity` must exist — this row is \
+             reading the real function, not a renamed or deleted one",
+        );
+
+        // (a) exactly one top-level `ExprMatch`.
+        let m = sole_top_level_match(&f);
+
+        // PAIRED POSITIVE CONTROL: the row is reading the real classification.
+        assert!(
+            m.arms.len() >= 3,
+            "the classification must have at least three arms; got {}",
+            m.arms.len()
+        );
+        let rendered: Vec<String> = m.arms.iter().map(|a| quote_pat(&a.pat)).collect();
+        for expected in [
+            "StaticMode :: CanAttackWithDefender",
+            "StaticMode :: CantAttack",
+            "StaticMode :: CantAttackOrBlock",
+        ] {
+            assert!(
+                rendered.iter().any(|r| r.contains(expected)),
+                "the classification must still mention {expected}; arms were {rendered:?}"
+            );
+        }
+
+        // (b) every top-level alternative of every arm names a variant.
+        let mut total_alternatives = 0usize;
+        for arm in &m.arms {
+            let mut alts = Vec::new();
+            arm_alternatives(&arm.pat, &mut alts);
+            for alt in &alts {
+                total_alternatives += 1;
+                assert!(
+                    names_a_static_mode_variant(alt),
+                    "EVERY arm alternative must NAME a `StaticMode` variant \
+                     explicitly — no `_`, no bare-binding catch-all. Offending \
+                     alternative: {}",
+                    quote_pat(alt)
+                );
+            }
+        }
+        assert!(
+            total_alternatives >= 3,
+            "instrument control: the walk must have seen alternatives at all; got \
+             {total_alternatives}"
+        );
+
+        // (c) THE INSTRUMENT FIRES. Without this a predicate that accepted
+        // everything would satisfy (b) vacuously.
+        for irrefutable in [
+            "_ => None",
+            "other => None",
+            "StaticMode::CantAttack | _ => None",
+        ] {
+            let arm: syn::Arm = syn::parse_str(irrefutable)
+                .unwrap_or_else(|e| panic!("{irrefutable} must parse as an arm: {e}"));
+            let mut alts = Vec::new();
+            arm_alternatives(&arm.pat, &mut alts);
+            assert!(
+                !alts.iter().all(names_a_static_mode_variant),
+                "the predicate must REJECT the irrefutable arm `{irrefutable}`"
+            );
+        }
+        for accepted in [
+            "StaticMode::Other(_) => None",
+            "StaticMode::Continuous => None",
+            "StaticMode::IgnoreLandwalkForBlocking { .. } => None",
+            "StaticMode::CantAttack | StaticMode::CantBlock => None",
+        ] {
+            let arm: syn::Arm = syn::parse_str(accepted)
+                .unwrap_or_else(|e| panic!("{accepted} must parse as an arm: {e}"));
+            let mut alts = Vec::new();
+            arm_alternatives(&arm.pat, &mut alts);
+            assert!(
+                alts.iter().all(names_a_static_mode_variant),
+                "the predicate must ACCEPT the variant-naming arm `{accepted}` — \
+                 sub-patterns inside a variant are deliberately out of scope"
+            );
+        }
+    }
+
+    /// Render a `syn::Pat` for assertion messages without pulling in `quote`.
+    fn quote_pat(pat: &syn::Pat) -> String {
+        use syn::__private::ToTokens;
+        pat.to_token_stream().to_string()
+    }
 
     fn static_mode_hash(mode: &StaticMode) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -4171,6 +4693,7 @@ mod tests {
             grants_flash: false,
             extra_cost: None,
             enters_with_counter: None,
+            grantee: ExileCastGrantee::SourceController,
         }
     }
 
@@ -4462,6 +4985,7 @@ mod tests {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4473,6 +4997,7 @@ mod tests {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             // Persistent, your-turn-only exile-play permission
             // (The Matrix of Time; Prosper/Tibalt impulse-commander class).
@@ -4486,6 +5011,7 @@ mod tests {
                 grants_flash: false,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             // CR 609.4b + CR 702.8a: Azula, Cunning Usurper — Cast mode from a
             // persistent pool, your-turn-only, granting any-type mana and flash.
@@ -4501,6 +5027,7 @@ mod tests {
                 grants_flash: true,
                 extra_cost: None,
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             // NOTE: Valgavoth (alternative pay-life) and Dawnhand (additional
             // remove-counters) `extra_cost`-bearing exile permissions are
@@ -4606,6 +5133,7 @@ mod tests {
                     mode: CastCostMode::Alternative,
                 }),
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4637,6 +5165,7 @@ mod tests {
                     mode: CastCostMode::Additional,
                 }),
                 enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
             },
             StaticMode::Other("Custom".to_string()),
         ];
@@ -4852,6 +5381,7 @@ mod tests {
                     amount: ManaCost::generic(2),
                     spell_filter: None,
                     dynamic_count: None,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 }
             );
         }
@@ -4928,6 +5458,7 @@ mod tests {
                     amount: ManaCost::zero(),
                     spell_filter: None,
                     dynamic_count: None,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 }
             );
         }

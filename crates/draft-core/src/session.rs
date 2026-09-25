@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rand::seq::SliceRandom;
+use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
@@ -8,6 +9,7 @@ use engine::types::player::PlayerId;
 
 use crate::pack_source::PackSource;
 use crate::pick_pass;
+use crate::shared_stack;
 use crate::types::*;
 use crate::validation::{validate_limited_deck, LimitedDeckError};
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
@@ -35,6 +37,37 @@ impl DraftSession {
         self.current_round + 1
     }
 
+    /// The shared-stack state, or the error a session that should have one but
+    /// does not deserves.
+    ///
+    /// EVERY read of `shared_stack` goes through here, so no call site unwraps.
+    /// The `Err` answer is reachable only from a hand-built or corrupt session,
+    /// which is why `validate_persisted_snapshot` refuses that shape at import.
+    ///
+    /// Every consumer of this accessor and of `shared_stack::refusal_for`, with
+    /// its `None`/`Err` answer stated so no caller has to guess. Rows marked
+    /// **A-ii** are the ones that DO NOT EXIST YET -- `DraftPlayerView` has no
+    /// `shared_stack` field and `pick_status` is still its unchanged
+    /// two-branch `if` -- so they state the contract the next phase must meet,
+    /// not a call site a reader can go and find today:
+    ///
+    /// | Consumer | Answer when `shared_stack` is `None` |
+    /// |---|---|
+    /// | `shared_stack::apply_shared_stack_decision` | this `Err`, surfaced unchanged |
+    /// | **A-ii** `view::filter_for_player` / `filter_for_spectator` | will publish `shared_stack: None`, identical to the status gate's answer |
+    /// | **A-ii** the distribution-dispatched `pick_status` helper | will answer `PickStatus::NotDrafting` |
+    /// | `shared_stack::forced_decision` | `None`, which is a correct answer and not an impossibility |
+    /// | `server_core::draft_seats_needing_auto_pick` | an empty `Vec` -- no seat owes a decision on a session with no stack |
+    /// | `server_core::pick_random_for_seat` | an `Err` that mutates nothing |
+    /// | the wire payload guard | deliberately not a consumer: it can never see a session |
+    pub fn shared_stack(&self) -> Result<&SharedStackState, DraftError> {
+        self.shared_stack
+            .as_ref()
+            .ok_or_else(|| DraftError::InvalidSharedStackConfiguration {
+                reason: "shared-stack state missing on a shared-stack session".to_string(),
+            })
+    }
+
     /// Create a new draft session in Lobby status.
     ///
     /// Timestamps are set to 0 -- callers set them externally since the pure
@@ -43,6 +76,7 @@ impl DraftSession {
         let pod_size = seats.len();
         DraftSession {
             booster_pack_pool: None,
+            shared_stack: None,
             set_code: config.set_code.clone(),
             kind: config.kind,
             status: DraftStatus::Lobby,
@@ -140,6 +174,9 @@ impl DraftSession {
                 .map_err(|reason| DraftError::InvalidPackSequence { reason })?;
         }
         let procedure = self.kind.procedure();
+        // Same authority the reducer asks at `StartDraft`, asked again here
+        // because an imported snapshot never passed through that path.
+        procedure.validate_source(&self.config.source)?;
         let pod_size = self.seats.len() as u8;
         let local_cube_size_is_allowed = matches!(self.config.source, DraftSource::Cube { .. })
             && procedure.allows_local_cube_pod_size(self.config.tournament_format, pod_size);
@@ -153,6 +190,167 @@ impl DraftSession {
         match procedure.distribution {
             PackDistribution::PickAndPass => return Ok(()),
             PackDistribution::AllAtOnce => {}
+            // A shared-stack session's whole live state is `shared_stack`, so a
+            // snapshot that claims to be drafting without one is not a
+            // restorable session -- it is an unplayable one. THIS IS WHAT MAKES
+            // A REDACTED PUBLIC BACKUP NON-RESUMABLE, deliberately: the
+            // `POST /p2p-draft-backup` projection strips `shared_stack` at the
+            // trust boundary, so the public copy fails here. The authoritative,
+            // resumable copy stays in the host's IndexedDB snapshot, which is
+            // the path that does resume a Winston pod. The alternative -- a
+            // second serialization shape that retains counts without contents
+            // -- needs two snapshot validity rules and a restored session whose
+            // card conservation is knowingly false.
+            PackDistribution::SharedStackPiles { pile_count } => {
+                let piles = shared_stack::piles_needed(pile_count)?;
+                let Some(state) = self.shared_stack.as_ref() else {
+                    if self.status == DraftStatus::Drafting {
+                        return Err(DraftError::InvalidSharedStackConfiguration {
+                            reason: "a drafting shared-stack session must carry its stack"
+                                .to_string(),
+                        });
+                    }
+                    return Ok(());
+                };
+                if state.piles.len() != piles || state.inspected.len() != piles {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: format!("a shared-stack session has exactly {piles} piles"),
+                    });
+                }
+                if usize::from(state.active_seat) >= self.seats.len()
+                    || usize::from(state.cursor) >= piles
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "active seat and cursor must be in range".to_string(),
+                    });
+                }
+                if state
+                    .inspected
+                    .iter()
+                    .zip(state.piles.iter())
+                    .any(|(seen, pile)| *seen > pile.len())
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a seat cannot have inspected more cards than a pile holds"
+                            .to_string(),
+                    });
+                }
+                // One notice slot per seat, so the projection can index by
+                // seat without a length test on every view build. An imported
+                // snapshot is the only way a wrong length arrives: the field
+                // carries `#[serde(default)]` for snapshots that predate it,
+                // and an empty vector is exactly what that default produces --
+                // so it is accepted and read as "no seat has a pending notice".
+                if !state.forced_draws.is_empty() && state.forced_draws.len() != self.seats.len() {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a shared-stack session keeps one forced-draw notice per seat"
+                            .to_string(),
+                    });
+                }
+                // The decision history's own rules. The capacity is what bounds
+                // every view broadcast and every snapshot, so an import is the
+                // one place an unbounded history could arrive from.
+                if state.history.len() > SHARED_STACK_HISTORY_CAPACITY {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: format!(
+                            "a shared-stack history keeps at most \
+                             {SHARED_STACK_HISTORY_CAPACITY} decisions"
+                        ),
+                    });
+                }
+                // Both indices are addressed the way the record documents them:
+                // `pile` is an engine pile index and `seat` is a seat index, so
+                // an out-of-range one would make a consumer's lookup silently
+                // wrong rather than loudly absent.
+                if state
+                    .history
+                    .iter()
+                    .any(|record| usize::from(record.pile) >= piles)
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a history record names a pile the session does not have"
+                            .to_string(),
+                    });
+                }
+                if state
+                    .history
+                    .iter()
+                    .any(|record| usize::from(record.seat) >= self.seats.len())
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a history record names a seat the session does not have"
+                            .to_string(),
+                    });
+                }
+                // The SEAT-INDEXED VECTORS this arm is about to hand the
+                // reducer. `apply_shared_stack_decision` indexes `session.pools`
+                // raw to receive a taken pile, and `filter_for_player` indexes
+                // it to publish a pool, so a snapshot with a short `pools` is
+                // an index-out-of-bounds -- and `panic = "abort"` in the release
+                // wasm profile makes that a dead client rather than an error.
+                // The `AllAtOnce` arm reaches this check by falling through to
+                // the shared per-seat block; this arm returns early, so it has
+                // to ask for itself. `PickAndPass` returns `Ok(())` above and
+                // gets no per-seat vector check at all -- pre-existing, and out
+                // of scope here, but do not read this comment as covering it.
+                if self.pools.len() != self.seats.len()
+                    || self.config.pod_size as usize != self.seats.len()
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "per-seat vectors do not match the core seats".to_string(),
+                    });
+                }
+                // `starting_seat` is the third seat-valued field, and the only
+                // one the range checks above did not cover. `play_first_chooser`
+                // computes `(starting_seat + 1) % 2` on it for a two-seat pod,
+                // which overflows a `u8` at 255 -- a debug panic, and in release
+                // a silently wrong chooser. It is not status-gated either, so
+                // it runs for lobby and deckbuilding views too.
+                if usize::from(state.starting_seat) >= self.seats.len() {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "the starting seat must be a seat the session has".to_string(),
+                    });
+                }
+                // `inspected` is bounded above per pile, but the CONTRACT is
+                // narrower: a seat has looked at piles up to the cursor and no
+                // further. Without this a crafted snapshot sets
+                // `inspected = [1, 3, 3]` at cursor 0 and the view hands the
+                // active seat the contents of piles it has not reached -- the
+                // exact over-reveal the counter exists to prevent. Both reducer
+                // write sites maintain this for free; only an import can break it.
+                if state
+                    .inspected
+                    .iter()
+                    .skip(usize::from(state.cursor) + 1)
+                    .any(|seen| *seen != 0)
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a seat cannot have inspected a pile beyond its cursor".to_string(),
+                    });
+                }
+                // AND THE SESSION MUST BE PLAYABLE. Everything above checks
+                // shapes; this checks that the shapes describe a turn somebody
+                // can take. A drafting snapshot with three empty piles and a
+                // stocked stack passes every structural rule and is permanently
+                // stuck: `refusal_for` answers `PileEmpty` to every take and
+                // `NoGuaranteedCard` to every decline, `forced_decision` finds
+                // nothing for the timeout sweep to apply, and the terminal
+                // predicate is false because the stack is not empty.
+                //
+                // Asked through `forced_decision` rather than re-derived from
+                // pile sizes, so this stays one question with one authority:
+                // if the reducer would accept no decision at all from the
+                // active seat, there is no session here to restore.
+                if self.status == DraftStatus::Drafting
+                    && shared_stack::forced_decision(state, state.active_seat).is_none()
+                {
+                    return Err(DraftError::InvalidSharedStackConfiguration {
+                        reason: "a drafting shared-stack session must admit a legal decision"
+                            .to_string(),
+                    });
+                }
+                return Ok(());
+            }
         }
         if !matches!(self.config.source, DraftSource::Set { .. }) {
             return Err(DraftError::SealedRequiresSetSource);
@@ -253,6 +451,11 @@ pub fn apply(
         DraftAction::SetSeatConnected { seat, connected } => {
             apply_set_seat_connected(session, seat, connected)
         }
+        DraftAction::SharedStackDecision {
+            seat,
+            pile,
+            decision,
+        } => shared_stack::apply_shared_stack_decision(session, seat, pile, decision),
     }
 }
 
@@ -491,8 +694,24 @@ fn generate_swiss_pairings(
 
 fn generate_se_pairings(session: &DraftSession, round: u8) -> Vec<DraftPairing> {
     if round == 1 {
-        // Standard seeded bracket: 0v7, 1v6, 2v5, 3v4
-        let bracket_pairs: [(u8, u8); 4] = [(0, 7), (1, 6), (2, 5), (3, 4)];
+        // Standard seeded bracket: highest seed against lowest, inward. This is
+        // MTR bracket policy, not a Comprehensive Rules concept -- there is
+        // deliberately no CR citation here.
+        //
+        // Reproduces the previous hardcoded `[(0, 7), (1, 6), (2, 5), (3, 4)]`
+        // EXACTLY at `n == 8`, and yields `[(0, 3), (1, 2)]` at `n == 4`, which
+        // is what a 4-seat single-elimination pod needs. The old literal
+        // panicked below eight seats.
+        //
+        // An odd `n` would drop the middle seat, and that is unreachable:
+        // `allowed_pod_size_range` forces `pod_size == max_pod_size` under
+        // `SingleElimination`; the only `TournamentPairings` kinds are
+        // Premier / Traditional / Sealed / Winston (Quick and CommanderDraft
+        // are `CompleteImmediately`); their max pod sizes are 8, 8, 8, 4, all
+        // even; and `apply_generate_pairings` guards `seats.len()` against that
+        // same range.
+        let n = session.seats.len() as u8;
+        let bracket_pairs: Vec<(u8, u8)> = (0..n / 2).map(|i| (i, n - 1 - i)).collect();
         bracket_pairs
             .iter()
             .enumerate()
@@ -739,6 +958,12 @@ fn apply_replace_seat_with_bot(
         return Err(DraftError::SeatOutOfRange { seat, pod_size });
     }
 
+    // NO distribution dispatch here, deliberately. A shared-stack pod admits a
+    // bot seat exactly as every other distribution does: the seat is driven by
+    // `draft_wasm::resolve_shared_stack_bot_turns`, whose decisions go through
+    // `shared_stack::refusal_for` like any seat's. The refusal this arm used to
+    // return (`SharedStackRequiresHumanSeats`) is gone, so a mid-draft swap is
+    // no longer the seam a start-time guard had to be defended at.
     session.seats[seat as usize] = DraftSeat::Bot {
         name: name.unwrap_or_else(|| format!("Seat {}", seat + 1)),
     };
@@ -786,6 +1011,11 @@ fn apply_start_draft(
             .validate_for_draft(seat_count, session.config.pack_count)
             .map_err(|reason| DraftError::InvalidPackSequence { reason })?;
     }
+    // The procedure's own verdict on the source shape, asked before anything is
+    // generated or dealt. `validate_for_draft` above checks a layout against the
+    // pod's dimensions; this checks it against the distribution that will consume
+    // it, which is a question no layout can answer about itself.
+    procedure.validate_source(&session.config.source)?;
 
     // CR 903.13a + CR 800.1: the smallest pod that can still deliver the
     // multiplayer game this kind is defined as. The procedure owns the full
@@ -846,6 +1076,35 @@ fn apply_start_draft(
                 });
             }
         }
+        PackDistribution::SharedStackPiles { pile_count } => {
+            // A distribution that deals no piles has no turn to take: refused
+            // HERE, in the pre-flight arm beside the pack-count and deck-size
+            // refusals, so nothing is generated or dealt before the answer is
+            // known. Unreachable for `Winston` (`pile_count: 3`); it is the
+            // next `SharedStackPiles` row that would otherwise reach
+            // `inspected[0] = piles[0].len()` below with an empty `piles` and
+            // panic inside `StartDraft`.
+            shared_stack::piles_needed(pile_count)?;
+            // NO seat scan here, deliberately. A shared-stack pod admits BOT
+            // SEATS: a bot's turn is driven by
+            // `draft_wasm::resolve_shared_stack_bot_turns`, which reads only
+            // `view::filter_for_player`'s projection and submits ordinary
+            // `DraftAction::SharedStackDecision`s through
+            // `shared_stack::refusal_for`. There is therefore no seat-composition
+            // rule left to enforce at start time, and the `human_seats` scalar
+            // (`2` for Winston) is a per-kind default rather than an authority --
+            // see `DraftProcedure::human_seats`.
+            if session.config.pack_count != procedure.packs_per_player
+                || session.config.min_deck_size != procedure.min_deck_size
+            {
+                return Err(DraftError::InvalidSharedStackConfiguration {
+                    reason: format!(
+                        "shared-stack drafts require {} packs per seat and a {}-card minimum deck",
+                        procedure.packs_per_player, procedure.min_deck_size
+                    ),
+                });
+            }
+        }
         PackDistribution::PickAndPass => {}
     }
 
@@ -898,6 +1157,79 @@ fn apply_start_draft(
                     status: DraftStatus::Deckbuilding,
                 },
             ]);
+        }
+        // Every pack is opened without looking at the contents and shuffled
+        // into one shared face-down main stack, which is then dealt through
+        // `pile_count` take-or-decline piles. WotC "Casual Formats": "the two
+        // players each supply three booster packs, which they open without
+        // looking at the contents". No CR -- see
+        // `PackDistribution::SharedStackPiles`.
+        PackDistribution::SharedStackPiles { pile_count } => {
+            let packs_per_seat = usize::from(procedure.packs_per_player);
+            if all_packs.len() != session.seats.len()
+                || all_packs.iter().any(|packs| packs.len() != packs_per_seat)
+            {
+                return Err(DraftError::InvalidSharedStackConfiguration {
+                    reason: format!("pack source did not generate {packs_per_seat} packs per seat"),
+                });
+            }
+            // Seat-major, then pack-major, then index order. Deterministic and
+            // RNG-free: the shuffle below is what makes the stack unpredictable,
+            // so the flatten order must not be a second source of entropy.
+            let mut main_stack: Vec<DraftCardInstance> = all_packs
+                .into_iter()
+                .flat_map(|seat_packs| seat_packs.into_iter().flat_map(|pack| pack.0))
+                .collect();
+            // The same single authority the pre-flight arm above already
+            // asked, so the `piles[0]` indexing below rests on a refusal
+            // rather than on a comment.
+            let piles_needed = shared_stack::piles_needed(pile_count)?;
+            if main_stack.len() < piles_needed {
+                return Err(DraftError::InsufficientCards {
+                    available: main_stack.len(),
+                    required: piles_needed,
+                });
+            }
+
+            // THE STREAM'S CONSUMPTION ORDER IS PART OF THE CONTRACT, because
+            // three draws share one `ChaCha20Rng`: `generate_packs` above, then
+            // the shuffle, then the starting-seat draw. SWAPPING THE LAST TWO
+            // changes both the stack order and the starting seat for a given
+            // seed, which is why `same_seed_yields_same_stack_and_starting_seat`
+            // pins a golden pair rather than only asserting determinism.
+            main_stack.shuffle(&mut rng);
+            let starting_seat = rng.random_range(0..seat_count);
+
+            // The LAST element is the top, so seeding pile `i` in ascending `i`
+            // is "deal the top card onto each pile in turn".
+            let mut piles: Vec<Vec<DraftCardInstance>> = vec![Vec::new(); piles_needed];
+            for pile in piles.iter_mut() {
+                pile.push(
+                    main_stack
+                        .pop()
+                        .expect("the stack holds at least `pile_count` cards"),
+                );
+            }
+            let mut inspected = vec![0usize; piles_needed];
+            // First write site of the `inspected` contract: at turn start the
+            // active seat is looking at pile 0. Index 0 exists because
+            // `shared_stack::piles_needed` refused a zero-pile row above, in
+            // the pre-flight arm.
+            inspected[0] = piles[0].len();
+
+            session.shared_stack = Some(SharedStackState {
+                main_stack,
+                piles,
+                starting_seat,
+                active_seat: starting_seat,
+                cursor: 0,
+                inspected,
+                decisions: 0,
+                history: Vec::new(),
+                forced_draws: vec![None; usize::from(seat_count)],
+            });
+            session.status = DraftStatus::Drafting;
+            return Ok(vec![DraftDelta::DraftStarted]);
         }
         PackDistribution::PickAndPass => {}
     }
@@ -973,9 +1305,14 @@ pub(crate) fn concession_set_codes(session: &DraftSession) -> Vec<&str> {
             // A cube contains no draft boosters from any set.
             DraftSource::Cube { .. } => Vec::new(),
         },
-        DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => {
-            Vec::new()
-        }
+        // CR 903.13e is scoped to Commander Draft, so every kind outside
+        // CR 903.13 concedes nothing -- including `Winston`, which carries no
+        // CR section at all.
+        DraftKind::Quick
+        | DraftKind::Premier
+        | DraftKind::Traditional
+        | DraftKind::Sealed
+        | DraftKind::Winston => Vec::new(),
     }
 }
 
@@ -1031,7 +1368,8 @@ fn apply_submit_deck(
         &commanders,
         // CR 903.3: the floor is the kind's, read from the procedure table.
         // This is the line that makes the value kind-derived rather than
-        // assumed -- `0` for the four CR 905.1a kinds, `1` for CommanderDraft.
+        // assumed -- `0` for every kind whose decks are not Commander decks
+        // (the four CR 905.1a kinds and `Winston`), `1` for CommanderDraft.
         usize::from(session.kind.procedure().commanders_required),
     ) {
         return Err(DraftError::ValidationFailed { errors });
@@ -2382,6 +2720,385 @@ mod tests {
         );
         assert_eq!(pairings.len(), 1);
         assert_eq!(unordered(pairings[0].players), unordered([p[0], p[2]]));
+    }
+
+    /// V19. The bracket is seeded for ANY even pod, not just eight seats.
+    ///
+    /// The `n == 8` leg is an EXACT-EQUALITY regression against the literal the
+    /// generalization replaced, seat for seat. The `n == 4` leg is the one a
+    /// 4-seat single-elimination Winston pod needs: the old literal indexed
+    /// seats 4..7 and panicked below eight.
+    #[test]
+    fn se_bracket_is_seeded_for_any_even_pod() {
+        fn round_one_pairs(kind: DraftKind, pod_size: u8) -> Vec<(u8, u8)> {
+            let (mut session, _) = test_session(pod_size);
+            // `allowed_pod_size_range` forces `pod_size == max_pod_size` under
+            // single elimination, so the 4-seat bracket is reachable only for a
+            // kind whose ceiling is 4 -- which is exactly why this row exists.
+            session.kind = kind;
+            session.config.kind = kind;
+            session.config.tournament_format = TournamentFormat::SingleElimination;
+            session.status = DraftStatus::Deckbuilding;
+            apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
+            session
+                .pairings
+                .iter()
+                .filter(|pairing| pairing.round == 1)
+                .map(|pairing| (pairing.players[0].0, pairing.players[1].0))
+                .collect()
+        }
+
+        assert_eq!(
+            round_one_pairs(DraftKind::Premier, 8),
+            vec![(0, 7), (1, 6), (2, 5), (3, 4)]
+        );
+        assert_eq!(round_one_pairs(DraftKind::Winston, 4), vec![(0, 3), (1, 2)]);
+    }
+
+    /// A started, drafting 2-seat Winston pod, built through the REAL reducer
+    /// so its shared stack is the shape `StartDraft` produces rather than one
+    /// a test invented.
+    fn winston_started() -> DraftSession {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Winston;
+        session.config.kind = DraftKind::Winston;
+        apply(&mut session, DraftAction::StartDraft, Some(&source))
+            .expect("a human-only Winston pod starts");
+        assert_eq!(session.status, DraftStatus::Drafting);
+        session
+    }
+
+    /// The import legs that keep a crafted snapshot from PANICKING the reducer
+    /// or from restoring a session nobody can play.
+    ///
+    /// Every leg here is reachable only from `import_draft_session`, which
+    /// parses client-supplied JSON — so each is a hostile snapshot refused,
+    /// not an internal invariant restated. The last one is the interesting
+    /// one: it is not a shape check at all. A drafting session with three
+    /// empty piles and a stocked stack satisfies every structural rule above
+    /// it and is permanently stuck, so playability is asked directly, through
+    /// the same `forced_decision` the timeout sweep uses rather than by
+    /// re-deriving anything from pile sizes.
+    #[test]
+    fn a_shared_stack_snapshot_that_would_panic_or_stall_is_refused_at_import() {
+        let reason_for = |mutate: &dyn Fn(&mut DraftSession)| -> String {
+            let mut session = winston_started();
+            mutate(&mut session);
+            match session
+                .validate_persisted_snapshot()
+                .expect_err("a snapshot the reducer could not survive is not restorable")
+            {
+                DraftError::InvalidSharedStackConfiguration { reason } => reason,
+                other => panic!("expected InvalidSharedStackConfiguration, got {other:?}"),
+            }
+        };
+
+        // `apply_shared_stack_decision` indexes `pools[seat]` raw, and so does
+        // `filter_for_player`. A short vector is an index-out-of-bounds, which
+        // the release wasm profile turns into an aborted client.
+        assert!(reason_for(&|session| session.pools.clear()).contains("per-seat vectors"));
+
+        // `play_first_chooser` computes `(starting_seat + 1) % 2`, which
+        // overflows a `u8` at 255.
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().starting_seat = 255;
+        })
+        .contains("starting seat"));
+
+        // The `inspected` contract's own rule: a seat has looked at piles up to
+        // its cursor and no further. Bounded-per-pile is not the same claim, and
+        // the gap is an over-reveal — the view slices every pile by `inspected`.
+        assert!(reason_for(&|session| {
+            let state = session.shared_stack.as_mut().unwrap();
+            state.cursor = 0;
+            let ahead = state.piles[1].len();
+            state.inspected[1] = ahead;
+        })
+        .contains("beyond its cursor"));
+
+        // Structurally perfect and permanently unplayable: no take (every pile
+        // empty) and no decline (nothing later to advance onto), so
+        // `forced_decision` finds nothing for the sweep either.
+        assert!(reason_for(&|session| {
+            let state = session.shared_stack.as_mut().unwrap();
+            let emptied: Vec<DraftCardInstance> =
+                state.piles.iter_mut().flat_map(std::mem::take).collect();
+            state.main_stack.extend(emptied);
+            state.inspected.iter_mut().for_each(|seen| *seen = 0);
+            state.cursor = 0;
+        })
+        .contains("must admit a legal decision"));
+
+        // PAIRED POSITIVE, and it is what keeps the legs above from passing on
+        // a session that was never valid: the real started pod restores.
+        winston_started()
+            .validate_persisted_snapshot()
+            .expect("a real started Winston snapshot restores");
+    }
+
+    /// The forced-draw notice vector's own import rule, and the migration the
+    /// reducer performs for the shape the rule deliberately lets through.
+    ///
+    /// Two legs, and the ACCEPTED one is the interesting half: `forced_draws`
+    /// carries `#[serde(default)]`, so a snapshot written before the field
+    /// existed arrives EMPTY and must load — but an empty vector would then
+    /// no-op every `get_mut` for the rest of the pod, silently costing that
+    /// draft its notices. So the import accepts it and the next decision grows
+    /// it.
+    #[test]
+    fn a_forced_draw_notice_vector_is_held_to_the_seat_count_or_migrated() {
+        // Refused: a length that is neither empty nor one slot per seat is a
+        // corrupt snapshot, not an old one.
+        let mut wrong_length = winston_started();
+        wrong_length
+            .shared_stack
+            .as_mut()
+            .expect("a started Winston session carries its stack")
+            .forced_draws = vec![None; 5];
+        assert!(matches!(
+            wrong_length.validate_persisted_snapshot(),
+            Err(DraftError::InvalidSharedStackConfiguration { .. })
+        ));
+
+        // Accepted, and then MIGRATED. An empty vector is what the serde
+        // default produces for a pre-field snapshot.
+        let mut legacy = winston_started();
+        legacy
+            .shared_stack
+            .as_mut()
+            .expect("a started Winston session carries its stack")
+            .forced_draws = Vec::new();
+        legacy
+            .validate_persisted_snapshot()
+            .expect("a snapshot that predates the field still loads");
+
+        let seat = legacy.shared_stack.as_ref().unwrap().active_seat;
+        let pile = legacy.shared_stack.as_ref().unwrap().cursor;
+        apply(
+            &mut legacy,
+            DraftAction::SharedStackDecision {
+                seat,
+                pile,
+                decision: SharedStackPileDecision::Take,
+            },
+            None,
+        )
+        .expect("the first decision after a legacy load applies");
+        assert_eq!(
+            legacy.shared_stack.as_ref().unwrap().forced_draws.len(),
+            legacy.seats.len(),
+            "the reducer grows the vector rather than no-opping on it forever"
+        );
+    }
+
+    /// A dimensionally VALID `SetLayout::Chaos` for a `pod_size`-seat,
+    /// 3-pack `test_session`, so `validate_for_draft` passes it through and
+    /// the only thing left that can refuse it is the distribution.
+    fn chaos_layout(pod_size: u8) -> DraftSource {
+        DraftSource::Set {
+            layout: SetLayout::Chaos {
+                candidate_codes: vec!["TST".to_string()],
+                assignments: vec![vec!["TST".to_string(); 3]; usize::from(pod_size)],
+            },
+        }
+    }
+
+    /// A shared-stack draft takes a named pack sequence, never a Chaos
+    /// assignment: the shuffle that builds the stack destroys the
+    /// `(seat, round)` identity a Chaos layout exists to express, and the
+    /// privacy it keeps would leave the players unable to learn what pool they
+    /// are drafting.
+    ///
+    /// The PAIRED POSITIVE is the load-bearing half. The identical layout,
+    /// pod, and pack source start a Premier pod, so the Winston refusal is
+    /// demonstrably about the distribution and not about the layout's
+    /// dimensions, the fixture pool, or the two-seat pod — every one of which
+    /// `validate_for_draft` and the pod-size gate could otherwise be answering.
+    #[test]
+    fn a_shared_stack_draft_refuses_a_chaos_layout() {
+        let (mut premier, source) = test_session(2);
+        premier.config.source = chaos_layout(2);
+        apply(&mut premier, DraftAction::StartDraft, Some(&source))
+            .expect("a pick-and-pass pod still drafts a Chaos layout");
+
+        let (mut winston, source) = test_session(2);
+        winston.kind = DraftKind::Winston;
+        winston.config.kind = DraftKind::Winston;
+        winston.config.source = chaos_layout(2);
+        match apply(&mut winston, DraftAction::StartDraft, Some(&source))
+            .expect_err("a shared stack does not deal a Chaos assignment")
+        {
+            DraftError::InvalidSharedStackConfiguration { reason } => {
+                assert!(
+                    reason.contains("Chaos"),
+                    "the refusal must name the layout it refused, got {reason}"
+                );
+            }
+            other => panic!("expected InvalidSharedStackConfiguration, got {other:?}"),
+        }
+        // Refused BEFORE anything is dealt: nothing was generated, so no
+        // shared stack exists and the pod is still in its lobby.
+        assert!(winston.shared_stack.is_none());
+        assert_eq!(winston.status, DraftStatus::Lobby);
+    }
+
+    /// The OTHER two source shapes a shared stack admits, so the refusal above
+    /// is demonstrably about the Chaos layout and not about set-backed pools.
+    ///
+    /// A cube generates packs exactly as a set does and names no seats, which
+    /// is why `draft-wasm`'s cube entry point lets a Winston pod run from one;
+    /// this is that permission asserted against the authority that grants it.
+    #[test]
+    fn a_shared_stack_draft_takes_a_named_sequence_and_a_cube() {
+        let winston = DraftKind::Winston.procedure();
+        assert!(!winston.allows_chaos_layout());
+        assert!(winston
+            .validate_source(&DraftSource::single_set("TST"))
+            .is_ok());
+        assert!(winston
+            .validate_source(&DraftSource::Cube {
+                id: "cube-1".to_string(),
+                name: "A Cube".to_string(),
+            })
+            .is_ok());
+        // Every other kind keeps the layout, read off the procedure table
+        // rather than listed here: a new pick-and-pass kind joins this leg
+        // without editing it.
+        for kind in [
+            DraftKind::Premier,
+            DraftKind::Traditional,
+            DraftKind::Sealed,
+        ] {
+            assert!(
+                kind.procedure().allows_chaos_layout(),
+                "{kind:?} still draws its boosters per seat and round"
+            );
+        }
+    }
+
+    /// The same rule at the IMPORT boundary, which `StartDraft` never guards:
+    /// `import_draft_session` parses client-supplied JSON, so a Chaos layout
+    /// can reach a live shared-stack session without passing the reducer.
+    #[test]
+    fn a_shared_stack_snapshot_carrying_a_chaos_layout_is_refused_at_import() {
+        // Paired positive first, so the refusal below is about the layout.
+        let started = winston_started();
+        started
+            .validate_persisted_snapshot()
+            .expect("a real started Winston snapshot restores");
+
+        let mut swapped = winston_started();
+        swapped.config.source = chaos_layout(2);
+        assert!(matches!(
+            swapped.validate_persisted_snapshot(),
+            Err(DraftError::InvalidSharedStackConfiguration { .. })
+        ));
+    }
+
+    /// Every corrupt-shared-stack leg of `validate_persisted_snapshot`, which
+    /// is the IMPORT TRUST BOUNDARY: `import_draft_session` parses
+    /// client-supplied JSON, so each leg here is a hostile snapshot refused
+    /// rather than an internal invariant.
+    ///
+    /// The over-inspection leg is the hidden-information one, and it is why
+    /// the whole set is asserted rather than only the missing-stack leg that
+    /// `draft-wasm` already covers: `inspected[i] > piles[i].len()` is a
+    /// snapshot claiming a seat saw cards the pile does not hold, which is an
+    /// over-reveal the moment a view projects `revealed` from `inspected` --
+    /// and a slice panic before that.
+    #[test]
+    fn a_corrupt_shared_stack_snapshot_is_refused_at_import() {
+        // Paired positive FIRST, so every refusal below is demonstrably about
+        // the corruption and not about Winston.
+        winston_started()
+            .validate_persisted_snapshot()
+            .expect("a real started Winston snapshot restores");
+
+        let reason_for = |mutate: &dyn Fn(&mut DraftSession)| -> String {
+            let mut session = winston_started();
+            mutate(&mut session);
+            match session
+                .validate_persisted_snapshot()
+                .expect_err("a corrupt shared stack is not a restorable snapshot")
+            {
+                DraftError::InvalidSharedStackConfiguration { reason } => reason,
+                other => panic!("expected InvalidSharedStackConfiguration, got {other:?}"),
+            }
+        };
+
+        // A drafting session's whole live state is the stack.
+        assert!(reason_for(&|session| session.shared_stack = None).contains("must carry its stack"));
+        // The two vectors that must both be `pile_count` long -- the piles and
+        // the per-pile inspected prefixes, which are indexed in lockstep.
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().piles.pop();
+        })
+        .contains("exactly 3 piles"));
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().inspected.pop();
+        })
+        .contains("exactly 3 piles"));
+        // Out-of-range authorities: a cursor past the last pile and a seat
+        // past the last seat.
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().cursor = 3;
+        })
+        .contains("cursor must be in range"));
+        assert!(reason_for(&|session| {
+            session.shared_stack.as_mut().unwrap().active_seat = 2;
+        })
+        .contains("cursor must be in range"));
+        // THE HIDDEN-INFORMATION LEG: a prefix longer than the pile it indexes.
+        assert!(reason_for(&|session| {
+            let state = session.shared_stack.as_mut().unwrap();
+            state.inspected[1] = state.piles[1].len() + 1;
+        })
+        .contains("inspected more cards than a pile holds"));
+
+        // The counter-case, so the missing-stack refusal above is keyed on
+        // DRAFTING and not on the kind: a lobby snapshot legitimately has no
+        // stack yet.
+        let mut lobby = winston_started();
+        lobby.shared_stack = None;
+        lobby.status = DraftStatus::Lobby;
+        lobby
+            .validate_persisted_snapshot()
+            .expect("a lobby snapshot carries no stack yet");
+    }
+
+    /// V22's snapshot half: a non-Winston session's serialized JSON carries NO
+    /// `shared_stack` key at all, so `skip_serializing_if` keeps every existing
+    /// snapshot byte-identical.
+    #[test]
+    fn non_winston_sessions_serialize_without_a_shared_stack_key() {
+        let (mut session, source) = test_session(2);
+        let json = serde_json::to_value(&session).unwrap();
+        assert!(json.get("shared_stack").is_none());
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        let started = serde_json::to_value(&session).unwrap();
+        assert!(started.get("shared_stack").is_none());
+        // Reach-guard: the serializer demonstrably ran and the session is live.
+        assert_eq!(started["status"], "Drafting");
+        // Paired positive: a Winston session DOES carry the key, so the absence
+        // above is `skip_serializing_if` and not a missing field.
+        let mut winston: DraftSession =
+            serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        winston.shared_stack = Some(SharedStackState {
+            main_stack: Vec::new(),
+            piles: vec![Vec::new(); 3],
+            starting_seat: 0,
+            active_seat: 0,
+            cursor: 0,
+            inspected: vec![0; 3],
+            decisions: 0,
+            history: Vec::new(),
+            forced_draws: Vec::new(),
+        });
+        let winston_json = serde_json::to_value(&winston).unwrap();
+        assert!(winston_json.get("shared_stack").is_some());
+        let back: DraftSession =
+            serde_json::from_str(&serde_json::to_string(&winston).unwrap()).unwrap();
+        assert_eq!(back.shared_stack, winston.shared_stack);
     }
 
     #[test]

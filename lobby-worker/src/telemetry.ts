@@ -47,9 +47,10 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
   stuck_decision: { blobs: ["waiting_for_kind", "game_mode", "phase"], doubles: [] },
   js_error: { blobs: ["name", "message", "top_frame", "source", "route"], doubles: [] },
   p2p_disconnect: {
-    blobs: ["reason", "connection_state", "ice_state", "visibility", "last_message_type"],
-    doubles: ["pong_age_ms", "receive_age_ms", "pending_sends", "pending_decodes", "buffered_bytes", "channel_open"],
+    blobs: ["reason", "connection_state", "ice_state", "visibility", "last_message_type", "last_connection_state", "last_ice_state", "last_channel_state", "channel_error"],
+    doubles: ["pong_age_ms", "receive_age_ms", "pending_sends", "pending_decodes", "buffered_bytes", "channel_open", "transport_captured_at", "last_buffered_bytes", "transport_age_ms"],
   },
+  wasm_not_initialized: { blobs: ["operation"], doubles: ["initializing", "disposed", "observed_at"] },
   // `probe_*` columns are appended (never inserted — AE columns are
   // positional) and populated only on `reason: "loop-abort"` events: the
   // client refetches the failing chunk and reports what it actually got.

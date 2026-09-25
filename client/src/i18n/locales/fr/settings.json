@@ -5,6 +5,7 @@
   },
   "tabs": {
     "gameplay": "Jouabilité",
+    "ai": "Adversaires IA",
     "experimental": "Expérimental",
     "visual": "Visuel",
     "combat": "Rythme",
@@ -36,7 +37,11 @@
     "logDockSide": "Position du journal de partie",
     "spellPayment": "Paiement des sorts",
     "manualManaPayment": "Paiement manuel du mana pour les sorts",
-    "spellPaymentOptions": { "auto": "Automatique", "autoExceptSacrificialMana": "Demander avant de sacrifier", "manual": "Manuel" },
+    "spellPaymentOptions": {
+      "auto": "Automatique",
+      "autoExceptSacrificialMana": "Demander avant de sacrifier",
+      "manual": "Manuel"
+    },
     "nativeEngine": "Utiliser le moteur natif pour les parties locales et le multijoueur hébergé",
     "nativeEngineDescription": "Utilisez le moteur téléchargé pour les parties locales contre l’IA et les parties que vous hébergez via un salon. Les invités se connectent toujours via la connexion pair à pair du salon. Utilise le moteur intégré lorsqu’il n’est pas disponible.",
     "boardBackground": "Arrière-plan du plateau",
@@ -133,9 +138,18 @@
       "right": "Aligner à droite"
     },
     "presets": {
-      "default": { "label": "Disposition 1", "description": "La disposition équilibrée standard." },
-      "layout2": { "label": "Disposition 2", "description": "Un champ de bataille plus grand avec les mains repliées." },
-      "layout3": { "label": "Disposition 3", "description": "Un tiers inférieur plus haut." }
+      "default": {
+        "label": "Disposition 1",
+        "description": "La disposition équilibrée standard."
+      },
+      "layout2": {
+        "label": "Disposition 2",
+        "description": "Un champ de bataille plus grand avec les mains repliées."
+      },
+      "layout3": {
+        "label": "Disposition 3",
+        "description": "Un tiers inférieur plus haut."
+      }
     },
     "zones": {
       "playerHud": "Votre HUD",
@@ -422,9 +436,31 @@
     "incompleteTitle": "La préparation hors ligne est incomplète",
     "incompleteMessage": "Manquant : {{capabilities}}. Activer le travail hors ligne quand même ?",
     "confirmOffline": "Activer le travail hors ligne",
-    "states": { "needs-preparation": "Préparez cet appareil avant de travailler hors ligne.", "preparing": "Préparation des capacités de jeu local…", "ready": "Cet appareil est prêt pour le jeu local hors ligne.", "failed": "Certaines capacités requises ne sont pas prêtes.", "reconnect-required": "Reconnectez-vous avant de préparer le jeu hors ligne.", "reload-or-relaunch-required": "Rechargez l’application ou relancez le bureau, puis réessayez." },
-    "capabilities": { "appShell": "Application", "browserEngine": "Moteur navigateur et base de cartes", "scryfallSearch": "Données de recherche", "preconCatalog": "Decks préconstruits", "bundledAiCatalog": "Catalogue de decks IA", "deckLibrary": "Bibliothèque de decks installée", "coreVisuals": "Dos de carte et symboles de mana", "nativeEngine": "Moteur natif" },
-    "capabilityStates": { "ready": "Prêt", "not-ready": "Non prêt", "reload-required": "Rechargement requis", "not-applicable": "Non applicable", "not-installed": "Non installé" }
+    "states": {
+      "needs-preparation": "Préparez cet appareil avant de travailler hors ligne.",
+      "preparing": "Préparation des capacités de jeu local…",
+      "ready": "Cet appareil est prêt pour le jeu local hors ligne.",
+      "failed": "Certaines capacités requises ne sont pas prêtes.",
+      "reconnect-required": "Reconnectez-vous avant de préparer le jeu hors ligne.",
+      "reload-or-relaunch-required": "Rechargez l’application ou relancez le bureau, puis réessayez."
+    },
+    "capabilities": {
+      "appShell": "Application",
+      "browserEngine": "Moteur navigateur et base de cartes",
+      "scryfallSearch": "Données de recherche",
+      "preconCatalog": "Decks préconstruits",
+      "bundledAiCatalog": "Catalogue de decks IA",
+      "deckLibrary": "Bibliothèque de decks installée",
+      "coreVisuals": "Dos de carte et symboles de mana",
+      "nativeEngine": "Moteur natif"
+    },
+    "capabilityStates": {
+      "ready": "Prêt",
+      "not-ready": "Non prêt",
+      "reload-required": "Rechargement requis",
+      "not-applicable": "Non applicable",
+      "not-installed": "Non installé"
+    }
   },
   "artChain": {
     "emptyState": "Utilisation de l'illustration Scryfall par défaut. Ajoutez des règles ci-dessous pour personnaliser.",
@@ -443,6 +479,48 @@
       "oldest": "Impression la plus ancienne",
       "preferBorderless": "Préférer sans bordure",
       "preferExtended": "Préférer l'illustration étendue"
+    }
+  },
+  "llm": {
+    "title": "Adversaires LLM",
+    "intro": "Facultatif. En reliant Phase à un fournisseur de LLM, vous pouvez confier un siège d'IA — ou les bots d'un draft — à ce modèle plutôt qu'à l'IA intégrée. Rien n'est utilisé tant que vous n'avez pas activé un fournisseur et affecté à un siège, et toute erreur bascule sur l'IA intégrée en pleine partie.",
+    "empty": "Aucun fournisseur configuré. L'IA intégrée pilote tous les sièges.",
+    "addProvider": "Ajouter un fournisseur",
+    "unnamed": "Fournisseur sans nom",
+    "name": "Nom",
+    "namePlaceholder": "Nommez ce fournisseur (par ex. « Claude »)",
+    "enable": "Activer ce fournisseur",
+    "remove": "Supprimer ce fournisseur",
+    "provider": "Fournisseur",
+    "model": "Modèle",
+    "modelId": "Identifiant du modèle",
+    "customModel": "Personnalisé…",
+    "modelPlaceholder": "Identifiant du modèle (par ex. gpt-5, claude-sonnet-5)",
+    "endpoint": "Point de terminaison",
+    "endpointPlaceholder": "https://votre-serveur/v1",
+    "apiKey": "Clé d'API",
+    "apiKeyPlaceholder": "Collez votre clé d'API",
+    "apiKeyOptional": "Facultative pour un serveur local",
+    "apiKeyStorage": "Conservée en mémoire pour cette session de navigation uniquement. Les clés d'API ne sont jamais écrites sur le disque et sont exclues de l'export de sauvegarde et de la synchronisation cloud : vous la ressaisirez après un rechargement. Une clé d'API impose aussi un point de terminaison https://, sauf si le serveur est sur localhost.",
+    "apiKeyGet": "Obtenir une clé",
+    "test": "Tester la connexion",
+    "testing": "Test en cours…",
+    "testOk": "Connecté.",
+    "draftToggle": {
+      "label": "Utiliser pour les bots de draft",
+      "hint": "Les sièges bots d'un draft choisissent avec le modèle, avec le contexte des éditions du format.",
+      "profile": "Fournisseur pour le draft"
+    },
+    "testHint": "Envoie une vraie requête et vérifie la réponse exactement comme le ferait un tour de jeu.",
+    "errors": {
+      "engineUnavailable": "Le moteur n'a pas pu être chargé.",
+      "requestNotBuilt": "Ce fournisseur n'est pas entièrement configuré.",
+      "undecodable": "Le point de terminaison a répondu, mais pas avec quelque chose d'exploitable par la partie.",
+      "emptyBody": "Le point de terminaison a renvoyé une réponse vide.",
+      "cancelled": "Le test a été annulé.",
+      "timedOut": "Le point de terminaison n'a pas répondu à temps.",
+      "unreachable": "Impossible de joindre le point de terminaison. Vérifiez l'URL et que le fournisseur autorise les requêtes depuis le navigateur.",
+      "oversized": "Le point de terminaison a renvoyé bien plus de données qu'une réponse de chat."
     }
   }
 }

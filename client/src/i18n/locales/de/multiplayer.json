@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} Unentschieden)",
     "draws_other": " ({{count}} Unentschieden)",
     "main": "Haupt ({{count}}, min. {{min}})",
+    "mainNoMinimum": "Haupt ({{count}})",
     "sideboard": "Sideboard ({{count}})",
     "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Karten aus dem Sideboard verschieben.",
@@ -96,6 +97,9 @@
     "message": "Dein Spiel wird nicht öffentlich gelistet. Du kannst trotzdem über P2P hosten — teile einfach den Raumcode direkt mit deinem Gegner.",
     "continueWithoutLobby": "Ohne Lobby fortfahren"
   },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Dieser Lobby-Server ist zu alt, um Spiele im gewählten Format aufzulisten (er benötigt Lobby-Protokoll {{needed}})."
+  },
   "joinErrorDialog": {
     "dismiss": "Schließen"
   },
@@ -103,7 +107,9 @@
     "firstMessageInvalid": "Der Host hat die Verbindung vor der Einrichtung abgelehnt. Aktualisiere beide Fenster und versuche es erneut.",
     "versionRequired": "Dieser Host benötigt das Übertragungsprotokoll v{{version}}. Aktualisiere beide Fenster und versuche es erneut.",
     "versionMismatch": "Übertragungsprotokoll stimmt nicht überein: Dein Client hat v{{guestVersion}} gesendet, der Host verwendet jedoch v{{hostVersion}}. Aktualisiere beide Fenster.",
-    "malformedAuthority": "Der Host hat eine ungültige Verbindungsberechtigung abgelehnt. Tritt mit einem neuen Raumcode erneut bei."
+    "malformedAuthority": "Der Host hat eine ungültige Verbindungsberechtigung abgelehnt. Tritt mit einem neuen Raumcode erneut bei.",
+    "frameUndecodable": "Der Host hat eine Nachricht gesendet, die dieser Client nicht lesen konnte. Aktualisiere beide Fenster und versuche es erneut.",
+    "hostDisconnectedBeforeSetup": "Die Verbindung zum Host wurde vor Abschluss der Einrichtung getrennt."
   },
   "serverOfflinePrompt": {
     "title": "Matchmaking nicht erreichbar",
@@ -129,6 +135,8 @@
     "sandboxConfirm": "Dies ist ein Sandbox-Spiel. Spieler mit Debug-Berechtigung können den Spielzustand direkt manipulieren. Fortfahren?",
     "draftBadgeTitle": "{{kind}} Draft — {{setCode}}",
     "draftBadge": "{{setCode}} Draft",
+    "cubeDraftBadgeTitle": "{{kind}} Draft — {{cubeName}}",
+    "cubeDraftBadge": "{{cubeName}} Draft",
     "p2pBadgeTitle": "Peer-to-Peer-Spiel (der Host führt die Engine aus)",
     "sandboxBadgeTitle": "Dieses Spiel erlaubt Debug-Aktionen. Zum Testen nutzen — keine kompetitive Partie.",
     "hintSlow": "LANGSAM",
@@ -274,7 +282,11 @@
     "loadingCustomFormat": "Format wird geladen…",
     "noSavedCustomFormats": "Noch keine eigenen Formate gespeichert.",
     "customFormatResolveFailed": "Dieses gespeicherte Format konnte nicht geladen werden.",
-    "customFormatHostingUnavailable": "Das Hosten mit einem eigenen Format wird noch nicht unterstützt — die Deck-Legalität kann dafür nicht geprüft werden. Speichere und sieh es dir vorerst nur an."
+    "customFormatHostingUnavailable": "Das Hosten mit einem eigenen Format wird noch nicht unterstützt — die Deck-Legalität kann dafür nicht geprüft werden. Speichere und sieh es dir vorerst nur an.",
+    "botGameNotice": "Du hostest das Discord-Spiel {{code}}. Verbindung und Privatsphäre legt der Discord-Beitrag fest.",
+    "botSeedIgnored": "Einige Einstellungen aus dem Discord-Beitrag können hier nicht verwendet werden — prüfe Format und Spielerzahl.",
+    "botP2PNotice": "Dein Gerät führt das Spiel aus. Lass die App geöffnet und bleib verbunden.",
+    "botServerNotice": "Ein dedizierter Server führt das Spiel aus. Er kann langsamer werden oder offline gehen."
   },
   "page": {
     "deckRejected": "Das Deck wurde vom Host abgelehnt.",
@@ -307,7 +319,20 @@
     "pickDeck": "Deck wählen",
     "anonymous": "Anonym",
     "joining": "Tritt bei",
-    "joinNeedsServer": "Wähle einen Server, bevor du einem Spiel beitrittst."
+    "joinNeedsServer": "Wähle einen Server, bevor du einem Spiel beitrittst.",
+    "serverDraftJoinUnsupported": "Serverseitig gehosteten Draft-Pods kannst du nicht aus der Lobby beitreten.",
+    "p2pDraftSpectateUnsupported": "Spielergehostete Draft-Pods können nicht beobachtet werden.",
+    "alreadyInDraftPod": "Du bist bereits in einem Draft-Pod. Verlasse ihn, bevor du einem anderen beitrittst.",
+    "invalidGameLink": "Dieser Spiellink ist ungültig oder unvollständig.",
+    "waitingForHostTitle": "Warte auf den Host…",
+    "waitingForHostMessage": "Der Host hat dieses Spiel noch nicht geöffnet, oder es wurde geschlossen. Versuche es erneut, sobald der Host seinen Link geöffnet hat.",
+    "botLinkBrokerUnreachable": "Der Lobby-Server für dieses Discord-Spiel ist nicht erreichbar. Prüfe deine Verbindung und öffne dann deinen Host-Link erneut.",
+    "updatingTitle": "Aktualisierung auf die neueste Version…",
+    "updatingMessage": "Eine neuere Version von phase.rs ist verfügbar. Die Seite wird neu geladen, sobald sie bereit ist.",
+    "refreshAfterGame": "Beende dein aktuelles Spiel und aktualisiere dann, um die neue Version zu laden.",
+    "updateFailedTitle": "Automatische Aktualisierung nicht möglich",
+    "updateFailedMessage": "Aktualisiere, um die neueste Version zu laden, oder fahre mit dieser fort. Spieler mit unterschiedlichen Versionen können nicht demselben Spiel beitreten.",
+    "continueAnyway": "Trotzdem fortfahren"
   },
   "draftLobbyPanel": {
     "draftPod": "Draft-Pod",
@@ -323,5 +348,20 @@
     "checkingLegality": "Deck-Legalität wird geprüft…",
     "legal": "✓ Legal in {{format}}",
     "notLegal": "Nicht legal in {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Dieser Server unterstützt noch keine Discord-Spiele.",
+    "codeInUse": "Der Code dieses Spiels ist noch von einem früheren Raum belegt. Warte ein paar Minuten und öffne dann deinen Host-Link aus Discord erneut. Wenn es weiter passiert, starte ein neues /lfg."
+  },
+  "openDesktop": {
+    "title": "Die phase.rs-Desktop-App wird geöffnet…",
+    "invalid": "Dieser Link kann nicht in der Desktop-App geöffnet werden.",
+    "openApp": "Desktop-App öffnen",
+    "continueInBrowser": "Nicht geöffnet? Im Browser fortfahren",
+    "getDesktopApp": "Desktop-App herunterladen"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Spiel läuft",
+    "gameInProgressBody": "Beende oder verlasse dein aktuelles Spiel und öffne den Link dann erneut."
   }
 }

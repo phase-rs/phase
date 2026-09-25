@@ -7,6 +7,7 @@ declare const __ENGINE_FINGERPRINT__: string | undefined;
 declare const __ENGINE_WASM_URL__: string | undefined;
 declare const __OFFICIAL_MULTIPLAYER_SERVER_URL__: string;
 declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
+declare const __TURN_CREDENTIALS_URL__: string;
 
 /**
  * Per-deployment configuration, set by `/config.js` before the app bundle runs.
@@ -19,6 +20,11 @@ declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
 interface PhaseRuntimeConfig {
   /** `ws://`/`wss://` address new profiles default to. Ignored if malformed. */
   multiplayerServerUrl?: string;
+  /**
+   * `http://`/`https://` site a release web build's "Try Preview" badge opens.
+   * Ignored if malformed. The desktop shell always opens the build-time site.
+   */
+  previewSiteUrl?: string;
 }
 
 interface Window {

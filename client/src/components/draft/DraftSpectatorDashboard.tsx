@@ -1,7 +1,30 @@
 import { useTranslation } from "react-i18next";
 
-import type { SpectatorDraftView } from "../../adapter/draft-adapter";
+import type { SeatPublicView, SpectatorDraftView } from "../../adapter/draft-adapter";
 import { DraftProgress } from "./DraftProgress";
+
+/**
+ * The engine's `PickStatus`, mapped to a STATIC translation key per variant.
+ *
+ * Not `t(`pickStatus.${seat.pick_status}`)`. That built the key out of a
+ * serialized engine value, and the comment that used to sit here claimed a
+ * variant with no catalog entry would be a compile error at the call site. It
+ * is not -- measured by adding a sixth variant to the union: the build broke in
+ * `SeatStatusRing`'s exhaustive `Record`s and NOT at the interpolated `t()`,
+ * which would have shipped the literal key text to spectators at runtime.
+ *
+ * A total `Record` keyed on the engine union is the same device `SeatStatusRing`
+ * already uses for these statuses, and it makes an engine that grows a variant a
+ * BUILD failure here rather than a missing translation on screen. The keys stay
+ * static, so nothing constructs one from wire data.
+ */
+const PICK_STATUS_KEY = {
+  Pending: "pickStatus.Pending",
+  Picked: "pickStatus.Picked",
+  Waiting: "pickStatus.Waiting",
+  TimedOut: "pickStatus.TimedOut",
+  NotDrafting: "pickStatus.NotDrafting",
+} as const satisfies Record<SeatPublicView["pick_status"], string>;
 
 interface DraftSpectatorDashboardProps {
   view: SpectatorDraftView;
@@ -37,7 +60,7 @@ export function DraftSpectatorDashboard({ view }: DraftSpectatorDashboardProps) 
             >
               <span className="font-medium text-white">{seat.display_name}</span>
               <span className="text-[10px] uppercase tracking-wide text-slate-400">
-                {seat.pick_status}
+                {t(PICK_STATUS_KEY[seat.pick_status])}
                 {seat.has_submitted_deck ? ` · ${t("spectator.deckSubmitted")}` : ""}
               </span>
             </li>

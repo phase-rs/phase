@@ -16,8 +16,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ControllerRef,
     CostReduction, DelayedTriggerCondition, Duration, MultiTargetSpec, OpponentMayScope,
-    PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetFilter, TargetSelectionMode,
-    UnlessPayModifier,
+    PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -592,13 +592,13 @@ pub(crate) struct ClauseId(pub(crate) u32);
 /// applied it.
 ///
 /// The three arms are the top-level XOR discriminant of the pre-U5 lower.rs loop
-/// (`if absorbed_by_followup … else if special … else …`, lower.rs:1314/1321).
+/// (`if absorbed_by_followup … else if special … else …`, the pre-U5 lowering pass).
 /// The two continuation channels ride ORTHOGONALLY on the arms — they are applied
 /// in multiple paths — so each arm carries the channels its path actually uses:
-/// - normal/`Emit`: `followup` patches PRIOR defs (lower.rs:1703), then the def is
-///   emitted, then `intrinsic` patches SELF (lower.rs:2078).
+/// - normal/`Emit`: `followup` patches PRIOR defs, then the def is
+///   emitted, then `intrinsic` patches SELF (the pre-U5 lowering pass).
 /// - absorbed/`Continue`: `continuation` patches PRIOR defs; no self def is
-///   emitted (lower.rs:1314).
+///   emitted (the pre-U5 lowering pass).
 /// - `FoldSearchIntoElse`: applies `intrinsic` to the def it builds, inline at its
 ///   own tail (the former `special` path's only intrinsic carrier).
 // Intentional: variants carry parser IR directly (the `Emit` channels hold two
@@ -609,16 +609,16 @@ pub(crate) struct ClauseId(pub(crate) u32);
 pub(crate) enum ClauseDisposition {
     /// CR 608.2c: this clause emits its own definition(s). `followup` is a
     /// continuation from THIS chunk that patches the PRIOR defs before this clause
-    /// emits (formerly `followup_continuation` on the non-absorbed path,
-    /// lower.rs:1703); `intrinsic` patches this clause's OWN lowered def after it
-    /// emits (formerly `intrinsic_continuation`, lower.rs:2078).
+    /// emits (formerly `followup_continuation` on the non-absorbed path);
+    /// `intrinsic` patches this clause's OWN lowered def after it
+    /// emits (formerly `intrinsic_continuation`, the pre-U5 lowering pass).
     Emit {
         followup: Option<ContinuationAst>,
         intrinsic: Option<ContinuationAst>,
     },
     /// CR 608.2c: this clause continues/patches the prior emitted clause rather
     /// than emitting an independent def. Folds the former `absorbed_by_followup`
-    /// and `followup_continuation` pair (absorbed path, lower.rs:1314). The clause
+    /// and `followup_continuation` pair (absorbed path, the pre-U5 lowering pass). The clause
     /// remains addressable (its own id/source) even though it produces no sibling
     /// def. The explicit antecedent selector is JIT-deferred to U6 (module note);
     /// in M1 the target is the prior emitted def, as the pre-U5 lowering applied it.
@@ -892,6 +892,15 @@ pub(crate) struct ClauseIr {
     /// targeted "of their choice" controlled by the phase-trigger active player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target_chooser: Option<TargetFilter>,
+    /// CR 115.10a + CR 701.41a: producer-declared target-choice timing captured
+    /// from `ParseContext` after this chunk was parsed. When `Some`, it outranks
+    /// the text-scan ladder in `lower::target_choice_timing_for_clause`, which
+    /// cannot read a keyword-action shorthand correctly because the shorthand is
+    /// not the ability's rules text ("support 2" contains no "target"; CR 701.41a
+    /// defines it to mean "… up to two other target creatures"). `None` (the
+    /// default) leaves that ladder in charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) declared_target_choice_timing: Option<TargetChoiceTiming>,
     /// CR 105.4 + CR 608.2c: this clause's text printed its own colour choice
     /// ("of the color of your choice"), captured from `ParseContext` after this
     /// chunk was parsed. Declared per-clause provenance — assembly gates the
@@ -1099,6 +1108,7 @@ impl ClauseIrBuilder {
             unless_pay: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             target_chooser: None,
+            declared_target_choice_timing: None,
             printed_color_choice: None,
             placement: ClausePlacement::Sibling,
         }
@@ -1168,6 +1178,7 @@ impl ClauseIrBuilder {
         .unless_pay(c.unless_pay)
         .target_selection_mode(c.target_selection_mode)
         .target_chooser(c.target_chooser)
+        .declared_target_choice_timing(c.declared_target_choice_timing)
         .printed_color_choice(c.printed_color_choice)
         .push();
     }
@@ -1201,6 +1212,7 @@ pub(crate) struct ClauseDraft<'a> {
     unless_pay: Option<UnlessPayModifier>,
     target_selection_mode: TargetSelectionMode,
     target_chooser: Option<TargetFilter>,
+    declared_target_choice_timing: Option<TargetChoiceTiming>,
     printed_color_choice: Option<ChoiceType>,
     placement: ClausePlacement,
 }
@@ -1259,6 +1271,18 @@ impl ClauseDraft<'_> {
     }
     pub(crate) fn target_chooser(mut self, v: Option<TargetFilter>) -> Self {
         self.target_chooser = v;
+        self
+    }
+    /// CR 115.10a + CR 701.41a: declare THIS clause's target-choice timing
+    /// directly, for a producer that expanded a keyword-action shorthand into a
+    /// targeted effect. The only writer is the chain chunk loop, lifting
+    /// `ParseContext::declared_target_choice_timing` immediately after the chunk
+    /// parses. `lower::target_choice_timing_for_clause` honours it ahead of its
+    /// text-scan ladder, which would otherwise read "support 2", find no
+    /// "target", and classify a targeted announcement as a described
+    /// resolution-time pick — suppressing its target slots entirely.
+    pub(crate) fn declared_target_choice_timing(mut self, v: Option<TargetChoiceTiming>) -> Self {
+        self.declared_target_choice_timing = v;
         self
     }
     /// CR 105.4 + CR 608.2c: declare that THIS clause's text printed its own
@@ -1378,6 +1402,7 @@ impl ClauseDraft<'_> {
             unless_pay: self.unless_pay,
             target_selection_mode: self.target_selection_mode,
             target_chooser: self.target_chooser,
+            declared_target_choice_timing: self.declared_target_choice_timing,
             printed_color_choice: self.printed_color_choice,
             chosen_color_grant: crate::parser::oracle_nom::filter::classify_chosen_color_grant(
                 &self.source_text,

@@ -962,6 +962,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChangeTargets
         | EffectKind::Incubate
         | EffectKind::Amass
+        | EffectKind::EmpowerJace
         | EffectKind::Bolster
         | EffectKind::Manifest
         | EffectKind::Cloak

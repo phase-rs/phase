@@ -44,7 +44,9 @@ import {
   normalizeRememberedHostConfig,
   normalizeUserLobbySources,
   hydrateSessionTournamentCredentials,
+  maybeRenewNearExpiry,
   rememberTournamentCredential,
+  shouldRenewCredential,
   userLobbySource,
   type AmbientLobbyFrame,
   type HostingSettings,
@@ -52,6 +54,8 @@ import {
   type LobbySource,
   useMultiplayerStore,
 } from "../multiplayerStore";
+import { renewTournamentCredentialOver } from "../../services/tournamentClient";
+import type { PhaseSocket } from "../../services/openPhaseSocket";
 import { SERVER_PRESETS } from "../../services/serverDetection";
 import {
   DIRECTORY_VERSION,
@@ -74,6 +78,13 @@ import {
   saveWsSession,
 } from "../../services/multiplayerSession";
 import { HandshakeError, openPhaseSocket, withReconnect } from "../../services/openPhaseSocket";
+import {
+  BrokerRequestError,
+  LobbyCapabilityError,
+  type RegisterHostRequest,
+} from "../../services/brokerClient";
+import i18n from "i18next";
+import multiplayerEn from "../../i18n/locales/en/multiplayer.json";
 
 const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
@@ -139,12 +150,30 @@ vi.mock("../../adapter/p2p-adapter", () => ({
   }),
 }));
 
-vi.mock("../../services/brokerClient", () => ({
-  openBrokerClient: brokerMocks.openBrokerClient,
-  subscribeLobbyOver: brokerMocks.subscribeLobbyOver,
-  lookupJoinTargetOver: brokerMocks.lookupJoinTargetOver,
-  resolveGuestOver: brokerMocks.resolveGuestOver,
-}));
+// `BrokerRequestError` and `LobbyCapabilityError` are the real classes so the
+// store's `instanceof` checks and this file's constructed errors share the
+// production identity.
+vi.mock("../../services/brokerClient", async (importActual) => {
+  const actual = await importActual<typeof import("../../services/brokerClient")>();
+  return {
+    BrokerRequestError: actual.BrokerRequestError,
+    LobbyCapabilityError: actual.LobbyCapabilityError,
+    openBrokerClient: brokerMocks.openBrokerClient,
+    subscribeLobbyOver: brokerMocks.subscribeLobbyOver,
+    lookupJoinTargetOver: brokerMocks.lookupJoinTargetOver,
+    resolveGuestOver: brokerMocks.resolveGuestOver,
+  };
+});
+
+// Only `renewTournamentCredentialOver` is stubbed — every other tournament
+// sender stays real (importActual) so unrelated store tests are untouched.
+// Stubbing this one lets `maybeRenewNearExpiry`'s gate and lost-reply-recovery
+// paths be driven directly, without a live socket exchange.
+vi.mock("../../services/tournamentClient", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../../services/tournamentClient")>();
+  return { ...actual, renewTournamentCredentialOver: vi.fn() };
+});
 
 /**
  * The metrics module is MOCKED here, module-level, and that is the mitigation —
@@ -1059,6 +1088,42 @@ describe("multiplayerStore", () => {
     },
   );
 
+  it.each([
+    ["a string", "yes"],
+    ["a number", 1],
+    ["null", null],
+  ])("hydrates %s remembered pod listing choice as never chosen", (_label, stored) => {
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({ state: { lastPodListingPublic: stored }, version: 6 }),
+    );
+
+    act(() => useMultiplayerStore.persist.rehydrate());
+
+    expect(useMultiplayerStore.getState().lastPodListingPublic).toBeNull();
+  });
+
+  it.each([true, false])(
+    "hydrates a stored %s pod listing choice",
+    (stored) => {
+      localStorage.setItem(
+        "phase-multiplayer",
+        JSON.stringify({ state: { lastPodListingPublic: stored }, version: 6 }),
+      );
+
+      act(() => useMultiplayerStore.persist.rehydrate());
+
+      expect(useMultiplayerStore.getState().lastPodListingPublic).toBe(stored);
+    },
+  );
+
+  it("persists the remembered pod listing choice", () => {
+    act(() => useMultiplayerStore.getState().rememberPodListingPublic(false));
+
+    const persisted = JSON.parse(localStorageItems.get("phase-multiplayer") ?? "null");
+    expect(persisted?.state?.lastPodListingPublic).toBe(false);
+  });
+
   it("strips AI seats from team-based server host settings", async () => {
     useMultiplayerStore.getState().startHosting(
       hostingSettings({
@@ -1448,6 +1513,109 @@ describe("multiplayerStore", () => {
     },
   );
 
+  describe("registerHost lobby-capability toast", () => {
+    beforeEach(() => {
+      useMultiplayerStore.setState({ toasts: new Map() });
+    });
+
+    function openBrokerRequest(): RegisterHostRequest {
+      return {
+        hostPeerId: "peer-host",
+        displayName: "Host",
+        public: true,
+        password: null,
+        timerSeconds: null,
+        playerCount: 2,
+        matchConfig: { match_type: "Bo1" },
+        formatConfig: null,
+        roomName: null,
+        draftMetadata: null,
+      };
+    }
+
+    it("startP2PHostingSession resolves false and toasts on LobbyCapabilityError", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new LobbyCapabilityError(10, 9));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings(),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { brokerUrl: "wss://broker.example/ws" },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", { needed: 10 }),
+      );
+    });
+
+    it("startP2PHostingSession resolves false with no capability toast on a generic error", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings(),
+        {
+          main_deck: ["Forest"],
+          sideboard: [],
+          commander: ["Goreclaw, Terror of Qal Sisma"],
+        },
+        { brokerUrl: "wss://broker.example/ws" },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("openBroker resolves null and toasts on LobbyCapabilityError", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new LobbyCapabilityError(10, 9));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(brokerMocks.close).toHaveBeenCalledOnce();
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        i18n.t("multiplayer:lobbyCapability.formatNeedsNewerServer", { needed: 10 }),
+      );
+    });
+
+    it("openBroker resolves null with no capability toast on a generic error", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("closes the broker socket it opened when registerHost rejects", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("boom"));
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).toBeNull();
+      expect(brokerMocks.close).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the broker open and hands it to getBroker when registerHost resolves", async () => {
+      useMultiplayerStore.getState().setHostingServer("wss://broker.example/ws");
+
+      const result = await useMultiplayerStore.getState().openBroker(openBrokerRequest());
+
+      expect(result).not.toBeNull();
+      expect(brokerMocks.close).not.toHaveBeenCalled();
+      expect(useMultiplayerStore.getState().getBroker()).toEqual({
+        broker: result!.broker,
+        gameCode: result!.gameCode,
+      });
+    });
+  });
+
   it("removes open P2P seats in order before starting with current players", async () => {
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(
       hostingSettings(),
@@ -1530,6 +1698,154 @@ describe("multiplayerStore", () => {
 
     expect(useMultiplayerStore.getState().activePlayerId).toBe(2);
     expect(useMultiplayerStore.getState().pendingGameRoute).toBeNull();
+  });
+
+  describe("Discord requested codes", () => {
+    const deck = { main_deck: ["Forest"], sideboard: [], commander: [] };
+    const BROKER_URL = "wss://broker.example/ws";
+
+    beforeEach(() => {
+      useMultiplayerStore.setState({ toasts: new Map() });
+    });
+
+    it("withdraws a P2P listing when an old broker mints its own code", async () => {
+      brokerMocks.registerHost.mockResolvedValueOnce({
+        gameCode: "ZZZ999",
+        playerToken: "host-token",
+      });
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      // Reach guard: the requested code reached the broker request.
+      expect(brokerMocks.registerHost).toHaveBeenCalledWith(
+        expect.objectContaining({ requestedCode: "AB12CD" }),
+      );
+      expect(ok).toBe(false);
+      expect(brokerMocks.unregister).toHaveBeenCalledWith("ZZZ999");
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeUnsupported,
+      );
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+    });
+
+    it("keeps a P2P listing whose code matches the requested one", async () => {
+      brokerMocks.registerHost.mockResolvedValueOnce({
+        gameCode: "AB12CD",
+        playerToken: "host-token",
+      });
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(true);
+      expect(brokerMocks.unregister).not.toHaveBeenCalled();
+    });
+
+    it("explains a held code on the P2P host path", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(
+        new BrokerRequestError("Game code AB12CD is already in use", "code_in_use"),
+      );
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeInUse,
+      );
+    });
+
+    it("stays silent on a generic P2P registration failure", async () => {
+      brokerMocks.registerHost.mockRejectedValueOnce(new Error("socket gone"));
+
+      const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        { brokerUrl: BROKER_URL },
+      );
+
+      expect(ok).toBe(false);
+      expect(useMultiplayerStore.getState().toasts.get("generic")).toBeUndefined();
+    });
+
+    it("cancels a Full host when an old server mints its own code", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+        data: { requested_code: unknown };
+      };
+      expect(frame.data.requested_code).toBe("AB12CD");
+
+      emitServerMessage("GameCreated", { game_code: "ZZZ999", player_token: "host-token" });
+
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeUnsupported,
+      );
+    });
+
+    it("waits on a Full host whose code matches the requested one", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("GameCreated", { game_code: "AB12CD", player_token: "host-token" });
+
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("waiting");
+      expect(useMultiplayerStore.getState().hostGameCode).toBe("AB12CD");
+    });
+
+    it("explains a held code on the Full host path", async () => {
+      useMultiplayerStore.getState().startHosting(
+        hostingSettings({ requestedCode: "AB12CD" }),
+        deck,
+        HOST_URL,
+      );
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      emitServerMessage("Error", {
+        message: "Game code AB12CD is already in use",
+        code: "code_in_use",
+      });
+
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        multiplayerEn.botLink.codeInUse,
+      );
+      expect(useMultiplayerStore.getState().hostingStatus).toBe("idle");
+    });
+
+    it("shows an un-coded Full host error verbatim", async () => {
+      useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+        data: { requested_code: unknown };
+      };
+      expect(frame.data.requested_code).toBeNull();
+      emitServerMessage("Error", { message: "Server is full" });
+
+      expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+        "Server is full",
+      );
+    });
   });
 
   it("reports a server host connection error instead of falling through to P2P", async () => {
@@ -2730,7 +3046,13 @@ describe("tournament credential storage (sessionStorage, not localStorage)", () 
     // (an emptied map removes the key).
     sessionStorage.setItem(
       SESSION_KEY,
-      JSON.stringify({ TOUR01: { playerToken: "secret", updatedAt: 5 } }),
+      JSON.stringify({
+        TOUR01: {
+          playerToken: "secret",
+          playerOrigin: "wss://o.example/ws",
+          updatedAt: 5,
+        },
+      }),
     );
 
     hydrateSessionTournamentCredentials();
@@ -2738,6 +3060,35 @@ describe("tournament credential storage (sessionStorage, not localStorage)", () 
     expect(
       useMultiplayerStore.getState().tournamentCredentials.TOUR01?.playerToken,
     ).toBe("secret");
+  });
+
+  // Maintainer [HIGH] #2: a legacy persisted credential with NO recorded origin
+  // is an authority bypass — it could be replayed against an unintended broker.
+  // Fail closed: drop the origin-less token on load.
+  it("drops an origin-less (legacy) stored credential on hydration", () => {
+    sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({
+        // Organizer token with no organizerOrigin, and a player token with no
+        // playerOrigin — both legacy, both must be dropped.
+        LEGACY: { organizerToken: "org", updatedAt: 1 },
+        MIXED: {
+          organizerToken: "org2",
+          playerToken: "ply",
+          playerOrigin: "wss://o.example/ws",
+          updatedAt: 2,
+        },
+      }),
+    );
+
+    hydrateSessionTournamentCredentials();
+
+    const creds = useMultiplayerStore.getState().tournamentCredentials;
+    // The wholly origin-less credential is gone entirely.
+    expect(creds.LEGACY).toBeUndefined();
+    // The mixed one keeps only the token whose origin survived.
+    expect(creds.MIXED?.organizerToken).toBeUndefined();
+    expect(creds.MIXED?.playerToken).toBe("ply");
   });
 
   it("removes the sessionStorage key when the credential map empties", () => {
@@ -2759,3 +3110,421 @@ describe("tournament credential storage (sessionStorage, not localStorage)", () 
   });
 });
 
+
+describe("proactive credential rotation", () => {
+  const NOW = 1_700_000_000_000;
+  const MARGIN = 24 * 60 * 60 * 1000;
+
+  /** A socket whose only load-bearing property here is the broker's advertised
+   *  lobby version — the version gate reads exactly that. */
+  function socketAtLobbyVersion(
+    lobbyProtocolVersion: number | undefined,
+  ): PhaseSocket {
+    return {
+      serverInfo: {
+        version: "0.0.0",
+        buildCommit: "test",
+        protocolVersion: 1,
+        mode: "LobbyOnly",
+        lobbyProtocolVersion,
+      },
+    } as unknown as PhaseSocket;
+  }
+
+  function seedOrganizer(expiresAtMs: number | undefined): void {
+    useMultiplayerStore.setState({
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "old",
+          ...(expiresAtMs !== undefined
+            ? { organizerTokenExpiresAtMs: expiresAtMs }
+            : {}),
+          updatedAt: 0,
+        },
+      },
+    });
+  }
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    vi.mocked(renewTournamentCredentialOver).mockReset();
+    useMultiplayerStore.setState({ tournamentCredentials: {} });
+  });
+
+  it("shouldRenewCredential renews only a still-valid credential inside the margin", () => {
+    // No expiry known (a pre-v6 broker minted none) -> never.
+    expect(shouldRenewCredential(undefined, NOW, MARGIN)).toBe(false);
+    // Already expired -> never: an expired credential is unrenewable, so this
+    // would only draw a refusal.
+    expect(shouldRenewCredential(NOW, NOW, MARGIN)).toBe(false);
+    expect(shouldRenewCredential(NOW - 1, NOW, MARGIN)).toBe(false);
+    // Valid but outside the margin -> not yet (no needless round trip).
+    expect(shouldRenewCredential(NOW + MARGIN + 1, NOW, MARGIN)).toBe(false);
+    // Valid and within the margin (inclusive at exactly the margin) -> renew.
+    expect(shouldRenewCredential(NOW + MARGIN, NOW, MARGIN)).toBe(true);
+    expect(shouldRenewCredential(NOW + 1, NOW, MARGIN)).toBe(true);
+  });
+
+  it("does NOT rotate against a broker below the recoverable-rotation floor", async () => {
+    // Near expiry, so the ONLY thing stopping a rotation is the version gate:
+    // an old broker invalidates instantly, so proactively rotating there would
+    // risk stranding on a lost reply.
+    seedOrganizer(NOW + 1000);
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(8),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("old");
+  });
+
+  it("does NOT rotate a credential that is not yet near expiry", async () => {
+    seedOrganizer(NOW + MARGIN + 60_000); // well outside the margin
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+  });
+
+  it("does NOT rotate a credential with no known expiry", async () => {
+    seedOrganizer(undefined); // pre-v6 broker minted no expiry
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+    expect(token).toBe("old");
+    expect(renewTournamentCredentialOver).not.toHaveBeenCalled();
+  });
+
+  it("rotates and adopts the fresh secret when near expiry against a v9 broker", async () => {
+    seedOrganizer(NOW + 1000);
+    const newExpiry = NOW + 7 * 24 * 60 * 60 * 1000;
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "fresh",
+        expires_at_ms: newExpiry,
+      },
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    expect(renewTournamentCredentialOver).toHaveBeenCalledWith(
+      expect.anything(),
+      "TOUR01",
+      "Organizer", // the CAPITALIZED wire role
+      "old",
+      expect.any(String), // the client-minted rotation nonce
+      expect.objectContaining({ signal: controller.signal }),
+    );
+    expect(token).toBe("fresh");
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("fresh");
+    expect(stored?.organizerTokenExpiresAtMs).toBe(newExpiry);
+    // The pending nonce is cleared once the rotation confirms.
+    expect(stored?.organizerPendingRotationNonce).toBeUndefined();
+  });
+
+  // The #8782 [HIGH] regression, client layer: an uncertain renewal must not
+  // strand the holder. It retries once in-call with the SAME nonce (to replay a
+  // committed-but-lost rotation), and if still uncertain leaves the held token
+  // and the PERSISTED nonce in place so the next attempt recovers.
+  it("retries with the same nonce on an uncertain result and persists it for recovery", async () => {
+    seedOrganizer(NOW + 1000);
+    // A genuinely uncertain result (not an abort): triggers the in-call retry.
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: false,
+      reason: "timeout",
+      message: "timeout",
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    // Initial attempt + one in-call retry, both with the SAME nonce.
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(2);
+    const firstNonce = vi.mocked(renewTournamentCredentialOver).mock.calls[0][4];
+    const retryNonce = vi.mocked(renewTournamentCredentialOver).mock.calls[1][4];
+    expect(retryNonce).toBe(firstNonce);
+
+    // The held token flows through to the action; the secret is not advanced.
+    expect(token).toBe("old");
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("old");
+    // The nonce is PERSISTED so the next proactive renewal replays rather than
+    // minting a fresh nonce the broker would refuse against a superseded token.
+    expect(stored?.organizerPendingRotationNonce).toBe(firstNonce);
+  });
+
+  it("reuses the persisted nonce on a later attempt, then clears it on recovery", async () => {
+    // Seed a credential mid-recovery: a prior uncertain attempt left a nonce.
+    useMultiplayerStore.setState({
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "old",
+          organizerTokenExpiresAtMs: NOW + 1000,
+          organizerPendingRotationNonce: "stuck-nonce",
+          updatedAt: 0,
+        },
+      },
+    });
+    vi.mocked(renewTournamentCredentialOver).mockResolvedValue({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "recovered",
+        expires_at_ms: NOW + 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+
+    const controller = new AbortController();
+    const token = await maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://o.example/ws",
+      "TOUR01",
+      "organizer",
+      "old",
+      controller.signal,
+      NOW,
+    );
+
+    // The retry reused the PERSISTED nonce (so the broker can replay), not a
+    // fresh one.
+    expect(vi.mocked(renewTournamentCredentialOver).mock.calls[0][4]).toBe(
+      "stuck-nonce",
+    );
+    expect(token).toBe("recovered");
+    const stored = useMultiplayerStore.getState().tournamentCredentials.TOUR01;
+    expect(stored?.organizerToken).toBe("recovered");
+    expect(stored?.organizerPendingRotationNonce).toBeUndefined();
+  });
+
+  // Superagent P2: two near-expiry gated actions firing at once must not rotate
+  // twice (the second would orphan the first's fresh secret). They share one
+  // in-flight renewal and both settle on the same surviving secret.
+  it("dedupes concurrent near-expiry rotations of the same authority", async () => {
+    seedOrganizer(NOW + 1000);
+    const newExpiry = NOW + 7 * 24 * 60 * 60 * 1000;
+    vi.mocked(renewTournamentCredentialOver).mockImplementation(async () => ({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "fresh",
+        expires_at_ms: newExpiry,
+      },
+    }));
+
+    const controller = new AbortController();
+    // Fire both without awaiting between them, so the second observes the first's
+    // in-flight renewal rather than starting its own.
+    const [a, b] = await Promise.all([
+      maybeRenewNearExpiry(
+        useMultiplayerStore.setState,
+        useMultiplayerStore.getState,
+        socketAtLobbyVersion(9),
+        "wss://o.example/ws",
+        "TOUR01",
+        "organizer",
+        "old",
+        controller.signal,
+        NOW,
+      ),
+      maybeRenewNearExpiry(
+        useMultiplayerStore.setState,
+        useMultiplayerStore.getState,
+        socketAtLobbyVersion(9),
+        "wss://o.example/ws",
+        "TOUR01",
+        "organizer",
+        "old",
+        controller.signal,
+        NOW,
+      ),
+    ]);
+
+    // Rotated exactly once, and both actions carry the same surviving secret.
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(1);
+    expect(a).toBe("fresh");
+    expect(b).toBe("fresh");
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("fresh");
+  });
+
+  // Maintainer [HIGH] #1, discriminating: with A's renewal in flight, a host
+  // switch to B and a SECOND renewal against B (distinct socket + token) must
+  // NOT dedupe onto A's promise — reverting the broker-origin component of the
+  // key would make B await A's promise and send A's bearer to B, and this test
+  // would catch it. B settles only from B's own response, and A's stale
+  // completion afterward cannot clobber B's credential (the CAS adoption).
+  it("scopes the dedupe by broker origin: a B renewal never awaits an in-flight A renewal", async () => {
+    // Resolve each renewal by hand, keyed by the presented token, so A and B can
+    // be driven independently.
+    const resolvers: Record<
+      string,
+      (r: {
+        ok: true;
+        value: {
+          code: string;
+          role: "Organizer" | "Player";
+          token: string;
+          expires_at_ms: number;
+        };
+      }) => void
+    > = {};
+    vi.mocked(renewTournamentCredentialOver).mockImplementation(
+      (_socket, _code, _role, token) =>
+        new Promise((res) => {
+          resolvers[token] = res;
+        }),
+    );
+    const now = NOW;
+
+    // Broker A: credential near expiry. Start A's renewal (pending).
+    useMultiplayerStore.setState({
+      hostingServer: "wss://a.example/ws",
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "A-old",
+          organizerTokenExpiresAtMs: now + 1000,
+          updatedAt: 0,
+        },
+      },
+    });
+    const aInflight = maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://a.example/ws", // A's broker origin, passed immutably
+      "TOUR01",
+      "organizer",
+      "A-old",
+      new AbortController().signal,
+      now,
+    );
+
+    // Host switch to B — SAME code, distinct credential — and start B's renewal
+    // (distinct socket + token) while A is still pending.
+    useMultiplayerStore.setState({
+      hostingServer: "wss://b.example/ws",
+      tournamentCredentials: {
+        TOUR01: {
+          organizerToken: "B-old",
+          organizerTokenExpiresAtMs: now + 1000,
+          updatedAt: 1,
+        },
+      },
+    });
+    const bInflight = maybeRenewNearExpiry(
+      useMultiplayerStore.setState,
+      useMultiplayerStore.getState,
+      socketAtLobbyVersion(9),
+      "wss://b.example/ws", // B's broker origin — distinct from A's
+      "TOUR01",
+      "organizer",
+      "B-old",
+      new AbortController().signal,
+      now,
+    );
+
+    // Let the two microtasks reach their awaits, then assert BOTH rotations went
+    // out — no cross-origin dedupe. (With a code:role-only key, B would await A's
+    // promise and only ONE send would have happened.)
+    await Promise.resolve();
+    expect(renewTournamentCredentialOver).toHaveBeenCalledTimes(2);
+    expect(resolvers["A-old"]).toBeDefined();
+    expect(resolvers["B-old"]).toBeDefined();
+
+    // Resolve B first: B settles from B's own response.
+    resolvers["B-old"]({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "B-fresh",
+        expires_at_ms: now + 7 * 24 * 60 * 60 * 1000,
+      },
+    });
+    expect(await bInflight).toBe("B-fresh");
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("B-fresh");
+
+    // A's stale completion lands afterward: it returns A's token for A's own
+    // socket but does NOT clobber B's credential (CAS: stored token is B-fresh,
+    // not the A-old this rotation started from).
+    resolvers["A-old"]({
+      ok: true,
+      value: {
+        code: "TOUR01",
+        role: "Organizer",
+        token: "A-fresh",
+        expires_at_ms: now + 999,
+      },
+    });
+    expect(await aInflight).toBe("A-fresh");
+    expect(
+      useMultiplayerStore.getState().tournamentCredentials.TOUR01
+        ?.organizerToken,
+    ).toBe("B-fresh");
+  });
+});

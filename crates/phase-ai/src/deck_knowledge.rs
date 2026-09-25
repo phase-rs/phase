@@ -124,7 +124,10 @@ fn public_account_object_ids(state: &GameState, player: PlayerId) -> Vec<ObjectI
         // sources for deck knowledge — only spells expose their card source.
         StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
-        | StackEntryKind::KeywordAction { .. } => None,
+        | StackEntryKind::KeywordAction { .. }
+        // Combat damage on the stack has no card source at all — it is not a
+        // card, and its `source_id` is its own entry id.
+        | StackEntryKind::CombatDamage { .. } => None,
     }));
 
     object_ids

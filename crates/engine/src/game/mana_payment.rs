@@ -948,17 +948,46 @@ pub(crate) fn reduce_cost_by_pool(
         }
     }
 
-    // CR 107.4b: Generic may be paid with any eligible mana. When a nested
-    // sub-cost's outer-cost `demand` is supplied, a generic pip is counted
-    // covered ONLY if a non-demanded scratch unit can pay it — a demanded unit
-    // left over is reserved for the outer cost's colored shard (CR 118.10), so
-    // the pip stays in `residual_generic` and auto-tap will tap another source
-    // for it. Without `demand` the prior least-available ordering is preserved.
-    for _ in 0..generic {
-        if spend_generic_non_demanded(&mut scratch, spell, demand, &[]).is_some() {
+    // CR 107.4b + CR 601.2b/h: Generic may be paid with any eligible mana, except
+    // for generic pips constrained by a "Spend only [colors] mana on X" restriction.
+    let (restricted_x_types, restricted_x_count) = match spell {
+        Some(PaymentContext::Spell(meta)) => {
+            if let Some(colors) = &meta.spend_only_on_x_colors {
+                let types: Vec<ManaType> = colors.iter().copied().map(ManaType::from).collect();
+                let count = generic.min(meta.spend_only_on_x_generic_count) as usize;
+                (types, count)
+            } else {
+                (Vec::new(), 0)
+            }
+        }
+        _ => (Vec::new(), 0),
+    };
+
+    let mut paid_restricted = 0;
+    for _ in 0..restricted_x_count {
+        if spend_restricted_x_generic_eligible(
+            &mut scratch,
+            &restricted_x_types,
+            spell,
+            any_color,
+            demand,
+            &[],
+        )
+        .is_some()
+        {
             residual_generic = residual_generic.saturating_sub(1);
+            paid_restricted += 1;
         } else {
             break;
+        }
+    }
+    if paid_restricted == restricted_x_count {
+        for _ in restricted_x_count..generic as usize {
+            if spend_generic_non_demanded(&mut scratch, spell, demand, &[]).is_some() {
+                residual_generic = residual_generic.saturating_sub(1);
+            } else {
+                break;
+            }
         }
     }
 
@@ -1414,18 +1443,35 @@ fn pay_cost_with_demand_and_choices_once(
                 }
             }
 
-            // CR 107.4b: Generic mana can be paid with any type of mana.
-            // Prefer colorless first, then a non-demanded color, then least-available
-            // color to preserve flexibility. `hand_demand` (combined upstream with the
-            // outer cost's reserved colors for nested sub-costs) softly deprioritizes
-            // a color another cost still needs (CR 118.10) without ever hard-blocking
-            // a payable spend (CR 601.2h: partial payments aren't allowed and an
-            // unpayable cost can't be paid, so a payable one must never be blocked).
-            // Note: this extends the demand signal — previously honored only by the
-            // hybrid-color path — to the generic spend, so a normal cast now also
-            // deprioritizes a hand-demanded color when filling generic. This only
-            // reorders WHICH eligible unit pays a generic pip; it never refuses one.
-            for _ in 0..*generic {
+            // CR 107.4b + CR 601.2b/h: Generic mana can be paid with any type of mana,
+            // except for generic pips constrained by a "Spend only [colors] mana on X" restriction.
+            let (restricted_x_types, restricted_x_count) = match spell {
+                Some(PaymentContext::Spell(meta)) => {
+                    if let Some(colors) = &meta.spend_only_on_x_colors {
+                        let types: Vec<ManaType> =
+                            colors.iter().copied().map(ManaType::from).collect();
+                        let count = (*generic).min(meta.spend_only_on_x_generic_count) as usize;
+                        (types, count)
+                    } else {
+                        (Vec::new(), 0)
+                    }
+                }
+                _ => (Vec::new(), 0),
+            };
+
+            for _ in 0..restricted_x_count {
+                let unit = spend_restricted_x_generic_eligible(
+                    pool,
+                    &restricted_x_types,
+                    spell,
+                    any_color,
+                    hand_demand,
+                    pins,
+                )
+                .ok_or(PaymentError::InsufficientMana)?;
+                spent.push(unit);
+            }
+            for _ in restricted_x_count..(*generic as usize) {
                 let unit = spend_generic_eligible(pool, spell, hand_demand, pins)
                     .ok_or(PaymentError::InsufficientMana)?;
                 spent.push(unit);
@@ -2256,6 +2302,53 @@ fn spend_any_for_required_colors(
     spend_any_eligible(pool, spell, demand, pins)
 }
 
+/// CR 601.2b / CR 601.2h: Spend mana for a generic pip that is restricted to specific colors
+/// by a "Spend only [colors] mana on X" casting restriction (e.g. Consume Spirit, Soul Burn, Emblazoned Golem).
+fn spend_restricted_x_generic_eligible(
+    pool: &mut ManaPool,
+    allowed_colors: &[ManaType],
+    spell: Option<&PaymentContext<'_>>,
+    any_color: bool,
+    demand: Option<&ColorDemand>,
+    pins: &[ManaPipId],
+) -> Option<ManaUnit> {
+    if any_color {
+        return spend_any_for_required_colors(pool, allowed_colors, spell, demand, pins);
+    }
+    if !pins.is_empty() {
+        if let Some(pos) = pool.mana.iter().position(|unit| {
+            pins.contains(&unit.pip_id)
+                && allowed_colors.contains(&unit.color)
+                && !unit.is_convoke_payment()
+                && spell_permits_unit(spell, unit)
+        }) {
+            return Some(pool.mana.swap_remove(pos));
+        }
+    }
+    if allowed_colors.len() == 1 {
+        return spend_eligible(pool, allowed_colors[0], spell, pins);
+    }
+    let mut best: Option<(ManaType, bool, usize)> = None;
+    for &color in allowed_colors {
+        let count = eligible_color_count(pool, color, spell);
+        if count > 0 {
+            let would_dip_into_reserve = demand
+                .and_then(|d| mana_type_to_demand_index(color).map(|i| count <= d[i] as usize))
+                .unwrap_or(false);
+            let better = match best {
+                None => true,
+                Some((_, best_dip, best_count)) => {
+                    (would_dip_into_reserve, count) < (best_dip, best_count)
+                }
+            };
+            if better {
+                best = Some((color, would_dip_into_reserve, count));
+            }
+        }
+    }
+    best.and_then(|(color, _, _)| spend_eligible(pool, color, spell, pins))
+}
+
 /// Planner-layer generic spend that respects an outer cost's colored `demand`.
 ///
 /// CR 107.4b + CR 118.10: A generic pip can be paid with any mana, but when an
@@ -2768,16 +2861,8 @@ mod tests {
 
     fn spell_meta(cant_spend_mana: bool) -> SpellMeta {
         SpellMeta {
-            types: Vec::new(),
-            subtypes: Vec::new(),
-            keyword_kinds: Vec::new(),
-            cast_from_zone: None,
-            mana_value: None,
-            color_count: None,
-            colors: vec![],
-            has_x_in_cost: false,
-            is_face_down: false,
             cant_spend_mana,
+            ..Default::default()
         }
     }
 
@@ -3778,6 +3863,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let elf_ctx = PaymentContext::Spell(&elf);
         assert!(can_pay_for_spell(
@@ -3803,6 +3890,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_ctx = PaymentContext::Spell(&goblin);
         assert!(!can_pay_for_spell(
@@ -3854,6 +3943,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let thought_knot_ctx = PaymentContext::Spell(&thought_knot);
         assert!(can_pay_for_spell(
@@ -3878,6 +3969,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let colored_eldrazi_ctx = PaymentContext::Spell(&colored_eldrazi);
         assert!(!can_pay_for_spell(
@@ -3939,6 +4032,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let colored_spell_ctx = PaymentContext::Spell(&colored_spell);
         assert!(!can_pay_for_spell(
@@ -4014,6 +4109,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(
             !can_pay_for_spell(
@@ -4057,6 +4154,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(
             can_pay_for_spell(
@@ -4159,6 +4258,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let flashback_ctx = PaymentContext::Spell(&flashback_spell);
         assert!(can_pay_for_spell(
@@ -4183,6 +4284,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let normal_ctx = PaymentContext::Spell(&normal_spell);
         assert!(!can_pay_for_spell(
@@ -4230,6 +4333,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let gy_ctx = PaymentContext::Spell(&graveyard_flashback_spell);
         assert!(can_pay_for_spell(
@@ -4254,6 +4359,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let hand_ctx = PaymentContext::Spell(&hand_flashback_spell);
         assert!(!can_pay_for_spell(

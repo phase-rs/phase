@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1297
 expression: "&ir"
 ---
 {
@@ -201,7 +200,7 @@ expression: "&ir"
                     "kind": "Spell",
                     "effect": {
                       "type": "Unimplemented",
-                      "name": "spend",
+                      "name": "unparsed_verb_arguments",
                       "description": "Spend this mana only to cast an instant or sorcery spell or to gain a Class level"
                     },
                     "cost": null,

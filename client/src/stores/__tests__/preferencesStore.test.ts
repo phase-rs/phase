@@ -341,7 +341,7 @@ describe("preferencesStore", () => {
 
     act(() => usePreferencesStore.persist.rehydrate());
 
-    expect(["en", "es", "fr", "de", "it", "pt", "pl"]).toContain(
+    expect(["en", "es", "fr", "de", "it", "pt", "pl", "ja"]).toContain(
       usePreferencesStore.getState().language,
     );
   });

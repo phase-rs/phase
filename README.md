@@ -162,6 +162,8 @@ workflow, which is maintainer-owned.
 ./packaging/flatpak/build-local.sh --appimage ~/Downloads/Phase-Desktop-Linux-x86_64.AppImage --install
 ```
 
+On an arm64 machine, pass the matching `Phase-Desktop-Linux-aarch64` artifact instead.
+
 That needs a release whose shell already carries the update guard described
 below; the script refuses older artifacts rather than package them. Run
 `--help` for the full options.

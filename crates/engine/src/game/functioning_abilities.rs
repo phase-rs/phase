@@ -55,12 +55,16 @@
 //! - **Replacements**: NOT battlefield-scoped. Zone-of-function is a
 //!   per-replacement property on `ReplacementDefinition`, so
 //!   `active_replacements` scans every object and only applies the
-//!   phased-out / command-zone gate. Caller-side zone restriction still
-//!   lives in `find_applicable_replacements`, which today filters to
-//!   `[Battlefield, Command]` because no in-engine replacement functions
-//!   from hand / graveyard / exile. CR 903.9a commander redirection is
-//!   handled separately in `zones::move_to_zone` — it is not routed
-//!   through `ReplacementDefinition`.
+//!   phased-out / command-zone gate. The per-definition part of the gate is
+//!   `replacement_functions_in_zone`, the replacement-side twin of
+//!   `static_functions_in_zone`: a non-empty `active_zones` restricts the
+//!   definition to exactly those zones per CR 113.6b (CR 702.52a dredge —
+//!   graveyard only), and an empty one takes the `DEFAULT_REPLACEMENT_ZONES`
+//!   default. `find_applicable_replacements` consults that predicate and layers
+//!   the event-dependent CR 614.12 / CR 702.35a self-replacement carve-outs on
+//!   top of the default case. CR 903.9a commander redirection is handled
+//!   separately in `zones::move_to_zone` — it is not routed through
+//!   `ReplacementDefinition`.
 //!
 //! # Condition filtering
 //!
@@ -72,8 +76,9 @@
 //! checkpoints, so these helpers deliberately do NOT filter triggers or
 //! replacements by their own `condition` fields.
 
+use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
-use crate::game::layers::evaluate_condition;
+use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
 use crate::types::ability::{
     ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionRef,
 };
@@ -112,8 +117,15 @@ pub(crate) fn non_emblem_command_zone_trigger_functions(
 /// CR 114.4: In the command zone, only emblems' abilities function by default.
 /// Non-emblem command-zone objects can still contribute individual definitions
 /// that explicitly opt in per CR 113.6b. The per-definition `active_zones` /
-/// `trigger_zones` overrides are enforced by the static/trigger iterators; this
-/// helper only captures the object-level default.
+/// `trigger_zones` overrides are enforced by the static, trigger, and
+/// replacement iterators; this helper only captures the object-level default.
+///
+/// NOT usable as a whole-object pre-filter by any iterator that honours a
+/// per-definition command-zone opt-in — it answers only the default, so
+/// applying it first would reject the opted-in definition before the iterator
+/// ever read it. `active_replacements` applies
+/// `non_emblem_command_zone_replacement_functions` per definition for exactly
+/// that reason, the same way `active_trigger_definitions` does.
 fn object_functions(obj: &GameObject) -> bool {
     if obj.is_phased_out() {
         return false;
@@ -140,6 +152,33 @@ pub fn static_opts_in_to_command_zone(def: &StaticDefinition) -> bool {
 /// from their intervening-if source-zone condition.
 pub fn trigger_opts_in_to_command_zone(def: &TriggerDefinition) -> bool {
     def.trigger_zones.contains(&Zone::Command)
+}
+
+/// CR 113.6b + CR 114.4: True when a replacement on a command-zone object opts
+/// in to function from the command zone via its `active_zones` list. The
+/// replacement-side twin of [`static_opts_in_to_command_zone`] /
+/// [`trigger_opts_in_to_command_zone`].
+///
+/// Without this, CR 114.4's object-level "only emblems function" default would
+/// swallow a non-emblem command-zone source WHOLE, before any per-definition
+/// opt-in could be read — making the declared-zone branch of
+/// [`replacement_functions_in_zone`] unreachable for `Zone::Command` and
+/// silently breaking the `active_zones` contract for that one zone.
+pub fn replacement_opts_in_to_command_zone(def: &ReplacementDefinition) -> bool {
+    def.active_zones.contains(&Zone::Command)
+}
+
+/// CR 905.4a + CR 113.6b: Replacement-side mirror of
+/// `non_emblem_command_zone_static_functions`.
+pub(crate) fn non_emblem_command_zone_replacement_functions(
+    obj: &GameObject,
+    def: &ReplacementDefinition,
+) -> bool {
+    if crate::game::conspiracy::is_conspiracy(obj) {
+        return crate::game::conspiracy::functions_from_command_zone(obj)
+            && replacement_opts_in_to_command_zone(def);
+    }
+    replacement_opts_in_to_command_zone(def)
 }
 
 /// CR 113.6b + CR 114.4 + CR 311.2 / CR 312.2: object-level command-zone
@@ -240,12 +279,141 @@ pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition)
     }
 }
 
+/// CR 113.6b: does `def` function from the zone `obj` is currently in?
+///
+/// The replacement-side twin of [`static_functions_in_zone`], and the single
+/// authority for [`ReplacementDefinition::active_zones`]:
+///
+/// 1. **Declared off-zone replacement** (non-empty `active_zones`) — CR 113.6b,
+///    "an ability that states which zones it functions in functions only from
+///    those zones." Restricted to exactly the listed zones. CR 702.52a dredge
+///    ("functions only while the card with dredge is in a player's graveyard")
+///    is the shape this exists for.
+/// 2. **Plain replacement** (empty `active_zones`) — the CR 113.6 default,
+///    which for the replacement pipeline means the zones
+///    `replacement::object_replacement_candidate_applies` scans.
+///
+/// `Zone::Command` in case 1 is a real, reachable declaration, not a dead
+/// branch: `active_replacements` admits a non-emblem command-zone source for
+/// precisely the definitions that name `Zone::Command`, so CR 114.4's
+/// object-level emblem default never gets to swallow the opt-in first.
+///
+/// Deliberately NOT the whole zone-of-function answer for case 2: the caller
+/// layers the CR 614.12 (self-replacement as an object enters) and CR 702.35a
+/// (Madness self-replacement as an object is discarded) carve-outs on top,
+/// because those depend on the proposed event, not on the object's zone. A
+/// definition in case 1 gets no carve-outs — it has already said where it works.
+pub(crate) fn replacement_functions_in_zone(obj: &GameObject, def: &ReplacementDefinition) -> bool {
+    replacement_functions_from_zone(def, obj.zone)
+}
+
+/// CR 113.6b: [`replacement_functions_in_zone`] against an EXPLICIT zone rather
+/// than the source's current one.
+///
+/// Exists for CR 113.6h + CR 614.12: "an object's ability that modifies how that
+/// particular object enters the battlefield functions as that object is entering
+/// the battlefield," and CR 614.12 directs the check at "the characteristics of
+/// the permanent as it would exist ON THE BATTLEFIELD." At that moment the
+/// object still sits in the zone it is LEAVING (hand, library, graveyard, stack),
+/// so asking where it is would reject a definition that declares the zone it is
+/// entering. `replacement::object_replacement_candidate_applies` passes the
+/// destination for that one case and the source's own zone for every other.
+pub(crate) fn replacement_functions_from_zone(def: &ReplacementDefinition, zone: Zone) -> bool {
+    if def.active_zones.is_empty() {
+        DEFAULT_REPLACEMENT_ZONES.contains(&zone)
+    } else {
+        def.active_zones.contains(&zone)
+    }
+}
+
+/// CR 113.6: the zones a replacement with no declared `active_zones` is scanned
+/// from. The command zone joins the battlefield here for CR 114.4 emblems,
+/// whose abilities function from it; a non-emblem command-zone object never
+/// reaches this default, because `active_replacements` already required its
+/// definition to opt in via `replacement_opts_in_to_command_zone`.
+pub(crate) const DEFAULT_REPLACEMENT_ZONES: [Zone; 2] = [Zone::Battlefield, Zone::Command];
+
+/// CR 508.1c + CR 702.3b: whether [`static_def_applies`] consults the polarity
+/// deferral. A TYPED choice, not a bool flag: it cannot be derived from
+/// `context.declared_attack`, because `active_static_definitions_for_attack(..,
+/// None)` is a real deferring call, and a bare `false` at a call site says
+/// nothing about what it selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolarityDeferral {
+    /// [`active_static_definitions`]: no attack question is being asked, so a
+    /// defending-player gate is evaluated exactly as it is at base.
+    Skip,
+    /// [`active_static_definitions_for_attack`]: apply
+    /// `static_abilities::unanchored_defending_player_deferral`.
+    Apply,
+}
+
+/// CR 604.1 / CR 613.1 + CR 113.6 + CR 113.6g + CR 702.26b: the shared gate stack
+/// for "does this definition of THIS object apply right now", parameterized by
+/// the condition-evaluation context and by whether the polarity deferral applies.
+/// Both public entry points below are this function; there is no second gate
+/// stack.
+///
+/// The polarity deferral sits AFTER the CR 113.6g branch and
+/// `static_functions_in_zone`, immediately BEFORE the condition evaluation.
+/// POSITION IS LOAD-BEARING: hoisting it to the top of this function returns
+/// `Permission => Some(true)` before the zone gate is ever consulted and would
+/// offer a creature whose own permission names `active_zones = [Command]`.
+/// Guarded by the intrinsic-carrier reading of
+/// `defender_permission_does_not_function_from_a_zone_it_does_not_name`.
+fn static_def_applies(
+    state: &GameState,
+    obj: &GameObject,
+    def: &StaticDefinition,
+    context: ConditionContext,
+    deferral: PolarityDeferral,
+) -> bool {
+    // CR 113.6g: An object's ability that states IT can't be countered
+    // or can't be copied functions on the stack — a self-referential
+    // exception to the CR 113.6 zone-of-function default below. A
+    // permanent's ability that instead GRANTS un-counterability /
+    // un-copyability to OTHER objects via a `TargetFilter` (Allosaurus
+    // Shepherd's "Green spells you control can't be countered") is not
+    // self-referential and must fall through to the ordinary default,
+    // so it keeps functioning from the battlefield like any other
+    // static. Fixes #1033.
+    if def.active_zones.is_empty() && is_self_referential_prohibition(def) {
+        if obj.zone != Zone::Stack {
+            return false;
+        }
+    } else if !static_functions_in_zone(obj, def) {
+        return false;
+    }
+    // CR 506.2 + CR 508.1c + CR 508.5 + CR 702.3b: the INTRINSIC half of the one
+    // polarity deferral rule. See `static_abilities::unanchored_defending_player_deferral`.
+    if matches!(deferral, PolarityDeferral::Apply) {
+        if let Some(deferred) = crate::game::static_abilities::unanchored_defending_player_deferral(
+            &def.mode,
+            def.condition.as_ref(),
+            context.declared_attack,
+        ) {
+            return deferred;
+        }
+    }
+    // CR 604.1 / CR 613.1: a static's `condition` must hold for the
+    // effect to apply continuously — re-evaluated every time the layers
+    // pipeline (or any reader of statics) runs.
+    def.condition.as_ref().is_none_or(|cond| {
+        evaluate_condition_with_context(state, cond, obj.controller, obj.id, context)
+    })
+}
+
 /// Iterate `StaticDefinition`s on `obj` that are currently functioning, with
 /// the CR 702.26b / CR 114.4 gate, the full CR 113.6 zone-of-function gate,
 /// and the per-static CR 604.1 / CR 613.1 `condition` gate applied.
 ///
 /// This is the authoritative replacement for `obj.static_definitions.iter_all()`
 /// at every read site in the engine.
+///
+/// = [`static_def_applies`] with `ConditionContext::NONE` and
+/// `PolarityDeferral::Skip` — verdict-identical for every existing caller,
+/// because `layers::evaluate_condition` IS
+/// `evaluate_condition_with_context(.., ConditionContext::NONE)`.
 pub fn active_static_definitions<'a>(
     state: &'a GameState,
     obj: &'a GameObject,
@@ -254,32 +422,63 @@ pub fn active_static_definitions<'a>(
     if obj.is_phased_out() {
         return Box::new(std::iter::empty());
     }
-    let source_id = obj.id;
-    let controller = obj.controller;
     Box::new(obj.static_definitions.iter_all().filter(move |def| {
-        // CR 113.6g: An object's ability that states IT can't be countered
-        // or can't be copied functions on the stack — a self-referential
-        // exception to the CR 113.6 zone-of-function default below. A
-        // permanent's ability that instead GRANTS un-counterability /
-        // un-copyability to OTHER objects via a `TargetFilter` (Allosaurus
-        // Shepherd's "Green spells you control can't be countered") is not
-        // self-referential and must fall through to the ordinary default,
-        // so it keeps functioning from the battlefield like any other
-        // static. Fixes #1033.
-        if def.active_zones.is_empty() && is_self_referential_prohibition(def) {
-            if obj.zone != Zone::Stack {
-                return false;
-            }
-        } else if !static_functions_in_zone(obj, def) {
-            return false;
-        }
-        // CR 604.1 / CR 613.1: a static's `condition` must hold for the
-        // effect to apply continuously — re-evaluated every time the layers
-        // pipeline (or any reader of statics) runs.
-        def.condition
-            .as_ref()
-            .is_none_or(|cond| evaluate_condition(state, cond, controller, source_id))
+        static_def_applies(
+            state,
+            obj,
+            def,
+            ConditionContext::NONE,
+            PolarityDeferral::Skip,
+        )
     }))
+}
+
+/// CR 508.1c + CR 702.3b + CR 611.3a: the ATTACK-LEGALITY slice of
+/// [`active_static_definitions`] — the SAME CR gate stack, with BOTH anchors
+/// bound and the polarity deferral
+/// (`static_abilities::unanchored_defending_player_deferral`) applied.
+///
+/// `target: None` is a CREATURE-LEVEL query (CR 508.1a): a gate that names the
+/// defending player defers. `target: Some(t)` is a PER-PAIRING query (CR 508.1b):
+/// nothing defers and the gate answers against `t`.
+///
+/// BOTH anchors, deliberately. This is an OWN-OBJECT read, so `recipient` IS
+/// `source_id` and no single-leaf verdict moves — but the REMOTE entry point
+/// (`static_abilities::static_condition_matches_context`) binds `recipient`
+/// unconditionally, and a COMPOUND condition carrying a recipient-relative leaf
+/// (`RecipientHasCounters`, `RecipientMatchesFilter`, ...) answers `false` under
+/// an unbound recipient. Leaving it unbound here would make the two entry points
+/// disagree about one static — the split authority this phase exists to remove.
+/// The widening is verdict-neutral through the `||` in
+/// `combat::creature_can_attack_despite_defender` (the remote arm already reaches
+/// intrinsic `SelfRef` carriers and already binds `recipient`), so it is measured
+/// arm-by-arm rather than through the `||`. Guarded by the compound arm of
+/// `both_condition_entry_points_agree_about_one_defender_permission`.
+///
+/// Deliberately a SEPARATE entry point rather than a change to
+/// [`active_static_definitions`]: that function is called from every module
+/// outside this one that asks an own-object static question (crew, speed,
+/// replacement, targeting, casting, zones, restrictions, triggers, turns,
+/// effects), none of which asks an attack question, and widening their verdicts
+/// for three combat modes is blast radius this phase neither needs nor can
+/// discriminate.
+pub(crate) fn active_static_definitions_for_attack<'a>(
+    state: &'a GameState,
+    obj: &'a GameObject,
+    target: Option<AttackTarget>,
+) -> Box<dyn Iterator<Item = &'a StaticDefinition> + 'a> {
+    // CR 702.26b: phased-out permanents' abilities never function.
+    if obj.is_phased_out() {
+        return Box::new(std::iter::empty());
+    }
+    // CR 611.3a + CR 508.1a-c: both anchors, matching what the REMOTE entry point
+    // binds. `recipient == source_id` for this own-object read.
+    let context = ConditionContext::recipient(obj.id).with_declared_attack(target);
+    Box::new(
+        obj.static_definitions.iter_all().filter(move |def| {
+            static_def_applies(state, obj, def, context, PolarityDeferral::Apply)
+        }),
+    )
 }
 
 /// Whole-battlefield iteration of `(source_obj, static_def)` pairs with the
@@ -334,16 +533,26 @@ pub fn game_functioning_statics(
         .iter()
         .chain(state.command_zone.iter())
         .filter_map(move |id| state.objects.get(id))
-        .filter(|obj| !obj.is_phased_out())
-        .flat_map(move |obj| {
-            obj.static_definitions
-                .iter_all()
-                // CR 113.6 + CR 113.6b + CR 114.4: single-authority
-                // zone-of-function gate, shared with every other statics
-                // gather so they cannot disagree.
-                .filter(move |def| static_functions_in_zone(obj, def))
-                .map(move |def| (obj, def))
-        })
+        .flat_map(move |obj| object_functioning_statics(obj).map(move |def| (obj, def)))
+}
+
+/// CR 702.26b + CR 113.6 + CR 113.6b + CR 114.4: the single-object slice of
+/// [`game_functioning_statics`] — the same two gates, no battlefield sweep.
+/// [`game_functioning_statics`] is this function flat-mapped over
+/// `battlefield ∪ command_zone`, so a caller that has already resolved WHICH
+/// object to ask cannot end up applying a different gate stack than the sweep
+/// did. Does NOT apply the CR 113.6g stack exception or the CR 604.1 condition
+/// filter — those are [`active_static_definitions`]' additions.
+pub(crate) fn object_functioning_statics(
+    obj: &GameObject,
+) -> impl Iterator<Item = &StaticDefinition> {
+    // CR 702.26b: phased-out permanents' abilities never function.
+    let phased_out = obj.is_phased_out();
+    obj.static_definitions
+        .iter_all()
+        // CR 113.6 + CR 113.6b + CR 114.4: single-authority zone-of-function
+        // gate, shared with every other statics gather so they cannot disagree.
+        .filter(move |def| !phased_out && static_functions_in_zone(obj, def))
 }
 
 /// CR 604.1: loop-invariant existence gate. True iff any currently-functioning
@@ -509,10 +718,13 @@ pub fn battlefield_active_triggers(
 /// time evaluation remains in the replacement pipeline itself.
 ///
 /// Zones callers actually scan today:
-/// - `find_applicable_replacements` in `game/replacement.rs` restricts
-///   to `[Battlefield, Command]` plus the entering card (CR 614.12
-///   self-replacement on ETB) or the discarded card (CR 702.35a
-///   Madness self-replacement from hand).
+/// - `find_applicable_replacements` in `game/replacement.rs` delegates the
+///   per-definition zone question to `replacement_functions_in_zone`: the
+///   `DEFAULT_REPLACEMENT_ZONES` default plus the entering card (CR 614.12
+///   self-replacement on ETB), the discarded card (CR 702.35a Madness
+///   self-replacement from hand), or the spell leaving the stack (CR 608.2n);
+///   and, for a definition that declares `active_zones`, exactly those zones
+///   (CR 113.6b — CR 702.52a dredge, graveyard only).
 /// - **CR 903.9a commander redirection** is not routed through
 ///   `ReplacementDefinition` at all; it is a hard-coded redirect in
 ///   `game/zones.rs::move_to_zone`. The helper's scan is future-proofed
@@ -521,13 +733,31 @@ pub fn active_replacements(
     state: &GameState,
 ) -> impl Iterator<Item = (usize, &GameObject, &ReplacementDefinition)> {
     state.objects.values().flat_map(move |obj| {
-        // Phased-out / command-zone gate still applies even though
-        // replacements are not battlefield-scoped.
-        let functioning = object_functions(obj);
+        // CR 702.26b: phased-out permanents' abilities never function. Purely
+        // object-level, so it short-circuits every definition on the object.
+        let phased_out = obj.is_phased_out();
+        // CR 114.4 + CR 113.6b: the command-zone gate is PER DEFINITION, not
+        // per object. Only emblems function from the command zone by default,
+        // but a definition that explicitly names `Zone::Command` in its
+        // `active_zones` has opted in and functions from there — the same
+        // shape `active_trigger_definitions` applies to `trigger_zones`.
+        // Reading it per definition is what keeps `ReplacementDefinition::
+        // active_zones` a real general axis: an object-level pre-filter here
+        // would drop the opted-in definition before the declared-zone branch
+        // of `replacement_functions_in_zone` could ever admit it.
+        let command_zone_non_emblem = obj.zone == Zone::Command && !obj.is_emblem;
         obj.replacement_definitions
             .iter_all()
             .enumerate()
-            .filter(move |_| functioning)
+            .filter(move |(_, def)| {
+                if phased_out {
+                    return false;
+                }
+                if command_zone_non_emblem {
+                    return non_emblem_command_zone_replacement_functions(obj, def);
+                }
+                true
+            })
             .map(move |(idx, def)| (idx, obj, def))
     })
 }
@@ -566,6 +796,75 @@ mod tests {
             format!("TestObj{id}"),
             zone,
         )
+    }
+
+    // ===== ROW 7, CR 113.6g arm =====
+
+    /// CR 113.6g: the new ATTACK slice
+    /// inherits the self-referential `CantBeCountered`/`CantBeCopied` stack
+    /// exception rather than restating it — both entry points are one
+    /// `static_def_applies`, so the exception cannot be dropped on one side.
+    ///
+    /// The static is deliberately UNCONDITIONED. "The two entry points yield the
+    /// SAME definition set" is true ONLY for conditions with no
+    /// recipient-relative leaf: the two DELIBERATELY differ for such a condition
+    /// (`layers.rs`'s `RecipientHasCounters` arm answers `false` under an unbound
+    /// recipient, and `active_static_definitions` binds none), which is what
+    /// `both_condition_entry_points_agree_about_one_defender_permission`'s
+    /// compound arm asserts. The property under test HERE is the CR 113.6g GATE.
+    #[test]
+    fn attack_slice_keeps_the_self_referential_stack_exception() {
+        use crate::types::ability::TargetFilter;
+
+        for affected in [None, Some(TargetFilter::SelfRef)] {
+            let mut def = StaticDefinition::new(StaticMode::CantBeCountered);
+            if let Some(filter) = affected.clone() {
+                def = def.affected(filter);
+            }
+            assert!(
+                is_self_referential_prohibition(&def),
+                "fixture: the static must actually trip the CR 113.6g exception \
+                 (affected = {affected:?})"
+            );
+
+            // CR 113.6g: FUNCTIONS on the stack (the exception), NOT on the
+            // battlefield (the exception's other half — `active_zones` is empty
+            // and the definition is self-referential, so the ordinary CR 113.6
+            // battlefield default is bypassed in BOTH directions).
+            for (zone, expected) in [(Zone::Stack, 1usize), (Zone::Battlefield, 0usize)] {
+                let mut state = new_state();
+                let mut obj = make_obj(1, zone);
+                obj.static_definitions = vec![def.clone()].into();
+                let id = obj.id;
+                state.objects.insert(id, obj);
+                if zone == Zone::Battlefield {
+                    state.battlefield.push_back(id);
+                }
+
+                let obj = &state.objects[&id];
+                let plain: Vec<&StaticDefinition> =
+                    active_static_definitions(&state, obj).collect();
+                let attack: Vec<&StaticDefinition> =
+                    active_static_definitions_for_attack(&state, obj, None).collect();
+                assert_eq!(
+                    plain.len(),
+                    expected,
+                    "CR 113.6g control ({zone:?}, affected = {affected:?}): \
+                     `active_static_definitions` must yield {expected}"
+                );
+                assert_eq!(
+                    attack.len(),
+                    plain.len(),
+                    "CR 113.6g ({zone:?}, affected = {affected:?}): the ATTACK slice \
+                     must yield the SAME definition set as the plain entry point"
+                );
+                assert!(
+                    attack.iter().zip(plain.iter()).all(|(a, p)| a == p),
+                    "CR 113.6g ({zone:?}, affected = {affected:?}): the two entry \
+                     points must yield the same DEFINITIONS, not merely the same count"
+                );
+            }
+        }
     }
 
     /// CR 113.6b + CR 311.2: a non-emblem command-zone object (active plane) is
@@ -1079,6 +1378,95 @@ mod tests {
             .collect();
         assert!(ids.contains(&1));
         assert!(ids.contains(&2));
+    }
+
+    /// CR 114.4 + CR 113.6b: the object-level "only emblems function from the
+    /// command zone" default must NOT swallow a replacement that explicitly
+    /// names `Zone::Command`. Before the opt-in existed, `active_replacements`
+    /// applied `object_functions` to the whole object, so a declared-Command
+    /// replacement on a non-emblem source was dropped here — one step before
+    /// `replacement_functions_in_zone` could admit it, making the declared-zone
+    /// branch unreachable for that zone.
+    #[test]
+    fn active_replacements_admits_declared_command_zone_on_non_emblem_source() {
+        let mut state = new_state();
+
+        // Non-emblem command-zone source, definition opts in to Command.
+        let mut opted_in = make_obj(1, Zone::Command);
+        opted_in.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .active_zones(vec![Zone::Command])]
+            .into();
+
+        // Same source shape, but the definition takes the CR 113.6 default —
+        // CR 114.4 still refuses it, so the emblem policy is preserved.
+        let mut defaulted = make_obj(2, Zone::Command);
+        defaulted.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)].into();
+
+        // A definition naming some OTHER zone must not smuggle itself in on
+        // the strength of having declared something.
+        let mut other_zone = make_obj(3, Zone::Command);
+        other_zone.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .active_zones(vec![Zone::Graveyard])]
+            .into();
+
+        // CR 114.4: an emblem needs no opt-in.
+        let mut emblem = make_obj(4, Zone::Command);
+        emblem.is_emblem = true;
+        emblem.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)].into();
+
+        for obj in [opted_in, defaulted, other_zone, emblem] {
+            state.objects.insert(obj.id, obj);
+        }
+
+        let ids: Vec<u64> = active_replacements(&state)
+            .map(|(_, obj, _)| obj.id.0)
+            .collect();
+        assert!(
+            ids.contains(&1),
+            "CR 113.6b: a replacement declaring Zone::Command must function from \
+             the command zone even on a non-emblem source"
+        );
+        assert!(
+            !ids.contains(&2),
+            "CR 114.4: a default (empty active_zones) replacement on a non-emblem \
+             command-zone source must still be refused"
+        );
+        assert!(
+            !ids.contains(&3),
+            "CR 113.6b: declaring [Graveyard] must not admit the source from the \
+             command zone"
+        );
+        assert!(
+            ids.contains(&4),
+            "CR 114.4: an emblem's replacements function from the command zone \
+             without any opt-in"
+        );
+    }
+
+    /// CR 702.26b: phasing is object-level and outranks the per-definition
+    /// command-zone opt-in — the opt-in must not become a way back in for a
+    /// phased-out source.
+    #[test]
+    fn active_replacements_still_refuses_phased_out_declared_command_source() {
+        let mut state = new_state();
+        let mut obj = make_obj(1, Zone::Command);
+        obj.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .active_zones(vec![Zone::Command])]
+            .into();
+        obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+            cause: crate::game::game_object::PhaseOutCause::Directly,
+        };
+        state.objects.insert(obj.id, obj);
+        assert_eq!(
+            active_replacements(&state).count(),
+            0,
+            "CR 702.26b: a phased-out source contributes nothing, opt-in or not"
+        );
     }
 
     // The phased-out Azusa test stays here because

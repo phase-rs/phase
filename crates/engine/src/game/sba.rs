@@ -215,7 +215,19 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         if has_battlefield_sbas {
             // CR 704.5j: If a player controls two or more legendary permanents with the same name,
             // that player chooses one and the rest are put into their owners' graveyards.
-            check_legend_rule(state, events, &mut any_performed, &battlefield_snapshot);
+            //
+            // CR 616.1: the pre-M14 scope moves permanents through the zone
+            // pipeline, which can park a replacement-ordering choice —
+            // `move_to_graveyard_via_pipeline` requires its caller to bail. Stop
+            // the whole pass here so no later SBA acts on the unsettled event.
+            // The modern path never reports a stop: it parks its own
+            // `ChooseLegend` prompt and moves nothing, so its behavior (and the
+            // Aura check that follows it) is unchanged.
+            if check_legend_rule(state, events, &mut any_performed, &battlefield_snapshot)
+                == SbaPassControl::Stop
+            {
+                return;
+            }
 
             // CR 704.5m: If an Aura is attached to an illegal object or player, it is put into
             // its owner's graveyard.
@@ -1235,16 +1247,44 @@ fn legend_rule_exempt_with_gate(
     )
 }
 
+/// Whether an SBA check left an event unsettled — parked on a CR 616.1
+/// replacement-ordering choice — so the rest of the pass must not run.
+///
+/// Only the checks that can pause mid-move need to report this; the others are
+/// covered by the shared `mid_resolution_entry_pauses_sba` guards between them.
+/// A returned `Stop` is the caller's instruction to bail immediately, which is
+/// what [`move_to_graveyard_via_pipeline`] requires of anything that moves a
+/// permanent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a Stop means the SBA pass must return immediately"]
+enum SbaPassControl {
+    Continue,
+    Stop,
+}
+
 /// CR 704.5j: If a player controls two or more legendary permanents with the same name,
 /// that player chooses one and the rest are put into their owners' graveyards.
 /// This is NOT destruction — indestructible does not prevent it.
 fn check_legend_rule(
     state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
-    _any_performed: &mut bool,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
-) {
+) -> SbaPassControl {
     let has_legend_rule_exemption_static = legend_rule_exemption_static_present(state);
+
+    // A format may declare the pre-M14 scope, which is a different rule rather
+    // than a variation on this one — global and choiceless. See
+    // `game::legend_scope` for what that variant models and why.
+    if crate::game::legend_scope::groups_across_controllers(state) {
+        return check_legend_rule_pre_m14(
+            state,
+            events,
+            any_performed,
+            battlefield_snapshot,
+            has_legend_rule_exemption_static,
+        );
+    }
 
     for player_idx in 0..state.players.len() {
         let player_id = state.players[player_idx].id;
@@ -1292,9 +1332,89 @@ fn check_legend_rule(
                 legend_name: name,
                 candidates: ids,
             };
-            return;
+            // The modern path only parks its own prompt — nothing has moved, so
+            // there is no unsettled event and the pass continues as it always has.
+            return SbaPassControl::Continue;
         }
     }
+    SbaPassControl::Continue
+}
+
+/// CR 704.5j with the M14 controller scope relaxed: before Magic 2014 the
+/// legend rule grouped same-named legendary permanents across **all**
+/// controllers, and every member of a two-or-more group was put into its
+/// owner's graveyard — no survivor, no choice.
+///
+/// Structurally this is `check_world_rule` (CR 704.5k), not the modern legend
+/// rule, so it is built the same way: one global pass, a deterministic doomed
+/// set, the shared SBA graveyard pipeline, and a simultaneous-departure mark.
+/// It needs no `WaitingFor`, which is why the modern path's choice machinery is
+/// not reused here — there is nothing to choose.
+///
+/// Reached only when [`crate::game::legend_scope::groups_across_controllers`]
+/// says the format declares the pre-M14 scope; that module documents which of
+/// the several pre-M14 forms this is.
+fn check_legend_rule_pre_m14(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
+    has_legend_rule_exemption_static: bool,
+) -> SbaPassControl {
+    // BTreeMap (not HashMap) so the grouping is name-sorted and deterministic
+    // across processes — issue #4878, same reason as the modern path.
+    let mut by_name: std::collections::BTreeMap<String, Vec<ObjectId>> =
+        std::collections::BTreeMap::new();
+    for id in battlefield_snapshot.iter().copied() {
+        let Some(obj) = live_battlefield_object(state, &id) else {
+            continue;
+        };
+        if !obj.card_types.supertypes.contains(&Supertype::Legendary) {
+            continue;
+        }
+        let name = obj.name.clone();
+        // The exemption is scope-independent: a permanent a "legend rule
+        // doesn't apply" static exempts (Mirror Gallery, Sakashima, Mirror Box)
+        // is outside the grouping under either rule, so the shared filter is
+        // reused unchanged rather than re-derived.
+        if legend_rule_exempt_with_gate(state, id, has_legend_rule_exemption_static) {
+            continue;
+        }
+        by_name.entry(name).or_default().push(id);
+    }
+
+    // Every member of a group of two or more, not all but one.
+    let mut doomed: Vec<ObjectId> = by_name
+        .into_values()
+        .filter(|ids| ids.len() >= 2)
+        .flatten()
+        .collect();
+    // Deterministic order, mirroring check_world_rule's stable iteration.
+    doomed.sort_by_key(|id| id.0);
+
+    let mut performed_ids = Vec::new();
+    for id in doomed {
+        if live_battlefield_object(state, &id).is_none() {
+            continue;
+        }
+        // CR 704.5j + CR 614.6: the permanent is put into its owner's graveyard
+        // through the replacement pipeline (Moved redirects apply). This is not
+        // destruction, so indestructible does not prevent it — the pipeline is
+        // entered as a state-based-action move, exactly as the modern path's
+        // chosen losers are.
+        // CR 616.1: bail on a replacement-order pause; the SBA fixpoint
+        // re-derives the remaining doomed permanents on the next pass.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return SbaPassControl::Stop;
+        }
+        performed_ids.push(id);
+        *any_performed = true;
+    }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously,
+    // so these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    SbaPassControl::Continue
 }
 
 /// CR 704.5m: An Aura attached to an illegal object or player, or that is no
@@ -2504,6 +2624,7 @@ mod tests {
         });
         let paused_prompt = WaitingFor::OptionalEffectChoice {
             player: PlayerId(2),
+            decision_subject_id: None,
             source_id: source,
             description: None,
             may_trigger_key: None,
@@ -4103,29 +4224,63 @@ mod tests {
     #[test]
     fn sba_phased_out_fortification_with_illegal_host_is_skipped() {
         // CR 702.26b: a phased-out Fortification is treated as though it
-        // doesn't exist, so the SBA must not touch it even though its host
-        // has left the battlefield — direct analog of the phased-out
-        // Equipment guard implied by `battlefield_phased_in_ids` filtering.
+        // doesn't exist, so the SBA must not touch it even though its host is
+        // an illegal one — direct analog of the phased-out Equipment guard
+        // implied by `battlefield_phased_in_ids` filtering.
+        //
+        // The illegal host here is a creature that is NOT a land: CR 301.6
+        // requires a Fortification's host to be a land, so this fails
+        // `is_valid_attachment_target` while both permanents stay put. Host
+        // EXIT is deliberately not the vehicle — `zones::move_to_zone` now
+        // severs the attachment graph itself per CR 702.26i, so a departing
+        // host would clear the pointer before this SBA ever ran and the
+        // assertion would no longer be about the SBA at all.
         let mut state = setup();
-        let land = create_land(&mut state, CardId(1), PlayerId(0), "Forest");
+        let host = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
         let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
         {
             let obj = state.objects.get_mut(&fort).unwrap();
-            obj.attached_to = Some(land.into());
+            obj.attached_to = Some(host.into());
             obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
                 cause: crate::game::game_object::PhaseOutCause::Directly,
             };
         }
-        state.objects.get_mut(&land).unwrap().attachments.push(fort);
-        zones::move_to_zone(&mut state, land, Zone::Graveyard, &mut Vec::new());
+        state.objects.get_mut(&host).unwrap().attachments.push(fort);
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
         assert_eq!(
             state.objects.get(&fort).unwrap().attached_to,
-            Some(land.into()),
+            Some(host.into()),
             "a phased-out Fortification is skipped by the SBA re-check"
+        );
+    }
+
+    #[test]
+    fn sba_phased_in_fortification_with_illegal_host_is_unattached() {
+        // Reach guard for the test above: the ONLY thing keeping that
+        // Fortification attached is its phased-out status. With the identical
+        // illegal host and the attachment phased in, CR 704.5n unattaches it —
+        // proving the SBA genuinely reaches this shape and the phased-out
+        // assertion is not passing for some unrelated reason.
+        let mut state = setup();
+        let host = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let fort = create_fortification(&mut state, CardId(2), PlayerId(0), "Darksteel Garrison");
+        state.objects.get_mut(&fort).unwrap().attached_to = Some(host.into());
+        state.objects.get_mut(&host).unwrap().attachments.push(fort);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects.get(&fort).unwrap().attached_to,
+            None,
+            "CR 704.5n: a phased-in Fortification on a non-land host unattaches"
+        );
+        assert!(
+            state.battlefield.contains(&fort),
+            "CR 704.5n: it remains on the battlefield"
         );
     }
 

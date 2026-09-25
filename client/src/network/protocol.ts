@@ -106,6 +106,45 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  61 — game_setup and state_update carry GameState, whose pending
+ *       activations can now hold the CR 601.2f activated-ability cost election
+ *       (ReductionProvenance::AbilityCostRider / TransientEffect, the
+ *       activation_cost_snapshot carrier). Bumped in lockstep with full-game
+ *       protocol 79.
+ *  60 — game_setup and state_update carry GameState, whose ability
+ *       definitions and transient continuous effects can now hold the
+ *       event-deadline `Duration::UntilEvent`, and whose transient effects
+ *       carry duration_event_source. Both peers are browsers and neither
+ *       validates the shape, so a v59 peer would take the new duration with
+ *       no decode error; first contact rejects the skew instead. Bumped in
+ *       lockstep with full-game protocol 78.
+ *  59 — Prospective: no GameState shape change lands in this bump. Moved
+ *       ahead of new GameFormat variants — the same precedent as 32's CommanderDraft variant: the
+ *       break, when it lands, will be conditional on a new variant actually
+ *       being serialized in a game_setup/state_update payload, not
+ *       unconditional like FormatConfig.deck_size's 32 retype. First
+ *       contact stays exact-match on both roles (guest `hostVersion !==
+ *       WIRE_PROTOCOL_VERSION`, host `guestVersion !== WIRE_PROTOCOL_VERSION`),
+ *       so no older peer ever completes a pairing that could carry a v59
+ *       payload.
+ *  57 — game_setup and state_update carry GameState, whose paid resolution
+ *       cleanup, receipt, and delayed-install origin now carry a
+ *       producer-issued offer owner. A v56 peer cannot preserve cross-offer
+ *       isolation across a paused offer, so first contact rejects the skew.
+ *       Bumped in lockstep with full-game protocol 75.
+ *  56 — game_setup and state_update carry GameState, whose
+ *       ResolutionCastCleanup can now carry exact delayed-trigger receipts.
+ *       A v55 peer cannot preserve the cancellation authority across a paused
+ *       paid offer, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 74.
+ *  54 — game_setup and state_update carry GameState, whose
+ *       FreeCastWindow requires `ResolutionCastFacePolicy` instead of the
+ *       legacy `filter`; WaitingFor.CastOffer { kind: GraveyardPaidCast } carries
+ *       additional_cost and installed_triggers (both serde-additive) and opens
+ *       for seven more printed cards that a v53 peer handled as a lingering
+ *       permission. A v53 guest parses the offer and pays the wrong cost, so
+ *       first contact rejects a v53 peer before state delivery. Bumped in
+ *       lockstep with full-game protocol 72.
  *  53 — game_setup and state_update carry GameState, whose OutsideGameChoice
  *       for an opened booster pack now names a required origin: PackOrigin in
  *       place of set_code. First contact therefore rejects a v52 peer before
@@ -377,7 +416,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 53 as const;
+export const WIRE_PROTOCOL_VERSION = 61 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

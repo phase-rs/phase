@@ -15,8 +15,8 @@ use engine::types::custom_format::{
     passes_legacy_axis_gate, passes_reprint_fidelity_gate, swedish_old_school,
     validate_custom_rules_consistency, AntePolicy, CombatDamageTiming, CommandZoneMode,
     CommanderEligibilityRule, CustomFormatDef, CustomFormatId, CustomFormatRules, LegacyRuleSet,
-    LegalityRules, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode, StructuralRules,
-    WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
+    LegalityRules, LegendRuleScope, ManaBurnPolicy, PrintingFidelity, ReprintPolicy, SetCode,
+    StructuralRules, WishOutsideGameScope, LOBBY_SAVE_CUSTOM_FORMAT_ID,
 };
 use engine::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SelectedFormat,
@@ -172,14 +172,61 @@ fn legacy_axis_gate_rejects_undeclared_axis() {
     assert!(!passes_legacy_axis_gate(&def.rules.legality.legacy));
 }
 
-/// The other side of that change: an axis the engine now DOES implement must
-/// pass. Without this, `IMPLEMENTED_LEGACY_AXES` could be emptied again and
-/// only the EC presets' registry test would notice.
+/// The other side of that change: every axis the engine DOES implement must
+/// pass, named individually. Without this, `IMPLEMENTED_LEGACY_AXES` could be
+/// emptied again and only the EC presets' registry test would notice — and
+/// that test covers mana burn alone, since no bundled preset declares either
+/// scope axis.
 #[test]
-fn legacy_axis_gate_accepts_the_implemented_mana_burn_axis() {
-    let mut def = sample_def(1);
-    def.rules.legality.legacy.mana_burn = ManaBurnPolicy::Obsolete;
-    assert!(passes_legacy_axis_gate(&def.rules.legality.legacy));
+fn legacy_axis_gate_accepts_every_implemented_axis() {
+    for (label, legacy) in [
+        (
+            "mana burn (Phase 2b)",
+            LegacyRuleSet {
+                mana_burn: ManaBurnPolicy::Obsolete,
+                ..LegacyRuleSet::default()
+            },
+        ),
+        (
+            "pre-M10 Wish reach (Phase 2cd)",
+            LegacyRuleSet {
+                wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+                ..LegacyRuleSet::default()
+            },
+        ),
+        (
+            "pre-M14 legend scope (Phase 2cd)",
+            LegacyRuleSet {
+                legend_rule_scope: LegendRuleScope::PreM14AnyController,
+                ..LegacyRuleSet::default()
+            },
+        ),
+    ] {
+        assert!(
+            passes_legacy_axis_gate(&legacy),
+            "{label} is implemented, so the gate must accept it"
+        );
+    }
+
+    // All three at once: the gate checks every declared axis, not just the
+    // first one it finds.
+    assert!(passes_legacy_axis_gate(&LegacyRuleSet {
+        mana_burn: ManaBurnPolicy::Obsolete,
+        wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+        legend_rule_scope: LegendRuleScope::PreM14AnyController,
+        ..LegacyRuleSet::default()
+    }));
+
+    // Paired control: adding the one unimplemented axis to that same set
+    // flips it back to rejected, so the assertions above are about the gate
+    // and not about it being permissive.
+    assert!(!passes_legacy_axis_gate(&LegacyRuleSet {
+        mana_burn: ManaBurnPolicy::Obsolete,
+        wish_scope: WishOutsideGameScope::PreM10ReachesExile,
+        legend_rule_scope: LegendRuleScope::PreM14AnyController,
+        damage_timing: CombatDamageTiming::OnStack,
+        ..LegacyRuleSet::default()
+    }));
 }
 
 #[test]
@@ -691,32 +738,17 @@ fn wish_outside_game_scope_default_is_the_deck_construction_policy_not_a_cr_mand
 
 #[test]
 fn game_format_from_str_display_roundtrip_builtins() {
-    let all = [
-        GameFormat::Standard,
-        GameFormat::Limited,
-        GameFormat::Commander,
-        GameFormat::Pioneer,
-        GameFormat::Modern,
-        GameFormat::Premodern,
-        GameFormat::Legacy,
-        GameFormat::Vintage,
-        GameFormat::Historic,
-        GameFormat::Timeless,
-        GameFormat::Pauper,
-        GameFormat::PauperCommander,
-        GameFormat::DuelCommander,
-        GameFormat::TinyLeaders,
-        GameFormat::Oathbreaker,
-        GameFormat::Brawl,
-        GameFormat::HistoricBrawl,
-        GameFormat::FreeForAll,
-        GameFormat::TwoHeadedGiant,
-        GameFormat::Archenemy,
-        GameFormat::Planechase,
-        GameFormat::Momir,
-    ];
-    assert_eq!(all.len(), 22);
-    for format in all {
+    use strum::IntoEnumIterator;
+
+    // Was a hand-written 22-element array guarded by `assert_eq!(all.len(), 22)`
+    // — which cannot fail from the enum growing (22 == 22 holds however many
+    // variants exist), and which was blind to `GameFormat::CommanderDraft`
+    // being absent. Iterating the enum means a new format arrives here on its
+    // own and reds if `FromStr` has no arm for it. `FromStr` ends in
+    // `other => Err(..)` and is NOT compiler-forced; `Deserialize` for
+    // `GameFormat` delegates to it, so the registry-iterating deserialization
+    // tests below also exercise every arm, not just this test.
+    for format in GameFormat::iter() {
         let s = format.to_string();
         let back: GameFormat = s.parse().unwrap();
         assert_eq!(format, back);
@@ -775,6 +807,8 @@ fn game_format_deserialize_accepts_valid_custom_string() {
 
 #[test]
 fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
+    use strum::IntoEnumIterator;
+
     use CommanderEligibilityRule::*;
     let cases = [
         (GameFormat::Standard, None),
@@ -799,7 +833,26 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         (GameFormat::Archenemy, None),
         (GameFormat::Planechase, None),
         (GameFormat::Momir, None),
+        // CR 903.13g: Commander Draft games follow Commander's rules, and
+        // CR 903.13f routes deck construction through CR 903.5, so CR 903.3's
+        // eligibility test applies unchanged — the value `from_source_format`
+        // already returns, read off its arm rather than chosen here. This row
+        // was MISSING; see the commit message.
+        (GameFormat::CommanderDraft, Some(Standard)),
+        (GameFormat::Freeform, None),
+        (GameFormat::FreeformCommander, Some(FreeformAnyCastableCard)),
     ];
+    // This table had NO length assertion at all, despite its name. Ordered
+    // equality against the enum is what makes the name true and keeps it true:
+    // a new format reds here until its expected rule is stated. The table is
+    // compared in declaration order, so a format appended to the enum is
+    // appended here and no existing row moves.
+    let covered: Vec<GameFormat> = cases.iter().map(|(format, _)| *format).collect();
+    assert_eq!(
+        covered,
+        GameFormat::iter().collect::<Vec<_>>(),
+        "this table must cover every built-in GameFormat, in declaration order"
+    );
     for (format, expected) in cases {
         assert_eq!(
             CommanderEligibilityRule::from_source_format(format),
@@ -822,6 +875,8 @@ fn commander_eligibility_rule_from_source_format_rejects_custom_without_panickin
 
 #[test]
 fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
+    use strum::IntoEnumIterator;
+
     let expectations: &[(GameFormat, &str)] = &[
         (GameFormat::Standard, "Standard"),
         (GameFormat::Limited, "Limited"),
@@ -845,8 +900,19 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
         (GameFormat::Archenemy, "Archenemy"),
         (GameFormat::Planechase, "Planechase"),
         (GameFormat::Momir, "Momir"),
+        (GameFormat::CommanderDraft, "CommanderDraft"),
+        (GameFormat::Freeform, "Freeform"),
+        (GameFormat::FreeformCommander, "FreeformCommander"),
     ];
-    assert_eq!(expectations.len(), 22);
+    // Replaces `assert_eq!(expectations.len(), 22)`, which could not fail:
+    // 22 == 22 holds however the enum grows, and it did — `CommanderDraft`'s
+    // serde string was unasserted. See the commit message.
+    let covered: Vec<GameFormat> = expectations.iter().map(|(format, _)| *format).collect();
+    assert_eq!(
+        covered,
+        GameFormat::iter().collect::<Vec<_>>(),
+        "this table must cover every built-in GameFormat, in declaration order"
+    );
     for (format, expected) in expectations {
         let value = serde_json::to_value(format).unwrap();
         assert_eq!(value, serde_json::Value::String(expected.to_string()));

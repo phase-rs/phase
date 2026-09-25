@@ -202,6 +202,8 @@ pub struct SetToken {
     #[serde(default)]
     pub toughness: Option<String>,
     #[serde(default)]
+    pub loyalty: Option<String>,
+    #[serde(default)]
     pub colors: Vec<String>,
     #[serde(default)]
     pub keywords: Vec<String>,

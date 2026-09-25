@@ -71,6 +71,46 @@ impl From<ManaColor> for ManaType {
     }
 }
 
+/// CR 106.1b: a set over the six types of mana, as a bitmask.
+///
+/// Used to describe which mana a single-mana cost symbol accepts
+/// ([`ManaCostShard::single_mana_payment_types`]), which is what lets two costs
+/// be compared by what can PAY them rather than by what they are worth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ManaTypeSet(u8);
+
+impl ManaTypeSet {
+    pub const EMPTY: Self = Self(0);
+
+    pub const fn of(mana_type: ManaType) -> Self {
+        Self(1 << mana_type as u8)
+    }
+
+    pub const fn with(self, mana_type: ManaType) -> Self {
+        Self(self.0 | (1 << mana_type as u8))
+    }
+
+    pub const fn contains(self, mana_type: ManaType) -> bool {
+        self.0 & (1 << mana_type as u8) != 0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether every mana type in `self` is also in `other` — i.e. any single
+    /// mana that satisfies `self` also satisfies `other`.
+    pub const fn is_subset_of(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+}
+
+impl FromIterator<ManaType> for ManaTypeSet {
+    fn from_iter<I: IntoIterator<Item = ManaType>>(it: I) -> Self {
+        it.into_iter().fold(Self::EMPTY, Self::with)
+    }
+}
+
 /// CR 107.4f + CR 118.3a + CR 118.3b: Set of mana colors for which a player
 /// may substitute 2 life rather than 1 colored mana at payment time, granted
 /// by static abilities like K'rrik, Son of Yawgmoth ("For each {B} in a cost,
@@ -296,6 +336,11 @@ pub struct SpellMeta {
     /// (`game::casting::pay_mana_cost_from_pool_with_choices`) withholds all real
     /// (non-convoke) pool units for the duration of the payment when this is set.
     pub cant_spend_mana: bool,
+    /// CR 601.2b / CR 601.2h: "Spend only [colors] mana on X."
+    /// When present, `spend_only_on_x_generic_count` of the generic mana pips must be paid
+    /// using only the specified `spend_only_on_x_colors`.
+    pub spend_only_on_x_colors: Option<Vec<ManaColor>>,
+    pub spend_only_on_x_generic_count: u32,
 }
 
 /// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
@@ -1783,6 +1828,134 @@ impl ManaCostShard {
         }
     }
 
+    /// CR 107.4e + CR 601.2b: the two nonhybrid mana symbols this hybrid symbol
+    /// can be announced as, when BOTH halves are themselves single mana
+    /// symbols.
+    ///
+    /// CR 601.2b: "If a cost that will be paid as the spell is being cast
+    /// includes hybrid mana symbols, the player announces the nonhybrid
+    /// equivalent cost they intend to pay." CR 107.4e: "Each one represents a
+    /// cost that can be paid in one of two ways, as represented by the two
+    /// halves of the symbol."
+    ///
+    /// `None` for the two hybrid families whose alternative half is NOT a mana
+    /// symbol, and which therefore cannot be expressed as a shard substitution:
+    ///   * the monocolored hybrids `{2/W}`..`{2/G}` (CR 107.4e), whose other
+    ///     half is two generic mana, and
+    ///   * every Phyrexian symbol (CR 107.4f), whose other half is 2 life.
+    ///
+    /// Both of those keep the engine's existing payment-time resolution, where
+    /// the same choice is still made; only the shard-substitutable families
+    /// participate in the CR 601.2f cost-determination election.
+    pub const fn announceable_halves(self) -> Option<[Self; 2]> {
+        match self {
+            Self::WhiteBlue => Some([Self::White, Self::Blue]),
+            Self::WhiteBlack => Some([Self::White, Self::Black]),
+            Self::BlueBlack => Some([Self::Blue, Self::Black]),
+            Self::BlueRed => Some([Self::Blue, Self::Red]),
+            Self::BlackRed => Some([Self::Black, Self::Red]),
+            Self::BlackGreen => Some([Self::Black, Self::Green]),
+            Self::RedWhite => Some([Self::Red, Self::White]),
+            Self::RedGreen => Some([Self::Red, Self::Green]),
+            Self::GreenWhite => Some([Self::Green, Self::White]),
+            Self::GreenBlue => Some([Self::Green, Self::Blue]),
+            // CR 107.4c + CR 107.4e: `{C/W}`'s halves are `{C}` and `{W}`, both
+            // single mana symbols, so this family substitutes cleanly too.
+            Self::ColorlessWhite => Some([Self::Colorless, Self::White]),
+            Self::ColorlessBlue => Some([Self::Colorless, Self::Blue]),
+            Self::ColorlessBlack => Some([Self::Colorless, Self::Black]),
+            Self::ColorlessRed => Some([Self::Colorless, Self::Red]),
+            Self::ColorlessGreen => Some([Self::Colorless, Self::Green]),
+            _ => None,
+        }
+    }
+
+    /// CR 106.1b + CR 107.4: the mana types that can pay this symbol, for the
+    /// symbols whose EVERY payment option is exactly one mana of a named type.
+    ///
+    /// This is the payment model behind [`ManaCost::is_payable_whenever`]: a
+    /// symbol with a `Some` answer is paid by one mana, and that mana qualifies
+    /// if and only if its type is in the returned set. The set has more than one
+    /// member when the SYMBOL accepts more than one type — `{W/U}` takes white
+    /// or blue — not because a mana carries several types at once; CR 106.1b
+    /// gives each mana exactly one of six.
+    ///
+    /// `None` — "not modelled here, assume nothing" — for every symbol that can
+    /// be paid some other way, or whose qualifying mana is picked out by
+    /// something other than its type:
+    ///   * `{X}` (CR 107.4b) is not a fixed amount of mana at all.
+    ///   * the monocolored hybrids `{2/W}`..`{2/G}` (CR 107.4e) accept TWO
+    ///     generic mana as their other half, so paying one is not paying one
+    ///     mana of a named type.
+    ///   * every Phyrexian symbol (CR 107.4f) accepts 2 life, which is not mana.
+    ///   * `{S}` (CR 107.4h) accepts one mana of ANY type, but only from a snow
+    ///     source — a restriction on the SOURCE, which a type set cannot
+    ///     express.
+    ///   * `{Z}` likewise restricts the source ("a source that could produce
+    ///     two or more colors"), not the type.
+    ///
+    /// Callers must treat `None` as "no conclusion", never as "empty set":
+    /// every comparison built on this is only as sound as its most conservative
+    /// answer.
+    pub const fn single_mana_payment_types(self) -> Option<ManaTypeSet> {
+        match self {
+            // CR 107.4a: one mana of that color.
+            Self::White => Some(ManaTypeSet::of(ManaType::White)),
+            Self::Blue => Some(ManaTypeSet::of(ManaType::Blue)),
+            Self::Black => Some(ManaTypeSet::of(ManaType::Black)),
+            Self::Red => Some(ManaTypeSet::of(ManaType::Red)),
+            Self::Green => Some(ManaTypeSet::of(ManaType::Green)),
+            // CR 107.4c: `{C}` is payable only with one colorless mana.
+            Self::Colorless => Some(ManaTypeSet::of(ManaType::Colorless)),
+            // CR 107.4e: one mana of either half.
+            Self::WhiteBlue => Some(ManaTypeSet::of(ManaType::White).with(ManaType::Blue)),
+            Self::WhiteBlack => Some(ManaTypeSet::of(ManaType::White).with(ManaType::Black)),
+            Self::BlueBlack => Some(ManaTypeSet::of(ManaType::Blue).with(ManaType::Black)),
+            Self::BlueRed => Some(ManaTypeSet::of(ManaType::Blue).with(ManaType::Red)),
+            Self::BlackRed => Some(ManaTypeSet::of(ManaType::Black).with(ManaType::Red)),
+            Self::BlackGreen => Some(ManaTypeSet::of(ManaType::Black).with(ManaType::Green)),
+            Self::RedWhite => Some(ManaTypeSet::of(ManaType::Red).with(ManaType::White)),
+            Self::RedGreen => Some(ManaTypeSet::of(ManaType::Red).with(ManaType::Green)),
+            Self::GreenWhite => Some(ManaTypeSet::of(ManaType::Green).with(ManaType::White)),
+            Self::GreenBlue => Some(ManaTypeSet::of(ManaType::Green).with(ManaType::Blue)),
+            // CR 107.4c + CR 107.4e: both halves of `{C/W}` are single mana.
+            Self::ColorlessWhite => {
+                Some(ManaTypeSet::of(ManaType::Colorless).with(ManaType::White))
+            }
+            Self::ColorlessBlue => Some(ManaTypeSet::of(ManaType::Colorless).with(ManaType::Blue)),
+            Self::ColorlessBlack => {
+                Some(ManaTypeSet::of(ManaType::Colorless).with(ManaType::Black))
+            }
+            Self::ColorlessRed => Some(ManaTypeSet::of(ManaType::Colorless).with(ManaType::Red)),
+            Self::ColorlessGreen => {
+                Some(ManaTypeSet::of(ManaType::Colorless).with(ManaType::Green))
+            }
+            Self::Snow
+            | Self::X
+            | Self::TwoOrMoreColorSource
+            | Self::TwoWhite
+            | Self::TwoBlue
+            | Self::TwoBlack
+            | Self::TwoRed
+            | Self::TwoGreen
+            | Self::PhyrexianWhite
+            | Self::PhyrexianBlue
+            | Self::PhyrexianBlack
+            | Self::PhyrexianRed
+            | Self::PhyrexianGreen
+            | Self::PhyrexianWhiteBlue
+            | Self::PhyrexianWhiteBlack
+            | Self::PhyrexianBlueBlack
+            | Self::PhyrexianBlueRed
+            | Self::PhyrexianBlackRed
+            | Self::PhyrexianBlackGreen
+            | Self::PhyrexianRedWhite
+            | Self::PhyrexianRedGreen
+            | Self::PhyrexianGreenWhite
+            | Self::PhyrexianGreenBlue => None,
+        }
+    }
+
     /// Returns true if this shard contributes to devotion for the given color.
     /// CR 700.5: Each mana symbol that is or contains the color counts.
     /// Hybrid symbols count toward each of their colors. A single hybrid symbol
@@ -1987,6 +2160,36 @@ pub enum ManaCost {
     },
 }
 
+/// One augmenting step of the bipartite matching behind
+/// [`ManaCost::is_payable_whenever`]: try to match `index` in `mine` to some
+/// still-unvisited shard of `theirs` whose payment types it accepts, displacing
+/// an earlier match along an augmenting path when that is what it takes.
+///
+/// `matched[j]` is the `mine` index currently holding `theirs[j]`, if any.
+fn match_shard(
+    index: usize,
+    mine: &[ManaTypeSet],
+    theirs: &[ManaTypeSet],
+    matched: &mut [Option<usize>],
+    visited: &mut [bool],
+) -> bool {
+    for candidate in 0..theirs.len() {
+        if visited[candidate] || !theirs[candidate].is_subset_of(mine[index]) {
+            continue;
+        }
+        visited[candidate] = true;
+        let free = match matched[candidate] {
+            None => true,
+            Some(holder) => match_shard(holder, mine, theirs, matched, visited),
+        };
+        if free {
+            matched[candidate] = Some(index);
+            return true;
+        }
+    }
+    false
+}
+
 impl ManaCost {
     pub fn zero() -> Self {
         ManaCost::Cost {
@@ -2042,6 +2245,69 @@ impl ManaCost {
                 shard_total + generic
             }
         }
+    }
+
+    /// CR 601.2h + CR 107.4e: whether EVERY mana pool that can pay `other` can
+    /// also pay `self` — "`self` is never harder to pay than `other`".
+    ///
+    /// Mana value cannot answer this. `{W}{W/U}` and `{G}{U}` both cost 2, but
+    /// a `{G}{U}` pool pays the second and cannot pay the first, so neither
+    /// dominates the other. Anything that discards one cost in favour of
+    /// another has to compare what PAYS them.
+    ///
+    /// The test is a sufficient condition, deliberately not a complete one:
+    ///
+    ///  1. every shard of `self` is matched injectively to a shard of `other`
+    ///     whose payment types are a SUBSET of the matched shard's
+    ///     ([`ManaCostShard::single_mana_payment_types`]), so the mana that pays
+    ///     the `other` shard necessarily also pays the `self` shard; and
+    ///  2. `self.mana_value() <= other.mana_value()`, so the mana left over
+    ///     after those matches covers `self`'s generic component (CR 107.4b:
+    ///     generic mana is payable with mana of any type).
+    ///
+    /// Soundness: a pool paying `other` assigns one distinct mana to each of
+    /// its shards; by (1) each matched `self` shard accepts the same mana, and
+    /// the `other.mana_value() - self.shards.len()` mana beyond the matched
+    /// ones — every shard of `other` is one mana, since an unmodelled shard
+    /// fails the whole test — covers `self`'s generic by (2).
+    ///
+    /// `false` whenever the answer cannot be PROVEN: a non-`Cost` variant on
+    /// either side, a shard whose payment options are not one mana of a named
+    /// type (Phyrexian life, `{2/W}`'s two generic, `{S}`/`{Z}`'s source
+    /// restriction), or simply no matching. A conservative `false` costs a
+    /// caller an option it did not have to offer; a wrong `true` deletes a
+    /// legal one.
+    pub fn is_payable_whenever(&self, other: &ManaCost) -> bool {
+        let (ManaCost::Cost { shards: mine, .. }, ManaCost::Cost { shards: theirs, .. }) =
+            (self, other)
+        else {
+            return false;
+        };
+        if self.mana_value() > other.mana_value() || mine.len() > theirs.len() {
+            return false;
+        }
+        let Some(mine) = mine
+            .iter()
+            .map(|shard| shard.single_mana_payment_types())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        let Some(theirs) = theirs
+            .iter()
+            .map(|shard| shard.single_mana_payment_types())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+
+        // Kuhn's algorithm: grow a maximum bipartite matching one `self` shard
+        // at a time, re-routing earlier matches along augmenting paths.
+        let mut matched: Vec<Option<usize>> = vec![None; theirs.len()];
+        (0..mine.len()).all(|index| {
+            let mut visited = vec![false; theirs.len()];
+            match_shard(index, &mine, &theirs, &mut matched, &mut visited)
+        })
     }
 
     /// CR 702.143 (foretell-cost reduction) / CR 118.7: return this cost with its
@@ -2965,6 +3231,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2977,6 +3245,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let legendary_spell = SpellMeta {
             types: vec!["Legendary".to_string(), "Creature".to_string()],
@@ -2989,6 +3259,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&creature_spell));
         assert!(!restriction.allows_spell(&instant_spell));
@@ -3017,6 +3289,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let omen_spell = SpellMeta {
             types: vec!["Enchantment".to_string(), "Omen".to_string()],
@@ -3029,6 +3303,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3041,6 +3317,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         // Matches one branch each.
         assert!(restriction.allows_spell(&dragon_spell));
@@ -3091,6 +3369,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let turtle_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3103,6 +3383,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3115,6 +3397,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&ninja_creature));
         assert!(!restriction.allows_spell(&turtle_creature));
@@ -3135,6 +3419,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let source_types = vec!["Artifact".to_string()];
         let source_subtypes = Vec::new();
@@ -3163,6 +3449,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3175,6 +3463,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let elf_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3187,6 +3477,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&elf_creature));
         assert!(!restriction.allows_spell(&goblin_creature));
@@ -3224,6 +3516,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let spent = pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&spell))
@@ -3253,6 +3547,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&elf_spell))
@@ -3316,6 +3612,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&goblin_spell))
@@ -3343,6 +3641,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let tribal_elemental_instant = SpellMeta {
             types: vec!["Tribal".to_string(), "Instant".to_string()],
@@ -3355,6 +3655,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3367,6 +3669,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let plain_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3379,6 +3683,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&elemental_creature));
         assert!(restriction.allows_spell(&tribal_elemental_instant));
@@ -3405,6 +3711,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let colored_eldrazi = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3417,6 +3725,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let colorless_construct = SpellMeta {
             types: vec!["Artifact".to_string(), "Colorless".to_string()],
@@ -3429,6 +3739,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&colorless_eldrazi));
         assert!(!restriction.allows_spell(&colored_eldrazi));
@@ -3485,6 +3797,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let colored_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3497,6 +3811,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         // Spell half: still gated to the named type.
         assert!(restriction.allows_spell(&colorless_spell));
@@ -3538,6 +3854,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let artifact_creature_spell = SpellMeta {
             types: vec!["Artifact".to_string(), "Creature".to_string()],
@@ -3550,6 +3868,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3562,6 +3882,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3574,6 +3896,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         // Permitted: any artifact spell (incl. artifact creatures).
         assert!(restriction.allows(&PaymentContext::Spell(&artifact_spell)));
@@ -3614,6 +3938,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3626,6 +3952,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let artifact_types = vec!["Artifact".to_string()];
         let creature_types = vec!["Creature".to_string()];
@@ -3660,12 +3988,16 @@ mod tests {
             types: vec!["Creature".to_string()],
             is_face_down: true,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let face_up_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         // LEGAL: spending the mana on a face-down cast.
@@ -3699,6 +4031,8 @@ mod tests {
             types: vec!["Creature".to_string()],
             is_face_down: true,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(!restriction.allows(&PaymentContext::Spell(&spell)));
@@ -3830,6 +4164,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let sorcery = SpellMeta {
             types: vec!["Sorcery".to_string()],
@@ -3842,6 +4178,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -3854,6 +4192,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         // Manamorphose is an instant — the {R}{R} restricted mana must pay for it.
         assert!(restriction.allows_spell(&instant));
@@ -3898,6 +4238,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         let normal_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -3910,6 +4252,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&flashback_spell));
         assert!(!restriction.allows_spell(&normal_spell));
@@ -3930,6 +4274,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let mv_four = SpellMeta {
@@ -3939,6 +4285,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let no_mv = SpellMeta::default();
@@ -3963,6 +4311,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let mv_four = SpellMeta {
@@ -3972,6 +4322,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&mv_two));
@@ -3997,6 +4349,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -4011,6 +4365,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -4047,6 +4403,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let two_colors = SpellMeta {
@@ -4055,6 +4413,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&three_colors));
@@ -4080,6 +4440,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let one_color = SpellMeta {
@@ -4088,6 +4450,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&colorless));
@@ -4112,6 +4476,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         let one_color = SpellMeta {
@@ -4120,6 +4486,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(two_or_more.allows_spell(&three_colors));
@@ -4146,6 +4514,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -4159,6 +4529,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -4461,6 +4833,8 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(restriction.allows_spell(&equipment_spell));
         // Non-Equipment artifact spell: REJECTED.
@@ -4475,7 +4849,149 @@ mod tests {
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
+            spend_only_on_x_colors: None,
+            spend_only_on_x_generic_count: 0,
         };
         assert!(!restriction.allows_spell(&artifact_spell));
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 601.2h + CR 107.4e: payment-set dominance.
+    //
+    // `is_payable_whenever` is the discriminator that decides whether one cost
+    // can stand in for another. Mana value cannot answer that question, and
+    // these rows pin both directions of why.
+    // -----------------------------------------------------------------------
+
+    fn cost(shards: &[ManaCostShard], generic: u32) -> ManaCost {
+        ManaCost::Cost {
+            shards: shards.to_vec(),
+            generic,
+        }
+    }
+
+    /// The Rigo case: `{W}{W/U}` and `{G}{U}` both cost 2, and NEITHER is
+    /// payable whenever the other is. A `{G}{U}` pool pays the second and
+    /// cannot pay the first; a `{W}{W}` pool pays the first and cannot pay the
+    /// second. An equal-mana-value filter calls these interchangeable, which is
+    /// exactly the defect this method exists to prevent.
+    #[test]
+    fn equal_mana_value_does_not_make_two_costs_interchangeable() {
+        let hybrid = cost(&[ManaCostShard::White, ManaCostShard::WhiteBlue], 0);
+        let announced = cost(&[ManaCostShard::Green, ManaCostShard::Blue], 0);
+        assert_eq!(hybrid.mana_value(), announced.mana_value());
+        assert!(!hybrid.is_payable_whenever(&announced));
+        assert!(!announced.is_payable_whenever(&hybrid));
+    }
+
+    /// CR 107.4e: a hybrid symbol IS payable every way either half is, so a
+    /// cost that only differs by announcing halves is dominated by the hybrid
+    /// form — at equal mana value, which is the case the filter must still
+    /// discard.
+    #[test]
+    fn a_hybrid_cost_is_payable_whenever_its_announced_form_is() {
+        let hybrid = cost(&[ManaCostShard::White, ManaCostShard::WhiteBlue], 0);
+        for announced in [
+            cost(&[ManaCostShard::White, ManaCostShard::Blue], 0),
+            cost(&[ManaCostShard::White, ManaCostShard::White], 0),
+            // The matching must be injective AND order-insensitive: here the
+            // plain `{W}` has to take the second shard so the hybrid can take
+            // the first.
+            cost(&[ManaCostShard::Blue, ManaCostShard::White], 0),
+        ] {
+            assert!(
+                hybrid.is_payable_whenever(&announced),
+                "{hybrid:?} must be payable whenever {announced:?} is"
+            );
+        }
+    }
+
+    /// CR 107.4b: generic mana is payable with mana of any type, so leftover
+    /// mana beyond the matched shards covers a generic component — but only as
+    /// far as the mana value comparison allows.
+    #[test]
+    fn generic_is_covered_by_leftover_mana_only_within_the_mana_value() {
+        assert!(cost(&[], 1).is_payable_whenever(&cost(&[ManaCostShard::Blue], 1)));
+        assert!(cost(&[], 2)
+            .is_payable_whenever(&cost(&[ManaCostShard::White, ManaCostShard::Blue], 0)));
+        assert!(!cost(&[], 3)
+            .is_payable_whenever(&cost(&[ManaCostShard::White, ManaCostShard::Blue], 0)));
+        assert!(!cost(&[ManaCostShard::White], 1)
+            .is_payable_whenever(&cost(&[ManaCostShard::White], 0)));
+    }
+
+    /// A shard whose payment options are not "one mana of a named type" is not
+    /// modelled, and an unmodelled shard on EITHER side must abstain rather
+    /// than guess. `{W/P}`'s life half and `{2/W}`'s two generic mana would
+    /// both make a colour-set comparison unsound.
+    #[test]
+    fn unmodelled_shards_abstain_rather_than_claim_dominance() {
+        for shard in [
+            ManaCostShard::PhyrexianWhite,
+            ManaCostShard::TwoWhite,
+            ManaCostShard::Snow,
+            ManaCostShard::TwoOrMoreColorSource,
+            ManaCostShard::X,
+        ] {
+            assert!(
+                shard.single_mana_payment_types().is_none(),
+                "{shard:?} is not one mana of a named type and must not be modelled"
+            );
+            assert!(
+                !cost(&[ManaCostShard::White], 0).is_payable_whenever(&cost(&[shard], 1)),
+                "an unmodelled {shard:?} on the right must abstain"
+            );
+            assert!(
+                !cost(&[shard], 0).is_payable_whenever(&cost(&[ManaCostShard::White], 1)),
+                "an unmodelled {shard:?} on the left must abstain"
+            );
+        }
+    }
+
+    /// CR 107.4c: `{C}` is payable only with colorless mana, so it is a type in
+    /// the model like any colour — and `{C/W}` is the hybrid of the two.
+    #[test]
+    fn colorless_participates_in_the_payment_model() {
+        assert_eq!(
+            ManaCostShard::ColorlessWhite.single_mana_payment_types(),
+            Some(ManaTypeSet::of(ManaType::Colorless).with(ManaType::White))
+        );
+        assert!(cost(&[ManaCostShard::ColorlessWhite], 0)
+            .is_payable_whenever(&cost(&[ManaCostShard::Colorless], 0)));
+        assert!(!cost(&[ManaCostShard::Colorless], 0)
+            .is_payable_whenever(&cost(&[ManaCostShard::White], 0)));
+    }
+
+    /// A non-`Cost` variant carries no shards to compare, so the answer is
+    /// "not proven" in both directions.
+    #[test]
+    fn non_concrete_costs_are_never_proven_dominant() {
+        for other in [
+            ManaCost::NoCost,
+            ManaCost::SelfManaCost,
+            ManaCost::SelfManaValue,
+            ManaCost::SelfManaCostReduced { reduction: 2 },
+        ] {
+            assert!(!cost(&[], 0).is_payable_whenever(&other));
+            assert!(!other.is_payable_whenever(&cost(&[], 0)));
+        }
+    }
+
+    #[test]
+    fn mana_type_sets_compare_as_sets() {
+        let white = ManaTypeSet::of(ManaType::White);
+        let white_blue = white.with(ManaType::Blue);
+        assert!(white.is_subset_of(white_blue));
+        assert!(!white_blue.is_subset_of(white));
+        assert!(ManaTypeSet::EMPTY.is_subset_of(white));
+        assert!(ManaTypeSet::EMPTY.is_empty());
+        assert!(white_blue.contains(ManaType::Blue));
+        assert!(!white_blue.contains(ManaType::Green));
+        assert_eq!(
+            [ManaType::White, ManaType::Blue]
+                .into_iter()
+                .collect::<ManaTypeSet>(),
+            white_blue
+        );
     }
 }

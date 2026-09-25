@@ -3,8 +3,21 @@ import type { FormatMetadata, GameFormat } from "../adapter/types";
 // The Rust engine at crates/engine/src/types/format.rs is the canonical source
 // of truth for this list; the `getFormatRegistry` WASM export emits the same
 // shape. This file mirrors that registry so React components can render
-// synchronously before the WASM module loads. A verification test compares
-// this constant to the WASM output to catch drift between the two.
+// synchronously before the WASM module loads.
+//
+// `format::tests::client_format_registry_matches_the_engine_registry`, in
+// crates/engine/src/types/format.rs, reads THIS FILE with `include_str!` and
+// compares its `format:` sequence to `GameFormat::registry()`. It runs in CI
+// job `rust-test` step "Run tests" and in Tilt's `test-engine`, so a format
+// added, removed, reordered or duplicated here reds a named assertion.
+// client/src/data/__tests__/formatRegistry.integration.test.ts compares the
+// full `FormatMetadata` shape against the live WASM export, and RUNS IN NO
+// LANE: client/vitest.config.ts excludes
+// src/**/*.integration.test.{ts,tsx} from the default run, and nothing invokes
+// `test:integration`, which is its only runner. Until that changes, treat
+// every field except `format` and `legality_key` as unguarded; `legality_key`
+// is checked by `format::tests::client_format_registry_legality_keys_match_the_engine`,
+// in the same module and lane as the `format` check.
 export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
   {
     format: "Standard",
@@ -12,6 +25,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "STD",
     description: "Rotating card pool",
     group: "Constructed",
+    legality_key: "standard",
     default_config: {
       format: "Standard",
       starting_life: 20,
@@ -36,6 +50,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "PIO",
     description: "Non-rotating from 2012",
     group: "Constructed",
+    legality_key: "pioneer",
     default_config: {
       format: "Pioneer",
       starting_life: 20,
@@ -60,6 +75,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "MOD",
     description: "Non-rotating from Mirrodin onward",
     group: "Constructed",
+    legality_key: "modern",
     default_config: {
       format: "Modern",
       starting_life: 20,
@@ -84,6 +100,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "PRE",
     description: "Old-frame constructed through Scourge",
     group: "Constructed",
+    legality_key: "premodern",
     default_config: {
       format: "Premodern",
       starting_life: 20,
@@ -108,6 +125,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "LEG",
     description: "Eternal format, all sets legal",
     group: "Constructed",
+    legality_key: "legacy",
     default_config: {
       format: "Legacy",
       starting_life: 20,
@@ -132,6 +150,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "VIN",
     description: "Broadest pool, Power Nine restricted",
     group: "Constructed",
+    legality_key: "vintage",
     default_config: {
       format: "Vintage",
       starting_life: 20,
@@ -156,6 +175,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "HIS",
     description: "Arena's eternal format",
     group: "Constructed",
+    legality_key: "historic",
     default_config: {
       format: "Historic",
       starting_life: 20,
@@ -180,6 +200,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "TML",
     description: "Arena's eternal non-rotating format",
     group: "Constructed",
+    legality_key: "timeless",
     default_config: {
       format: "Timeless",
       starting_life: 20,
@@ -204,6 +225,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "PAU",
     description: "Commons only",
     group: "Constructed",
+    legality_key: "pauper",
     default_config: {
       format: "Pauper",
       starting_life: 20,
@@ -223,11 +245,37 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     },
   },
   {
+    format: "Freeform",
+    label: "Freeform",
+    short_label: "FRF",
+    description: "Every set, no bans, no copy limit, no deck minimum",
+    group: "Constructed",
+    legality_key: null,
+    default_config: {
+      format: "Freeform",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 2,
+      deck_size: { type: "Minimum", data: 0 },
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: false,
+      sideboard_policy: { type: "Limited", data: 15 },
+      default_deck_copy_limit: { type: "Unlimited" },
+      allow_debug_actions: false,
+    },
+  },
+  {
     format: "Commander",
     label: "Commander",
     short_label: "CMD",
     description: "100-card singleton, 2–4 players",
     group: "Commander",
+    legality_key: "commander",
     default_config: {
       format: "Commander",
       starting_life: 40,
@@ -252,6 +300,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "DUC",
     description: "Tournament 1v1 Commander, 30 life",
     group: "Commander",
+    legality_key: "duel",
     default_config: {
       format: "DuelCommander",
       starting_life: 30,
@@ -276,6 +325,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "PDH",
     description: "Commons-only singleton Commander",
     group: "Commander",
+    legality_key: "paupercommander",
     default_config: {
       format: "PauperCommander",
       starting_life: 40,
@@ -300,6 +350,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "TLR",
     description: "50-card Tiny singleton",
     group: "Commander",
+    legality_key: null,
     default_config: {
       format: "TinyLeaders",
       starting_life: 20,
@@ -324,6 +375,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "OBK",
     description: "60-card singleton, Planeswalker + signature spell",
     group: "Commander",
+    legality_key: "oathbreaker",
     default_config: {
       format: "Oathbreaker",
       starting_life: 20,
@@ -348,6 +400,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "BRL",
     description: "60-card Standard singleton",
     group: "Commander",
+    legality_key: "standardbrawl",
     default_config: {
       format: "Brawl",
       starting_life: 25,
@@ -372,6 +425,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "HBR",
     description: "100-card eternal singleton",
     group: "Commander",
+    legality_key: "brawl",
     default_config: {
       format: "HistoricBrawl",
       starting_life: 25,
@@ -396,6 +450,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "CDR",
     description: "Drafted 60-card minimum Commander, 3–8 players",
     group: "Commander",
+    legality_key: null,
     default_config: {
       format: "CommanderDraft",
       starting_life: 40,
@@ -415,11 +470,37 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     },
   },
   {
+    format: "FreeformCommander",
+    label: "Freeform Commander",
+    short_label: "FFC",
+    description: "Any castable card as your commander, every set, no deck minimum",
+    group: "Commander",
+    legality_key: null,
+    default_config: {
+      format: "FreeformCommander",
+      starting_life: 40,
+      min_players: 2,
+      max_players: 4,
+      deck_size: { type: "Minimum", data: 0 },
+      singleton: false,
+      command_zone: true,
+      commander_damage_threshold: 21,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: true,
+      supplies_fixed_deck: false,
+      sideboard_policy: { type: "Forbidden" },
+      default_deck_copy_limit: { type: "Unlimited" },
+      allow_debug_actions: false,
+    },
+  },
+  {
     format: "FreeForAll",
     label: "Free-for-All",
     short_label: "FFA",
     description: "3–6 player battle royale",
     group: "Multiplayer",
+    legality_key: null,
     default_config: {
       format: "FreeForAll",
       starting_life: 20,
@@ -444,6 +525,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "2HG",
     description: "4 players, two teams of two",
     group: "Multiplayer",
+    legality_key: null,
     default_config: {
       format: "TwoHeadedGiant",
       starting_life: 30,
@@ -468,6 +550,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "ARC",
     description: "One archenemy against a team of heroes",
     group: "Multiplayer",
+    legality_key: null,
     default_config: {
       format: "Archenemy",
       starting_life: 20,
@@ -493,6 +576,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "PLC",
     description: "60-card multiplayer with a communal planar deck",
     group: "Multiplayer",
+    legality_key: null,
     default_config: {
       format: "Planechase",
       starting_life: 20,
@@ -517,6 +601,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "LIM",
     description: "Draft or sealed, 40-card deck",
     group: "Limited",
+    legality_key: null,
     default_config: {
       format: "Limited",
       starting_life: 20,
@@ -541,6 +626,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     short_label: "MOM",
     description: "60 snow basic lands, random creature tokens",
     group: "Multiplayer",
+    legality_key: null,
     default_config: {
       format: "Momir",
       starting_life: 20,

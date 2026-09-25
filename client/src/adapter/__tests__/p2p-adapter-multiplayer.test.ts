@@ -16,9 +16,12 @@ import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supports
 import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
-import { WIRE_PROTOCOL_VERSION, type P2PMessage } from "../../network/protocol";
+import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
 import { ownsP2PHostLease } from "../../services/p2pSession";
+
+/** `multiplayer:reconnectRejected.hostDisconnectedBeforeSetup`, rendered in English. */
+const HOST_DISCONNECTED_BEFORE_SETUP = "Host disconnected before game setup completed";
 
 // `vi.mock` is hoisted above imports, so the factory can't reference module
 // scope. Inline the wire-format stub. See `./protocolTestStub.ts` for the
@@ -370,6 +373,7 @@ vi.mock("../wasm-adapter", () => {
   return {
     WasmAdapter: vi.fn().mockImplementation(createEngine),
     getHostAdapter: vi.fn(createEngine),
+    createHostSessionOwner: vi.fn(() => Symbol("test-host-session-owner")),
   };
 });
 
@@ -939,6 +943,41 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mocks.setAiDecisionDiagnosticsEnabled).toHaveBeenCalledWith(true);
   });
 
+  it("releases a native seat when its PeerJS guest closes during attachment", async () => {
+    const { adapter, emitConnection } = makeNativeHost();
+    const guestAttachment = deferred<typeof NATIVE_GUEST_ATTACHMENT>();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame
+      .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+      .mockImplementationOnce(() => guestAttachment.promise);
+
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    guest.simulateClose();
+    guestAttachment.resolve(NATIVE_GUEST_ATTACHMENT);
+    await flushPromises(20);
+
+    const host = adapter as unknown as { guestSessions: Map<number, unknown> };
+    expect(host.guestSessions.has(1)).toBe(false);
+    expect(nativeWebSocketMocks.sendSeatMutation).toHaveBeenCalledWith({
+      type: "SetKind",
+      data: { seatIndex: 1, kind: { type: "WaitingHuman" } },
+    });
+    expect(nativeWebSocketMocks.dispose).toHaveBeenCalledOnce();
+
+    nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+    await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Island"], sideboard: [] } },
+    });
+    await flushPromises(10);
+    expect(host.guestSessions.has(1)).toBe(true);
+    adapter.dispose();
+  });
+
   it("exposes local diagnostics after native pregame seat release falls back to WASM", async () => {
     const { adapter, emitConnection } = makeNativeHost();
     nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
@@ -1149,6 +1188,48 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     current.dispose();
   });
 
+  it("fences a stale resume after restore before publishing or clearing state", async () => {
+    const restored = deferred<RestoredGameStateResult>();
+    mocks.resumeMultiplayerHostState.mockImplementationOnce(() => restored.promise);
+    const stale = makeResumedHost();
+    const staleInitialize = stale.adapter.initialize();
+    await vi.waitFor(() => expect(mocks.resumeMultiplayerHostState).toHaveBeenCalledOnce());
+
+    const current = makeResumedHost();
+    await current.adapter.initialize();
+    persistenceMocks.clearGame.mockClear();
+    persistenceMocks.saveResumableGameStrict.mockClear();
+    terminalMocks.commitP2PTerminalResult.mockClear();
+    mocks.releaseHostSession.mockClear();
+
+    restored.resolve({
+      snapshot: {
+        state: {
+          players: [],
+          objects: {},
+          waiting_for: { type: "GameOver", data: { winner: 0 } },
+        } as unknown as GameState,
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 1,
+      },
+      presentation: {
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      },
+    });
+
+    await expect(staleInitialize).rejects.toThrow("Host session superseded");
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
+    expect(persistenceMocks.clearGame).not.toHaveBeenCalled();
+    expect(persistenceMocks.saveResumableGameStrict).not.toHaveBeenCalled();
+    expect(terminalMocks.commitP2PTerminalResult).not.toHaveBeenCalled();
+
+    stale.adapter.dispose();
+    current.adapter.dispose();
+  });
+
   it("persists resumed authority before acknowledging a reconnect", async () => {
     const persisted = deferred<void>();
     persistenceMocks.saveResumableGameStrict.mockImplementationOnce(() => persisted.promise);
@@ -1202,7 +1283,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await flushPromises();
 
     expect(ownsP2PHostLease(authority)).toBe(false);
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
     expect(await reconnect.getSentMessages()).toEqual([]);
   });
 
@@ -1880,6 +1961,73 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(rejected).toBeDefined();
     // And the spoofed action did NOT reach the engine.
     expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
+  it("routes an open guest connection by its current seat after pregame renumbering", async () => {
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+
+    // Seat 1 is removed while the guest occupies seat 2. The real reducer
+    // compacts the seat map and moves that same connection to seat 1.
+    mocks.applySeatMutation.mockImplementationOnce(async (stateJson: string, mutationJson: string) => {
+      const state = JSON.parse(stateJson) as { seats: unknown[]; tokens: string[] };
+      const mutation = JSON.parse(mutationJson) as {
+        data: { kind: unknown };
+      };
+      state.seats[1] = mutation.data.kind;
+      return {
+        state,
+        delta: {
+          mutatedSeats: [1],
+          invalidatedTokens: [],
+          removedAi: [],
+          newAi: [[1, "Medium", { main_deck: [], sideboard: [], commander: [] }]],
+          renumbering: null,
+          nowStarted: false,
+        },
+      } as unknown as Awaited<ReturnType<typeof mocks.applySeatMutation>>;
+    });
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } },
+      },
+    });
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+
+    mocks.applySeatMutation.mockImplementationOnce(async (stateJson: string) => {
+      const state = JSON.parse(stateJson) as { seats: unknown[]; tokens: string[] };
+      state.seats.splice(1, 1);
+      state.tokens.splice(1, 1);
+      return {
+        state,
+        delta: {
+          mutatedSeats: [1],
+          invalidatedTokens: [],
+          removedAi: [1],
+          newAi: [],
+          renumbering: { removedIndex: 1, remapping: [[2, 1]] },
+          nowStarted: false,
+        },
+      } as unknown as Awaited<ReturnType<typeof mocks.applySeatMutation>>;
+    });
+    await adapter.applySeatMutation({ type: "Remove", data: { seatIndex: 1 } });
+    await adapter.initializeGame();
+
+    mockSubmitAction.mockClear();
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    adapter.dispose();
   });
 
   it("separates engine rejections from host operational action failures", async () => {
@@ -3971,7 +4119,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
     await adapter.initialize();
 
+    const setupRejection = expect(adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: HOST_DISCONNECTED_BEFORE_SETUP,
+    });
     conn.simulateClose();
+    await setupRejection;
     adapter.dispose();
     await vi.advanceTimersByTimeAsync(1_000);
 
@@ -4023,6 +4176,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       reconnectPeer as unknown as Peer,
       "host-peer",
       conn as unknown as DataConnection,
+      "seat-token",
     );
     await adapter.initialize();
 
@@ -4287,7 +4441,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
 
     adapter.dispose();
 
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
   });
 
   it("leaves the engine untouched when a host that never started tears down", async () => {
@@ -4311,7 +4465,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
 
     mocks.releaseHostSession.mockClear();
     claimant.dispose();
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
   });
 
   function occupiedRefusal(): AdapterError {
@@ -4337,7 +4491,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     // A refused claim installed nothing, so there is nothing to compensate.
     // `releaseHostSession(true)` here would run `resetGameState()` on the
     // shared engine and destroy the live local game the refusal just protected.
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false, expect.any(Symbol));
     expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
     expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
     adapter.dispose();
@@ -4391,7 +4545,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     install.resolve({ events: [] });
 
     await expect(start).rejects.toThrow(/disposed during start/);
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(true, expect.any(Symbol));
   });
 
   it("leaves the engine untouched when the start call rejects for any other reason", async () => {
@@ -4408,7 +4562,7 @@ describe("P2PHostAdapter — shared-engine ownership", () => {
     await expect(adapter.initializeGame()).rejects.toThrow(refusal);
 
     expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
-    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false);
+    expect(mocks.releaseHostSession).toHaveBeenCalledWith(false, expect.any(Symbol));
     expect(mocks.releaseHostSession).not.toHaveBeenCalledWith(true);
     adapter.dispose();
   });
@@ -4480,14 +4634,19 @@ describe("P2P wire-protocol version gate", () => {
   // Both halves stamp LITERALS. A frame built from WIRE_PROTOCOL_VERSION
   // cannot tell a bumped client from an unbumped one, which is why every
   // other handshake fixture in the suite is useless as an instrument for a
-  // bump. Revert 53 → 52 and BOTH halves red: the v52 frame stops being
-  // refused, and the v53 frame stops being admitted. The admitting half is
-  // the reach-guard — without it "refuses v52" is also satisfied by a client
+  // bump. Reverting WIRE_PROTOCOL_VERSION itself (61 → 60) breaks both
+  // halves' premise: the v60 frame now equals the reverted constant and is
+  // admitted instead of refused — measured, this test reds at that first
+  // assertion ("promise resolved … instead of rejecting") — and the v61
+  // frame no longer equals it and would be refused instead of admitted,
+  // though this single synchronous test body never reaches that second
+  // assertion once the first has thrown. The admitting half is still the
+  // reach-guard — without it "refuses v60" is also satisfied by a client
   // that refuses everything.
-  it("refuses the previous wire protocol (v52) and admits its own (v53)", async () => {
+  it("refuses the previous wire protocol (v60) and admits its own (v61)", async () => {
     const refusing = makeGuest();
     await refusing.adapter.initialize();
-    await refusing.conn.simulateData(setupFrameAt(52));
+    await refusing.conn.simulateData(setupFrameAt(60));
 
     await expect(refusing.adapter.initializeGame()).rejects.toMatchObject({
       code: "P2P_REJECTED",
@@ -4499,7 +4658,7 @@ describe("P2P wire-protocol version gate", () => {
 
     const admitting = makeGuest();
     await admitting.adapter.initialize();
-    await admitting.conn.simulateData(setupFrameAt(53));
+    await admitting.conn.simulateData(setupFrameAt(61));
 
     await expect(admitting.adapter.initializeGame()).resolves.toBeDefined();
     expect(admitting.emitted).not.toHaveBeenCalledWith(
@@ -4623,6 +4782,400 @@ describe("P2P wire-protocol version gate", () => {
     const reconnect = await sentOfType(rejoinConn, "reconnect");
     expect(reconnect).toBeDefined();
     expect(reconnect!.wireProtocolVersion).toBe(WIRE_PROTOCOL_VERSION);
+    adapter.dispose();
+  });
+});
+
+/**
+ * A frame the transport cannot deliver used to die in a `console.warn`,
+ * leaving `initializeGame()` pending forever and the user unmessaged. The
+ * answer is keyed on re-requestability, not on the cause: the host's redelivery
+ * sweep heals a seated guest, `reconnect_ack` can be re-asked for exactly once,
+ * and `game_setup` cannot be asked for at all.
+ */
+describe("P2P undeliverable frames", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** `RECONNECT_BACKOFF_MS[0]`, which `attemptReconnect(0)` waits out. */
+  const FIRST_BACKOFF_MS = 1_000;
+
+  /**
+   * Not this suite's 0xff sentinel, so the decode stub throws — the production
+   * shape of a corrupt frame, an envelope version only a newer peer writes, or
+   * a `type` only a newer host sends. The guest's answer keys on the DROP, so
+   * one fixture stands for every cause.
+   */
+  const undecodable = () => new Uint8Array([0x00, 0x01, 0x02]);
+
+  /** `multiplayer:reconnectRejected.frameUndecodable`, rendered in English. */
+  const FRAME_UNDECODABLE =
+    "The host sent a message this client could not read. Refresh both windows and try again.";
+
+  const setupFrame = () => ({
+    type: "game_setup" as const,
+    wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+    assignedPlayerId: 1,
+    playerToken: "seat-token",
+    state: remoteState("setup"),
+    events: [],
+    legalActions: [],
+    autoPassRecommended: false,
+    manaPaymentShortcutActions: [],
+  });
+
+  const ackFrame = (label: string) => ({
+    type: "reconnect_ack" as const,
+    wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+    assignedPlayerId: 1,
+    state: remoteState(label),
+    legalActions: [],
+    autoPassRecommended: false,
+    manaPaymentShortcutActions: [],
+  });
+
+  const stateFrame = (label: string) => ({
+    type: "state_update" as const,
+    state: remoteState(label),
+    events: [],
+    legalActions: [],
+    autoPassRecommended: false,
+    manaPaymentShortcutActions: [],
+  });
+
+  const sentOfType = async (conn: FakeDataConnection, type: string) =>
+    (await conn.getSentMessages()).find(
+      (m) => typeof m === "object" && m !== null && (m as { type: string }).type === type,
+    ) as { type: string; reasonCode?: string } | undefined;
+
+  /** A guest whose reconnect dials hand out fresh connections in order. */
+  function makeGuest(playerToken?: string) {
+    const conn = new FakeDataConnection();
+    const dials: FakeOpenableConnection[] = [];
+    const connect = vi.fn(() => {
+      const dialled = new FakeOpenableConnection();
+      dials.push(dialled);
+      return dialled as unknown as DataConnection;
+    });
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      { on() {}, off() {}, destroy() {}, connect } as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+      playerToken,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    return { adapter, conn, dials, connect, emitted };
+  }
+
+  /** Drain one backoff step and complete the WebRTC open the redial awaits. */
+  async function completeRedial(
+    dials: FakeOpenableConnection[],
+    index: number,
+  ): Promise<FakeOpenableConnection> {
+    await vi.advanceTimersByTimeAsync(FIRST_BACKOFF_MS);
+    const dialled = dials[index];
+    expect(dialled).toBeDefined();
+    dialled.fireOpen();
+    await vi.advanceTimersByTimeAsync(0);
+    return dialled;
+  }
+
+  it("fails a tokenless guest's setup on the first undeliverable frame", async () => {
+    const refused = makeGuest();
+    await refused.adapter.initialize();
+    const rejection = expect(refused.adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: FRAME_UNDECODABLE,
+    });
+
+    await refused.conn.simulateData(undecodable());
+
+    await rejection;
+    expect(refused.emitted).toHaveBeenCalledWith({
+      type: "reconnectFailed",
+      reason: FRAME_UNDECODABLE,
+    });
+    // No retry is spent: only the accept path produces `game_setup`, so there
+    // is nothing a re-dial could ask for.
+    expect(refused.connect).not.toHaveBeenCalled();
+
+    // Control: the identical adapter shape settles on a well-formed frame, so
+    // the refusal above is the drop and not a guest that refuses everything.
+    const seated = makeGuest();
+    await seated.adapter.initialize();
+    await seated.conn.simulateData(setupFrame());
+
+    await expect(seated.adapter.initializeGame()).resolves.toBeDefined();
+    expect(seated.emitted).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "playerIdentity" }),
+    );
+  });
+
+  it("rejects a tokenless guest's setup when the initial host channel closes", async () => {
+    const guest = makeGuest();
+    await guest.adapter.initialize();
+    const rejection = expect(guest.adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: HOST_DISCONNECTED_BEFORE_SETUP,
+    });
+
+    guest.conn.simulateClose();
+
+    await rejection;
+    expect(guest.emitted).toHaveBeenCalledWith({
+      type: "reconnectFailed",
+      reason: HOST_DISCONNECTED_BEFORE_SETUP,
+    });
+    // A fresh guest has no token, so a redial cannot identify it to the host.
+    expect(guest.connect).not.toHaveBeenCalled();
+  });
+
+  it("spends one retry per reconnect episode, and a decoded handshake restores the budget", async () => {
+    const { adapter, conn, dials, emitted } = makeGuest("seat-token");
+    await adapter.initialize();
+
+    // Episode one: the drop closes the session and re-dials, re-sending
+    // `reconnect` — the ask that can bring `reconnect_ack` back.
+    await conn.simulateData(undecodable());
+    const second = await completeRedial(dials, 0);
+    expect(await sentOfType(second, "reconnect")).toBeDefined();
+
+    await second.simulateData(ackFrame("episode-one"));
+    await expect(adapter.initializeGame()).resolves.toBeDefined();
+    expect(emitted).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "reconnectFailed" }),
+    );
+
+    // The disconnect is what makes the next frame a SECOND episode: while
+    // `authenticatedSession === second` every drop is the seated no-op below,
+    // so the reset is observable only on a session that is unauthenticated
+    // again. `attachSession` re-nulls it on every retry.
+    second.simulateClose();
+    const third = await completeRedial(dials, 1);
+    expect(await sentOfType(third, "reconnect")).toBeDefined();
+
+    // THE PROPERTY: episode two's first undeliverable frame closes and retries,
+    // because the decoded ack put the budget back. Delete the reset in
+    // `handleHostMessage` and this frame terminates the adapter instead.
+    await third.simulateData(undecodable());
+    const fourth = await completeRedial(dials, 2);
+    expect(third.open).toBe(false);
+    expect(await sentOfType(fourth, "reconnect")).toBeDefined();
+    expect(emitted).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "reconnectFailed" }),
+    );
+
+    // Reach-guard: the adapter is alive at the end, not merely quiet.
+    emitted.mockClear();
+    await fourth.simulateData(ackFrame("episode-two"));
+    expect(emitted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "stateChanged",
+        snapshot: expect.objectContaining({ state: remoteState("episode-two") }),
+      }),
+    );
+    adapter.dispose();
+  });
+
+  it("settles a token-bearing guest on the second undeliverable frame", async () => {
+    const { adapter, conn, dials, emitted } = makeGuest("seat-token");
+    await adapter.initialize();
+    const rejection = expect(adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+      message: FRAME_UNDECODABLE,
+    });
+
+    await conn.simulateData(undecodable());
+    // Reach-guard: the retry was really spent — the retry connection exists and
+    // carries a re-sent `reconnect`. Without it, "the second frame terminates"
+    // is also satisfied by a handler that never ran.
+    const second = await completeRedial(dials, 0);
+    expect(await sentOfType(second, "reconnect")).toBeDefined();
+
+    // Hostile: a decodable frame this guest cannot USE must not restore the
+    // budget. It reaches `handleHostMessage` and dies at the
+    // unauthenticated-discard guard, which the reset sits below.
+    await second.simulateData(stateFrame("discarded"));
+    expect(emitted).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "stateChanged" }),
+    );
+
+    await second.simulateData(undecodable());
+
+    await rejection;
+    expect(emitted).toHaveBeenCalledWith({
+      type: "reconnectFailed",
+      reason: FRAME_UNDECODABLE,
+    });
+  });
+
+  it("leaves a seated guest's undeliverable frame to the host's redelivery sweep", async () => {
+    const { adapter, conn, connect, emitted } = makeGuest();
+    await adapter.initialize();
+    await conn.simulateData(setupFrame());
+    await adapter.initializeGame();
+    emitted.mockClear();
+
+    await conn.simulateData(undecodable());
+
+    expect(emitted).not.toHaveBeenCalled();
+    expect(conn.open).toBe(true);
+    expect(connect).not.toHaveBeenCalled();
+    // Charges nothing: the counter is incremented below the seated guard, so a
+    // mid-game drop cannot spend the budget a later reconnect needs.
+    expect(
+      (adapter as unknown as { undeliverableFramesSinceDecode: number })
+        .undeliverableFramesSinceDecode,
+    ).toBe(0);
+
+    // The sweep's own resend still applies: healthy, not merely quiet.
+    await conn.simulateData(stateFrame("swept"));
+    expect(emitted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "stateChanged",
+        snapshot: expect.objectContaining({ state: remoteState("swept") }),
+      }),
+    );
+  });
+
+  it("ignores an undeliverable frame on a session the adapter has already replaced", async () => {
+    const { adapter, conn, dials, emitted } = makeGuest("seat-token");
+    await adapter.initialize();
+
+    // Re-attach WITHOUT closing the first transport, so the superseded session
+    // is still live and its own drop still reaches the adapter. Production
+    // always closes first, which is why the identity guard needs its own
+    // instrument rather than riding on `peer.ts`'s closed check.
+    const redial = (adapter as unknown as {
+      attemptReconnect(attemptIndex: number): Promise<void>;
+    }).attemptReconnect(0);
+    await vi.advanceTimersByTimeAsync(FIRST_BACKOFF_MS);
+    const second = dials[0];
+    expect(second).toBeDefined();
+    second.fireOpen();
+    await redial;
+    await vi.advanceTimersByTimeAsync(0);
+
+    await conn.simulateData(undecodable());
+
+    expect(second.open).toBe(true);
+    expect(emitted).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "reconnectFailed" }),
+    );
+    // The live session's budget is untouched: its OWN first undeliverable frame
+    // still buys a retry rather than terminating.
+    await second.simulateData(undecodable());
+    const third = await completeRedial(dials, 1);
+    expect(await sentOfType(third, "reconnect")).toBeDefined();
+    expect(emitted).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "reconnectFailed" }),
+    );
+    adapter.dispose();
+  });
+
+  it("rejects a pre-identification connection whose first frame the host cannot decode", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const hostile = new FakeOpenableConnection();
+    emitConnection(hostile as unknown as DataConnection);
+    hostile.fireOpen();
+    await hostile.simulateData(undecodable());
+
+    const rejected = await sentOfType(hostile, "reconnect_rejected");
+    expect(rejected).toEqual(
+      expect.objectContaining({ reasonCode: "first_message_invalid" }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostile.open).toBe(false);
+
+    // The host's ACTION is only half of it: relayed to a real tokenless guest,
+    // that same frame is what releases the waiter this ticket left pending.
+    const guest = makeGuest();
+    await guest.adapter.initialize();
+    const rejection = expect(guest.adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_REJECTED",
+    });
+    await guest.conn.simulateData(rejected);
+    await rejection;
+    expect(guest.emitted).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "reconnectFailed" }),
+    );
+
+    // Control: a decodable first message is seated, not rejected.
+    const joiner = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await flushPromises(20);
+    expect(await sentOfType(joiner, "reconnect_rejected")).toBeUndefined();
+    expect(joiner.open).toBe(true);
+    expect(adapter.getPlayerSlots()[1]?.kind.type).toBe("JoinedHuman");
+    adapter.dispose();
+  });
+
+  it("gives a token-bearing guest the same rejection when its reconnect is undecodable", async () => {
+    const { adapter, emitConnection } = makeResumedHost();
+    await adapter.initialize();
+
+    const garbled = new FakeOpenableConnection();
+    emitConnection(garbled as unknown as DataConnection);
+    garbled.fireOpen();
+    await garbled.simulateData(undecodable());
+
+    // The host answers a token-bearing guest exactly as a tokenless one, and
+    // that is deliberate: `identified` flips only inside the one-shot
+    // `onMessage`, which runs only on a decodable frame, so a frame the host
+    // could not decode carries no token to tell the two apart.
+    expect(await sentOfType(garbled, "reconnect_rejected")).toEqual(
+      expect.objectContaining({ reasonCode: "first_message_invalid" }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(garbled.open).toBe(false);
+    expect(await sentOfType(garbled, "reconnect_ack")).toBeUndefined();
+
+    // Control: the SAME token, decodable, is acknowledged and seated — the
+    // rejection is caused by undecodability, not by the token.
+    const clean = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: "guest-token",
+    });
+    await flushPromises(20);
+    expect(await sentOfType(clean, "reconnect_ack")).toBeDefined();
+    expect(await sentOfType(clean, "reconnect_rejected")).toBeUndefined();
+    adapter.dispose();
+  });
+
+  it("keeps a seated guest when an undeliverable frame arrives with its join", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const joining = new FakeOpenableConnection();
+    emitConnection(joining as unknown as DataConnection);
+    joining.fireOpen();
+    const okBytes = await encodeWireMessage({
+      type: "guest_deck",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    } as P2PMessage);
+
+    // One tick, no await between: `identified` flips on `peer.ts`'s dispatch
+    // queue while the drop is reported on its recv queue, and awaiting the
+    // join first drains the former so the two never interleave.
+    const join = joining.simulateData(okBytes);
+    const drop = joining.simulateData(undecodable());
+    await Promise.all([join, drop]);
+    await flushPromises(20);
+
+    expect(adapter.getPlayerSlots()[1]?.kind.type).toBe("JoinedHuman");
+    expect(joining.open).toBe(true);
+    expect(await sentOfType(joining, "reconnect_rejected")).toBeUndefined();
     adapter.dispose();
   });
 });

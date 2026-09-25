@@ -286,11 +286,52 @@ describe("P2PDraftHost persistence disposal", () => {
     }
   });
 
+  // A shared-stack (Winston) draft's live state. `main_stack` is the draw
+  // order every pile is dealt from, so publishing it solves the only decision
+  // that format contains. This is the TypeScript half of the same
+  // deny-by-enumeration redaction `server-core`'s `p2p_backup_guard` performs
+  // in Rust; both halves are load-bearing because the host uploads this
+  // projection itself, and only the Rust half had a regression test.
+  const winstonSharedStack = {
+    main_stack: [{ instance_id: "secret-draw-order" }],
+    piles: [[], [], []],
+    starting_seat: 0,
+    active_seat: 0,
+    cursor: 0,
+    inspected: [0, 0, 0],
+    decisions: 0,
+  };
+
+  // EVERY SEAT'S DRAFTED CARDS and the booster a seat is mid-pick on. Private in
+  // every draft kind, and under a shared stack the format's central secret.
+  const winstonPools = [["Seat 0 secret card"], ["Seat 1 secret card"]];
+  const winstonCurrentPack = ["Mid-pick secret card"];
+  // The boosters a seat has not opened yet — private in EVERY draft kind, which
+  // is why this row is not Winston-specific.
+  const winstonPacksBySeat = [["Unopened secret booster"]];
+  // The seed IS the draw order — stripping the stack while shipping this hands
+  // back everything stripping the stack protected.
+  const winstonRngSeed = 987654321;
+
   it.each([
-    ["serialized", JSON.stringify({ booster_pack_pool: ["Nested cube"] })],
-    ["object", { booster_pack_pool: ["Nested cube"] }],
+    ["serialized", JSON.stringify({
+      booster_pack_pool: ["Nested cube"],
+      shared_stack: winstonSharedStack,
+      pools: winstonPools,
+      current_pack: winstonCurrentPack,
+      packs_by_seat: winstonPacksBySeat,
+      config: { rng_seed: winstonRngSeed },
+    })],
+    ["object", {
+      booster_pack_pool: ["Nested cube"],
+      shared_stack: winstonSharedStack,
+      pools: winstonPools,
+      current_pack: winstonCurrentPack,
+      packs_by_seat: winstonPacksBySeat,
+      config: { rng_seed: winstonRngSeed },
+    }],
     ["null", null],
-  ])("strips every cube source alias from a %s public backup without changing IndexedDB", async (_shape, draftSessionJson) => {
+  ])("strips every cube source alias, the shared stack, and every seat's pool from a %s public backup without changing IndexedDB", async (_shape, draftSessionJson) => {
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("", { status: 200 }));
     globalThis.fetch = fetchMock;
@@ -335,15 +376,51 @@ describe("P2PDraftHost persistence disposal", () => {
       expect(publicSnapshot.poolInput.data.cube_list_text).toBeUndefined();
       expect(publicSnapshot.matchLaunches[0].launch.deckPayload.booster_pack_pool).toBeUndefined();
       expect(publicSnapshot.intergameCommands[0].launchPayload.deckPayload.booster_pack_pool).toBeUndefined();
+      // The nested draft-session legs. `booster_pack_pool` is the REACH-GUARD
+      // for `shared_stack`: it proves the nested redactor demonstrably ran on
+      // this fixture, so an absent `shared_stack` is a redaction and not a
+      // field the fixture never carried. The IndexedDB half of each pair is
+      // what proves the authority copy is untouched and still resumable.
       if (typeof snapshot.draftSessionJson === "string") {
         expect(JSON.parse(publicSnapshot.draftSessionJson).booster_pack_pool).toBeUndefined();
+        expect(JSON.parse(publicSnapshot.draftSessionJson).shared_stack).toBeUndefined();
+        expect(JSON.parse(publicSnapshot.draftSessionJson).pools).toBeUndefined();
+        expect(JSON.parse(publicSnapshot.draftSessionJson).current_pack).toBeUndefined();
+        expect(JSON.parse(publicSnapshot.draftSessionJson).packs_by_seat).toBeUndefined();
+        expect(JSON.parse(publicSnapshot.draftSessionJson).config.rng_seed).toBe(0);
         expect(JSON.parse(snapshot.draftSessionJson).booster_pack_pool).toEqual(["Nested cube"]);
+        expect(JSON.parse(snapshot.draftSessionJson).shared_stack).toEqual(winstonSharedStack);
+        expect(JSON.parse(snapshot.draftSessionJson).pools).toEqual(winstonPools);
+        expect(JSON.parse(snapshot.draftSessionJson).current_pack).toEqual(winstonCurrentPack);
+        expect(JSON.parse(snapshot.draftSessionJson).packs_by_seat).toEqual(winstonPacksBySeat);
+        expect(JSON.parse(snapshot.draftSessionJson).config.rng_seed).toBe(winstonRngSeed);
       } else if (snapshot.draftSessionJson && typeof snapshot.draftSessionJson === "object") {
         expect(publicSnapshot.draftSessionJson.booster_pack_pool).toBeUndefined();
-        expect((snapshot.draftSessionJson as { booster_pack_pool: string[] }).booster_pack_pool).toEqual(["Nested cube"]);
+        expect(publicSnapshot.draftSessionJson.shared_stack).toBeUndefined();
+        expect(publicSnapshot.draftSessionJson.pools).toBeUndefined();
+        expect(publicSnapshot.draftSessionJson.current_pack).toBeUndefined();
+        expect(publicSnapshot.draftSessionJson.packs_by_seat).toBeUndefined();
+        expect(publicSnapshot.draftSessionJson.config.rng_seed).toBe(0);
+        const retained = snapshot.draftSessionJson as {
+          booster_pack_pool: string[];
+          shared_stack: typeof winstonSharedStack;
+          pools: string[][];
+          current_pack: string[];
+          packs_by_seat: string[][];
+          config: { rng_seed: number };
+        };
+        expect(retained.booster_pack_pool).toEqual(["Nested cube"]);
+        expect(retained.shared_stack).toEqual(winstonSharedStack);
+        expect(retained.pools).toEqual(winstonPools);
+        expect(retained.current_pack).toEqual(winstonCurrentPack);
+        expect(retained.packs_by_seat).toEqual(winstonPacksBySeat);
+        expect(retained.config.rng_seed).toBe(winstonRngSeed);
       } else {
         expect(publicSnapshot.draftSessionJson).toBeNull();
       }
+      // Whole-projection sentinel: the draw order must not survive ANYWHERE in
+      // the uploaded payload, including a field this test does not enumerate.
+      expect(JSON.stringify(publicSnapshot)).not.toContain("secret-draw-order");
       expect(snapshot.booster_pack_pool).toEqual(["Top level cube"]);
       expect(snapshot.poolInput.data.cube_list_text).toBe("Secret cube");
       expect(snapshot.matchLaunches[0].launch.deckPayload.booster_pack_pool).toEqual(["Launch cube"]);
@@ -584,6 +661,9 @@ describe("P2PDraftHost persistence disposal", () => {
     };
     const view = {
       status: "Deckbuilding",
+      // Required from v30 on: the protocol is compared for EXACT equality at the
+      // handshake, so a frame without it is malformed rather than old.
+      distribution: "PickAndPass",
       seats: [{ has_submitted_deck: false, is_bot: false }],
     };
     privateHost.draftStarted = true;
@@ -619,6 +699,9 @@ describe("P2PDraftHost persistence disposal", () => {
     };
     const view = {
       status: "Deckbuilding",
+      // Required from v30 on: the protocol is compared for EXACT equality at the
+      // handshake, so a frame without it is malformed rather than old.
+      distribution: "PickAndPass",
       seats: [{ has_submitted_deck: false, is_bot: false }],
     };
     privateHost.draftStarted = true;
@@ -895,6 +978,9 @@ describe("P2PDraftHost persistence disposal", () => {
       privateHost.adapter.draftProcedure = vi.fn(async () => ({
         packs_per_player: 3, min_deck_size: 40, launch_capability: "None", commanders_required: 0,
         pick_selection_mode: "Direct", match_config: { match_type: "Bo1" },
+        // `buildLobbyView` copies this straight from the procedure, and every
+        // participant frame carries it from v30 on.
+        distribution: "PickAndPass",
       }));
       privateHost.adapter.createMultiplayerDraft = vi.fn(async () => {});
       privateHost.adapter.setSeatConnected = vi.fn(async () => {});

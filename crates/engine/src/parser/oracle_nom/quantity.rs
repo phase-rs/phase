@@ -26,10 +26,10 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
-    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
-    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
+    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
+    ControllerRef, CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate,
+    PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
     ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
@@ -89,6 +89,107 @@ fn parse_pt_stat(input: &str) -> OracleResult<'_, PtStat> {
         value(PtStat::Toughness, tag("toughness")),
     ))
     .parse(input)
+}
+
+/// CR 702.179f (speed) / CR 119.3 (life total as a changing quantity) / CR
+/// 402.3 (a player may count the cards in their hand at any time): which
+/// per-player scalar a superlative or comparative player predicate reads.
+/// Parser-internal — selects which `QuantityRef` to build, never stored in
+/// the AST. The engine's own cross-section reader for exactly this set is
+/// `effects::candidate_player_scalar` (annotated CR 402.1 / 119.1 / 119.3 /
+/// 122.1f / 404.1); this selector is its parse-side counterpart. A further
+/// property (graveyard size CR 404.1, poison CR 122.1f, cards drawn CR
+/// 121.1) is one `alt` arm plus two `match` arms, not a new grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::parser) enum PlayerProperty {
+    /// CR 702.179f: a player's speed.
+    Speed,
+    /// CR 119.3: a player's life total.
+    Life,
+    /// CR 402.3: the number of cards in a player's hand.
+    HandSize,
+}
+
+/// CR 702.179f / CR 119.3 / CR 402.3: parse a player-property keyword.
+pub(in crate::parser) fn parse_player_property_keyword(
+    input: &str,
+) -> OracleResult<'_, PlayerProperty> {
+    alt((
+        value(PlayerProperty::Speed, tag("speed")),
+        value(PlayerProperty::Life, tag("life")),
+        value(PlayerProperty::HandSize, tag("cards in hand")),
+    ))
+    .parse(input)
+}
+
+/// Build the `QuantityRef` for a player-property of the given player scope.
+/// Infallible — every arm has a runtime resolver, but NOT a single shared one:
+/// `Speed` and `HandSize` resolve through
+/// `game/quantity.rs::resolve_per_player_scalar` (`Speed` is Spikeshell
+/// Harrier's live path), while `LifeTotal`'s arm never reaches that function —
+/// it resolves single-player scopes through `players::team_life_total` and
+/// aggregate scopes through `resolve_per_team_life` (CR 810.9a team folding).
+/// A guard added to one path is not on the other.
+pub(in crate::parser) fn player_property_quantity(
+    property: PlayerProperty,
+    player: PlayerScope,
+) -> QuantityRef {
+    match property {
+        PlayerProperty::Speed => QuantityRef::Speed { player },
+        PlayerProperty::Life => QuantityRef::LifeTotal { player },
+        PlayerProperty::HandSize => QuantityRef::HandSize { player },
+    }
+}
+
+/// CR 102.1 (the player population) + CR 102.2 (two-player opponent) / CR
+/// 102.3 (multiplayer opponent): "the player[s] with the most `<property>`"
+/// as a LIVE PER-CANDIDATE predicate — candidate property `>=` the
+/// population maximum. `relation` selects the population and, with it, the
+/// aggregate scope: `All` -> `AllPlayers { Max, exclude: None }`,
+/// `Opponent` -> `Opponent { Max }`.
+///
+/// Returns `None` for `Speed`: `PlayerFilter::PlayerAttribute` reads `attr`
+/// through `effects::candidate_player_scalar{,_with_state}`, which has no
+/// `QuantityRef::Speed` arm and fails a candidate CLOSED. A silently
+/// never-matching filter is worse than a declined parse, so this fails at
+/// the constructor. Adding a `Speed` arm to `candidate_player_scalar` is the
+/// one edit that flips this on.
+pub(in crate::parser) fn player_property_leader_filter(
+    property: PlayerProperty,
+    relation: PlayerRelation,
+) -> Option<PlayerFilter> {
+    match property {
+        PlayerProperty::Speed => None,
+        PlayerProperty::Life | PlayerProperty::HandSize => {
+            // Exhaustive on `relation`, no wildcard: `Controller` is a
+            // single-player "population" that a leader-comparison grammar
+            // never printed (the corpus's superlative forms are always
+            // `All` — "each other player" — or `Opponent` — "among your
+            // opponents"), so it is refused rather than emitting a
+            // vacuously-true filter for an unmodelled reading.
+            let population_scope = match relation {
+                PlayerRelation::All => PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+                PlayerRelation::Opponent => PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+                PlayerRelation::Controller => return None,
+            };
+            Some(PlayerFilter::PlayerAttribute {
+                relation,
+                attr: Box::new(player_property_quantity(
+                    property,
+                    PlayerScope::ScopedPlayer,
+                )),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Ref {
+                    qty: player_property_quantity(property, population_scope),
+                }),
+            })
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3436,8 +3537,8 @@ pub(crate) fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
 /// CR 604.3: In zone-count contexts ("two or more instant and/or sorcery cards
 /// in your graveyard"), the joining conjunction is semantically a disjunction
 /// — a card matches if it has any of the listed types. The result
-/// `Vec<TypeFilter>` is consumed by `matches_zone_card_filter`
-/// (`game/quantity.rs:1151`), which uses `.iter().any(...)` (logical OR).
+/// `Vec<TypeFilter>` is consumed by `game::quantity::matches_zone_card_filter`,
+/// which uses `.iter().any(...)` (logical OR).
 ///
 /// All three separators (`and`, `or`, `and/or`) are accepted so the combinator
 /// covers the grammatical variants Wizards uses across templating eras
@@ -6770,6 +6871,101 @@ mod tests {
         SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    // ── U1.1 building-block tests: `PlayerProperty` / `parse_player_property_keyword`
+    // / `player_property_quantity` / `player_property_leader_filter`. Test the
+    // block across its input range, not one card (CLAUDE.md).
+
+    #[test]
+    fn parse_player_property_keyword_accepts_all_three_and_rejects_subfamily_b_nouns() {
+        assert_eq!(
+            parse_player_property_keyword("speed"),
+            Ok(("", PlayerProperty::Speed))
+        );
+        assert_eq!(
+            parse_player_property_keyword("life"),
+            Ok(("", PlayerProperty::Life))
+        );
+        assert_eq!(
+            parse_player_property_keyword("cards in hand"),
+            Ok(("", PlayerProperty::HandSize))
+        );
+        // Subfamily B (object-count) nouns must keep declining at the property
+        // axis so those 8 cards stay honestly red.
+        for rejected in ["lands", "creatures", "permanents", "Wizards"] {
+            assert!(
+                parse_player_property_keyword(rejected).is_err(),
+                "{rejected:?} must NOT parse as a PlayerProperty"
+            );
+        }
+    }
+
+    #[test]
+    fn player_property_leader_filter_life_opponent_matches_incumbent_shape() {
+        // U2.1's behavior-preservation proof: this must be `assert_eq!`-identical
+        // to the `PlayerFilter` `parse_opponent_most_life_restriction` built
+        // BEFORE this diff (the literal pre-existing shape, reproduced here).
+        let expected = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: crate::types::ability::Comparator::GE,
+            value: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Max,
+                    },
+                },
+            }),
+        };
+        assert_eq!(
+            player_property_leader_filter(PlayerProperty::Life, PlayerRelation::Opponent),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn player_property_leader_filter_speed_fails_closed() {
+        // Pins the fail-closed contract: `candidate_player_scalar{,_with_state}`
+        // has no `QuantityRef::Speed` arm, so a `Speed` leader filter would
+        // silently match nobody. A future `Speed` arm there must flip this
+        // test deliberately.
+        assert_eq!(
+            player_property_leader_filter(PlayerProperty::Speed, PlayerRelation::All),
+            None
+        );
+        assert_eq!(
+            player_property_leader_filter(PlayerProperty::Speed, PlayerRelation::Opponent),
+            None
+        );
+    }
+
+    #[test]
+    fn player_property_leader_filter_controller_relation_declines() {
+        // Exhaustive-match follow-through: a leader-comparison grammar never
+        // printed the `Controller` relation (always `All` or `Opponent`), so
+        // it is refused rather than emitting a vacuously-true filter.
+        assert_eq!(
+            player_property_leader_filter(PlayerProperty::Life, PlayerRelation::Controller),
+            None
+        );
+    }
+
+    #[test]
+    fn player_property_quantity_speed_unchanged_from_pre_move_helper() {
+        // Spikeshell Harrier preservation: the pre-move helper's Speed arm is
+        // byte-identical after the U1.1 relocation + widening.
+        assert_eq!(
+            player_property_quantity(
+                PlayerProperty::Speed,
+                PlayerScope::ParentObjectTargetController
+            ),
+            QuantityRef::Speed {
+                player: PlayerScope::ParentObjectTargetController
+            }
+        );
+    }
 
     fn assert_pt_difference(parsed: QuantityExpr, scope: ObjectScope, left: PtStat, right: PtStat) {
         assert_eq!(

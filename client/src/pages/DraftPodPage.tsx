@@ -32,20 +32,24 @@ import { HostControls, useHostDraftTopActions } from "../components/draft/HostCo
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { PackDisplay, type PackDisplayController } from "../components/draft/PackDisplay";
 import { PickTimer } from "../components/draft/PickTimer";
-import { COMMANDER_DRAFT_ENTRY, type DraftKind } from "../components/draft/draftKind";
-import { distinctJoined } from "../adapter/draft-adapter";
+import { draftKindForEntry, type DraftKind } from "../components/draft/draftKind";
+import { distinctJoined, isSharedStackDistribution, type SharedStackPileDecision } from "../adapter/draft-adapter";
+import type { DraftPauseReason } from "../network/draftProtocol";
 import { PodIcon } from "../components/draft/PodIcon";
 import { PoolPanel } from "../components/draft/PoolPanel";
 import { ScoreBadge } from "../components/draft/ScoreBadge";
 import { SeatStatusRing } from "../components/draft/SeatStatusRing";
 import { SetSelector } from "../components/draft/SetSelector";
 import { StandingsTable } from "../components/draft/StandingsTable";
+import { WinstonPileTable } from "../components/draft/WinstonPileTable";
 import { PodErrorBanner } from "../components/draft/PodErrorBanner";
 import {
   getResponsiveDraftLayout,
   loadDraftWorkspacePreferences,
   repairDraftWorkspacePackScale,
+  repairDraftWorkspacePileScale,
   saveDraftWorkspacePreferences,
+  setArrivingCardBoardPreferences,
   type DraftWorkspacePreferences,
   type ResponsiveDraftLayout,
 } from "../components/draft/workspace/workspacePreferences";
@@ -74,7 +78,13 @@ import {
   type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
 import type { DraftPickDestination, DraftPickPlacementHint } from "../stores/draftStore";
-import { useDraftPodStore } from "../stores/draftPodStore";
+import {
+  LOBBY_HOST_NAME_MAX_CHARS,
+  LOBBY_LABEL_MAX_CHARS,
+  LOBBY_LISTING_MAX_SEATS,
+  podListingEligible,
+  useDraftPodStore,
+} from "../stores/draftPodStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 
 // ── Setup Mode ────────────────────────────────────────────────────────
@@ -100,6 +110,16 @@ function subscribePickInteraction(listener: () => void): () => void {
   });
 }
 
+/** Any entry of this length fits the lobby's byte bound for a password. */
+const POD_PASSWORD_MAX_LENGTH = 32;
+
+/** The offline sentinel is a translation key and is translated; any other
+ *  message is shown as written. */
+function usePodErrorMessage(error: string | null): string | null {
+  const { t } = useTranslation("draft");
+  return error === DRAFT_OFFLINE_ERROR ? t("offline.startUnavailable") : error;
+}
+
 function PodSetup() {
   const { t } = useTranslation("draft");
   const effectiveOffline = useEffectiveOffline();
@@ -111,6 +131,11 @@ function PodSetup() {
   const setHostDisplayName = useDraftPodStore((s) => s.setHostDisplayName);
   const guestDisplayName = useDraftPodStore((s) => s.guestDisplayName);
   const setGuestDisplayName = useDraftPodStore((s) => s.setGuestDisplayName);
+  const adoptSavedDisplayName = useDraftPodStore((s) => s.adoptSavedDisplayName);
+  const listing = useDraftPodStore((s) => s.listing);
+  const setListing = useDraftPodStore((s) => s.setListing);
+  const adoptRememberedListing = useDraftPodStore((s) => s.adoptRememberedListing);
+  const [showPassword, setShowPassword] = useState(() => listing.password !== "");
   const joinCode = useDraftPodStore((s) => s.joinCode);
   const setJoinCode = useDraftPodStore((s) => s.setJoinCode);
   const createPod = useDraftPodStore((s) => s.createPod);
@@ -129,6 +154,7 @@ function PodSetup() {
       : null,
   );
   const packDistribution = useDraftPodStore((s) => s.packDistribution);
+  const allowedSetLayouts = useDraftPodStore((s) => s.allowedSetLayouts);
   const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
   const cubeMinDeckSize = useDraftPodStore((s) =>
     s.procedureCacheKey?.kind === s.config.kind
@@ -137,6 +163,20 @@ function PodSetup() {
       : null,
   );
   const refreshProcedure = useDraftPodStore((s) => s.refreshProcedure);
+
+  // Seed both name inputs below from the saved multiplayer identity, so
+  // hosting or joining a pod is not one more place to retype a name the player
+  // already saved. On mount rather than per render: `adoptSavedDisplayName`
+  // fills only an empty field, so re-seeding on every render would re-fill the
+  // input mid-edit (measured: clearing it and typing "Bea" under a dependency-
+  // less effect lands "AliceBea") instead of leaving it editable.
+  useEffect(() => {
+    adoptSavedDisplayName();
+  }, [adoptSavedDisplayName]);
+
+  useEffect(() => {
+    adoptRememberedListing();
+  }, [adoptRememberedListing]);
 
   // The kind radios record intent (`setConfig`) but publish nothing, so the
   // ENGINE's per-kind axes — booster count and allowed seat set — are re-read here
@@ -147,15 +187,20 @@ function PodSetup() {
     if (effectiveOffline) return;
     void refreshProcedure();
   }, [effectiveOffline, refreshProcedure, config.kind, config.tournamentFormat]);
-  // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than a
-  // blank line under the radios. Values are already-resolved strings because
-  // `react-i18next.d.ts` types `t`'s key against the `en` catalog, so a `t(variable)`
-  // lookup would not typecheck.
+  // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than
+  // a blank line under the radios. Values are already-resolved strings, which is
+  // the right shape regardless -- but NOT for the reason this comment used to
+  // give. It claimed `react-i18next.d.ts` types `t`'s key so a `t(variable)`
+  // lookup would not typecheck. Measured: it does not. `t()` keys are unchecked
+  // in this client, which is why the interpolated lookups elsewhere on this page
+  // and in the draft components were replaced with total `Record`s rather than
+  // trusted.
   const kindDescription: Record<Exclude<DraftKind, "Quick">, string> = {
     Premier: t("podSetup.kindPremierDesc"),
     Traditional: t("podSetup.kindTraditionalDesc"),
     Sealed: t("podSetup.kindSealedDesc"),
     CommanderDraft: t("podSetup.kindCommanderDraftDesc"),
+    Winston: t("podSetup.kindWinstonDesc"),
   };
   const tournamentDescription = config.tournamentFormat === "Swiss"
     ? t("podSetup.tournamentSwissDesc")
@@ -174,9 +219,10 @@ function PodSetup() {
   const podSizeLabel =
     podSizeItems.find((item) => item.value === String(config.podSize))?.label ??
     t("podSetup.playerCount", { count: config.podSize });
-  const configErrorMessage = configError === DRAFT_OFFLINE_ERROR
-    ? t("offline.startUnavailable")
-    : configError;
+  const configErrorMessage = usePodErrorMessage(configError);
+  const listingEligible = podListingEligible(config.podSize);
+  const listed = listing.isPublic && listingEligible;
+  const hostName = hostDisplayName.trim();
 
   if (effectiveOffline) {
     return (
@@ -273,6 +319,7 @@ function PodSetup() {
             value={hostDisplayName}
             onChange={(e) => setHostDisplayName(e.target.value)}
             placeholder={t("podSetup.namePlaceholder")}
+            maxLength={LOBBY_HOST_NAME_MAX_CHARS}
             className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
           />
         </div>
@@ -282,7 +329,7 @@ function PodSetup() {
           <label className="text-sm font-medium text-white/60">
             {t("podSetup.draftType")}
           </label>
-          <div className="flex gap-4">
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
             <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
               <input
                 type="radio"
@@ -293,7 +340,7 @@ function PodSetup() {
               />
               {t("podSetup.kindPremier")}
             </label>
-            <label className="flex items-center gap-2 text-sm text-white/70">
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
               <input
                 type="radio"
                 name="draftKind"
@@ -303,7 +350,7 @@ function PodSetup() {
               />
               {t("podSetup.kindTraditional")}
             </label>
-            <label className="flex items-center gap-2 text-sm text-white/70">
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
               <input
                 type="radio"
                 name="draftKind"
@@ -313,7 +360,7 @@ function PodSetup() {
               />
               {t("podSetup.kindSealed")}
             </label>
-            <label className="flex items-center gap-2 text-sm text-white/70">
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
               <input
                 type="radio"
                 name="draftKind"
@@ -322,6 +369,16 @@ function PodSetup() {
                 className="accent-emerald-400"
               />
               {t("podSetup.kindCommanderDraft")}
+            </label>
+            <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Winston"}
+                onChange={() => setConfig({ kind: "Winston" })}
+                className="accent-emerald-400"
+              />
+              {t("podSetup.kindWinston")}
             </label>
           </div>
           <p className="text-xs text-white/40">{kindDescription[config.kind]}</p>
@@ -406,6 +463,78 @@ function PodSetup() {
           <p className="text-xs text-white/40">{podSizeDescription}</p>
         </div>
 
+        <div className="flex flex-col gap-2">
+          {/* Above the seat ceiling the host's choice stays shown and
+              applies again within it. */}
+          <label
+            className={`flex min-h-11 items-center gap-2 py-2 text-sm ${
+              listingEligible ? "text-white/70" : "cursor-not-allowed text-white/40"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={listing.isPublic}
+              disabled={!listingEligible}
+              onChange={(e) => setListing({ isPublic: e.target.checked })}
+              className="accent-emerald-400"
+            />
+            {t("podSetup.listInLobby")}
+          </label>
+          {!listingEligible && (
+            <p className="text-xs text-white/40">
+              {t("podSetup.listingSeatLimit", { max: LOBBY_LISTING_MAX_SEATS })}
+            </p>
+          )}
+          {listed && (
+            <>
+              <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+                <input
+                  type="checkbox"
+                  checked={showPassword}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setShowPassword(next);
+                    if (!next) setListing({ password: "" });
+                  }}
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.setPassword")}
+              </label>
+              {showPassword && (
+                <input
+                  type="password"
+                  value={listing.password}
+                  onChange={(e) => setListing({ password: e.target.value })}
+                  placeholder={t("podSetup.passwordPlaceholder")}
+                  aria-label={t("podSetup.passwordPlaceholder")}
+                  maxLength={POD_PASSWORD_MAX_LENGTH}
+                  className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
+                />
+              )}
+              <div className="flex flex-col gap-1 pt-1">
+                <label htmlFor="pod-setup-room-name" className="text-sm font-medium text-white/60">
+                  {t("podSetup.roomName")} <span className="text-white/40">{t("podSetup.optional")}</span>
+                </label>
+                <input
+                  id="pod-setup-room-name"
+                  type="text"
+                  value={listing.roomName}
+                  onChange={(e) => setListing({ roomName: e.target.value })}
+                  maxLength={LOBBY_LABEL_MAX_CHARS}
+                  // It is the default `podListingRequest` sends for a blank room name.
+                  placeholder={
+                    hostName
+                      ? t("hostSetup.roomNameDefaultPlaceholder", { ns: "multiplayer", name: hostName })
+                      : t("podSetup.roomNamePlaceholder")
+                  }
+                  className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
+                />
+                <p className="text-xs text-white/40">{t("podSetup.roomNameHelp")}</p>
+              </div>
+            </>
+          )}
+        </div>
+
         {/* Pool source: Set vs Cube tab switch */}
         <div className="flex gap-2 border-b border-white/10">
           <button
@@ -435,36 +564,56 @@ function PodSetup() {
 
         {poolMode === "set" || packDistribution === "AllAtOnce" ? (
           <>
-            <div className="flex flex-col gap-1">
-              <span className="text-sm font-medium text-white/60">{t("podSetup.setDraftMode")}</span>
-              <div className="flex gap-4">
-                <label className="flex items-center gap-2 text-sm text-white/70">
-                  <input
-                    type="radio"
-                    name="setDraftMode"
-                    checked={setDraftMode === "uniform"}
-                    onChange={() => setSetDraftMode("uniform")}
-                    className="accent-emerald-400"
-                  />
-                  {t("podSetup.uniformPacks")}
-                </label>
-                <label className="flex items-center gap-2 text-sm text-white/70">
-                  <input
-                    type="radio"
-                    name="setDraftMode"
-                    checked={setDraftMode === "chaos"}
-                    onChange={() => setSetDraftMode("chaos")}
-                    className="accent-emerald-400"
-                  />
-                  {t("podSetup.chaosPacks")}
-                </label>
+            {/* A Chaos pod draws each (seat, round) booster from its own
+                privately-assigned set. A shared stack shuffles every booster
+                together before the first decision, so no seat holds the packs
+                generated for it and the assignment only hides which sets the
+                pool is made of — `DraftProcedure::validate_source` refuses the
+                pair outright.
+
+                RENDER THE PUBLISHED CAPABILITY. `allowed_set_layouts` is the
+                engine's own list, read by `validate_source` and by the server's
+                admission guard, so what is offered here and what is accepted
+                cannot disagree. This used to ask
+                `isSharedStackDistribution(packDistribution)` and conclude "then
+                no Chaos" — a second authority over a rule the engine owns,
+                correct only while the rule happens to track the distribution.
+                `null` means NOT PUBLISHED YET, and renders nothing: an absent
+                contract is not permission, and offering a control the engine
+                may refuse is the guessing this list exists to remove. The radio
+                returns when the engine says Chaos is admitted. */}
+            {(allowedSetLayouts?.includes("Chaos") ?? false) && (
+              <div className="flex flex-col gap-1">
+                <span className="text-sm font-medium text-white/60">{t("podSetup.setDraftMode")}</span>
+                <div className="flex gap-4">
+                  <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+                    <input
+                      type="radio"
+                      name="setDraftMode"
+                      checked={setDraftMode === "uniform"}
+                      onChange={() => setSetDraftMode("uniform")}
+                      className="accent-emerald-400"
+                    />
+                    {t("podSetup.uniformPacks")}
+                  </label>
+                  <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+                    <input
+                      type="radio"
+                      name="setDraftMode"
+                      checked={setDraftMode === "chaos"}
+                      onChange={() => setSetDraftMode("chaos")}
+                      className="accent-emerald-400"
+                    />
+                    {t("podSetup.chaosPacks")}
+                  </label>
+                </div>
+                <p className="text-xs text-white/40">
+                  {setDraftMode === "chaos"
+                    ? t("podSetup.chaosSelectorHint")
+                    : t("podSetup.setSelectorHint")}
+                </p>
               </div>
-              <p className="text-xs text-white/40">
-                {setDraftMode === "chaos"
-                  ? t("podSetup.chaosSelectorHint")
-                  : t("podSetup.setSelectorHint")}
-              </p>
-            </div>
+            )}
             <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
               {setDraftMode === "chaos"
                 ? t("podSetup.chaosSelectorDetail")
@@ -891,15 +1040,41 @@ function DraftingPhaseContent({
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
   const paused = useMultiplayerDraftStore((s) => s.paused);
   const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
+  // THIS viewer's seat, for the shared-stack table's "is it my turn" test. The
+  // engine publishes `active_seat` but no viewer identity, and `active_pile` is
+  // public, so the comparison needs the seat the transport assigned us.
+  const seatIndex = useMultiplayerDraftStore((s) => s.seatIndex);
   const phoneToolbarPinned = phoneLayout && !mobileWorkspaceOpen;
   const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
     if (useMultiplayerDraftStore.getState().pickInteractionLocked) return;
     setWorkspacePreferences(next);
     saveDraftWorkspacePreferences(next);
+    // SYNCHRONOUSLY, not from an effect. Cards reach the pool on paths that
+    // resolve no placement of their own -- a shared-stack take collects a whole
+    // pile, a timed-out seat's decision is applied by the host and broadcast --
+    // so the store has to know which columns this board currently means. An
+    // effect runs after commit, and a `viewUpdated` landing in that window made
+    // `installEventView` place and publish the arrivals against the PREVIOUS
+    // columns. This is the only path that changes `deck`: the scale setters
+    // below spread `current` and touch one numeric field.
+    setArrivingCardBoardPreferences(next.deck);
+  }, []);
+  // Mount only. The change path publishes for itself, above.
+  useEffect(() => {
+    setArrivingCardBoardPreferences(loadDraftWorkspacePreferences().deck);
   }, []);
   const setPackScale = useCallback((next: number) => {
     setWorkspacePreferences((current) => {
       const updated = { ...current, packScale: repairDraftWorkspacePackScale(next) };
+      saveDraftWorkspacePreferences(updated);
+      return updated;
+    });
+  }, []);
+  // The pile surface's own scale, stored beside the pack surface's and never
+  // shared with it: see `DRAFT_WORKSPACE_PILE_SCALE_DEFAULT`.
+  const setPileScale = useCallback((next: number) => {
+    setWorkspacePreferences((current) => {
+      const updated = { ...current, pileScale: repairDraftWorkspacePileScale(next) };
       saveDraftWorkspacePreferences(updated);
       return updated;
     });
@@ -928,6 +1103,8 @@ function DraftingPhaseContent({
     );
   }, [workspacePreferences.sideboard.columnCount]);
   const interactionLocked = paused || pickInteractionLocked;
+  // Read once, so the surface selection and the two gates above it cannot drift.
+  const sharedStack = view?.shared_stack ?? null;
   const dragController = useDraftWorkspaceDrag({
     enabled: introDismissed && !interactionLocked,
     workspaceProjectionEnabled: responsiveLayout === "desktop",
@@ -958,6 +1135,9 @@ function DraftingPhaseContent({
       : { column: 0 };
     return state.confirmPick(destination, resolvedPlacement);
   }, [workspacePreferences.deck]);
+  const handleSharedStackDecision = useCallback((pile: number, decision: SharedStackPileDecision) => {
+    void useMultiplayerDraftStore.getState().submitSharedStackDecision(pile, decision);
+  }, []);
   const handleAutoPick = useCallback(() => {
     const state = useMultiplayerDraftStore.getState();
     const { view: currentView, workspaceState } = state;
@@ -1009,22 +1189,46 @@ function DraftingPhaseContent({
     // worse than a frame with no intro, and the following `viewUpdated` supplies it.
     if (!view) return null;
 
+    // The DISTRIBUTION is asked first, ahead of the launch capability. A
+    // shared-stack pod's capability is `None`, exactly like an ordinary pod's,
+    // so a capability-first test falls through to the pod copy and explains a
+    // Winston draft as opening packs and passing them — a procedure it does not
+    // have. Both reads are engine-published procedure facts; only their order
+    // makes one of them wrong.
+    const sharedStack = isSharedStackDistribution(view.distribution)
+      ? view.distribution.SharedStackPiles
+      : null;
+
     return (
       <DraftIntro
-        mode={view.launch_capability === "CommanderMultiplayer" ? "commander" : "pod"}
+        mode={sharedStack !== null
+          ? "winston"
+          : view.launch_capability === "CommanderMultiplayer"
+            ? "commander"
+            : "pod"}
         podSize={view.seats.length}
         packCount={view.pack_count}
         cardsPerPack={view.cards_per_pack}
         packSizes={view.pack_sizes}
+        pileCount={sharedStack?.pile_count}
         minDeckSize={view.min_deck_size}
         onContinue={() => setIntroDismissed(true)}
       />
     );
   }
 
-  // Wire `pauseReason` is `DraftPauseReason` (PascalCase) — same shape as the
-  // i18n key path, so no boundary conversion. Falls back to a generic key if
-  // the engine ever emits an unknown reason (defensive only).
+  // A total `Record` over `DraftPauseReason`, not an interpolated key. Same
+  // device as `PICK_STATUS_KEY` and `REFUSAL_KEY`, for the reason measured
+  // there: an interpolated `t()` does NOT typecheck its key, so a reason the
+  // engine grows later would reach the banner as its own key text. This way it
+  // is a TS2741 at this literal. The `??` is the "not paused for a named
+  // reason" fallback, not a defence against an unknown variant -- the wire
+  // refuses those.
+  const PAUSE_REASON_KEY = {
+    PlayerDisconnected: "podPhaseView.pauseReason.PlayerDisconnected",
+    PausedByHost: "podPhaseView.pauseReason.PausedByHost",
+    DisconnectGraceExpired: "podPhaseView.pauseReason.DisconnectGraceExpired",
+  } as const satisfies Record<DraftPauseReason, string>;
   const pauseKey = pauseReason ?? "PausedByHost";
 
   return (
@@ -1034,7 +1238,7 @@ function DraftingPhaseContent({
           role="status"
           className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
         >
-          ⚠ {t(`podPhaseView.pauseReason.${pauseKey}`)}
+          ⚠ {t(PAUSE_REASON_KEY[pauseKey])}
         </div>
       )}
       <div
@@ -1053,17 +1257,54 @@ function DraftingPhaseContent({
           ? "w-full min-w-0"
           : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
           {responsiveLayout === "desktop" && <SeatStatusRing />}
-          {responsiveLayout === "desktop" && <DraftProgress view={view} />}
+          {/* `DraftProgress` describes a PICK-AND-PASS step — a pack number and a
+              pick step out of that pack's total — and neither exists under a
+              shared stack: the turn is a whole-pile decision and the engine
+              publishes no pick step for it. So it is gated on the same
+              engine-published discriminator that selects the surface below,
+              rather than rendering a frozen pack bar beside the piles.
+
+              `PickTimer` IS NOT GATED, and the asymmetry is the point. The host
+              re-arms the pick clock on every applied shared-stack decision
+              (`P2PDraftHost.handleSharedStackDecision`) and expiry runs
+              `autoDecideSharedStackTurn`, which applies the first legal decision
+              for the active seat — it takes the pile for them. A player who
+              cannot see that clock loses a turn with no warning, which is worse
+              than the frozen-bar problem the gate above avoids. `PickTimer`
+              self-gates on `pod_policy === "Competitive"` and a non-null
+              remaining time, which is exactly the condition under which the
+              sweep can fire, so rendering it unconditionally shows it precisely
+              when it is real. */}
+          {responsiveLayout === "desktop" && sharedStack === null && <DraftProgress view={view} />}
           <PickTimer />
-          <PackDisplay
-            controller={packController}
-            presentation={{ packScale: workspacePreferences.packScale, setPackScale }}
-            enableDraftEffects
-            onCardHover={setHoveredCard}
-            responsiveLayout={responsiveLayout}
-            phoneToolbarPinned={phoneToolbarPinned}
-            mobileWorkspaceOpen={mobileWorkspaceOpen}
-          />
+          {sharedStack !== null && view !== null ? (
+            /* The ENGINE's discriminator, not a kind check: `shared_stack` is
+               status-gated to `Drafting` and present only under
+               `PackDistribution::SharedStackPiles`, so a non-null value means
+               exactly "a live pile turn", and `current_pack` — which drives
+               `PackDisplay` — is null for every seat in such a draft. */
+            <WinstonPileTable
+              sharedStack={sharedStack}
+              seats={view.seats}
+              viewerSeat={seatIndex}
+              playFirstChooser={view.play_first_chooser}
+              interactionLocked={interactionLocked}
+              onDecide={handleSharedStackDecision}
+              pileScale={workspacePreferences.pileScale}
+              setPileScale={setPileScale}
+              responsiveLayout={responsiveLayout}
+            />
+          ) : (
+            <PackDisplay
+              controller={packController}
+              presentation={{ packScale: workspacePreferences.packScale, setPackScale }}
+              enableDraftEffects
+              onCardHover={setHoveredCard}
+              responsiveLayout={responsiveLayout}
+              phoneToolbarPinned={phoneToolbarPinned}
+              mobileWorkspaceOpen={mobileWorkspaceOpen}
+            />
+          )}
         </div>
         {view && workspaceState && (
           <div className={responsiveLayout === "desktop"
@@ -1285,12 +1526,16 @@ function PodErrorView({
 }) {
   const { t } = useTranslation("draft");
   const recoveryFailure = useMultiplayerDraftStore((s) => s.guestRecoveryFailure);
+  const reason = usePodErrorMessage(useMultiplayerDraftStore((s) => s.error));
+  // A recovery failure's own message wins over the store error, because a
+  // retry that fails offline writes the offline sentinel while the recovery
+  // failure and its retry stay.
   const message =
     phase === "kicked"
       ? t("podError.kicked")
       : phase === "hostLeft"
         ? t("podError.hostLeft")
-        : recoveryFailure?.message ?? t("podError.connection");
+        : recoveryFailure?.message ?? reason ?? t("podError.connection");
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24">
       <div className="text-xl font-medium text-red-300">{message}</div>
@@ -1386,7 +1631,9 @@ function DraftPodPageContent() {
   const entryGeneration = useRef(0);
   const retryController = useRef<AbortController | null>(null);
   const entry = searchParams.get("entry");
-  const commanderDraftRequested = searchParams.get("kind") === COMMANDER_DRAFT_ENTRY;
+  // One resolver over the slug map instead of a `<kind>Requested` boolean per kind:
+  // the fifth kind adds a map entry in `draftKind.ts` and nothing here.
+  const requestedKind = draftKindForEntry(searchParams.get("kind"));
   const resumeRequested = searchParams.get("resume") === "1";
   const entryMode = entry === "host" || entry === "guest" || entry === "auto"
     ? entry
@@ -1560,9 +1807,9 @@ function DraftPodPageContent() {
     // A resumed pod's kind comes from its persisted session, which is the higher
     // authority — a URL intent must never overwrite it.
     if (resumeRequested) return;
-    if (!commanderDraftRequested) return;
-    void enterKindForEntry("CommanderDraft");
-  }, [commanderDraftRequested, enterKindForEntry, resumeRequested]);
+    if (requestedKind === null) return;
+    void enterKindForEntry(requestedKind);
+  }, [requestedKind, enterKindForEntry, resumeRequested]);
 
   const handleLeave = useCallback(async () => {
     await leave(false);

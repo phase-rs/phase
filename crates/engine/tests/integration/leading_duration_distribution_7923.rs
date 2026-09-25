@@ -1161,9 +1161,16 @@ fn gain_all_activated_abilities_yields_to_a_governing_leading_duration() {
 
 /// **V-U2e — `[COVER]`, SHAPE, table-driven.**
 ///
-/// **PASSES AT BASE_SHA UNCHANGED, BY DESIGN — this is OVER-SPLITTING cover.**
-/// Each row asserts its exact post-fix chain shape, which EQUALS its BASE shape;
-/// the row fails only if `severed_prefix_end` becomes over-broad. The
+/// **PASSES AT BASE_SHA UNCHANGED, BY DESIGN — this is OVER-SPLITTING cover —
+/// WITH ONE AMENDED EXCEPTION.** Each row asserts its exact post-fix chain shape,
+/// which EQUALS its BASE shape, and fails only if `severed_prefix_end` becomes
+/// over-broad. **The Arm the Cathars row is the exception:** phase 6 amended its
+/// `links` from 2 to 4, so it does NOT pass at base and its shape is deliberately
+/// NOT the base shape. At base that row pinned a silent DROP of two of the card's
+/// three printed P/T instructions (the chain was `Pump(+3/+3) -> vigilance`); it
+/// now pins the conjunct split. For that row alone, read the per-row
+/// "must be UNCHANGED" message below as "must be UNCHANGED from the amended
+/// value". The
 /// revert-failing content for the predicate lives in
 /// `opportunistic_dragon_riders_bind_stolen_permanent` and
 /// `revenge_of_the_hunted_recovers_lure_conjunct`.
@@ -1212,7 +1219,7 @@ fn leading_duration_merge_cards_unchanged() {
         Row { name: "Sylvan Awakening", text: "Until your next turn, all lands you control become 2/2 Elemental creatures with reach, indestructible, and haste. They're still lands.", types: &["Sorcery"], subtypes: &[], keywords: &["Indestructible"], unimplemented: 0, links: 2, mods: 9 },
         Row { name: "Kitesail Larcenist", text: "Flying, ward {1}\nWhen this creature enters, for each player, choose up to one other target artifact or creature that player controls. For as long as this creature remains on the battlefield, the chosen permanents become Treasure artifacts with \"{T}, Sacrifice this artifact: Add one mana of any color\" and lose all other abilities.", types: &["Creature"], subtypes: &["Human", "Pirate"], keywords: &["Flying", "Ward"], unimplemented: 1, links: 2, mods: 5 },
         Row { name: "Dominaria's Judgment", text: "Until end of turn, creatures you control gain protection from white if you control a Plains, from blue if you control an Island, from black if you control a Swamp, from red if you control a Mountain, and from green if you control a Forest.", types: &["Instant"], subtypes: &[], keywords: &[], unimplemented: 0, links: 1, mods: 5 },
-        Row { name: "Arm the Cathars", text: "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.", types: &["Sorcery"], subtypes: &[], keywords: &[], unimplemented: 0, links: 2, mods: 1 },
+        Row { name: "Arm the Cathars", text: "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.", types: &["Sorcery"], subtypes: &[], keywords: &[], unimplemented: 0, links: 4, mods: 1 },
     ];
 
     for row in rows {
@@ -1329,8 +1336,9 @@ fn leading_duration_merge_cards_unchanged() {
         "Stolen Strategy: the mana-spend rider stays MERGED onto the grant: {ss_links:#?}"
     );
 
-    // Arm the Cathars parses to ONE chunk before the predicate — `sub.len() < 2`
-    // early-returns, so the predicate must never even be reached.
+    // Arm the Cathars reaches the predicate: its conjuncts each parse to their own
+    // targeted node, so `sub.len() < 2` no longer early-returns for this row. The
+    // row's `links` value is what pins that chain, not this comment.
     let cathars = parse_oracle_text(
         "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.",
         "Arm the Cathars", &[], &["Sorcery".to_string()], &[],

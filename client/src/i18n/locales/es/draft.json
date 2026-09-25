@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Draft Rápido",
     "podTitle": "Pod Draft",
+    "winstonTitle": "Winston Draft",
     "commanderTitle": "Commander Draft",
     "subtitle": "Así funciona",
     "startDrafting": "Empezar a draftear",
@@ -21,7 +22,11 @@
       "minimumDeckCards_one": "{{count, number}} carta",
       "minimumDeckCards_few": "{{count, number}} cartas",
       "minimumDeckCards_many": "{{count, number}} cartas",
-      "minimumDeckCards_other": "{{count, number}} cartas"
+      "minimumDeckCards_other": "{{count, number}} cartas",
+      "pilesDealt_one": "{{count, number}} montón de una carta",
+      "pilesDealt_few": "{{count, number}} montones de una carta",
+      "pilesDealt_many": "{{count, number}} montones de una carta",
+      "pilesDealt_other": "{{count, number}} montones de una carta"
     },
     "packPassing_one": "Este draft tiene una sola ronda de sobres, por lo que la dirección de pase no cambia",
     "packPassing_few": "La dirección de pase cambia en cada ronda",
@@ -38,6 +43,13 @@
       "step2": "Abre {{packs}}; cada sobre contiene {{cardsPerPack}} — elige una carta y pasa el resto",
       "step2Mixed": "Abre {{packs}} de tamaños distintos, en este orden: {{packSizes, list}} — elige una carta y pasa el resto",
       "step4": "Tras el draft, construye un mazo de al menos {{minimumDeckCards}} y juega partidas de torneo"
+    },
+    "winston": {
+      "step2": "Los {{packs}} de cada jugador se abren sin que nadie los mire y todas las cartas se barajan en un único mazo boca abajo",
+      "step2Mixed": "Los {{packs}} de tamaños distintos de cada jugador, en este orden: {{packSizes, list}}, se abren sin que nadie los mire y se barajan en un único mazo boca abajo",
+      "step3": "Se reparten {{piles}} de la cima. En tu turno, mira el primer montón: tómalo o recházalo y pasa al siguiente",
+      "step4": "Rechazar pone la carta superior del mazo sobre el montón que rechazaste. Recházalos todos y te llevas la carta superior del mazo sin verla",
+      "step5": "Los turnos se alternan hasta que no quedan cartas; después construye un mazo de al menos {{minimumDeckCards}} y juega partidas de torneo"
     },
     "commander": {
       "step2": "Abre {{packs}}; cada sobre contiene {{cardsPerPack}} — elige dos cartas y pasa el resto",
@@ -79,6 +91,13 @@
     "label": "Temporizador de elección",
     "seconds": "{{count}}s"
   },
+  "pickStatus": {
+    "Pending": "Eligiendo",
+    "Picked": "Elegido",
+    "Waiting": "Esperando",
+    "TimedOut": "Tiempo agotado",
+    "NotDrafting": "Sin draftear"
+  },
   "scoreBadge": {
     "label": "Puntuación: {{count}} victorias"
   },
@@ -92,7 +111,11 @@
     "activePackCount_one": "{{count}} sobre en {{player}}",
     "activePackCount_few": "{{count}} sobres en {{player}}",
     "activePackCount_many": "{{count}} sobres en {{player}}",
-    "activePackCount_other": "{{count}} sobres en {{player}}"
+    "activePackCount_other": "{{count}} sobres en {{player}}",
+    "draftedCardCount_one": "{{count}} carta drafteada por {{player}}",
+    "draftedCardCount_few": "{{count}} cartas drafteadas por {{player}}",
+    "draftedCardCount_many": "{{count}} cartas drafteadas por {{player}}",
+    "draftedCardCount_other": "{{count}} cartas drafteadas por {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Dificultad de los bots",
@@ -160,6 +183,7 @@
     "packProgress": "Sobre {{current}} de {{total}}",
     "openPack": "Abrir sobre",
     "openPackArt": "Abrir ilustración del sobre",
+    "openAllPacks": "Abrir todos los sobres",
     "pulls": "Tus cartas",
     "nextPack": "Siguiente sobre",
     "viewPool": "Ver tu pool",
@@ -366,6 +390,10 @@
       "title": "Commander Draft",
       "description": "Draftea dos cartas a la vez en un pod, construye un mazo Commander de 60 cartas y juega una partida multijugador."
     },
+    "winstonDraft": {
+      "title": "Winston Draft",
+      "description": "Dos jugadores comparten una pila boca abajo repartida en tres montones: toma un montón o recházalo, luego construye y juega."
+    },
     "podInProgress": "Pod Draft en curso",
     "guestPodInProgress": "Pod unido listo para reconectar",
     "podLabel": "Pod {{kind}}",
@@ -515,6 +543,8 @@
     "kindSealedDesc": "Abre seis sobres directamente en el pool de cada jugador y luego construye un mazo de torneo al mejor de uno.",
     "kindCommanderDraft": "Commander",
     "kindCommanderDraftDesc": "Cada jugador draftea dos cartas a la vez y construye un mazo Commander de 60 cartas; después el pod juega una partida multijugador.",
+    "kindWinston": "Winston",
+    "kindWinstonDesc": "De dos a cuatro jugadores draftean una pila compartida boca abajo mediante tres montones: en tu turno, mira un montón y tómalo o recházalo y añádele una carta.",
     "tournamentFormat": "Formato de torneo",
     "tournamentSwiss": "Suizo",
     "tournamentSwissDesc": "Todos siguen jugando durante tres rondas, incluso tras una derrota.",
@@ -542,7 +572,20 @@
     "tabs": {
       "set": "Colección",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "No se pudo conectar con la sala para publicar este pod. Desactiva “$t(draft:podSetup.listInLobby)” para hospedar con un código de sala.",
+    "listingHostNameTooLong": "Para publicar este pod en la sala, usa un nombre visible de máximo {{max}} caracteres.",
+    "listingRoomNameTooLong": "Para publicar este pod en la sala, usa un nombre de sala de máximo {{max}} caracteres.",
+    "listingCubeNameTooLong": "Para publicar este pod en la sala, usa un nombre de Cube de máximo {{max}} caracteres.",
+    "listingPasswordTooLong": "Para publicar este pod en la sala, usa una contraseña más corta.",
+    "listInLobby": "Listar en la sala de espera",
+    "listingSeatLimit": "El listado de la sala admite pods de hasta {{max}} jugadores.",
+    "setPassword": "Establecer contraseña",
+    "passwordPlaceholder": "Contraseña del pod",
+    "roomName": "Nombre de la sala",
+    "optional": "(opcional)",
+    "roomNameHelp": "Se muestra a los jugadores que exploran la sala de espera.",
+    "roomNamePlaceholder": "p. ej. Cube del viernes por la noche"
   },
   "podPhaseView": {
     "tournamentPairings": "Emparejamientos del torneo",
@@ -597,6 +640,53 @@
     "hostLeft": "El anfitrión abandonó el draft",
     "connection": "Error de conexión",
     "retry": "Intentar reconectar"
+  },
+  "winston": {
+    "heading": "Winston Draft",
+    "yourTurn": "Tu turno — montón {{index}}",
+    "otherSeatTurn": "{{name}} está decidiendo",
+    "seatFallback": "Asiento {{index}}",
+    "turnHint": "Toma el montón o recházalo. Al rechazarlo se le añade una carta de la pila principal y pasas al siguiente montón; si rechazas el último, robas la carta superior de la pila principal.",
+    "mainStackRemaining_one": "{{count, number}} carta boca abajo en la pila principal",
+    "mainStackRemaining_few": "{{count, number}} cartas boca abajo en la pila principal",
+    "mainStackRemaining_many": "{{count, number}} cartas boca abajo en la pila principal",
+    "mainStackRemaining_other": "{{count, number}} cartas boca abajo en la pila principal",
+    "cardsLeft_one": "{{count, number}} carta restante en el draft",
+    "cardsLeft_few": "{{count, number}} cartas restantes en el draft",
+    "cardsLeft_many": "{{count, number}} cartas restantes en el draft",
+    "cardsLeft_other": "{{count, number}} cartas restantes en el draft",
+    "stackShare": "Proporción de las cartas restantes del draft que siguen boca abajo en la pila principal",
+    "pileLabel": "Montón {{index}}",
+    "pileTotal_one": "{{count, number}} carta",
+    "pileTotal_few": "{{count, number}} cartas",
+    "pileTotal_many": "{{count, number}} cartas",
+    "pileTotal_other": "{{count, number}} cartas",
+    "pileFaceDown": "Boca abajo",
+    "deciding": "Decidiendo sobre este montón",
+    "hiddenPiles": "Los montones permanecen boca abajo hasta que sea tu turno.",
+    "take": "Tomar",
+    "takeAria": "Tomar el montón {{index}}",
+    "decline": "Rechazar",
+    "declineAria": "Rechazar el montón {{index}}",
+    "spreadPile": "Extender el montón {{index}}",
+    "stackPile": "Apilar el montón {{index}}",
+    "refusal": {
+      "PileNotActive": "No estás decidiendo sobre este montón.",
+      "PileEmpty": "Este montón está vacío, no hay nada que tomar.",
+      "NoGuaranteedCard": "Rechazar ya no puede darte una carta este turno, así que tomar este montón es tu única jugada legal."
+    },
+    "refusalUnpublished": "El draft no publicó ningún veredicto para esta decisión.",
+    "playFirstChooser": "{{name}} elige quién juega primero en las partidas posteriores al draft.",
+    "scale": "Escala de montones",
+    "scaleDecrease": "Reducir la escala de montones",
+    "scaleReset": "Restablecer la escala de montones",
+    "scaleIncrease": "Aumentar la escala de montones",
+    "faceDownStack_one": "{{count, number}} carta boca abajo",
+    "faceDownStack_few": "{{count, number}} cartas boca abajo",
+    "faceDownStack_many": "{{count, number}} cartas boca abajo",
+    "faceDownStack_other": "{{count, number}} cartas boca abajo",
+    "forcedDraw": "Rechazaste todos los montones, así que robaste {{name}} de la cima del mazo principal.",
+    "forcedDrawLabel": "Robada del mazo principal"
   },
   "lobby": {
     "title": "Sala de espera del pod de draft",

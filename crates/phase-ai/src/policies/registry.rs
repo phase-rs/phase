@@ -10,6 +10,7 @@ use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
 use super::combat_withdrawal::CombatWithdrawalPolicy;
+use super::commander_zone_return::CommanderZoneReturnPolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
 use super::creature_type_choice::CreatureTypeChoicePolicy;
@@ -116,7 +117,6 @@ pub enum PolicyId {
     PlusOneCountersMulligan,
     SpellslingerCasting,
     SpellslingerKeepablesMulligan,
-    CombatTaxPayment,
     ReactiveSelfProtection,
     /// CR 601.2f + CR 702.34a: a cast whose mandatory sacrifice cost — an
     /// additional cost, or a flashback alternative cost — could only be paid by
@@ -157,6 +157,7 @@ pub enum PolicyId {
     GraveyardTypes,
     CrewTiming,
     CombatWithdrawal,
+    CommanderZoneReturn,
     /// CR 608.2c: "return a land you control" self-bounce target choice.
     SelfBounceTarget,
     /// CR 601.2f: deploy a "spells you cast cost less" engine before the spells
@@ -409,7 +410,7 @@ impl Default for PolicyRegistry {
             Box::new(AnthemPriorityPolicy),
             Box::new(PlusOneCountersPolicy),
             Box::new(SpellslingerCastingPolicy),
-            Box::new(super::combat_tax::CombatTaxPaymentPolicy),
+            Box::new(CommanderZoneReturnPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
             Box::new(SacrificeCostManaGatePolicy),
             Box::new(SacrificeLandProtectionPolicy),

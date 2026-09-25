@@ -408,6 +408,7 @@ fn locale_code(language: &str) -> Option<&'static str> {
         "French" => Some("fr"),
         "German" => Some("de"),
         "Italian" => Some("it"),
+        "Japanese" => Some("ja"),
         "Portuguese (Brazil)" => Some("pt"),
         _ => None,
     }

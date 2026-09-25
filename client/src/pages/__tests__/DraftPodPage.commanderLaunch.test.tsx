@@ -240,6 +240,7 @@ function seat(index: number, isBot: boolean): SeatPublicView {
     has_submitted_deck: true,
     pick_status: "NotDrafting",
     active_pack_count: 0,
+    drafted_card_count: 0,
     face_up_draft_cards: [],
   };
 }

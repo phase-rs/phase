@@ -378,7 +378,16 @@ fn resolution_mana_x_max(
     loop {
         let mut concrete = cost.clone();
         concrete.concretize_x(max);
-        if casting::can_pay_effect_mana_cost_after_auto_tap(state, payer, source_id, &concrete) {
+        // CR 605.3b + CR 616.1: the chosen amount is paid through
+        // `pay_unless_cost`, which has no resume root, so the offered range must
+        // not count a mana source whose own cost would pause.
+        if casting::can_pay_effect_mana_cost_after_auto_tap(
+            state,
+            payer,
+            source_id,
+            &concrete,
+            casting::PausedManaPayment::Unresumable,
+        ) {
             return Some(max);
         }
         if max == 0 {
@@ -681,7 +690,7 @@ mod tests {
         assert_eq!(state.players[0].life, 17);
         assert!(events.iter().any(|e| matches!(
             e,
-            GameEvent::LifeChanged { player_id, amount }
+            GameEvent::LifeChanged { player_id, amount, .. }
                 if *player_id == PlayerId(0) && *amount == -3
         )));
     }
@@ -726,7 +735,7 @@ mod tests {
         assert_eq!(state.players[0].life, 16);
         assert!(events.iter().any(|e| matches!(
             e,
-            GameEvent::LifeChanged { player_id, amount }
+            GameEvent::LifeChanged { player_id, amount, .. }
                 if *player_id == PlayerId(0) && *amount == -4
         )));
     }
@@ -1641,6 +1650,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         });
 
         let draw = ResolvedAbility::new(
@@ -2156,6 +2166,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         });
 
         // CR 608.2c: Build the IfYouDo SequentialSibling Draw rider — exact
@@ -2325,6 +2336,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         });
 
         let mut draw = ResolvedAbility::new(
@@ -2726,6 +2738,7 @@ mod tests {
         let event_b = GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         };
         state.current_trigger_event = Some(event_b.clone());
         let context_b = ResolvingTriggerContext::capture(&state)
@@ -2808,6 +2821,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 3,
+            new_total: crate::types::events::LifeTotalReading::default(),
         });
 
         let mut draw = ResolvedAbility::new(
@@ -2939,6 +2953,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::LifeChanged {
             player_id: PlayerId(0),
             amount: 2,
+            new_total: crate::types::events::LifeTotalReading::default(),
         });
 
         let mut draw = ResolvedAbility::new(

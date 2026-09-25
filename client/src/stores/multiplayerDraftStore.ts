@@ -19,6 +19,7 @@ import type {
   DraftPlayerView,
   PairingView,
   SeatPublicView,
+  SharedStackPileDecision,
   StandingEntry,
 } from "../adapter/draft-adapter";
 import type { EngineAdapter, GameAction, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
@@ -30,9 +31,12 @@ import {
   appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
   makeInteractiveVirtualBasicInstanceId,
+  placeArrivingPoolCards,
   reconcileWorkspaceState,
+  unplacedPoolIds,
   updateWorkspacePlacement,
 } from "../components/draft/workspace/workspacePlacement";
+import { getArrivingCardBoardPreferences } from "../components/draft/workspace/workspacePreferences";
 import {
   addVirtualBasic,
   countProjectedNames,
@@ -350,6 +354,11 @@ interface MultiplayerDraftActions {
   submitPickStep: (cardInstanceIds: readonly string[], destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
   /** Both: submit a pick using a drafted card's draft-time effect. */
   submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: readonly [string, string], destination?: DraftPickDestination, placementHint?: DraftPickPlacementHint) => Promise<DraftPickOutcome>;
+  /**
+   * One whole shared-stack turn decision. No destination and no placement
+   * hint: a decision names no cards, so there is nothing to place.
+   */
+  submitSharedStackDecision: (pile: number, decision: SharedStackPileDecision) => Promise<DraftPickOutcome>;
   /** Both: select a card (UI highlight before confirming pick). */
   selectCard: (cardInstanceId: string | null) => void;
   /** Both: confirm the currently selected card as pick. */
@@ -809,7 +818,62 @@ async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOu
       cleanup();
       return { status: "rejected", reason: "unacknowledged" };
     }
-    let workspace = reconcileWorkspaceState(state.workspaceState, acknowledgedView.pool);
+    // Sorted placement for a pick that resolved no hint of its own. The pod page
+    // resolves one in `handleConfirmPick` and `handleAutoPick`, but
+    // `PackDisplay`'s `request` dispatches `pickCard`,
+    // `pickCardStep` and `pickCardWithDraftEffect` with no hint at all, and `applyDestination` then
+    // falls back to `placement.column` — reconcile's column-0 default.
+    //
+    // Ids this request places itself, which the arriving pass must leave alone.
+    //
+    // A `sideboard` destination, because the pass is deck-only: the card still
+    // carries reconcile's `"deck"` default when the pass runs, so the pass would
+    // stamp a deck-geometry column that `applyDestination` carries into the
+    // sideboard, to be clamped by `normalizeWorkspaceForBoardGeometry` to that
+    // zone's last column once it overflows the narrower sideboard.
+    //
+    // A `placementHint`, because `applyDestination` falls back per FIELD:
+    // `placementHint?.row ?? placement.row`. A drag that hits a column but no
+    // row band omits `row` (`useDraftWorkspaceDrag` sends none when
+    // `target.row === null`), so on a two-row board the pass would decide that
+    // card's row through the engine classification instead of leaving the
+    // reconcile default the hint path has always fallen back to. That card's own
+    // column is unaffected — the hint always wins there — so `row` is the whole
+    // of what this arm protects.
+    //
+    // `auto-pick` types its `destination` as the literal `"deck"`, and carries
+    // per-id hints rather than one.
+    const ownPlacement = request.kind === "auto-pick"
+      ? request.instanceIds.filter((instanceId) => request.placementHints?.[instanceId] !== undefined)
+      : request.placementHint !== undefined || request.destination !== "deck"
+        ? request.instanceIds
+        : [];
+    // BEFORE the `applyDestination` below, and the order is load-bearing — do
+    // not move this under it. For a multi-id hint-less DECK pick — what
+    // `PackDisplay`'s `request` sends as `pickCardWithDraftEffect(effect, ids,
+    // destination)` with no hint, which `DraftPodPage`'s controller forwards to
+    // `submitPickWithDraftEffect` — both calls write the same two ids'
+    // placements: this pass appends them in POOL order, `applyDestination`
+    // appends them in REQUEST order and re-appends an id it finds already
+    // placed (`if (!placement) continue` is its only skip). Whichever runs last
+    // decides the stack order. Pinned by `appends a hint-less deck draft-effect
+    // pick in request order`, which was the single placement failure of a full
+    // `npx vitest run` with this call moved below the `applyDestination`
+    // assignment — it failed there on `second.order`, expecting 0 and getting
+    // 1, the pool-order result. Count the placement failures, not the failures:
+    // `devServerPort.test.ts` times out beside it in some runs of that move,
+    // and timed out on this tree with nothing moved too.
+    let workspace = placeArrivingPoolCards(
+      reconcileWorkspaceState(state.workspaceState, acknowledgedView.pool),
+      // Against the PRE-reconcile workspace, so the cards this pick just added
+      // still count as arriving; asked afterwards they would already hold
+      // reconcile's column-0 default and be filtered out.
+      unplacedPoolIds(state.workspaceState, acknowledgedView.pool)
+        .filter((instanceId) => !ownPlacement.includes(instanceId)),
+      acknowledgedView.pool,
+      acknowledgedView.pool_groups,
+      getArrivingCardBoardPreferences(),
+    );
     workspace = request.kind === "auto-pick"
       ? request.instanceIds.reduce(
         (next, instanceId) => applyDestination(
@@ -833,6 +897,130 @@ async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOu
     installWorkspace({
       view: acknowledgedView,
       base: workspace,
+      publish: true,
+      patch: {
+        phase: phaseForDraftViewStatus(acknowledgedView.status),
+        selectedCard: null,
+        pendingPickIntent: null,
+        pickInteractionLocked: false,
+      },
+    });
+    return { status: "acknowledged" };
+  } catch {
+    if (!isFresh()) return { status: "ignored", reason: "stale" };
+    cleanup();
+    return { status: "rejected", reason: "adapter" };
+  }
+}
+
+/**
+ * One whole shared-stack turn decision.
+ *
+ * A SIBLING of `performPick`, deliberately, and it must stay one — do not
+ * "simplify" it back into `performPick`. `performPick` acknowledges on
+ * `exactAddedIds`: every requested instance id present exactly once in the
+ * pool afterwards. A shared-stack DECLINE adds ZERO cards to the pool and
+ * names no ids at all, so that predicate can never be satisfied, and
+ * `performPick` refuses a zero-length id list outright before it gets that
+ * far. The engine publishes `shared_stack.decisions` for precisely this
+ * reason: it is a monotone counter of APPLIED decisions, so
+ * `after > before` acknowledges a decline and a take alike.
+ *
+ * Everything else is `performPick`'s machinery unchanged — the
+ * `exclusivePickToken` mutual exclusion, the `lifecycleGeneration` /
+ * adapter-identity `isFresh` guard, and `installWorkspace`. The one further
+ * difference: reconciliation is `reconcileWorkspaceState` ALONE, with no
+ * `applyDestination`. A decision names no cards, so there is no instance to
+ * place into a workspace zone; a take's new pool cards are picked up by
+ * reconciliation as unplaced, exactly as a restored pool is.
+ *
+ * Legality is not consulted here. The engine publishes a per-pile, per-decision
+ * `legality` vector and refuses an illegal decision in the reducer; a client
+ * that re-derived "may this seat take pile 2" from pile sizes would be a second
+ * authority, which Fork 4 forbids.
+ */
+async function performSharedStackDecision(
+  pile: number,
+  decision: SharedStackPileDecision,
+): Promise<DraftPickOutcome> {
+  if (exclusivePickToken) return { status: "ignored", reason: "busy" };
+  if (!Number.isInteger(pile) || pile < 0) {
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  const state = useMultiplayerDraftStore.getState();
+  const adapter = activeWorkspaceAdapter();
+  if (!adapter || !state.view || !state.workspaceState) {
+    return { status: "rejected", reason: "invalid-request" };
+  }
+  // No live pile turn means no decision to make. This is the ENGINE's
+  // discriminator (`shared_stack` is `Some` exactly while a pile turn is
+  // live), not a kind check.
+  const before = state.view.shared_stack;
+  if (!before) return { status: "rejected", reason: "invalid-request" };
+
+  const token = Symbol("shared-stack-decision");
+  exclusivePickToken = token;
+  const generation = lifecycleGeneration;
+  useMultiplayerDraftStore.setState({ pickInteractionLocked: true });
+  const isFresh = () => generation === lifecycleGeneration
+    && exclusivePickToken === token
+    && activeWorkspaceAdapter() === adapter;
+  const cleanup = () => {
+    if (exclusivePickToken !== token) return;
+    exclusivePickToken = null;
+    pendingGuestPick = null;
+    useMultiplayerDraftStore.setState({ pendingPickIntent: null, pickInteractionLocked: false });
+  };
+
+  try {
+    let acknowledgedView: DraftPlayerView | null;
+    if (state.role === "host" && activeHostAdapter === adapter) {
+      acknowledgedView = await adapter.submitSharedStackDecision(pile, decision);
+    } else if (state.role === "guest" && activeGuestAdapter === adapter) {
+      // The host answers with `draft_pick_ack`, which the guest adapter emits
+      // as `pickAcknowledged` — the same correlation slot a pick uses, because
+      // the exclusive token makes at most one of the two outstanding.
+      const acknowledgement = new Promise<DraftPlayerView | null>((resolve) => {
+        pendingGuestPick = { generation, resolve };
+      });
+      await adapter.submitSharedStackDecision(pile, decision);
+      acknowledgedView = await acknowledgement;
+    } else {
+      acknowledgedView = null;
+    }
+    if (!isFresh()) return { status: "ignored", reason: "stale" };
+    if (!acknowledgedView) {
+      cleanup();
+      return { status: "rejected", reason: "adapter" };
+    }
+    const after = acknowledgedView.shared_stack;
+    const applied = after
+      ? after.decisions > before.decisions
+      // The decision that empties the stack also ends the draft, and
+      // `shared_stack` is status-gated to `Drafting` — so the view that
+      // acknowledges the FINAL decision publishes no counter to compare.
+      // A view still in `Drafting` with no shared stack is a genuine failure
+      // and stays one.
+      : acknowledgedView.status !== "Drafting";
+    if (!applied) {
+      cleanup();
+      return { status: "rejected", reason: "unacknowledged" };
+    }
+    exclusivePickToken = null;
+    pendingGuestPick = null;
+    // A take collects a WHOLE PILE the engine chose the contents of, so unlike a
+    // pick there was no card to resolve a placement for before dispatching.
+    // Placed here, or every card this format delivers would stack in the
+    // board's first column.
+    installWorkspace({
+      view: acknowledgedView,
+      base: placeArrivingPoolCards(
+        reconcileWorkspaceState(state.workspaceState, acknowledgedView.pool),
+        unplacedPoolIds(state.workspaceState, acknowledgedView.pool),
+        acknowledgedView.pool,
+        acknowledgedView.pool_groups,
+        getArrivingCardBoardPreferences(),
+      ),
       publish: true,
       patch: {
         phase: phaseForDraftViewStatus(acknowledgedView.status),
@@ -1690,6 +1878,8 @@ export const useMultiplayerDraftStore = create<
   submitPickWithDraftEffect: (effectCardInstanceId, cardInstanceIds, destination = "deck", placementHint) => performPick({
     kind: "draft-effect", effectCardInstanceId, instanceIds: cardInstanceIds, destination, placementHint,
   }),
+
+  submitSharedStackDecision: (pile, decision) => performSharedStackDecision(pile, decision),
 
   selectCard: (cardInstanceId) => {
     if (get().pickInteractionLocked) return;
@@ -2925,7 +3115,18 @@ function installEventView(view: DraftPlayerView): void {
   const restored = restoredWorkspace?.generation === lifecycleGeneration ? restoredWorkspace : null;
   restoredWorkspace = null;
   const base = restored?.state ?? state.workspaceState ?? createDraftWorkspaceState();
-  const workspace = reconcileWorkspaceState(base, view.pool);
+  // Cards can arrive on this path with no placement resolved for them: the host
+  // decides for a timed-out seat and broadcasts the result, a guest receives
+  // every one of its own shared-stack takes this way, and a reconnect or a
+  // resume arrives holding a whole pool at once. Same treatment as the decision
+  // path, for the same reason — otherwise they land in column 0.
+  const workspace = placeArrivingPoolCards(
+    reconcileWorkspaceState(base, view.pool),
+    unplacedPoolIds(base, view.pool),
+    view.pool,
+    view.pool_groups,
+    getArrivingCardBoardPreferences(),
+  );
   const publish = restored !== null
     ? (restored.state === null ? view.pool.length > 0 : workspace !== base)
     : workspace !== state.workspaceState;
@@ -2935,7 +3136,18 @@ function installEventView(view: DraftPlayerView): void {
     publish,
     patch: {
       phase: phaseForDraftViewStatus(view.status),
-      timerRemainingMs: view.timer_remaining_ms ?? null,
+      // Only overwrite the clock when the view actually carries one. A view
+      // NEVER does on the P2P path -- `draft-core` publishes
+      // `timer_remaining_ms: None` on every view it builds, and the countdown
+      // is a host-side JS timer delivered by `timerTick`. Coalescing to `null`
+      // here therefore wiped the clock on every broadcast, and `startPickTimer`
+      // re-arms on each applied decision and is immediately followed by
+      // `broadcastViews()` -- so the timer unmounted and remounted once per
+      // turn, shifting the rows under the deciding player for ~1s of exactly
+      // the window `timerTick` exists to cover.
+      ...(typeof view.timer_remaining_ms === "number"
+        ? { timerRemainingMs: view.timer_remaining_ms }
+        : {}),
       standings: view.standings ?? [],
       currentRound: view.current_round ?? 0,
       pairings: view.pairings ?? [],
@@ -3050,6 +3262,14 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       // Informational — standings update comes via viewUpdated
       break;
     case "timerExpired":
+      set({ timerRemainingMs: null });
+      break;
+    case "timerTick":
+      // The host's own clock. A guest receives this reading over
+      // `draft_timer_sync`; the host has no session to receive it on, so the
+      // adapter hands it straight to this store. Without it the host cannot see
+      // a countdown that, under a shared stack, takes the pile when it expires.
+      set({ timerRemainingMs: event.remainingMs > 0 ? event.remainingMs : null });
       break;
     case "error":
       set({ error: event.message });

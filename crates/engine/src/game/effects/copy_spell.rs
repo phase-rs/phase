@@ -177,6 +177,14 @@ pub fn resolve(
                 preserve_ability_copy_source_recursive(ability);
             }
             StackEntryKind::KeywordAction { .. } => {}
+            // CR 707.10 copies a spell or ability; combat damage is neither.
+            // The refusal lives in `stack_entry_cant_be_copied`, NOT in the
+            // targeting layer — an untargeted `CopySpell` reaches
+            // `state.stack.last()` without consulting any filter, so a
+            // targeting-only argument would leave that route open. A no-op
+            // rather than a panic, because this match also runs over
+            // already-built copies.
+            StackEntryKind::CombatDamage { .. } => {}
         }
         set_copied_kind_controller(&mut kind, copy_controller);
         kind
@@ -200,7 +208,8 @@ pub fn resolve(
         StackEntryKind::Spell { card_id, .. } => Some(*card_id),
         StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
-        | StackEntryKind::KeywordAction { .. } => None,
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => None,
     };
 
     // CR 707.10: the copy-onto-stack authority stamps the CR 701.27f
@@ -834,6 +843,18 @@ fn triggering_spell_stack_entry(state: &GameState) -> Option<StackEntry> {
 }
 
 fn stack_entry_cant_be_copied(state: &GameState, entry: &StackEntry) -> bool {
+    // CR 707.10 copies a spell or ability. Combat damage on the stack is
+    // neither (CR 112.1 + CR 113.3b), so it is never a legal copy subject.
+    //
+    // This gate — not the targeting layer — is what has to refuse it. An
+    // untargeted `CopySpell` never consults a target filter at all: it falls
+    // back to `triggering_spell_stack_entry` and then to `state.stack.last()`,
+    // so a combat-damage entry sitting on top would otherwise be duplicated
+    // onto the stack.
+    if matches!(entry.kind, StackEntryKind::CombatDamage { .. }) {
+        return true;
+    }
+
     if entry
         .ability()
         .is_some_and(|ability| ability.cant_be_copied)
@@ -863,7 +884,10 @@ fn set_copied_kind_controller(kind: &mut StackEntryKind, controller: PlayerId) {
         StackEntryKind::TriggeredAbility { ability, .. } => {
             set_resolved_controller_recursive(ability, controller);
         }
-        StackEntryKind::Spell { ability: None, .. } | StackEntryKind::KeywordAction { .. } => {}
+        StackEntryKind::Spell { ability: None, .. }
+        | StackEntryKind::KeywordAction { .. }
+        // No resolved ability chain to re-controller.
+        | StackEntryKind::CombatDamage { .. } => {}
     }
 }
 
@@ -940,7 +964,9 @@ fn rewrite_copy_spell_object_targets(
 
 fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> ObjectId {
     match kind {
-        StackEntryKind::Spell { .. } | StackEntryKind::KeywordAction { .. } => copy_id,
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => copy_id,
         StackEntryKind::ActivatedAbility { source_id, .. }
         | StackEntryKind::TriggeredAbility { source_id, .. } => *source_id,
     }

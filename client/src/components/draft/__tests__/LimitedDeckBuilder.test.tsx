@@ -200,6 +200,7 @@ const TEST_VIEW: BuilderView = {
   status: "Deckbuilding",
   kind: "Quick",
   launch_capability: "None",
+  distribution: "PickAndPass",
   commanders_required: 0,
   current_pack_number: 1,
   pick_number: 1,
@@ -1457,7 +1458,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         sideboard: [],
         commander: ["Vehicle Commander"],
       },
-      { selectedFormat: "CommanderDraft" },
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
 
     expect(await screen.findByText(reason)).toBeInTheDocument();
@@ -1560,7 +1561,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
       expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
         expect.objectContaining({ main: [{ count: 1, name: "Wind Drake" }] }),
-        { selectedFormat: null },
+        { selectedFormat: null, draftSetCodes: [] },
       );
     },
   );
@@ -1655,7 +1656,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         sideboard: [],
         commander: ["Vehicle Commander"],
       },
-      { selectedFormat: "CommanderDraft" },
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
     expect(await screen.findByText(reason)).toBeInTheDocument();
     const submits = within(container).getAllByRole("button", { name: "Submit Deck" });
@@ -1731,7 +1732,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           { count: 1, name: "Vehicle Commander" },
         ],
       }),
-      { selectedFormat: null },
+      { selectedFormat: null, draftSetCodes: ["CMM"] },
     );
   });
 
@@ -2129,6 +2130,255 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       ["Second Commander"],
       [],
     );
+  });
+
+  /**
+   * CR 903.13f(3) at the DECK-COMPATIBILITY gate. Crowning a second commander
+   * and submitting the deck are two different engine calls off the same latched
+   * value: the partner-candidate query already received the drafted set codes
+   * and the compatibility request did not, which is the reported bug.
+   *
+   * This pair renders `view=`, which reaches the TEST-ONLY
+   * ControlledDeckBuilder arm: every `<LimitedDeckBuilder>` render in
+   * client/src outside __tests__ passes `local`, so ControlledDeckBuilder is
+   * test-only today. Regenerate with
+   * `grep -rn -A2 "<LimitedDeckBuilder" client/src --include=*.tsx | grep -v __tests__`.
+   * Neither row of this pair discriminates alone: with only the granting row, a
+   * client that hard-coded ["CMM"] would pass.
+   */
+  it("sends the drafted set codes with the controlled compatibility request", async () => {
+    render(
+      <LimitedDeckBuilder
+        view={COMMANDER_VIEW}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
+    ));
+  });
+
+  /** The paired sibling: a draft that latched no set codes sends none. */
+  it("sends no set codes when the controlled view latched none", async () => {
+    render(
+      <LimitedDeckBuilder
+        view={{ ...COMMANDER_VIEW, draft_set_codes: [] }}
+        mainDeck={SIXTY_CARD_DECK}
+        landCounts={NO_LANDS}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: [] },
+    ));
+  });
+
+  /**
+   * The new production-arm row for the reported bug. `local=` reaches
+   * WorkspaceDeckBuilder, and DraftPodPage — the server-hosted pod the bug was
+   * reported from — renders `<LimitedDeckBuilder>` with `local`. Regenerate the
+   * render list with
+   * `grep -rn -A2 "<LimitedDeckBuilder" client/src --include=*.tsx | grep -v __tests__`.
+   */
+  it("sends the drafted set codes from the workspace arm", async () => {
+    const fixture = workspaceDeckFixture();
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: fixture.cards },
+          workspace: fixture.workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
+    ));
+  });
+
+  /**
+   * CR 903.13f(3) conditions on what the draft CONTAINED, and the engine takes
+   * the union over every set it contained — the `draft_set_codes` field doc on
+   * the engine's `DeckCompatibilityRequest` says so ("a mixed-set draft carries
+   * every set it contained and `commander_draft_partner_grant` takes the
+   * union"). So the client forwards the whole array as published: one that
+   * reduced it to the code it recognised, or lower-cased it, would send
+   * something other than the literal asserted here.
+   */
+  it("forwards a mixed-set draft's codes whole from the workspace arm", async () => {
+    const fixture = workspaceDeckFixture();
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: fixture.cards, draft_set_codes: ["CLB", "CMM"] },
+          workspace: fixture.workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CLB", "CMM"] },
+    ));
+  });
+
+  /**
+   * Both re-render rows keep the SAME `workspace` and `preferences` references
+   * and build the next view by spreading the first, so `view.pool` keeps its
+   * identity and the compatibility `key` memo in useCommanderDraftCompatibility
+   * is what decides whether the effect re-fires: dropping `draftSetCodes` from
+   * that memo and its dependency array reds both rows. A row that rebuilt
+   * `workspace` or `pool` would move the call count for an unrelated reason.
+   */
+  function commanderDraftWorkspaceController(
+    view: BuilderView,
+    fixture: ReturnType<typeof workspaceDeckFixture>,
+    preferences: ReturnType<typeof createDefaultDraftWorkspacePreferences>,
+  ) {
+    return {
+      view,
+      workspace: fixture.workspace,
+      preferences,
+      interactionLocked: false,
+      onWorkspaceChange: () => {},
+      onPreferencesChange: () => {},
+      onSubmitDeck: () => {},
+      onAddBasicLand: () => {},
+      onRemoveBasicLand: () => {},
+    };
+  }
+
+  /**
+   * The compatibility `key` memo in useCommanderDraftCompatibility fingerprints
+   * the arguments of the call it guards, so changing the drafted set codes must
+   * re-fire the evaluator and the NEW codes must reach it. The mount's 0 -> 1
+   * transition is this test's positive reach guard.
+   */
+  it("re-evaluates compatibility when the drafted set codes change", async () => {
+    const fixture = workspaceDeckFixture();
+    const preferences = createDefaultDraftWorkspacePreferences();
+    const firstView: BuilderView = { ...COMMANDER_VIEW, pool: fixture.cards };
+    const { rerender } = render(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(firstView, fixture, preferences)}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(
+          { ...firstView, draft_set_codes: ["CLB", "CMM"] },
+          fixture,
+          preferences,
+        )}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(2));
+    expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commander: [] }),
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CLB", "CMM"] },
+    );
+  });
+
+  /**
+   * The sibling negative: a re-render carrying a DIFFERENT array of EQUAL
+   * content must not re-fire the evaluator, because the codes ride in
+   * useCommanderDraftCompatibility's `key` memo — a JSON.stringify result,
+   * which React compares with Object.is, by value for strings — rather than in
+   * the effect's own dependency array. Adding `draftSetCodes` to that
+   * dependency array makes step (2) read 2 calls instead of 1.
+   *
+   * Step 3 is the reach guard for step 2's negative, and its POSITION AFTER the
+   * negative is what makes it one: React commits updates to one root in the
+   * order they are issued, so an observable commit from step 3 proves step 2's
+   * re-render was delivered and flushed. Do not tidy it above the negative.
+   * The three expectations opening step 2 are about the test's own fixtures:
+   * they are what makes "a new array of equal content" a fact of this test
+   * rather than an intention of its author.
+   */
+  it("does not re-evaluate for a new set-code array of equal content", async () => {
+    const fixture = workspaceDeckFixture();
+    const preferences = createDefaultDraftWorkspacePreferences();
+    const firstView: BuilderView = { ...COMMANDER_VIEW, pool: fixture.cards };
+
+    // (1) Mount.
+    const { rerender } = render(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(firstView, fixture, preferences)}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(1));
+
+    // (2) THE NEGATIVE — a different array of equal content.
+    const nextView: BuilderView = { ...firstView, draft_set_codes: ["CMM"] };
+    expect(nextView).not.toBe(firstView);
+    expect(nextView.draft_set_codes).not.toBe(firstView.draft_set_codes);
+    expect(nextView.draft_set_codes).toEqual(firstView.draft_set_codes);
+    rerender(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(nextView, fixture, preferences)}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+    await act(async () => {});
+    expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(1);
+
+    // (3) THE REACH GUARD — different content on the same mounted component.
+    rerender(
+      <LimitedDeckBuilder
+        local={commanderDraftWorkspaceController(
+          { ...firstView, draft_set_codes: ["CLB", "CMM"] },
+          fixture,
+          preferences,
+        )}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+    await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalledTimes(2));
   });
 
   /**
@@ -2755,7 +3005,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     fireEvent.click(await commanderPanelScope().findByRole("button", { name: "The Prismatic Piper" }));
     await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenLastCalledWith(
       expect.objectContaining({ commander: ["The Prismatic Piper"] }),
-      { selectedFormat: "CommanderDraft" },
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
     await act(async () => {
       compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());
@@ -2767,7 +3017,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       expect.objectContaining({
         commander: ["The Prismatic Piper", "The Prismatic Piper"],
       }),
-      { selectedFormat: "CommanderDraft" },
+      { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
     ));
     await act(async () => {
       compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());
@@ -2845,7 +3095,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         expect.objectContaining({
           commander: ["The Prismatic Piper", "The Prismatic Piper"],
         }),
-        { selectedFormat: "CommanderDraft" },
+        { selectedFormat: "CommanderDraft", draftSetCodes: ["CMM"] },
       ));
       await act(async () => {
         compatibilityResolvers[compatibilityResolvers.length - 1](compatibleResult());

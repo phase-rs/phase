@@ -752,6 +752,36 @@ impl EventObjectSnapshot {
     }
 }
 
+/// A life total reported alongside the change that produced it, for display.
+///
+/// Its `PartialEq` is deliberately always true, which is what makes it safe to carry
+/// inside a [`GameEvent`]. The event can be retained as resolution context, and a life
+/// total moves every iteration of a drain loop. A derived `PartialEq` would therefore make
+/// two otherwise-equivalent cycle points differ by this display reading alone. Being
+/// equality-transparent, the reading cannot perturb any comparison of game state, present
+/// or future, while the change itself (`amount`) stays fully compared.
+///
+/// `None` means no total was reported: an event from a peer or a recording older than this
+/// field, where a consumer falls back to the accompanying state snapshot.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LifeTotalReading(pub Option<i32>);
+
+impl LifeTotalReading {
+    /// Whether no total was reported, so serialization can leave the key out entirely.
+    pub fn is_unreported(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl PartialEq for LifeTotalReading {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for LifeTotalReading {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -879,6 +909,13 @@ pub enum GameEvent {
     LifeChanged {
         player_id: PlayerId,
         amount: i32,
+        /// CR 119.1 + CR 119.3: the player's own life total once this change has
+        /// been applied. Emitted so a presentation layer animating a run of life
+        /// changes can show each intermediate total without re-deriving it by
+        /// summing `amount`s — summing cannot reproduce the real sequence once a
+        /// replacement effect alters an amount mid-run.
+        #[serde(default, skip_serializing_if = "LifeTotalReading::is_unreported")]
+        new_total: LifeTotalReading,
     },
     ManaAdded {
         player_id: PlayerId,

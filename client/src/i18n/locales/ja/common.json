@@ -1,0 +1,427 @@
+{
+  "actions": {
+    "cancel": "キャンセル",
+    "save": "保存",
+    "close": "閉じる",
+    "closeNamed": "{{name}}を閉じる"
+  },
+  "debug": {
+    "copyDisplaySnapshot": "表示スナップショットをコピー（復元不可）",
+    "exportAuthoritative": "正本ゲーム状態をエクスポート",
+    "exportAuthoritativeTitle": "ゲームの診断と復元に使うエンジン管理状態をダウンロード"
+  },
+  "quantityRef": {
+    "highestNumber": "最大の数",
+    "lowestNumber": "最小の数",
+    "chosenNumber": "選ばれた数"
+  },
+  "scryOutcome": {
+    "title": "占術完了",
+    "you": "あなた",
+    "result": "{{player}} — 上に{{top}} · 下に{{bottom}}"
+  },
+  "modal": {
+    "defaultEyebrow": "ワークスペースツール"
+  },
+  "pausedBanner": {
+    "message": "ゲーム一時停止 — {{reason}}",
+    "resume": "ゲームを再開"
+  },
+  "fullscreen": {
+    "enter": "全画面表示",
+    "exit": "全画面表示を終了"
+  },
+  "nativeEngineProgress": {
+    "title": "ネイティブエンジンを更新中",
+    "resolving": "適切なローカルサーバーを検索中…",
+    "downloadingBinary": "更新済みサーバーをダウンロード中…",
+    "verifying": "サーバーを検証中…",
+    "downloadingData": "ゲームデータをダウンロード中…",
+    "spawning": "ローカルサーバーを起動中…",
+    "ready": "ネイティブエンジンの準備完了",
+    "failed": "ネイティブエンジンを準備できませんでした"
+  },
+  "engineBadge": {
+    "native": "ネイティブエンジン",
+    "nativeTooltip": "このゲームはデスクトップアプリのネイティブエンジンで実行中です。",
+    "inBrowser": "ブラウザ内エンジン",
+    "inBrowserTooltip": "ネイティブエンジンを利用できないため、ブラウザ内で実行中です。",
+    "versionMismatchTooltip": "ネイティブエンジンのバージョンが一致しないため、ブラウザ内で実行中です。",
+    "notAttemptedTooltip": "このゲームはブラウザ内で実行中です — ネイティブエンジンは使用されませんでした。"
+  },
+  "buildBadge": {
+    "downloading": "ダウンロード中… {{progress}}%",
+    "checking": "確認中…",
+    "updating": "更新中…",
+    "updatePending": "ゲーム終了後に更新予定",
+    "cards": "カード {{age}}（{{commit}}）",
+    "cardDataTitle": "{{commit}}から{{date}}に生成されたカードデータ",
+    "desktopAppVersion": "デスクトップアプリ v{{version}}",
+    "checkForUpdates": "更新を確認",
+    "updaterDebugInfo": "アップデータのデバッグ情報",
+    "updaterIssue": "アップデータの問題: {{error}}",
+    "updateIssue": "更新の問題",
+    "updated": "更新済み"
+  },
+  "offlineBadge": {
+    "label": "オフライン",
+    "servicesPaused": "オンライン更新とサービスは一時停止しています。",
+    "forced": "オフライン作業が有効です。",
+    "connection": "ネットワーク接続がありません。"
+  },
+  "comboDetector": {
+    "label": "コンボ検出（実験的）",
+    "title": "無限ループを検出: 必須ループを自動終了し、∞リソースを表示（既定ではオフ）",
+    "off": "オフ",
+    "interactive": "対話式"
+  },
+  "gameMenu": {
+    "sections": {
+      "view": "表示",
+      "tools": "ツール",
+      "game": "ゲーム"
+    },
+    "reportCard": "カードを報告",
+    "menu": "ゲームメニュー",
+    "sandboxTools": "サンドボックスツール",
+    "sandboxToolsTitle": "サンドボックスツール — 任意の盤面状態を設定（`）",
+    "openSandboxTools": "サンドボックスツールを開く",
+    "clickModeButton": "クリックモードボタン",
+    "shown": "表示",
+    "hidden": "非表示",
+    "openGameLog": "ゲームログを開く",
+    "closeGameLog": "ゲームログを閉じる",
+    "settings": "設定",
+    "boardLayoutSplit": "分割",
+    "boardLayoutLegacy": "旧式",
+    "switchToSplitView": "分割テーブル表示に切り替え",
+    "switchToLegacyView": "旧式のフォーカス表示に切り替え",
+    "multiplayerSplitLayoutNudge": {
+      "message": "分割テーブル表示なら、すべての対戦相手を同時に確認できます。",
+      "trySplit": "分割表示を試す",
+      "dismiss": "今はしない"
+    },
+    "helpShortcuts": "ヘルプとショートカット",
+    "showAiHand": "AIの手札を表示",
+    "hideAiHand": "AIの手札を隠す",
+    "requestTakeback": "巻き戻しを要求",
+    "undoLastAction": "直前の行動を元に戻す",
+    "concede": "投了",
+    "backToDraft": "ドラフトに戻る",
+    "mainMenu": "メインメニュー",
+    "cards": "カード {{commit}}",
+    "cardDataTitle": "カードデータ: {{date}}"
+  },
+  "volume": {
+    "deviceBlocked": "音声を利用できません — システムの音声サーバーが応答していません。アプリを再起動して再試行してください。",
+    "mediaUnavailable": "音声を利用できません — このシステムには再生に必要なメディアコンポーネントがありません。ディストリビューションのGStreamerプラグインパッケージをインストールして、アプリを再起動してください。",
+    "mute": "ミュート",
+    "unmute": "ミュート解除",
+    "volume": "音量"
+  },
+  "hostControl": {
+    "collapse": "折りたたむ",
+    "expand": "ホストパネルを展開",
+    "seatHost": "ホスト",
+    "seatPlayer": "プレイヤー",
+    "seatOpen": "空席",
+    "seatAi": "AI（{{difficulty}}）",
+    "teamLabel": "チーム{{number}}",
+    "waiting": "待機中…",
+    "seatLabel": "座席{{id}}",
+    "addAi": "AIを追加",
+    "remove": "削除",
+    "human": "人間",
+    "kick": "キック",
+    "replaceAi": "AIに置換",
+    "random": "ランダム",
+    "connecting": "接続中…",
+    "cancelHosting": "ホストをキャンセル",
+    "kickConfirm": "{{name}}をルームからキックしますか？",
+    "replaceConfirm": "{{name}}をAIに置き換えますか？ルームから削除されます。",
+    "fallbackPlayerName": "プレイヤー{{number}}",
+    "seatsOccupied": "{{occupied}}/{{total}}席使用中",
+    "startGame": "ゲームを開始",
+    "startNow": "今すぐ開始",
+    "fillWithAi": "AIで埋める",
+    "joinLinkCopied": "参加リンクをコピーしました",
+    "copyJoinLink": "参加リンクをコピー: {{joinShare}}"
+  },
+  "grantDebug": {
+    "heading": "サンドボックス: デバッグ権限",
+    "description": "他のプレイヤーにデバッグ操作の送信権限を付与します。操作は公開ログに記録されます。",
+    "playerLabel": "プレイヤー{{number}}",
+    "revoke": "取り消す",
+    "grant": "付与"
+  },
+  "help": {
+    "eyebrow": "ヘルプ",
+    "title": "ヘルプとショートカット",
+    "subtitle": "紙のプレイヤー向けデジタルMagicの流れ: 停止、優先権、パス、復旧ツール。",
+    "closeHelp": "ヘルプを閉じる",
+    "searchPlaceholder": "ヘルプまたはショートカットを検索",
+    "whatCanIDo": "今できることは？",
+    "recoveryTitle": "復旧ツール",
+    "recoveryDescription": "カードが正しく動かない場合は、まず状態をエクスポートしてください。確認や調整が必要なら高度なデバッグパネルを使えます。",
+    "copyState": "状態をコピー",
+    "exportState": "状態をエクスポート",
+    "exportReplay": "リプレイをエクスポート",
+    "openAdvancedDebug": "高度なデバッグを開く",
+    "sections": {
+      "Flow": "流れ",
+      "Shortcuts": "ショートカット",
+      "Recovery": "復旧"
+    },
+    "status": {
+      "copied": "ゲーム状態をクリップボードにコピーしました。",
+      "copyFailed": "ゲーム状態をコピーできませんでした。",
+      "exported": "{{filename}}をエクスポートしました。",
+      "exportedTo": "{{path}}にエクスポートしました。",
+      "exportRequested": "エクスポートを要求しました — {{filename}}。",
+      "exportFailed": "ゲーム状態をエクスポートできませんでした。",
+      "replayExported": "リプレイを{{filename}}として保存しました。",
+      "replayExportUnavailable": "このゲームのリプレイ記録はありません。",
+      "replayExportFailed": "リプレイをエクスポートできませんでした。"
+    },
+    "prompt": {
+      "starting": "ゲームを開始または状態を復元しています。",
+      "gameOver": "ゲーム終了です。",
+      "mulliganDecide": "この初期手札をキープするかマリガンするか選択してください。",
+      "mulliganWaitDecide": "別のプレイヤーが初期手札を決めるのを待っています。",
+      "mulliganBottom": "マリガン後にキープした手札から、下に置くカードを選択してください。",
+      "mulliganWaitBottom": "別のプレイヤーがマリガンを終えるのを待っています。",
+      "openingHandBottom": "通常のマリガン前に、下に置くカードを選択してください。",
+      "openingHandWait": "別のプレイヤーが初期手札を解決するのを待っています。",
+      "waitOther": "別のプレイヤーの行動を待っています。",
+      "priorityStack": "スタック上に何かある状態であなたに優先権があります。解決を選ぶと、全員がパスしたとき一番上の項目を解決できます。",
+      "priorityAutoPass": "あなたに優先権があります。停止またはフルコントロールが有効でない限り、クライアントは静かなウィンドウを自動でパスする場合があります。",
+      "priorityActions": "あなたに優先権があります。使用可能なカードを使うかパスしてターンを進められます。",
+      "priorityPass": "あなたに優先権があります。パスすると次のステップまたはプレイヤーへ進みます。",
+      "manaPayment": "保留中の呪文または能力のマナを支払ってください。Tキーで使用可能な土地をタップできます。",
+      "targetSelection": "ハイライトされた適正な対象を選ぶか、プロンプトに許可されていればキャンセルしてください。",
+      "declareAttackers": "攻撃クリーチャーを選んで確定してください。攻撃なしも選べます。",
+      "declareBlockers": "ブロッカーを選んで攻撃クリーチャーに割り当て、確定してください。",
+      "chooseXValue": "呪文または能力を続行する前にXの値を選んでください。",
+      "payAmountChoice": "要求されたリソースをいくら支払うか選んでください。",
+      "default": "ゲームはあなたの選択を待っています。現在のプロンプトに従って続行してください。"
+    },
+    "entries": {
+      "automaticPhaseSkips": {
+        "title": "フェイズの自動スキップ",
+        "body": "フェイズは自動的にスキップされます。紙のような優先権ウィンドウが必要なら停止またはフルコントロールを使ってください。"
+      },
+      "phaseStops": {
+        "title": "フェイズ停止",
+        "body": "停止を設定するとそのステップの前で止まります。紙で戦闘前、ドロー前、終了ステップ前に行動できると宣言するのに似ています。"
+      },
+      "fullControl": {
+        "title": "フルコントロール",
+        "body": "フルコントロールでは、デジタルクライアントなら通常進む箇所を含め、優先権ウィンドウをスキップしません。"
+      },
+      "resolve": {
+        "title": "解決",
+        "body": "解決とは優先権をパスし、他の全員もパスした場合にスタックの一番上の呪文または能力を解決できるようにすることです。"
+      },
+      "passToEnd": {
+        "title": "終了までパス",
+        "body": "終了までパスすると、選択、停止、フルコントロールに中断されない限りターン中の優先権をパスし続けます。"
+      },
+      "manaPayment": {
+        "title": "マナの支払い",
+        "body": "マナの支払い中は土地を手動でタップするか、Tキーで使用可能な土地をタップできます。"
+      },
+      "combatDeclarations": {
+        "title": "戦闘の宣言",
+        "body": "ゲームが攻撃クリーチャーとブロッカーを求めるのは宣言ステップだけです。クリーチャーを選び、宣言を確定してください。"
+      },
+      "openHelp": {
+        "title": "ヘルプを開く",
+        "body": "このヘルプシートを開きます。"
+      },
+      "passPriority": {
+        "title": "優先権をパス",
+        "body": "優先権をパスするか、現在の優先権プロンプトを進めます。"
+      },
+      "undo": {
+        "title": "元に戻す",
+        "body": "非公開情報を明らかにしていない最後のローカル操作を元に戻します。"
+      },
+      "cancel": {
+        "title": "キャンセル",
+        "body": "可能な場合、現在の選択、マナ支払い、対象選択、または自動パスをキャンセルします。"
+      },
+      "advancedDebugPanel": {
+        "title": "高度なデバッグパネル",
+        "body": "高度なデバッグパネルを開きます。ほとんどのプレイヤーは最初に復旧ツールを使ってください。"
+      },
+      "reportOrExportState": {
+        "title": "状態を報告またはエクスポート",
+        "body": "カードが正しく動かない場合、現在のゲーム状態をエクスポートすると正確な盤面を再現できます。"
+      },
+      "boardRightClickMenu": {
+        "title": "盤面の右クリックメニュー",
+        "body": "デスクトップでは盤面の空白を右クリックすると、ゲームログ、復旧・デバッグツール、背景設定を開けます。"
+      }
+    },
+    "flowNudge": {
+      "message": "フェイズは自動的にスキップされます。紙のような優先権ウィンドウが必要なら停止またはフルコントロールを使ってください。",
+      "dismiss": "閉じる",
+      "learnFlow": "流れを見る"
+    },
+    "sandboxNudge": {
+      "message": "<tools>サンドボックスツール</tools>で任意の盤面状態を設定できます — カードやトークンの追加、ライフやカウンターの変更、パーマネントのコピー、フェイズ移動が可能です。<key>`</key>キーでいつでも開けます。",
+      "dismiss": "閉じる",
+      "open": "サンドボックスツールを開く"
+    },
+    "reportCardNudge": {
+      "message": "カードの表示や動作がおかしいですか？左上の<flag>報告フラグ</flag>をタップして知らせてください。",
+      "dismiss": "閉じる",
+      "open": "カードを報告",
+      "debugPrompt": "カードの表示や動作がおかしいですか？フラグを立てて知らせてください。"
+    }
+  },
+  "splash": {
+    "ready": "準備完了",
+    "loading": "読み込み中…"
+  },
+  "turnBanner": {
+    "turn": "{{number}}ターン目"
+  },
+  "diceRoll": {
+    "rollingForFirst": "先攻を決めるためにダイスを振っています",
+    "tieReroll": "同数 — 振り直し！",
+    "versus": "対",
+    "skip": "タップしてスキップ",
+    "continue": "タップして続行",
+    "you": "あなた",
+    "youPlayFirst": "あなたが先攻",
+    "playerPlaysFirst": "{{name}}が先攻",
+    "heads": "表",
+    "tails": "裏",
+    "coinFlip": "コインフリップ",
+    "wonCoinFlip": "{{name}}がコインフリップに勝利",
+    "lostCoinFlip": "{{name}}がコインフリップに敗北",
+    "turnOrder": "ターン順",
+    "turnOrderItem": "{{turn}}ターン目: {{name}}",
+    "youTakeTurn": "あなたの{{turn}}ターン目"
+  },
+  "chrome": {
+    "back": "戻る",
+    "settings": "設定",
+    "languageSettings": "言語（{{lang}}） — 設定を開く",
+    "languageTitle": "言語: {{lang}}",
+    "statusBanner": {
+      "dismiss": "このメッセージを閉じる",
+      "severity": {
+        "info": "お知らせ",
+        "warning": "注意",
+        "critical": "重要"
+      }
+    }
+  },
+  "errorBoundary": {
+    "heading": "問題が発生しました",
+    "body": "予期しないエラーが発生し、この画面を続行できません。通常は再読み込みで解決します。",
+    "reload": "再読み込み"
+  },
+  "actionError": {
+    "title": "{{action}}に失敗しました",
+    "skipTarget": "対象をスキップ",
+    "genericAction": "操作",
+    "unknownEngineError": "不明なエンジンエラー"
+  },
+  "troubleshooting": {
+    "title": "トラブルシューティング",
+    "intro": "2つの一時接続と短いテストメッセージでPeerJSシグナリングとTURNをテストします。確認には最大35秒かかり、マッチは変更されません。",
+    "run": "確認を実行",
+    "rerun": "もう一度実行",
+    "running": "確認中…",
+    "export": "レポートをダウンロード",
+    "privacy": "JSONレポートには技術的な観測結果だけが含まれます。ゲーム内容、プレイヤーID、ルームコード、認証情報、コンソールログは含まれません。最近の履歴は再読み込み後も含め、このタブに最大1時間残ります。",
+    "history": "最近のイベント: {{count}}。過去のイベントは現在の障害を証明しません。",
+    "observed": "観測時刻 {{time}}",
+    "saved": "レポートを保存しました。",
+    "requested": "ダウンロードを要求しました。ダウンロードを確認してください。",
+    "failed": "レポートを保存できませんでした。もう一度試してください。",
+    "cancelled": "保存をキャンセルしました。",
+    "runnerFailed": "確認を完了できませんでした。もう一度試してください。",
+    "checks": {
+      "connectivity": "ネットワーク接続",
+      "visibility": "ページ表示状態",
+      "support": "ブラウザ対応",
+      "engine": "ローカルエンジンインスタンス",
+      "peer": "プレイヤー接続",
+      "route": "接続経路",
+      "directory": "ロビーサービス",
+      "mode": "ゲームプレイエンジン",
+      "credentials": "新しいTURN認証情報",
+      "signaling": "PeerJSシグナリング",
+      "relay": "TURNメッセージ往復"
+    },
+    "reasons": {
+      "online": "ブラウザはオンラインと報告しています。インターネットアクセスは確認されません。",
+      "offline": "ブラウザはオフラインと報告しています。ネットワーク接続を確認してください。",
+      "visible": "ページは表示されています。",
+      "hidden": "このタブに戻ってください。バックグラウンドのタブは遅くなる場合があります。",
+      "supported": "WebAssemblyとWebRTCを利用できます。",
+      "unsupported": "WebAssemblyまたはWebRTCを利用できません。このブラウザでは一部の確認を実行できません。",
+      "noEngine": "登録されたローカルエンジンインスタンスがありません。エンジンの状態は確認されませんでした。",
+      "engineReady": "ローカルエンジンインスタンスが応答しました。マッチで実行中のエンジンとは限りません。",
+      "engineWaiting": "ローカルエンジンインスタンスの準備ができていません。待ってから再度確認してください。",
+      "probeFailed": "プローブに失敗しました。繰り返す場合は退出前にレポートを保存してください。",
+      "probeTimeout": "エンジンが時間内に応答しませんでした。待ってから再試行し、繰り返す場合はレポートを保存してください。",
+      "noPeer": "稼働中のピアが登録されていません。ピアの状態は確認されませんでした。",
+      "peerConnected": "プレイヤー接続は開いています。キュー待ちの処理はレポートに記録されます。",
+      "peerWaiting": "プレイヤー接続は接続中または切断状態です。待ってから再度確認してください。",
+      "peerDisconnectedDuringCheck": "確認中にプレイヤー接続が切断されました。再試行前にこのレポートを保存してください。",
+      "relayConnectionFailed": "セットアップまたは転送中にリレー接続に失敗しました。下のエラーカテゴリにPeerJSが報告した失敗が示されます。",
+      "peerFailed": "トランスポートがエラーを報告しました。問題が繰り返す場合はレポートを保存してください。",
+      "relayed": "この接続はリレーを使用しています。リレーの使用は正常であり、失敗ではありません。",
+      "statsUnavailable": "接続経路の詳細を利用できません。これは失敗の証拠ではありません。",
+      "directoryReached": "ディレクトリはHTTP成功応答を返しました。到達性だけを確認し、ゲームプレイの健全性は確認しません。",
+      "directoryFailed": "ディレクトリの確認に失敗しました。接続を確認して、もう一度試してください。",
+      "modeNotChecked": "ローカルエンジンが表示されても、ここではWebSocketとネイティブゲームエンジンの状態を確認しません。",
+      "direct": "観測された接続は直接接続で、リレーを使用していません。",
+      "draftModeNotChecked": "この確認ではドラフトマッチを実行するエンジンを検証しません。ローカルまたはリモートの場合があります。",
+      "networkUnsupported": "このブラウザではPeerJSリレーテストを実行できません。WebRTC対応の最新ブラウザを試してください。",
+      "credentialsReady": "新しいTURN認証情報を取得しました。リレーアクセスは下で別途確認します。",
+      "credentialsFailed": "新しいTURN認証情報を取得できないか、使用可能なリレーが含まれていませんでした。再試行してください。続く場合はサポート用にレポートをダウンロードしてください。VPN、フィルター、サービス障害が原因の場合があります。",
+      "credentialsTimeout": "TURN認証サービスが時間内に応答しませんでした。ネットワークを確認して再試行し、続く場合はレポートをダウンロードしてください。",
+      "prerequisiteFailed": "認証情報またはシグナリングに失敗したため、リレーテストを実行できませんでした。これはTURNトランスポートの失敗を示すものではありません。",
+      "signalingReady": "2つの一時ピアがPeerJSに登録されました。リレー確認ではオファーとアンサーの転送もテストします。",
+      "signalingFailed": "PeerJSシグナリングに失敗しました。ネットワークフィルター、VPN、シグナリングサービスの問題が考えられます。別のネットワークを試し、繰り返す場合はレポートをダウンロードしてください。",
+      "signalingTimeout": "PeerJSが時間内に2つの一時ピアを登録できませんでした。ネットワークまたはVPNの制限を確認し、別のネットワークを試して、繰り返す場合はレポートを保存してください。",
+      "relayReady": "選択したリレー候補を通じて想定メッセージが戻りました。このブラウザはTURNを使用できます。",
+      "relayEvidenceUnavailable": "候補統計からリレー結果を検証できませんでした。レポートをダウンロードしてください。これはTURN停止の証明ではありません。",
+      "relayNoCandidates": "テストが失敗またはタイムアウトする前にリレー候補が観測されませんでした。TURNアクセスがブロックまたは利用できない可能性があります。別のネットワークを試し、レポートをサポートに共有してください。",
+      "relayNoEcho": "リレー候補は観測されましたが、想定メッセージが戻りませんでした。別のネットワークを試し、繰り返す場合はレポートをダウンロードしてください。"
+    },
+    "statuses": {
+      "pass": "成功",
+      "warning": "注意",
+      "unavailable": "未確認",
+      "error": "エラー"
+    },
+    "pastEngine": "以前、ローカルエンジンの準備ができていませんでした。繰り返す場合は退出前にレポートを保存してください。",
+    "pastDisconnect": "以前、予期しないプレイヤー切断が記録されました。繰り返す場合は退出前にレポートを保存してください。",
+    "limitations": "この同一端末テストは現在のブラウザのリレー経路を確認します。別のプレイヤー、長時間のマッチ安定性、すべてのUDP/TCPトランスポートを個別に検証することはできません。",
+    "pastSetup": "以前、プレイヤー接続のセットアップ問題が記録されました。段階はレポートで確認できます。現在の障害を示すものではありません。",
+    "pastRoute": "以前に選択された経路: ローカル{{local}}、リモート{{remote}}。",
+    "unknownRoute": "利用不可",
+    "duration": "所要時間: {{duration, number}}ミリ秒",
+    "routeEvidence": "選択された候補: ローカル{{local}}、リモート{{remote}}。候補プロトコル: {{protocol}}（クライアントからTURNへのトランスポートではありません）。",
+    "iceErrors": "ICEエラーコード: {{codes}}",
+    "credentialDetail": "認証情報の結果: {{reason}}",
+    "httpStatus": "HTTPステータス: {{status}}",
+    "connectionId": "診断接続: {{id}}",
+    "relayProtocol": "クライアントからTURNへのトランスポート: {{protocol}}",
+    "peerError": "PeerJSエラーカテゴリ: {{code}}",
+    "credentialFailures": {
+      "http": "サービスがHTTPエラーを返しました",
+      "network": "ネットワーク要求に失敗しました",
+      "invalid": "認証情報の応答が無効です",
+      "no-turn": "TURNリレーが提供されませんでした",
+      "aborted": "要求をキャンセルしました"
+    }
+  }
+}

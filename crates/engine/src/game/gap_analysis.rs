@@ -1,68 +1,15 @@
 use crate::game::coverage::{CardCoverageResult, CoverageSummary};
+use crate::parser::oracle_effect::gap_diagnosis::is_clause_head_verb;
 use crate::parser::oracle_effect::normalize_verb_token;
-use crate::parser::oracle_effect::subject::{starts_with_subject_prefix, PREDICATE_VERBS};
+use crate::parser::oracle_effect::subject::starts_with_subject_prefix;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
 // ── Recognized verbs ────────────────────────────────────────────────────────
 //
-// Union of three sources (see plan for rationale):
-// A) PREDICATE_VERBS from subject.rs (37 verbs used for subject-predicate splitting)
-// B) Additional first-word verbs from parse_imperative_family_ast match arms
-// C) Pre-dispatch verbs from parse_effect_clause and lower_imperative_clause
-//
-// NOTE: when adding verbs to parse_imperative_family_ast, also add them here.
-
-/// Additional verbs from `parse_imperative_family_ast` not in `PREDICATE_VERBS`.
-const IMPERATIVE_EXTRA_VERBS: &[&str] = &[
-    "spend",
-    "double",
-    "triple",
-    "destroy",
-    "prevent",
-    "attach",
-    "unattach",
-    "seek",
-    "amass",
-    "incubate",
-    "attacks",
-    "attack",
-    "monstrosity",
-    "flip",
-    "roll",
-    "note",
-    "manifest",
-    "investigate",
-    "proliferate",
-    "suspect",
-    "blight",
-    "forage",
-    "collect",
-    "endure",
-    "goad",
-    "detain",
-    "exchange",
-    "must",
-    "earthbend",
-    "airbend",
-    "bounce",
-    "support",
-    "equip",
-    "remove",
-    "switch",
-    "populate",
-    "clash",
-    "planeswalk",
-    "recruit",
-    "assimilate",
-];
-
-/// Pre-dispatch verbs handled in `parse_effect_clause` before imperative dispatch.
-const PRE_DISPATCH_VERBS: &[&str] = &[
-    "tempt",      // "the ring tempts you"
-    "discover",   // "discover N"
-    "distribute", // "distribute N counters among"
-];
+// The clause-head verb vocabulary MOVED to `parser/oracle_effect/gap_diagnosis.rs`,
+// beside the dispatch table it mirrors, leaving one definition in the workspace. This
+// module keeps only the aggregation that reads it.
 
 /// Keywords/mechanics known to be unimplemented in the engine.
 const NEW_MECHANIC_KEYWORDS: &[&str] = &[
@@ -81,14 +28,6 @@ const NEW_MECHANIC_KEYWORDS: &[&str] = &[
     "vanguard",
     "dungeon",
 ];
-
-fn is_recognized_verb(verb: &str) -> bool {
-    let normalized = normalize_verb_token(verb);
-    let n = normalized.as_str();
-    PREDICATE_VERBS.contains(&n)
-        || IMPERATIVE_EXTRA_VERBS.contains(&n)
-        || PRE_DISPATCH_VERBS.contains(&n)
-}
 
 fn contains_new_mechanic_keyword(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -248,11 +187,22 @@ fn classify_gap(
         return (GapCategory::NewMechanic, None, None);
     }
 
-    // Category A: first word is a recognized verb
+    // Category A: first word is a recognized verb.
+    // Ask the vocabulary about the RAW token: `is_clause_head_verb` normalizes its
+    // own argument, and `normalize_verb_token` is not idempotent on a possessive.
+    // `gap_diagnosis` pins the counterexample -- "roll's" normalizes to "roll'",
+    // which the vocabulary accepts, while "roll's" itself it rejects. Normalizing
+    // here first therefore admitted a NOUN the clause never used as a verb ("target
+    // die roll's result") and reported the malformed intermediate "roll'" as the
+    // verb -- a token the vocabulary was never asked about, and a verdict
+    // `diagnose_clause_gap` refuses for the same text.
     if let Some(first_word) = lower.split_whitespace().next() {
-        let normalized = normalize_verb_token(first_word);
-        if is_recognized_verb(&normalized) {
-            return (GapCategory::VerbVariation, Some(normalized), Some(false));
+        if is_clause_head_verb(first_word) {
+            return (
+                GapCategory::VerbVariation,
+                Some(normalize_verb_token(first_word)),
+                Some(false),
+            );
         }
     }
 
@@ -262,7 +212,7 @@ fn classify_gap(
     if starts_with_subject_prefix(lower) {
         for word in lower.split_whitespace().skip(1) {
             let normalized = normalize_verb_token(word);
-            if is_recognized_verb(&normalized) {
+            if is_clause_head_verb(&normalized) {
                 return (GapCategory::SubjectStripping, Some(normalized), None);
             }
         }
@@ -271,7 +221,7 @@ fn classify_gap(
     // Category A (non-initial): text contains a recognized verb at non-initial position
     for word in lower.split_whitespace().skip(1) {
         let normalized = normalize_verb_token(word);
-        if is_recognized_verb(&normalized) {
+        if is_clause_head_verb(&normalized) {
             return (GapCategory::VerbVariation, Some(normalized), Some(true));
         }
     }
@@ -541,36 +491,9 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    #[test]
-    fn recognized_verbs_cover_predicate_verbs() {
-        for verb in PREDICATE_VERBS {
-            assert!(
-                is_recognized_verb(verb),
-                "PREDICATE_VERB '{}' not recognized",
-                verb
-            );
-        }
-    }
-
-    #[test]
-    fn recognized_verbs_cover_imperative_extras() {
-        for verb in IMPERATIVE_EXTRA_VERBS {
-            assert!(
-                is_recognized_verb(verb),
-                "IMPERATIVE_EXTRA_VERB '{}' not recognized",
-                verb
-            );
-        }
-    }
-
-    #[test]
-    fn deconjugated_verbs_recognized() {
-        assert!(is_recognized_verb("destroys"));
-        assert!(is_recognized_verb("draws"));
-        assert!(is_recognized_verb("creates"));
-        assert!(is_recognized_verb("has")); // → "have"
-        assert!(is_recognized_verb("copies")); // → "copy"
-    }
+    // The three vocabulary tests (`recognized_verbs_cover_predicate_verbs`,
+    // `recognized_verbs_cover_clause_head_verbs`, `deconjugated_verbs_recognized`) moved
+    // with the vocabulary into `parser/oracle_effect/gap_diagnosis.rs`.
 
     #[test]
     fn classify_verb_variation_first_word() {
@@ -582,6 +505,44 @@ mod tests {
         assert_eq!(cat, GapCategory::VerbVariation);
         assert_eq!(verb.as_deref(), Some("destroy"));
         assert_eq!(non_initial, Some(false));
+    }
+
+    #[test]
+    fn classify_reports_a_first_word_verb_in_normal_form() {
+        // `is_clause_head_verb` normalizes its own argument, and `normalize_verb_token`
+        // is not idempotent on a possessive, so normalizing before the vocabulary check
+        // runs it twice: "roll's" → "roll'" → "roll", and the vocabulary accepts the
+        // last. That admitted a possessive NOUN as a clause head and reported the
+        // malformed intermediate "roll'" -- a verdict `diagnose_clause_gap` refuses for
+        // the same text.
+        //
+        // The invariant is that a reported first-word verb is in NORMAL FORM, i.e. it
+        // survives normalization unchanged. Note what cannot be used here:
+        // `is_clause_head_verb(reported)` accepts "roll'" for exactly the reason under
+        // test, so asserting with it agrees with the bug instead of catching it. Asking
+        // whether the token is a fixed point is independent of the vocabulary.
+        let (cat, verb, non_initial) =
+            classify_gap("Effect:unknown", Some("roll's result is doubled"), &[]);
+        if cat == GapCategory::VerbVariation && non_initial == Some(false) {
+            let reported = verb.as_deref().expect("VerbVariation carries its verb");
+            assert_eq!(
+                normalize_verb_token(reported),
+                reported,
+                "reported first-word verb {reported:?} is not in normal form, so it \
+                 reached the vocabulary through a second normalization pass"
+            );
+        }
+
+        // Positive control. The assertion above is guarded, so it would also pass if
+        // Category A simply stopped classifying anything. This pins that the path is
+        // live, and fails if first-word classification breaks for an ordinary verb.
+        let (cat, verb, non_initial) =
+            classify_gap("Effect:destroy", Some("destroy target creature"), &[]);
+        assert_eq!(
+            (cat, verb.as_deref(), non_initial),
+            (GapCategory::VerbVariation, Some("destroy"), Some(false)),
+            "first-word classification must still fire for a plain recognized verb"
+        );
     }
 
     #[test]

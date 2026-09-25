@@ -499,33 +499,20 @@ fn umbra_armor_attachments(
 /// CR 122.1c: Remove one shield counter from the permanent, emitting
 /// `CounterRemoved`. Returns `true` if a shield counter was present and removed
 /// (so the caller should treat the destruction/damage as replaced/prevented),
-/// `false` otherwise. Mirrors the CR 122.1d stun-counter removal model in
-/// `turns.rs`: decrement, drop the map entry at zero, and emit one
-/// `CounterRemoved { count: 1 }` event so counter-removal triggers observe it.
+/// `false` otherwise. The accepted edit journals one counter command and emits
+/// one `CounterRemoved { count: 1 }` event for counter-removal triggers.
 pub(crate) fn consume_shield_counter(
     state: &mut GameState,
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let Some(obj) = state.objects.get_mut(&object_id) else {
-        return false;
-    };
-    let Some(entry) = obj.counters.get_mut(&CounterType::Shield) else {
-        return false;
-    };
-    if *entry == 0 {
-        return false;
-    }
-    *entry -= 1;
-    if *entry == 0 {
-        obj.counters.remove(&CounterType::Shield);
-    }
-    events.push(GameEvent::CounterRemoved {
+    crate::game::effects::counters::apply_counter_removal(
+        state,
         object_id,
-        counter_type: CounterType::Shield,
-        count: 1,
-    });
-    true
+        CounterType::Shield,
+        1,
+        events,
+    ) == 1
 }
 
 fn apply_compleated_replacement(
@@ -1897,9 +1884,11 @@ fn discard_applier(
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_as_copy: None,
             discard_frame,
+            performed_by: None,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -2063,10 +2052,11 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
         .is_some_and(rider_reflects_per_event_damage_source)
 }
 
-/// CR 614.9: Read back the captured chosen-object recipient stashed in the
-/// matched replacement's `redirect_target` field (set at resolution time for
-/// `DamageRedirectTarget::ChosenObjectTarget` — "to target creature").
-fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Option<ObjectId> {
+/// CR 614.9: Read back the captured chosen recipient (an object or a player)
+/// stashed in the matched replacement's `redirect_target` field (set at
+/// resolution time for `DamageRedirectTarget::ChosenTarget` — "to target
+/// creature" / "to any target").
+fn redirect_chosen_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetRef> {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
     } else {
@@ -2076,7 +2066,8 @@ fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Opti
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
     match repl.and_then(|r| r.redirect_target.as_ref()) {
-        Some(TargetFilter::SpecificObject { id }) => Some(*id),
+        Some(TargetFilter::SpecificObject { id }) => Some(TargetRef::Object(*id)),
+        Some(TargetFilter::SpecificPlayer { id }) => Some(TargetRef::Player(*id)),
         _ => None,
     }
 }
@@ -2137,11 +2128,15 @@ fn durable_redirect_route_for_filter(filter: &TargetFilter) -> PreventionShieldR
         // CR 614.9: a concrete object recipient belongs exclusively to the
         // EFFECT-CREATED path — `create_damage_replacement::resolve` writes
         // `SpecificObject { id }` alongside a `ShieldKind::Redirection` (of
-        // either `RedirectionLifetime`), and `redirect_chosen_object_for_rid` is
+        // either `RedirectionLifetime`), and `redirect_chosen_target_for_rid` is
         // its reader. Such a shield is claimed by Branch 1b and never reaches
         // this Prevention-shield gate; routing it to `Redirect` here would
         // resurrect a consumed one-shot as a durable shield.
         TargetFilter::SpecificObject { .. } => PreventionShieldRoute::Prevent,
+        // CR 614.9: the same effect-created path latches a chosen PLAYER
+        // recipient ("…is dealt to any target instead") as `SpecificPlayer`;
+        // it is likewise claimed by Branch 1b and never reaches this gate.
+        TargetFilter::SpecificPlayer { .. } => PreventionShieldRoute::Prevent,
         _ => PreventionShieldRoute::Unmapped,
     }
 }
@@ -2252,7 +2247,7 @@ fn redirect_damage_event(
         });
     }
 
-    let chosen = redirect_chosen_object_for_rid(state, rid);
+    let chosen = redirect_chosen_target_for_rid(state, rid);
     let new_recipient = super::effects::create_damage_replacement::resolve_redirect_recipient(
         state, recipient, rid.source, source_id, chosen,
     )
@@ -5438,7 +5433,7 @@ fn bind_search_found_definition(
                         card_filter: None,
                         single_use_group: None,
                         single_use: false,
-                        cast_cost_raise: None,
+                        cast_cost_modifier: None,
                         alt_ability_cost: None,
                         land_enter_tapped,
                         invalidation: None,
@@ -7050,33 +7045,79 @@ fn object_replacement_candidate_applies(
         _ => None,
     };
 
-    let zones_to_scan = [Zone::Battlefield, Zone::Command];
     let is_liminal_source = state.liminal_entries.contains_key(&obj.id);
-    let in_scanned_zone = !is_liminal_source && zones_to_scan.contains(&obj.zone);
+    let declares_zones = !repl_def.active_zones.is_empty();
     let is_entering = entering_object_id == Some(obj.id);
     let is_being_discarded = discarding_object_id == Some(obj.id);
     let is_stack_self_move = stack_self_moving_object_id == Some(obj.id);
     let replacement_player = replacement_source_player(obj);
-    // CR 702.52a + CR 702.52b: Dredge functions from the graveyard on that
-    // card's owner's draw while the library has enough cards.
-    let is_applicable_dredge = matches!(repl_def.event, ReplacementEvent::Draw)
-        && obj.zone == Zone::Graveyard
-        && matches!(event, ProposedEvent::Draw { player_id, .. } if *player_id == replacement_player)
-        && crate::game::keywords::effective_dredge_value(state, obj.id).is_some_and(|dredge| {
-            state
+
+    // "Is this definition functioning from the zone its source is in RIGHT NOW?"
+    // Strictly present-tense, and deliberately not the whole zone-of-function
+    // answer: the three self-replacement carve-outs below are about an object
+    // that is mid-move, and the CR 614.12 restrictions further down read this
+    // flag to tell "found by the ordinary scan" apart from "reached only
+    // because it is the object moving".
+    let in_scanned_zone = !is_liminal_source
+        && crate::game::functioning_abilities::replacement_functions_in_zone(obj, repl_def);
+
+    // CR 113.6h + CR 614.12: "an object's ability that modifies how that
+    // particular object enters the battlefield functions as that object is
+    // entering the battlefield," checked against "the characteristics of the
+    // permanent as it would exist on the battlefield." As it enters, the object
+    // is still in the zone it is LEAVING — hand, library, graveyard, or stack —
+    // so a self-replacement that DECLARES the battlefield has to be matched
+    // against the zone it is entering, or the declaration would suppress the
+    // very entry it exists to modify.
+    //
+    // Scoped to the entering object's OWN definition (`is_entering` is true only
+    // when this candidate's source IS the entrant). `Zone::Battlefield` IS the
+    // destination here rather than an assumption about it: `entering_object_id`
+    // is `Some` only for a `ZoneChange` whose `to` is the battlefield, or a
+    // `TokenEntry`, which enters it. Discard (CR 702.35a) and stack self-moves
+    // (CR 608.2n) keep present-tense evaluation on purpose: those abilities
+    // function from the zone the object is IN (hand, stack), not one it is
+    // heading to, and both already match that way through `obj.zone`.
+    //
+    // A liminal source is admitted here only through its own entry, mirroring
+    // the `!is_liminal_source` term above — a not-yet-committed token must not
+    // become visible to the ordinary scan, but it is still the object entering.
+    let declared_zone_admits_own_entry = declares_zones
+        && is_entering
+        && crate::game::functioning_abilities::replacement_functions_from_zone(
+            repl_def,
+            Zone::Battlefield,
+        );
+
+    // CR 614.12 / CR 702.35a / CR 608.2n: an object outside the scanned zones
+    // still applies its OWN self-replacement as it enters, as it is discarded,
+    // or as it leaves the stack. These carve-outs extend the CR 113.6 DEFAULT
+    // only — a definition that has stated its zones gets them solely through the
+    // CR 113.6h entry match above, never on the strength of being mid-move.
+    if !in_scanned_zone
+        && !declared_zone_admits_own_entry
+        && (declares_zones || (!is_entering && !is_being_discarded && !is_stack_self_move))
+    {
+        return false;
+    }
+
+    // CR 702.52b: "A player with fewer cards in their library than the number
+    // required by a dredge ability can't mill any of them this way" — with too
+    // small a library the replacement is not applicable at all. The CR 702.52a
+    // zone half is declared on the definition (`active_zones = [Graveyard]`);
+    // only this threshold depends on live library size, so only this half is
+    // evaluated here.
+    if repl_def.event == ReplacementEvent::Draw && obj.zone == Zone::Graveyard {
+        if let Some(dredge) = crate::game::keywords::effective_dredge_value(state, obj.id) {
+            let library_size = state
                 .players
                 .iter()
                 .find(|p| p.id == replacement_player)
-                .is_some_and(|p| p.library.len() as u32 >= dredge)
-        });
-
-    if !in_scanned_zone
-        && !is_entering
-        && !is_being_discarded
-        && !is_applicable_dredge
-        && !is_stack_self_move
-    {
-        return false;
+                .map_or(0, |p| p.library.len() as u32);
+            if library_size < dredge {
+                return false;
+            }
+        }
     }
 
     // CR 701.19: skip consumed one-shot replacements such as used regeneration.
@@ -11144,6 +11185,156 @@ mod tests {
         ReplacementDefinition::new(event)
     }
 
+    fn shield_removal_commands(state: &GameState, object_id: ObjectId) -> usize {
+        state.resolved_rules_journal.entries().iter().filter(|entry| matches!(
+            &entry.command,
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::ObjectCounter(command))
+                if command.object.object_id == object_id
+                    && command.counter_type == CounterType::Shield
+                    && matches!(command.edit, crate::types::resolved_commands::ResolvedObjectCounterEdit::Remove { count: 1 })
+        )).count()
+    }
+
+    #[test]
+    fn shield_damage_and_destroy_each_journal_one_accepted_removal() {
+        for destroy in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let object_id = ObjectId(30);
+            let mut target = GameObject::new(
+                object_id,
+                CardId(3),
+                PlayerId(1),
+                "Shielded Bear".into(),
+                Zone::Battlefield,
+            );
+            target.counters.insert(CounterType::Shield, 1);
+            state.objects.insert(object_id, target);
+            state.battlefield.push_back(object_id);
+            let proposed = if destroy {
+                ProposedEvent::Destroy {
+                    object_id,
+                    source: Some(ObjectId(50)),
+                    cant_regenerate: false,
+                    applied: HashSet::new(),
+                }
+            } else {
+                ProposedEvent::Damage {
+                    source_id: ObjectId(50),
+                    target: TargetRef::Object(object_id),
+                    amount: 2,
+                    is_combat: false,
+                    applied: HashSet::new(),
+                }
+            };
+            let mut events = Vec::new();
+            let result = replace_event(&mut state, proposed, &mut events);
+            assert!(
+                matches!(result, ReplacementResult::Prevented),
+                "shield must replace the {:?} event",
+                if destroy { "destroy" } else { "damage" }
+            );
+            assert_eq!(
+                state.objects[&object_id].counters.get(&CounterType::Shield),
+                None
+            );
+            assert_eq!(
+                shield_removal_commands(&state, object_id),
+                1,
+                "accepted shield consumption must record one command"
+            );
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1 } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
+            if !destroy {
+                let removed_at = events.iter().position(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, .. } if *id == object_id)).unwrap();
+                let prevented_at = events
+                    .iter()
+                    .position(|event| matches!(event, GameEvent::DamagePrevented { .. }))
+                    .unwrap();
+                assert!(
+                    removed_at < prevented_at,
+                    "damage prevention follows the accepted shield removal event"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batched_combat_shield_consumption_journals_once() {
+        use crate::game::combat::{DamageAssignment, DamageTarget};
+        use crate::game::combat_damage::{apply_combat_damage, CombatDamageBatch};
+        use crate::game::zones::create_object;
+        use crate::types::game_state::CombatDamageSubStep;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        let shielded = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Shielded Bear".into(),
+            Zone::Battlefield,
+        );
+        let attacker_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker A".into(),
+            Zone::Battlefield,
+        );
+        let attacker_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Attacker B".into(),
+            Zone::Battlefield,
+        );
+        for (id, power, toughness) in [(shielded, 2, 2), (attacker_a, 3, 3), (attacker_b, 3, 3)] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.power = Some(power);
+            object.toughness = Some(toughness);
+            object.entered_battlefield_turn = Some(1);
+        }
+        state
+            .objects
+            .get_mut(&shielded)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        let assignments = vec![
+            (
+                attacker_a,
+                DamageAssignment {
+                    target: DamageTarget::Object(shielded),
+                    amount: 3,
+                },
+            ),
+            (
+                attacker_b,
+                DamageAssignment {
+                    target: DamageTarget::Object(shielded),
+                    amount: 3,
+                },
+            ),
+        ];
+        let CombatDamageBatch::Complete(events) =
+            apply_combat_damage(&mut state, &assignments, CombatDamageSubStep::Regular)
+        else {
+            panic!("the simultaneous damage batch must complete");
+        };
+        assert_eq!(state.objects[&shielded].damage_marked, 0);
+        assert_eq!(
+            state.objects[&shielded].counters.get(&CounterType::Shield),
+            None
+        );
+        assert_eq!(
+            shield_removal_commands(&state, shielded),
+            1,
+            "the post-batch shield consumption records one accepted removal"
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1 } if *object_id == shielded)).count(), 1);
+    }
+
     /// V14 — `ability_tree_copies_tokens` walks the substitution's OWN tree and
     /// stops at a granted trigger.
     ///
@@ -11259,13 +11450,20 @@ mod tests {
             );
         }
 
-        // Owned by the ONE-SHOT path (`redirect_chosen_object_for_rid`), which
+        // Owned by the ONE-SHOT path (`redirect_chosen_target_for_rid`), which
         // reads it off a `ShieldKind::Redirection` shield — never this gate. Not
         // parser-producible here, so it is asserted directly.
         assert_eq!(
             durable_redirect_route_for_filter(&TargetFilter::SpecificObject { id: ObjectId(7) }),
             PreventionShieldRoute::Prevent,
             "a captured chosen object belongs to the one-shot redirection shield"
+        );
+        // CR 614.9: a captured chosen PLAYER ("…is dealt to any target instead")
+        // belongs to the same one-shot path.
+        assert_eq!(
+            durable_redirect_route_for_filter(&TargetFilter::SpecificPlayer { id: PlayerId(1) }),
+            PreventionShieldRoute::Prevent,
+            "a captured chosen player belongs to the one-shot redirection shield"
         );
 
         // The fail-closed residual arm, asserted rather than assumed: an
@@ -11308,7 +11506,7 @@ mod tests {
         state.pending_damage_replacements.push(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
                 .redirection_shield(
-                    DamageRedirectTarget::ChosenObjectTarget,
+                    DamageRedirectTarget::ChosenTarget,
                     PreventionAmount::Next(2),
                     RedirectionLifetime::Continuous,
                 )
@@ -12645,8 +12843,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -13522,6 +13722,11 @@ mod tests {
                 .get(&CounterType::Shield),
             None
         );
+        assert_eq!(
+            shield_removal_commands(&state, ObjectId(30)),
+            1,
+            "unpreventable damage still journals its accepted shield removal"
+        );
         assert!(
             !events
                 .iter()
@@ -14339,8 +14544,11 @@ mod tests {
             },
         );
         mill.sub_ability = Some(Box::new(return_to_hand));
+        // CR 702.52a + CR 113.6b: mirrors `synthesize_dredge`'s declared
+        // graveyard-only zone of function.
         let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
-            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+            .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+            .active_zones(vec![Zone::Graveyard]);
         repl.mode = ReplacementMode::Optional { decline: None };
         repl.execute = Some(Box::new(mill));
         repl
@@ -14411,6 +14619,237 @@ mod tests {
         assert!(
             find_applicable_replacements(&state, &opponent_draw, &registry).is_empty(),
             "dredge must not apply to an opponent's draw"
+        );
+    }
+
+    /// CR 113.6h + CR 614.12: RUNTIME regression for a declared `[Battlefield]`
+    /// zone on the source's OWN entry, driven through `replace_event`.
+    ///
+    /// "An object's ability that modifies how that particular object enters the
+    /// battlefield functions as that object is entering the battlefield"
+    /// (CR 113.6h), checked against the permanent "as it would exist on the
+    /// battlefield" (CR 614.12). As it enters, the object is still in the zone
+    /// it is LEAVING — here the hand — so evaluating a declared zone list
+    /// against where the source currently IS would reject an enters-tapped
+    /// self-replacement that declares the battlefield, suppressing the very
+    /// entry it exists to modify.
+    ///
+    /// Three arms, because the fix has to be narrow in both directions: the
+    /// declared `[Battlefield]` applies; a declared sibling naming a DIFFERENT
+    /// zone does not (the destination match is real, not a blanket entry pass);
+    /// and an undeclared definition is untouched.
+    #[test]
+    fn declared_battlefield_zone_applies_to_the_sources_own_entry() {
+        fn enters_tapped_from_hand(active_zones: Option<Vec<Zone>>) -> bool {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                ))
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield);
+            if let Some(zones) = active_zones {
+                repl = repl.active_zones(zones);
+            }
+
+            // Hand, not battlefield: the object's zone as it enters is the one
+            // it is leaving, which is the whole point of the regression.
+            let mut state = test_state_with_object(ObjectId(10), Zone::Hand, vec![repl]);
+            let mut events = Vec::new();
+            let proposed =
+                ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+            let result = replace_event(&mut state, proposed, &mut events);
+            let ReplacementResult::Execute(ProposedEvent::ZoneChange { enter_tapped, .. }) = result
+            else {
+                panic!("expected Execute with ZoneChange, got {result:?}");
+            };
+            enter_tapped.resolve(false)
+        }
+
+        assert!(
+            enters_tapped_from_hand(Some(vec![Zone::Battlefield])),
+            "CR 113.6h + CR 614.12: a self-replacement declaring [Battlefield] must \
+             apply as its source enters, even though the source is still in hand"
+        );
+        assert!(
+            !enters_tapped_from_hand(Some(vec![Zone::Graveyard])),
+            "CR 113.6b: a declared zone that is NOT the entry destination must not \
+             ride in on the entry — the destination match has to be real"
+        );
+        assert!(
+            enters_tapped_from_hand(None),
+            "baseline: an undeclared self-replacement keeps the CR 614.12 carve-out \
+             it always had"
+        );
+    }
+
+    /// CR 113.6b + CR 114.4: RUNTIME regression for the declared-Command zone
+    /// of function, driven through the real `replace_event` pipeline rather
+    /// than the candidate scan alone.
+    ///
+    /// `ReplacementDefinition::active_zones` is a general per-definition axis,
+    /// so a definition naming `Zone::Command` must actually be offered and
+    /// applied from the command zone on a NON-emblem source. CR 114.4's
+    /// object-level "only emblems function" default used to swallow that source
+    /// whole inside `active_replacements`, one step before the declared-zone
+    /// branch could admit it — leaving the Command declaration inert with no
+    /// test able to see it.
+    ///
+    /// The negative half is the point of the pairing: the identical source and
+    /// definition WITHOUT the declaration must still be refused, so this proves
+    /// the opt-in is what admits it and that the emblem default is preserved.
+    #[test]
+    fn declared_command_zone_replacement_applies_through_the_real_pipeline() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+
+        fn run(declare_command: bool) -> u32 {
+            let host = ObjectId(10);
+            let mut doubler = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .token_owner_scope(ControllerRef::You);
+            if declare_command {
+                doubler = doubler.active_zones(vec![Zone::Command]);
+            }
+
+            let mut state = GameState::new_two_player(42);
+            let mut obj = GameObject::new(
+                host,
+                CardId(1),
+                PlayerId(0),
+                "Command Doubler".to_string(),
+                Zone::Command,
+            );
+            // The whole point: NOT an emblem. CR 114.4's default refuses this
+            // source, and only the per-definition opt-in lets it through.
+            assert!(!obj.is_emblem);
+            obj.replacement_definitions = vec![doubler].into();
+            state.objects.insert(host, obj);
+            state.command_zone.push_back(host);
+
+            let spec = TokenSpec {
+                characteristics: TokenCharacteristics {
+                    display_name: "Soldier".to_string(),
+                    power: Some(1),
+                    toughness: Some(1),
+                    loyalty: None,
+                    core_types: vec![crate::types::card_type::CoreType::Creature],
+                    subtypes: vec!["Soldier".to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: "Soldier".to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+            };
+            let proposed = ProposedEvent::CreateToken {
+                owner: PlayerId(0),
+                spec: Box::new(spec),
+                copy: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                count: 3,
+                applied: HashSet::new(),
+            };
+
+            let mut events = Vec::new();
+            let result = replace_event(&mut state, proposed, &mut events);
+            let ReplacementResult::Execute(primary) = result else {
+                panic!("expected Execute, got {result:?}");
+            };
+            let ProposedEvent::CreateToken { count, .. } = primary else {
+                panic!("expected CreateToken");
+            };
+            count
+        }
+
+        assert_eq!(
+            run(true),
+            6,
+            "CR 113.6b: a replacement declaring Zone::Command must be offered and \
+             applied from the command zone — three tokens doubled to six"
+        );
+        assert_eq!(
+            run(false),
+            3,
+            "CR 114.4: the same definition without the declaration must NOT \
+             function from the command zone on a non-emblem source — the count \
+             is untouched"
+        );
+    }
+
+    /// CR 702.52a + CR 113.6b: "Dredge is a static ability that functions only
+    /// while the card with dredge is in a player's graveyard." A dredge creature
+    /// on the BATTLEFIELD must not offer dredge on its controller's draw — the
+    /// reported bug, and the reason `synthesize_dredge` declares `active_zones`.
+    /// Battlefield is the scanner's default zone, so without the declaration the
+    /// definition sails through the zone gate.
+    #[test]
+    fn dredge_does_not_apply_from_the_battlefield() {
+        let mut state = dredge_state(10);
+        state.objects.get_mut(&ObjectId(10)).unwrap().zone = Zone::Battlefield;
+        state.battlefield.push_back(ObjectId(10));
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &owner_draw, &registry).is_empty(),
+            "CR 702.52a: dredge functions only from the graveyard — a dredge \
+             creature in play must not replace its controller's draw"
+        );
+    }
+
+    /// CR 113.6b: the zone declaration is a general building block, not a dredge
+    /// special case — any replacement naming its zones functions only from them,
+    /// and gets none of the default scan zones. Same definition, same object,
+    /// only the declared zone differs.
+    #[test]
+    fn declared_active_zones_replace_the_default_scan_zones() {
+        use crate::game::functioning_abilities::replacement_functions_in_zone;
+
+        let obj = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            PlayerId(0),
+            "Zone Probe".to_string(),
+            Zone::Battlefield,
+        );
+        let mut undeclared = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        assert!(
+            replacement_functions_in_zone(&obj, &undeclared),
+            "an undeclared replacement keeps the CR 113.6 battlefield default"
+        );
+
+        undeclared.active_zones = vec![Zone::Graveyard];
+        assert!(
+            !replacement_functions_in_zone(&obj, &undeclared),
+            "CR 113.6b: declaring [Graveyard] must REMOVE the battlefield default"
+        );
+
+        let graveyard_obj = GameObject::new(
+            ObjectId(11),
+            CardId(11),
+            PlayerId(0),
+            "Zone Probe".to_string(),
+            Zone::Graveyard,
+        );
+        assert!(
+            replacement_functions_in_zone(&graveyard_obj, &undeclared),
+            "CR 113.6b: a declared zone must admit the definition from that zone"
         );
     }
 
@@ -15113,8 +15552,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
 
@@ -15513,6 +15954,7 @@ mod tests {
                 display_name: "Test Token".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: vec![core_type],
                 subtypes: vec!["Soldier".to_string()],
                 supertypes: Vec::new(),
@@ -16333,8 +16775,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
 
@@ -18828,6 +19272,7 @@ mod tests {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: vec![crate::types::card_type::CoreType::Creature],
                 subtypes: vec!["Squirrel".to_string()],
                 supertypes: Vec::new(),
@@ -18855,6 +19300,7 @@ mod tests {
                 display_name: "Plant".to_string(),
                 power: Some(0),
                 toughness: Some(2),
+                loyalty: None,
                 core_types: vec![crate::types::card_type::CoreType::Creature],
                 subtypes: vec!["Plant".to_string()],
                 supertypes: Vec::new(),
@@ -18927,6 +19373,7 @@ mod tests {
                     display_name: name.to_string(),
                     power: None,
                     toughness: None,
+                    loyalty: None,
                     core_types: vec![crate::types::card_type::CoreType::Artifact],
                     subtypes: vec![name.to_string()],
                     supertypes: Vec::new(),
@@ -19061,6 +19508,7 @@ mod tests {
                 display_name: "Food".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![crate::types::card_type::CoreType::Artifact],
                 subtypes: vec!["Food".to_string()],
                 supertypes: Vec::new(),
@@ -19390,6 +19838,7 @@ mod tests {
                 display_name: name.to_string(),
                 power: (core == CoreType::Creature).then_some(1),
                 toughness: (core == CoreType::Creature).then_some(1),
+                loyalty: None,
                 core_types: vec![core],
                 subtypes: vec![subtype.to_string()],
                 supertypes: Vec::new(),
@@ -19532,8 +19981,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
         };
         let cast_matches = find_applicable_replacements(&state, &cast_event, &registry);
@@ -19580,8 +20031,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
         };
         let put_matches = find_applicable_replacements(&state, &put_event, &registry);
@@ -19619,6 +20072,7 @@ mod tests {
                 display_name: "Soldier".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                loyalty: None,
                 core_types: vec![crate::types::card_type::CoreType::Creature],
                 subtypes: vec!["Soldier".to_string()],
                 supertypes: Vec::new(),
@@ -20147,6 +20601,7 @@ mod tests {
                     display_name: name.to_string(),
                     power: None,
                     toughness: None,
+                    loyalty: None,
                     core_types: vec![crate::types::card_type::CoreType::Artifact],
                     subtypes: vec![name.to_string()],
                     supertypes: Vec::new(),
@@ -20265,6 +20720,7 @@ mod tests {
                     display_name: name.to_string(),
                     power: None,
                     toughness: None,
+                    loyalty: None,
                     core_types: vec![crate::types::card_type::CoreType::Artifact],
                     subtypes: vec![name.to_string()],
                     supertypes: Vec::new(),
@@ -20445,6 +20901,7 @@ mod tests {
                     display_name: "Token".to_string(),
                     power: None,
                     toughness: None,
+                    loyalty: None,
                     core_types: vec![crate::types::card_type::CoreType::Creature],
                     subtypes: Vec::new(),
                     supertypes: Vec::new(),

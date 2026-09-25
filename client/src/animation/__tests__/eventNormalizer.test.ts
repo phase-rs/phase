@@ -15,8 +15,8 @@ function combatPlayerDamage(sourceId: number, playerId = 0, amount = 1): GameEve
   return { type: "DamageDealt", data: { source_id: sourceId, target: { Player: playerId }, amount, is_combat: true } };
 }
 
-function lifeChanged(playerId = 0, amount = -1): GameEvent {
-  return { type: "LifeChanged", data: { player_id: playerId, amount } };
+function lifeChanged(playerId = 0, amount = -1, newTotal?: number): GameEvent {
+  return { type: "LifeChanged", data: { player_id: playerId, amount, new_total: newTotal } };
 }
 
 function poisonCounterChanged(playerId = 0, amount = 1): GameEvent {
@@ -347,6 +347,58 @@ describe("normalizeEvents", () => {
       event: { type: "LifeChanged", data: { player_id: 0, amount: -sources.length } },
       displayOnly: true,
     });
+  });
+
+  it("carries the last engine-reported total on a collapsed run's synthesized life change", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    // One engine event per hit, each reporting the total it left the player on.
+    const events = [
+      ...sources.flatMap((sourceId, hit) => [
+        combatPlayerDamage(sourceId),
+        lifeChanged(0, -1, 20 - hit - 1),
+      ]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(steps).toHaveLength(1);
+    // The run collapses to one visible hit, so it must land on the total the LAST
+    // consumed event reported — never a sum of amounts, and never the first total.
+    expect(steps[0].effects[1]).toMatchObject({
+      event: {
+        type: "LifeChanged",
+        data: { player_id: 0, amount: -sources.length, new_total: 20 - sources.length },
+      },
+      displayOnly: true,
+    });
+  });
+
+  it("leaves a collapsed run's synthesized total absent when no consumed event carried one", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId) => [combatPlayerDamage(sourceId), lifeChanged()]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(expectLifeChanged(steps[0].effects[1].event).data.new_total).toBeUndefined();
+  });
+
+  it("uses the final consumed event's absent total for a collapsed run", () => {
+    const sources = Array.from({ length: GROUPED_COMBAT_DAMAGE_THRESHOLD }, (_, i) => i + 1);
+    const events = [
+      ...sources.flatMap((sourceId, hit) => [
+        combatPlayerDamage(sourceId),
+        hit === sources.length - 1 ? lifeChanged() : lifeChanged(0, -1, 20 - hit - 1),
+      ]),
+      combatAggregate(sources),
+    ];
+
+    const steps = normalizeEvents(events);
+
+    expect(expectLifeChanged(steps[0].effects[1].event).data.new_total).toBeUndefined();
   });
 
   it("groups aggregate combat damage when replacement effects change life-loss amount", () => {

@@ -131,7 +131,9 @@
       "feed": "Flux",
       "user": "Utilisateur",
       "precon": "Precon"
-    }
+    },
+    "brain": "Contrôlé par",
+    "brainEngine": "IA du moteur"
   },
   "feedManager": {
     "title": "Gérer les flux",

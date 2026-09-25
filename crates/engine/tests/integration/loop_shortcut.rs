@@ -29,7 +29,7 @@ use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, LifeTotalReading};
 use engine::types::game_state::{
     AutoPassRequest, CastPaymentMode, GameState, LoopDetectionMode, StackEntryKind, WaitingFor,
     YieldTarget,
@@ -471,16 +471,18 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
     let (rest, wf) = drive_collect(&mut runner, 500);
     all.extend(rest);
 
-    // The golden covers event ordering and effect payloads from before
-    // SpellCast gained its optional cast-time snapshot. That orthogonal field
-    // is asserted by the Thor quantity tests, so omit it from this legacy
-    // byte-for-byte stream comparison.
+    // The golden covers event ordering and effect payloads from before SpellCast
+    // gained its optional cast-time snapshot, and before LifeChanged began
+    // reporting the life total it left the player on. Both are orthogonal fields
+    // asserted by their own tests (the Thor quantity tests; `effects::life` and
+    // `combat_damage`), so omit them from this legacy byte-for-byte comparison.
     for event in &mut all {
-        if let GameEvent::SpellCast {
-            cast_mana_value, ..
-        } = event
-        {
-            *cast_mana_value = None;
+        match event {
+            GameEvent::SpellCast {
+                cast_mana_value, ..
+            } => *cast_mana_value = None,
+            GameEvent::LifeChanged { new_total, .. } => *new_total = LifeTotalReading::default(),
+            _ => {}
         }
     }
 
@@ -493,7 +495,9 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         life(&runner, P1) > 0,
         "ON: the shortcut fired early (P1 positive)"
     );
-    let event_stream = format!("{all:?}").replace(", cast_mana_value: None", "");
+    let event_stream = format!("{all:?}")
+        .replace(", cast_mana_value: None", "")
+        .replace(", new_total: LifeTotalReading(None)", "");
     assert_eq!(
         event_stream, GOLDEN_ON,
         "ON: the accumulated event stream must be byte-identical to the pre-PR-7 golden — \
@@ -5111,8 +5115,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 136,
-        "`WaitingFor` has 136 variants at this tip, read off the `syn` parse. This number is \
+        total, 138,
+        "`WaitingFor` has 138 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5151,6 +5155,13 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // also deliberately absent from the `filter_state_for_viewer` redaction loop. That omission is
     // engine convention carrying no CR annotation — no Comprehensive Rule states that die results
     // are public information — and mirrors `CoinFlipKeepChoice`, which is likewise unredacted.
+    // 136 ⇒ 137 is ADJUDICATED: CR 601.2f's caster-elected cost-reduction ordering added
+    // `OrderCostReductions { player, reductions, outcomes, pending_cast }`. Measured, not inferred
+    // from the diff: that body holds NO `DecisionTemplate` (zero matches), so it is not a third
+    // carrier and the carrier assertion below is unchanged by it. It is also deliberately absent
+    // from the `filter_state_for_viewer` redaction loop: the spell is already announced and every
+    // snapshotted reduction comes from a face-up battlefield permanent, so the prompt carries no
+    // private information — the same reasoning that leaves `OrderTriggers` unredacted.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(

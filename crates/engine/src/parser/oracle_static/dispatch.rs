@@ -275,8 +275,8 @@ fn parse_max_untap_per_type_static(tp: &TextPair<'_>, text: &str) -> Option<Stat
         // cap's own source, so the self-pronoun rewrite always applies
         // (unlike parse_continuous_gets_has's SelfRef-only guard).
         let condition = parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            .unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
+            .unwrap_or_else(|| {
+                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
             });
         def.condition = Some(condition);
         return Some(def);
@@ -909,6 +909,10 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    if let Some(def) = parse_tagged_ability_activation_timing_permission(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 510.1c: Attached-object conditional variants must precede the generic
     // inverted "As long as ..." rewrite so the condition binds to the
     // enchanted/equipped creature rather than becoming an unrecognized SelfRef
@@ -1416,10 +1420,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1428,10 +1437,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted permanent ") {
         let filter =
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1480,10 +1494,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "enchanted land ") {
         let filter =
             TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::EnchantedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -1492,10 +1511,15 @@ pub(crate) fn parse_static_line_inner(
     if let Some(rest) = nom_tag_tp(&tp, "equipped creature ") {
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]));
-        if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text)
-            .into_iter()
-            .next()
-        {
+        // A COMPOSED pair (permission + companion) cannot be represented by this
+        // single-return caller, and taking `.next()` would silently drop the
+        // second definition — reintroducing the partial-prefix defect one layer
+        // up. Decline instead: `parse_static_line_multi` owns those lines.
+        let defs = parse_enchanted_equipped_predicate(rest.original, filter, &text);
+        if defs.len() > 1 {
+            return None;
+        }
+        if let Some(def) = defs.into_iter().next() {
             return Some(def);
         }
     }
@@ -2077,10 +2101,9 @@ pub(crate) fn parse_static_line_inner(
         // instead, so the line reaches an authority that can model it or is
         // surfaced honestly as unimplemented.
         if let Some(keyword) = map_keyword(keyword_text) {
-            let condition =
-                parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                    text: condition_text.to_string(),
-                });
+            let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+            });
             return Some(
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SelfRef)
@@ -2223,10 +2246,9 @@ pub(crate) fn parse_static_line_inner(
                 .description(text.to_string());
             if let Some(cond_tp) = condition_tp {
                 let cond_text = cond_tp.original.trim().trim_end_matches('.');
-                let condition =
-                    parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                        text: cond_text.to_string(),
-                    });
+                let condition = parse_static_condition(cond_text).unwrap_or_else(|| {
+                    unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive)
+                });
                 def = def.condition(condition);
             }
             return Some(def);
@@ -3618,10 +3640,9 @@ pub(crate) fn parse_static_line_inner(
     // only NARROW the set of lines that end up `Unrecognized`, never widen it.
     if let Some(rest_tp) = nom_tag_tp(&tp, "as long as ") {
         let condition_text = rest_tp.original.trim_end_matches('.');
-        let condition =
-            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
-            });
+        let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+            unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+        });
         return Some(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)

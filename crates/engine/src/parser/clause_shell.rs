@@ -469,8 +469,9 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         value((), tag("they may cast ")),
         // CR 601.2f — "the next [type] spell you cast this turn ..."
         // next-spell limiter (cost reduction, keyword grant). The
-        // specialized parser at `oracle_effect/mod.rs:571` requires
-        // "this turn" to be present in the input.
+        // specialized parser `oracle_effect::try_parse_grant_next_spell_ability`
+        // requires "this turn" (via `parse_next_spell_subject`) to be present
+        // in the input.
         value((), tag("the next ")),
         // CR 305.2 — "play an additional land this turn" / "play <n> additional
         // lands this turn" (Escape to the Wilds). `try_parse_additional_land_this_turn`

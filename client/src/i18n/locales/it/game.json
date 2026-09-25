@@ -112,6 +112,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugMove": {
+    "runEtbEffects": "Esegui effetti ETB",
+    "simulate": "Simula (effetti ETB, innescate + SBA)"
+  },
   "debugLibrary": {
     "openActions": "Apri le azioni di debug per {{name}}"
   },
@@ -1671,6 +1675,10 @@
       "labelExile": "Esilia",
       "labelBehold": "Contempla"
     },
+    "empowerJace": {
+      "title": "Potenziare Jace",
+      "subtitle": "Scegli una pedina Jace che controlli perché ottenga +{{count}} fedeltà"
+    },
     "collectEvidence": {
       "title": "Raccogli prove",
       "subtitle": "Esilia carte dal tuo cimitero con valore di mana totale {{minimum}} o superiore"
@@ -2001,10 +2009,15 @@
     "subtitleCascade": "Cascata ha esiliato {{name}} (valore di mana sotto {{sourceMv}}). Lanciala senza pagare il suo costo di mana, o rifiuta e rimescola tutte le {{total}} carte esiliate in fondo al tuo grimorio.",
     "subtitleDiscover": "Scoperta ha esiliato {{name}}. Lanciala senza pagare il suo costo di mana, o mettila nella tua mano e rimescola le altre {{missCount}} carte esiliate in fondo al tuo grimorio.",
     "subtitleRipple": "Ripple ha rivelato {{name}}. Lanciala senza pagare il suo costo di mana, oppure rifiuta e metti tutte le {{total}} carte rivelate in fondo al tuo grimorio in ordine casuale.",
-    "subtitleGraveyardPaid": "Lancia {{name}} da un cimitero pagando il suo costo di mana — può essere speso mana di qualsiasi tipo. Oppure rifiuta e lasciala nel cimitero.",
+    "subtitleGraveyardPaid": "Lancia {{name}} da un cimitero pagando il suo costo di mana{{extra}}{{concession}}. Oppure rifiuta e lasciala nel cimitero.",
     "castNamed": "Lancia {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
-    "castPaidSuffix": "(paga il suo costo di mana — può essere speso mana di qualsiasi tipo)",
+    "castPaidSuffix": "(paga il suo costo di mana{{extra}}{{concession}})",
+    "paidExtraFragment": " più {{extra}}",
+    "paidAnyTypeSubtitleFragment": " — può essere speso mana di qualsiasi tipo",
+    "paidAnyColorSubtitleFragment": " — può essere speso mana di qualsiasi colore",
+    "paidAnyTypeSuffixFragment": " — può essere speso mana di qualsiasi tipo",
+    "paidAnyColorSuffixFragment": " — può essere speso mana di qualsiasi colore",
     "putIntoHand": "Metti in mano",
     "decline": "Rifiuta",
     "discoverDeclineSuffix": "(metti il resto in fondo)",
@@ -2354,6 +2367,25 @@
     "moveDown": "Sposta giù",
     "triggerFallback": "Innesco {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Ordine delle riduzioni di costo",
+    "title": "Ordina le tue riduzioni di costo",
+    "subtitle": "Queste riduzioni fissano un costo totale diverso a seconda dell'ordine in cui le applichi (CR 601.2f). La cima di questo elenco viene applicata per prima.",
+    "appliedFirst": "Applicata per prima",
+    "appliedLast": "Applicata per ultima",
+    "lockedCost": "Costo totale fissato",
+    "lockedCostUnknown": "Uguale a uno dei totali qui sotto",
+    "outcomesHeading": "Totali che puoi fissare",
+    "reachColoredOnly": "Riduce solo il mana colorato",
+    "reachSpills": "Può ridurre il mana generico",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Conferma ordine",
+    "cancel": "Annulla",
+    "moveUp": "Sposta su",
+    "moveDown": "Sposta giù",
+    "reductionFallback": "Riduzione {{number}}",
+    "floor": "Non può ridurre il costo sotto {{count}} mana"
+  },
   "unhandledWaitingFor": {
     "title": "Azione richiesta, ma manca l'interfaccia",
     "body": "La partita è in attesa di un'azione da parte tua, ma questa versione di phase.rs non ha ancora un'interfaccia per essa. Questo è un bug — per favore segnalalo così possiamo correggerlo. Usa il pulsante qui sotto per uscire dalla partita.",
@@ -2522,6 +2554,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2537,6 +2570,7 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",
