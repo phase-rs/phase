@@ -5,10 +5,11 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, AttackedYouScope, CardTypeSetSource, Comparator,
-    CountScope, DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SharedQuality, SharedQualityRelation, SubtypeExclusion, TypeFilter, ZoneRef,
+    ActivationRestriction, AggregateFunction, AttackedYouScope, CardTypeSetSource,
+    CommanderOwnership, Comparator, CountScope, DamageKindFilter, Duration, Effect, FilterProp,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, SubtypeExclusion, TypeFilter,
+    ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -30626,6 +30627,181 @@ fn compound_static_foreign_keyword_grant_splits_angelic_field_marshal() {
     assert!(
         companion.condition.is_some(),
         "companion must carry the as-long-as condition"
+    );
+}
+
+/// CR 611.3a + CR 613.1f + CR 613.4c: Compound static where the foreign-subject
+/// conjunct is a P/T-and-keyword modification, not a keyword grant. Thunderfoot
+/// Baloth: "As long as you control your commander, this creature gets +2/+2 and
+/// other creatures you control get +2/+2 and have trample."
+/// Must decompose into TWO StaticDefinitions sharing the same condition:
+///   - def[0]: SelfRef subject, exactly [AddPower(2), AddToughness(2)]
+///   - def[1]: Typed(creatures you control, Another) subject, [AddPower(2),
+///     AddToughness(2), AddKeyword(Trample)]
+#[test]
+fn compound_static_foreign_pt_grant_splits_thunderfoot_baloth() {
+    let defs = parse_static_line_multi(
+        "Lieutenant — As long as you control your commander, this creature gets +2/+2 and other creatures you control get +2/+2 and have trample.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected 2 StaticDefinitions (self P/T + other-creatures P/T and trample), got {defs:?}"
+    );
+
+    let def0 = &defs[0];
+    assert_eq!(def0.mode, StaticMode::Continuous);
+    assert!(
+        matches!(&def0.affected, Some(TargetFilter::SelfRef)),
+        "def0 must target SelfRef, got {:?}",
+        def0.affected
+    );
+    assert_eq!(
+        def0.modifications,
+        vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ]
+    );
+    assert_eq!(
+        def0.condition,
+        Some(StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own
+        })
+    );
+
+    let def1 = &defs[1];
+    assert_eq!(def1.mode, StaticMode::Continuous);
+    match &def1.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "def1 must affect creatures you control, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Another),
+                "def1 must exclude the source (\"other creatures\"), got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("def1 affected must be Typed(other creatures you control), got {other:?}"),
+    }
+    assert!(
+        def1.modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "def1 must add +2 power, got {:?}",
+        def1.modifications
+    );
+    assert!(
+        def1.modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }),
+        "def1 must add +2 toughness, got {:?}",
+        def1.modifications
+    );
+    assert!(
+        def1.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Trample)
+        ),
+        "def1 must add Trample, got {:?}",
+        def1.modifications
+    );
+    assert_eq!(
+        def1.condition,
+        Some(StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own
+        })
+    );
+}
+
+/// A compound subject ("artifacts and creatures you control") must parse to
+/// ONE static, not split by `try_split_and_foreign_subject_grant` — the
+/// splitter's empty-modifications guard declines the candidate split here
+/// because the leading "artifacts" conjunct alone re-parses to a `Continuous`
+/// def with no modifications. Thorin Oakenshield: "As long as you have an
+/// enduring story, artifacts and creatures you control have ward {1}."
+#[test]
+fn compound_subject_keyword_grant_is_not_split_thorin() {
+    let defs = parse_static_line_multi(
+        "As long as you have an enduring story, artifacts and creatures you control have ward {1}.",
+    );
+    assert_eq!(
+        defs.len(),
+        1,
+        "the compound subject must not be split into a false SelfRef + companion pair, got {defs:?}"
+    );
+
+    let def = &defs[0];
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(
+                filters.len(),
+                2,
+                "expected Artifact + Creature, got {filters:?}"
+            );
+            for filter in filters {
+                match filter {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(
+                            tf.type_filters.contains(&TypeFilter::Artifact)
+                                || tf.type_filters.contains(&TypeFilter::Creature),
+                            "expected an Artifact or Creature conjunct, got {:?}",
+                            tf.type_filters
+                        );
+                    }
+                    other => panic!("expected a Typed conjunct, got {other:?}"),
+                }
+            }
+        }
+        other => panic!("affected must be Or(Artifact You, Creature You), got {other:?}"),
+    }
+    assert!(
+        def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward { .. },
+            }
+        )),
+        "expected AddKeyword(Ward), got {:?}",
+        def.modifications
+    );
+    assert_eq!(def.condition, Some(StaticCondition::HasEnduringStory));
+}
+
+/// CR 601.2f + CR 602.2b + CR 118.7a: the cost-reduction floor accepts BOTH
+/// referent phrasings — "that cost" (Training Grounds) and "that ability's
+/// activation cost" (Convergence of Dominion) — for the same `minimum_mana`
+/// floor. Convergence of Dominion: "As long as you control your commander,
+/// activated abilities of cards in your graveyard cost {2} less to activate.
+/// This effect can't reduce the mana in that ability's activation cost to less
+/// than one mana."
+#[test]
+fn static_reduce_activated_ability_cost_that_ability_activation_cost_floor() {
+    let defs = parse_static_line_multi(
+        "As long as you control your commander, activated abilities of cards in your graveyard cost {2} less to activate. This effect can't reduce the mana in that ability's activation cost to less than one mana.",
+    );
+    assert_eq!(defs.len(), 1, "expected exactly one def, got {defs:?}");
+    let def = &defs[0];
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 2,
+            minimum_mana: Some(1),
+            dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
+        }
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own
+        })
     );
 }
 

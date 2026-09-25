@@ -148,11 +148,13 @@ pub(crate) fn parse_activated_ability_cost_head(
 
 pub(crate) fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
     preceded(
-        take_until::<_, _, OracleError<'_>>(
-            "this effect can't reduce the mana in that cost to less than ",
-        ),
+        take_until::<_, _, OracleError<'_>>("this effect can't reduce the mana in "),
         preceded(
-            tag("this effect can't reduce the mana in that cost to less than "),
+            (
+                tag("this effect can't reduce the mana in "),
+                alt((tag("that cost"), tag("that ability's activation cost"))),
+                tag(" to less than "),
+            ),
             alt((value(1, tag("one mana")), nom_primitives::parse_number)),
         ),
     )

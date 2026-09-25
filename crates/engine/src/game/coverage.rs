@@ -10099,28 +10099,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         }
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
-        // CR 903.3d: the RUNTIME does evaluate this static
-        // (the `ControlsCommander` arm of `layers::evaluate_condition_with_context`,
-        // delegating both ownership arms to the single `game::commander` authority), so the
-        // `Unhandled` tag below understates the resolver.
-        //
-        // It stays `Unhandled` DELIBERATELY, and must not be flipped as a rider on
-        // an unrelated change: the tag is currently the only thing holding two
-        // demonstrably MISPARSED Lieutenant cards out of the supported set. Of the
-        // seven `ControlsCommander` statics in the pool, Convergence of Dominion
-        // parses to a static with `modifications: []` (a no-op continuous effect)
-        // and Thunderfoot Baloth collapses "this creature gets +2/+2 and other
-        // creatures you control get +2/+2 and have trample" into ONE `SelfRef`
-        // static, dropping the "other creatures you control" clause and granting
-        // trample to the Baloth itself. Flipping the tag alone would advertise both
-        // as `supported: true, gap_count: 0`.
-        //
-        // Land the flip in its own change, AFTER an empty-`modifications` static
-        // and a dropped continuous-modification clause each register as real gaps.
-        // Nothing in the commander-gate work depends on this tag — Fight for the
-        // Throne's intervening-`if` is an `AbilityCondition`, classified `Handled`
-        // in `condition_feature` above.
-        StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
+        // CR 903.3d: resolved by the `ControlsCommander` arm of
+        // `layers::evaluate_condition_inner`.
+        StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Handled),
         // SourceIsEquipped resolved by layers::evaluate_condition_inner.
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Handled),
         // SourceIsEnchanted resolved by layers::evaluate_condition_inner.
@@ -14861,75 +14842,174 @@ mod tests {
         );
     }
 
-    /// CR 903.3d: the Lieutenant STATIC's `Unhandled` coverage tag is a
-    /// deliberate mask, not an oversight — this pins both halves so the flip
-    /// cannot be smuggled in as a rider on an unrelated change.
-    ///
-    /// The runtime DOES evaluate `StaticCondition::ControlsCommander`
-    /// (the `ControlsCommander` arm of `layers::evaluate_condition_with_context`), so on the
-    /// resolver axis alone the tag understates the engine. But the tag is also
-    /// the only thing keeping two demonstrably misparsed Lieutenant cards out
-    /// of the supported set, so it must stay until those misparses register as
-    /// real gaps.
-    ///
-    /// The second assertion is the evidence, on verbatim Oracle text: Thunderfoot
-    /// Baloth's "…this creature gets +2/+2 AND OTHER CREATURES YOU CONTROL get
-    /// +2/+2 and have trample" collapses into a single `SelfRef` static, so the
-    /// other-creatures clause is silently dropped and trample lands on the Baloth
-    /// itself — with no gap recorded anywhere.
-    ///
-    /// FLIP PROTOCOL: when the dropped-clause misparse (and Convergence of
-    /// Dominion's empty-`modifications` no-op static) each register as a gap, the
-    /// second assertion here goes red. THAT is the signal to flip the tag to
-    /// `Handled` and delete this test — not before.
-    #[test]
-    fn lieutenant_commander_static_tag_is_a_deliberate_mask() {
-        let (label, support) = static_condition_feature(&StaticCondition::ControlsCommander {
-            ownership: CommanderOwnership::Own,
-        });
-        assert_eq!(label, "ControlsCommander");
-        assert!(
-            matches!(support, FeatureSupport::Unhandled),
-            "the mask must stay until the two misparses register as gaps; see the \
-             FLIP PROTOCOL on this test"
-        );
+    /// Build an `AtomicCard` for a `ControlsCommander` static-ability test with
+    /// its real MTGJSON keyword array, so the tests exercise the production
+    /// MTGJSON→face path (shaped like `tiered_atomic_card`).
+    fn commander_condition_atomic_card(case: &CommanderConditionCase) -> AtomicCard {
+        AtomicCard {
+            name: case.name.to_string(),
+            mana_cost: Some("{1}{G}".to_string()),
+            colors: vec!["G".to_string()],
+            color_identity: vec!["G".to_string()],
+            power: case.power.map(|p| p.to_string()),
+            toughness: case.toughness.map(|t| t.to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some(case.oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some(case.type_line.to_string()),
+            types: case.types.iter().map(|t| (*t).to_string()).collect(),
+            subtypes: case.subtypes.iter().map(|t| (*t).to_string()).collect(),
+            supertypes: vec![],
+            keywords: if case.keywords.is_empty() {
+                None
+            } else {
+                // allow-raw-authority: fixture copies MTGJSON keyword text, not game-object state.
+                Some(case.keywords.iter().map(|k| (*k).to_string()).collect())
+            },
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", case.name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", case.name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
 
-        let parsed = crate::parser::parse_oracle_text(
-            "Trample\nLieutenant — As long as you control your commander, this creature gets \
-             +2/+2 and other creatures you control get +2/+2 and have trample.",
-            "Thunderfoot Baloth",
-            &[],
-            &["Creature".to_string()],
-            &["Beast".to_string()],
-        );
-        // Reach-guard: the fixture only exercises the misparse if the parser
-        // really produced the OWNER-scoped commander gate.
-        let commander_statics: Vec<_> = parsed
-            .statics
-            .iter()
-            .filter(|s| {
-                matches!(
+    /// One row of the `controls_commander_statics_report_supported` table.
+    struct CommanderConditionCase<'a> {
+        name: &'a str,
+        type_line: &'a str,
+        types: &'a [&'a str],
+        subtypes: &'a [&'a str],
+        keywords: &'a [&'a str],
+        power: Option<&'a str>,
+        toughness: Option<&'a str>,
+        oracle: &'a str,
+    }
+
+    /// CR 903.3d: statics gated on `StaticCondition::ControlsCommander` carry no
+    /// resolver gap in `analyze_coverage`.
+    #[test]
+    fn controls_commander_statics_report_supported() {
+        let cases: &[CommanderConditionCase] = &[
+            CommanderConditionCase {
+                name: "Stormsurge Kraken",
+                type_line: "Creature — Kraken",
+                types: &["Creature"],
+                subtypes: &["Kraken"],
+                keywords: &["Hexproof", "Lieutenant"],
+                power: Some("5"),
+                toughness: Some("5"),
+                oracle: "Hexproof\nLieutenant — As long as you control your commander, this \
+                 creature gets +2/+2 and has \"Whenever this creature becomes blocked, you may \
+                 draw two cards.\"",
+            },
+            CommanderConditionCase {
+                name: "Angelic Field Marshal",
+                type_line: "Creature — Angel",
+                types: &["Creature"],
+                subtypes: &["Angel"],
+                keywords: &["Flying", "Lieutenant"],
+                power: Some("3"),
+                toughness: Some("3"),
+                oracle: "Flying\nLieutenant — As long as you control your commander, this \
+                 creature gets +2/+2 and creatures you control have vigilance.",
+            },
+            CommanderConditionCase {
+                name: "Demon of Wailing Agonies",
+                type_line: "Creature — Demon",
+                types: &["Creature"],
+                subtypes: &["Demon"],
+                keywords: &["Flying", "Lieutenant"],
+                power: Some("4"),
+                toughness: Some("4"),
+                oracle: "Flying\nLieutenant — As long as you control your commander, this \
+                 creature gets +2/+2 and has \"Whenever this creature deals combat damage to a \
+                 player, that player sacrifices a creature of their choice.\"",
+            },
+            CommanderConditionCase {
+                name: "Tyrant's Familiar",
+                type_line: "Creature — Dragon",
+                types: &["Creature"],
+                subtypes: &["Dragon"],
+                keywords: &["Flying", "Haste", "Lieutenant"],
+                power: Some("5"),
+                toughness: Some("5"),
+                oracle: "Flying, haste\nLieutenant — As long as you control your commander, \
+                 this creature gets +2/+2 and has \"Whenever this creature attacks, it deals 7 \
+                 damage to target creature defending player controls.\"",
+            },
+            CommanderConditionCase {
+                name: "Skyhunter Strike Force",
+                type_line: "Creature — Cat Knight",
+                types: &["Creature"],
+                subtypes: &["Cat", "Knight"],
+                keywords: &["Flying", "Lieutenant", "Melee"],
+                power: Some("2"),
+                toughness: Some("2"),
+                oracle: "Flying\nMelee (Whenever this creature attacks, it gets +1/+1 until \
+                 end of turn for each opponent you attacked this combat.)\nLieutenant — As \
+                 long as you control your commander, other creatures you control have melee.",
+            },
+            CommanderConditionCase {
+                name: "Thunderfoot Baloth",
+                type_line: "Creature — Beast",
+                types: &["Creature"],
+                subtypes: &["Beast"],
+                keywords: &["Lieutenant", "Trample"],
+                power: Some("5"),
+                toughness: Some("5"),
+                oracle: "Trample\nLieutenant — As long as you control your commander, this \
+                 creature gets +2/+2 and other creatures you control get +2/+2 and have \
+                 trample.",
+            },
+            CommanderConditionCase {
+                name: "Convergence of Dominion",
+                type_line: "Artifact",
+                types: &["Artifact"],
+                subtypes: &[],
+                keywords: &["Dynastic Command Node", "Mill", "Translocation Protocols"],
+                power: None,
+                toughness: None,
+                oracle: "Dynastic Command Node — As long as you control your commander, \
+                 activated abilities of cards in your graveyard cost {2} less to activate. \
+                 This effect can't reduce the mana in that ability's activation cost to less \
+                 than one mana.\nTranslocation Protocols — {3}, {T}: Mill three cards.",
+            },
+        ];
+
+        for case in cases {
+            let card = commander_condition_atomic_card(case);
+            let name = case.name;
+            let face = build_oracle_face(&card, None);
+            // Reach-guard: the fixture only counts if the parser really produced
+            // an Own-scoped ControlsCommander static.
+            assert!(
+                face.static_abilities.iter().any(|s| matches!(
                     &s.condition,
                     Some(StaticCondition::ControlsCommander {
                         ownership: CommanderOwnership::Own
                     })
-                )
-            })
-            .collect();
-        assert!(
-            !commander_statics.is_empty(),
-            "the Lieutenant line must parse to an Own-scoped ControlsCommander static: {:#?}",
-            parsed.statics
-        );
-        assert!(
-            commander_statics
-                .iter()
-                .all(|s| matches!(s.affected, Some(TargetFilter::SelfRef))),
-            "MISPARSE STILL PRESENT (expected): the \"other creatures you control\" clause \
-             is dropped and the whole Lieutenant grant lands on SelfRef. When this goes \
-             red the parser was fixed — flip `static_condition_feature` to Handled and \
-             delete this test. Got {commander_statics:#?}"
-        );
+                )),
+                "{name} must parse a static gated on ControlsCommander{{Own}}: {:#?}",
+                face.static_abilities
+            );
+            let result = coverage_result_for_face(face);
+            assert!(
+                result.gap_details.is_empty(),
+                "{name} must carry no resolver gap: {:?}",
+                result.gap_details
+            );
+        }
     }
 
     /// CR 903.3 vs CR 903.3d: the parse-details label is what bug triage reads,

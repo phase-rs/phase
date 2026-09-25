@@ -3077,12 +3077,10 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
-    // CR 611.3a + CR 613.1f: "PRIMARY and FOREIGN_SUBJECT have/has/gains/gain
-    // KEYWORD [as long as COND]" — compound static where the second conjunct has
-    // a different subject (e.g., Angelic Field Marshal: "~ gets +2/+2 and
-    // creatures you control have vigilance as long as you control your commander").
-    // Must run before the single-return fallback that can only produce one def.
-    if let Some(defs) = try_split_and_foreign_keyword_grant(&stripped) {
+    // CR 611.3a + CR 613.1f + CR 613.4c: "PRIMARY and FOREIGN_SUBJECT <keyword grant |
+    // P/T modification> [as long as COND]" (Angelic Field Marshal, Thunderfoot Baloth).
+    // Must run before the `parse_static_line` fallback below.
+    if let Some(defs) = try_split_and_foreign_subject_grant(&stripped) {
         return defs;
     }
 
