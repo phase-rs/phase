@@ -15976,6 +15976,87 @@ mod tests {
         );
     }
 
+    /// CR 119.3 + CR 608.2h: discriminating coverage for the all-players
+    /// life-change population — "for each player who lost life this turn"
+    /// (Reaper's Scythe / Strefan, Maurer Progenitor) lowers to
+    /// `PlayerCount{PlayerAttribute{relation: All, attr: LifeLostThisTurn, GE 1}}`.
+    /// 3-player board: the CONTROLLER lost 2 (must count — "each player" is not
+    /// "each opponent"), opp1 lost 1 (counts), opp2 lost 0 (excluded). Expect 2.
+    /// The opponent-only `OpponentLostLife` representation would answer 1 here,
+    /// so this test discriminates the all-players population from its sibling.
+    #[test]
+    fn resolve_player_count_all_players_who_lost_life_includes_the_controller() {
+        use crate::types::ability::{Comparator, PlayerRelation, PlayerScope};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].life_lost_this_turn = 2; // controller — counts
+        state.players[1].life_lost_this_turn = 1; // opp1 — counts
+        state.players[2].life_lost_this_turn = 0; // opp2 — excluded
+
+        let per_each = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &per_each, PlayerId(0), ObjectId(1)),
+            2,
+            "controller + opp1 lost life; opp2 did not — the controller must count"
+        );
+
+        // Discriminator on the attribute side: dropping the controller to 0
+        // drops the count to 1, confirming the per-candidate read (not a
+        // controller-scoped read, which would always see 2).
+        state.players[0].life_lost_this_turn = 0;
+        assert_eq!(
+            resolve_quantity(&state, &per_each, PlayerId(0), ObjectId(1)),
+            1,
+            "only opp1 still lost life"
+        );
+    }
+
+    /// CR 119.3: the gained-direction sibling reads each candidate's
+    /// `life_gained_this_turn` through `candidate_player_scalar` — the arm this
+    /// change adds. Before the arm, `PlayerAttribute` with `LifeGainedThisTurn`
+    /// failed the candidate predicate closed and resolved to 0 (a false green
+    /// for a parsed "for each player who gained life this turn").
+    #[test]
+    fn resolve_player_count_all_players_who_gained_life_uses_the_gained_scalar() {
+        use crate::types::ability::{Comparator, PlayerRelation, PlayerScope};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].life_gained_this_turn = 1; // controller — counts
+        state.players[1].life_gained_this_turn = 0; // opp1 — excluded
+        state.players[2].life_gained_this_turn = 3; // opp2 — counts
+
+        let per_each = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &per_each, PlayerId(0), ObjectId(1)),
+            2,
+            "controller and opp2 gained life; opp1 did not"
+        );
+    }
+
     /// CR 402.1: discriminating coverage for Wolfcaller's Howl — "the number of
     /// your opponents with four or more cards in hand". Hand size is read off
     /// each candidate. 3-player board: opp1 hand=4 (counts), opp2 hand=2

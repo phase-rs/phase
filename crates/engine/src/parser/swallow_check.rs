@@ -43,7 +43,7 @@ use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
 use crate::types::game_state::RetargetScope;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaCost, ManaExpiry};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::ActivationExemption;
@@ -2465,6 +2465,80 @@ fn dynamic_markers_are_all_recorded_unrecognized(
     })
 }
 
+/// CR 702.21a + CR 608.2h + CR 113.7a: how many dynamic ward payments a parsed
+/// `WardCost` represents — one per `PayLifeEqualToPower`, recursing through
+/// `Compound` so the comma-separated spelling ("Ward—{2}, Pay life equal to ~'s
+/// power", `oracle_keyword::parse_ward_cost`) counts exactly like the bare one at
+/// the parse level this detector audits. (The compound path's RUNTIME payment is
+/// separately incomplete — `ward_cost_to_ability_cost` charges only the first
+/// component — and is reported on this PR, not hidden here.)
+///
+/// EXHAUSTIVE on purpose: a future `WardCost` variant must decide whether it
+/// represents a dynamic amount rather than defaulting into invisibility behind a `_`
+/// arm. `PayLifeEqualToPower` is the only variant that represents one today; every
+/// other parsed ward cost is a fixed amount, a mana cost, or a non-quantity payment.
+fn ward_power_life_payments(cost: &WardCost) -> usize {
+    match cost {
+        WardCost::PayLifeEqualToPower => 1,
+        WardCost::Compound(parts) => parts.iter().map(ward_power_life_payments).sum(),
+        WardCost::Mana(_)
+        | WardCost::PayLife(_)
+        | WardCost::DiscardCard
+        | WardCost::Sacrifice { .. }
+        | WardCost::Waterbend(_)
+        | WardCost::GetPlayerCounters { .. } => 0,
+    }
+}
+
+/// CR 702.21a + CR 608.2h + CR 113.7a: true when every dynamic-quantity marker the
+/// line raises is an `" equal to "` occurrence discharged by a represented Ward
+/// power-life payment.
+///
+/// **Occurrence-counted, not set-like** — the same consumption contract
+/// [`dynamic_markers_are_all_recorded_unrecognized`] documents, applied to the Ward
+/// carrier instead of to recorded gap text. A predicate of the shape "some Ward in
+/// this unit pays life equal to power" answers a question about the carrier's TYPE,
+/// not about its OCCURRENCES: a unit whose text raises `" equal to "` twice, from two
+/// independent clauses, of which only ONE is the Ward payment, satisfied that
+/// predicate and had BOTH occurrences suppressed — so the second clause's dropped
+/// dynamic quantity was reported by nothing at all. That is the silent false green
+/// this detector exists to prevent.
+///
+/// So each represented payment CONSUMES one raised `" equal to "` occurrence and no
+/// more. The gate is deliberately narrow twice over: the raised marker set must be
+/// exactly `[" equal to "]` (any other marker — `"for each "`, `"the number of "`, …
+/// — falls through to the remaining probes), and the represented payment count must
+/// cover the raised occurrence count. Everything else is left to the other probes, so
+/// an unrepresented quantity still warns.
+fn ward_power_life_payments_cover_all_equal_to_markers(
+    cleaned: &str,
+    markers: &[&'static str],
+    evidence: &UnitEvidence,
+) -> bool {
+    // Exactly the one marker this leg can discharge; a second marker kind belongs to
+    // a clause no Ward payload represents.
+    if markers.len() != 1 || markers[0] != " equal to " {
+        return false;
+    }
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let raised = cleaned.matches(" equal to ").count();
+    let represented: usize = evidence
+        .keywords()
+        .into_iter()
+        // CR 702.21a: a granted Ward ("Other creatures you control have ward—pay
+        // life equal to ~'s power") carries the same payment under
+        // `ContinuousModification::AddKeyword`, reached through the typed parent
+        // carrier — see `UnitEvidence::granted_keywords`.
+        .chain(evidence.granted_keywords())
+        .map(|keyword| match keyword {
+            Keyword::Ward(cost) => ward_power_life_payments(&cost),
+            // Every non-Ward keyword represents no ward payment.
+            _ => 0,
+        })
+        .sum();
+    raised > 0 && represented >= raised
+}
+
 /// Oracle text contains dynamic-quantity grammar ("equal to", "for each",
 /// "twice", "where x is", "the number of", "half [poss]") but the parsed
 /// AST contains no dynamic carrier (Ref, Multiply, DivideRounded, Offset,
@@ -2627,12 +2701,40 @@ fn detect_dynamic_qty(
     if evidence.any::<PlayerFilter>(|p| matches!(p, PlayerFilter::VotedFor { .. })) {
         return;
     }
-    //   CR 702.139 / 702.41  Affinity-style built-in cost mods carry their scaling in the
-    //              keyword payload. `Keyword` is EXTERNALLY tagged, so it is key-anchored
-    //              (array elements inherit their field's key).
-    if evidence.any_at::<Keyword>(&["extracted_keywords", "keywords"], |k| {
-        matches!(k, Keyword::Affinity { .. })
-    }) {
+    // CR 702.41  There is deliberately NO whole-unit Affinity exemption
+    //              here. Affinity's scaling text is REMINDER text ("This spell costs
+    //              {1} less to cast for each artifact you control"), which
+    //              `strip_parens` removes before any detector runs — so an Affinity
+    //              keyword in this unit can never be the source of a raised
+    //              "for each " occurrence, and a presence check could only ever
+    //              discharge an UNRELATED clause's dropped quantity (the same
+    //              false-green the Ward leg's occurrence-counted gate closes). A
+    //              future card that raises a marker the Affinity payload genuinely
+    //              represents needs an occurrence-counted association with the
+    //              keyword's own `TypedFilter`, not a presence check. Regression
+    //              test: `dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity`.
+    //   CR 702.21a + CR 608.2h + CR 113.7a  A Ward whose life payment is the
+    //              warded permanent's power ("Ward—Pay life equal to ~'s power") is
+    //              a dynamic quantity intrinsic to the `WardCost` variant: the power
+    //              is read as the ability resolves (608.2h / 113.7a), and for the
+    //              BARE `PayLifeEqualToPower` variant `ward_cost_to_ability_cost`
+    //              resolves it to `AbilityCost::PayLife { amount: Ref(Power { scope:
+    //              Source }) }` at payment time. The compound spelling
+    //              ("Ward—{2}, Pay life equal to ~'s power") is counted because its
+    //              PARSE-level representation is the same dynamic quantity — that is
+    //              the question this detector audits. Its runtime payment is
+    //              separately incomplete (`ward_cost_to_ability_cost` charges only
+    //              the first component: a pre-existing gap on Gisa, the Hellraiser /
+    //              Captain Howler, Sea Scourge / Ovika, Enigma Goliath, reported on
+    //              this PR rather than hidden by this leg). No `QuantityExpr` field
+    //              exists for the probes above to see, so the variant itself is the
+    //              evidence — but each payment discharges exactly ONE raised
+    //              " equal to " occurrence
+    //              (`ward_power_life_payments_cover_all_equal_to_markers`), so a
+    //              second, unrepresented " equal to "/"for each "/… clause in the
+    //              same unit still warns. Cards: Raubahn, Bull of Ala Mhigo;
+    //              Phyrexian Fleshgorger.
+    if ward_power_life_payments_cover_all_equal_to_markers(cleaned, &markers, evidence) {
         return;
     }
     // Slot-shaped carriers: the fact IS "the parser filled this slot", and the slot's
@@ -5394,7 +5496,7 @@ mod tests {
         TargetFilter, TriggerCondition,
     };
     use crate::types::identifiers::TrackedSetId;
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{Keyword, WardCost};
     use crate::types::mana::ManaCost;
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
@@ -9191,6 +9293,400 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: a Ward whose life payment is the
+    /// warded permanent's power ("Ward—Pay life equal to ~'s power") is a dynamic
+    /// quantity intrinsic to the `WardCost::PayLifeEqualToPower` variant — the
+    /// power is read as the ability resolves (608.2h / 113.7a, the same authority
+    /// `oracle_keyword.rs` cites for the read) and `ward_cost_to_ability_cost`
+    /// resolves it to `AbilityCost::PayLife { amount: Ref(Power { Source }) }`.
+    /// No `QuantityExpr` field exists, so the " equal to " marker must NOT raise
+    /// a DynamicQty swallow warning; the variant itself is the carrier.
+    /// Reverting the evidence leg re-reds Raubahn, Bull of Ala Mhigo and
+    /// Phyrexian Fleshgorger, both of which carried a live warning in shipped
+    /// card data.
+    #[test]
+    fn dynamic_qty_accepts_ward_pay_life_equal_to_power() {
+        // Detector-liveness control, same run: a fixture whose dynamic quantity
+        // is genuinely dropped still warns, so the two greens below cannot be
+        // produced by a detector that never fires. (Drown in the Loch's modal
+        // bullets are the suite's pinned DynamicQty positive.)
+        let dropped = parse_named(
+            "Choose one \u{2014}\n\
+             \u{2022} Counter target spell with mana value less than or equal to the number of \
+             cards in its controller's graveyard.\n\
+             \u{2022} Destroy target creature with mana value less than or equal to the number of \
+             cards in its controller's graveyard.",
+            "Drown in the Loch",
+            &["Instant"],
+        );
+        assert!(
+            has_swallowed_detector(&dropped, "DynamicQty"),
+            "control: the DynamicQty detector must be live in this test"
+        );
+
+        // The real cards, parsed with the production keyword/type inputs so the
+        // fixture reaches the same branches the card-data pipeline does.
+        let raubahn_keywords = vec!["Ward".to_string()];
+        let fleshgorger_keywords = vec![
+            "Prototype".to_string(),
+            "Menace".to_string(),
+            "Lifelink".to_string(),
+            "Ward".to_string(),
+        ];
+        let cases = [
+            (
+                "Raubahn, Bull of Ala Mhigo",
+                "Ward\u{2014}Pay life equal to Raubahn's power.\n\
+                 Whenever Raubahn attacks, attach up to one target Equipment you \
+                 control to target attacking creature.",
+                &raubahn_keywords,
+                vec!["Legendary".to_string(), "Creature".to_string()],
+                vec!["Human".to_string(), "Warrior".to_string()],
+            ),
+            (
+                "Phyrexian Fleshgorger",
+                "Prototype {1}{B}{B} \u{2014} 3/3 (You may cast this spell with different mana \
+                 cost, color, and size. It keeps its abilities and types.)\n\
+                 Menace, lifelink\n\
+                 Ward\u{2014}Pay life equal to this creature's power.",
+                &fleshgorger_keywords,
+                vec!["Artifact".to_string(), "Creature".to_string()],
+                vec!["Phyrexian".to_string(), "Wurm".to_string()],
+            ),
+        ];
+        for (name, text, keywords, core_types, subtypes) in cases {
+            // Reach guard 1: the fixture raises the detector's " equal to "
+            // expectation — without it, green could mean the marker never fired.
+            assert!(
+                // allow-noncombinator: test fixture assertion on classified text
+                text.to_ascii_lowercase().contains(" equal to "),
+                "{name}: fixture must raise the detector's dynamic marker"
+            );
+            let parsed = parse_oracle_text(text, name, keywords, &core_types, &subtypes);
+            // Reach guard 2: the typed carrier the leg keys on is present, so a
+            // green result is the leg's doing rather than a parse failure.
+            assert!(
+                parsed
+                    .extracted_keywords
+                    .iter()
+                    .any(|keyword| matches!(keyword, Keyword::Ward(WardCost::PayLifeEqualToPower))),
+                "{name} must carry the dynamic Ward cost: {:?}",
+                parsed.extracted_keywords
+            );
+            // Reach guard 3: no `Unimplemented` root effect, which would make
+            // `check_swallowed_clauses` skip the unit and green the negative
+            // assertion vacuously.
+            assert!(
+                parsed
+                    .abilities
+                    .iter()
+                    .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                    .all(|ability| !matches!(
+                        ability.effect.as_ref(),
+                        Effect::Unimplemented { .. }
+                    )),
+                "{name}: no Unimplemented root effect may suppress the unit"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "DynamicQty"),
+                "{name} must not report a swallowed dynamic quantity: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: a dynamic Ward GRANTED to other
+    /// permanents ("Other creatures you control have ward—Pay life equal to ~'s
+    /// power") parses to `ContinuousModification::AddKeyword { Ward(
+    /// PayLifeEqualToPower) }`, so the Ward leg must count it from the typed grant
+    /// carrier (`UnitEvidence::granted_keywords`) and stay silent. The control — the
+    /// same text with the same-shaped grant carrying a FIXED Ward — does not
+    /// represent the dynamic quantity, so the warning must still fire.
+    #[test]
+    fn dynamic_qty_accepts_granted_ward_pay_life_equal_to_power() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let text = "Other creatures you control have ward\u{2014}pay life equal to ~'s power.";
+
+        // Production parse: the grant lowers to AddKeyword(Ward(PayLifeEqualToPower)).
+        let granted = parse_named(text, "Test Grantor", &["Creature"]);
+        assert!(
+            granted
+                .statics
+                .iter()
+                .any(|stat| stat.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Ward(WardCost::PayLifeEqualToPower)
+                    }
+                ))),
+            "reach guard: the production parser must lower the granted dynamic ward \
+             to AddKeyword(Ward(PayLifeEqualToPower)): {:?}",
+            granted.statics
+        );
+        let evidence = UnitEvidence::of(&granted);
+        let cleaned = text.to_ascii_lowercase();
+        assert!(
+            !super::active_dynamic_markers(&cleaned, &evidence).is_empty(),
+            "fixture must raise the dynamic marker"
+        );
+        // Reach guard: the typed grant carrier exposes the payment to the counting path.
+        assert!(
+            !evidence.granted_keywords().is_empty(),
+            "evidence must expose the granted keyword"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(&cleaned, &cleaned, &evidence, &mut diagnostics);
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "a granted power-life Ward must not report DynamicQty: {diagnostics:?}"
+        );
+
+        // Control: the same text with a fixed-cost grant. Nothing represents the
+        // raised " equal to " occurrence, so the warning must fire.
+        let mut fixed_static = StaticDefinition::new(StaticMode::Continuous);
+        fixed_static.modifications = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Ward(WardCost::PayLife(2)),
+        }];
+        let control = crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: vec![fixed_static],
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        };
+        let control_evidence = UnitEvidence::of(&control);
+        let mut control_diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            &cleaned,
+            &cleaned,
+            &control_evidence,
+            &mut control_diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&control_diagnostics).len(),
+            1,
+            "a granted fixed Ward represents no dynamic quantity: {control_diagnostics:?}"
+        );
+    }
+
+    /// CR 702.41: an Affinity keyword's scaling lives in its REMINDER text ("This
+    /// spell costs {1} less to cast for each artifact you control"), which
+    /// `strip_parens` removes before the detectors run — so an Affinity keyword in this
+    /// unit can never be the source of a raised "for each " occurrence, and no
+    /// whole-unit Affinity exemption exists (see `detect_dynamic_qty`). A sibling
+    /// clause whose "for each " is unrepresented must therefore still warn; the
+    /// removed presence-check leg suppressed it.
+    #[test]
+    fn dynamic_qty_still_warns_for_a_sibling_marker_beside_affinity() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let parsed = parsed_with_keywords(vec![Keyword::Affinity(TypedFilter::new(
+            TypeFilter::Artifact,
+        ))]);
+        let evidence = UnitEvidence::of(&parsed);
+        let cleaned = "affinity for artifacts. when this creature enters, create a treasure \
+                       token for each artifact you control.";
+        // Reach guard: the marker is raised and the Affinity keyword is visible to the
+        // unit's evidence, so a warning here cannot be vacuous.
+        assert!(
+            !super::active_dynamic_markers(cleaned, &evidence).is_empty(),
+            "fixture must raise the dynamic marker"
+        );
+        assert!(
+            evidence
+                .keywords()
+                .iter()
+                .any(|keyword| matches!(keyword, Keyword::Affinity(_))),
+            "fixture must expose the Affinity keyword: {:?}",
+            evidence.keywords()
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut diagnostics);
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a sibling unrepresented \"for each \" clause beside an Affinity keyword must \
+             warn: {diagnostics:?}"
+        );
+    }
+
+    /// A minimal `ParsedAbilities` carrying exactly the given extracted keywords and
+    /// no other definitions — the direct-probe fixture for the Ward evidence leg.
+    /// Field list taken verbatim from `ParsedAbilities` in
+    /// `crates/engine/src/parser/oracle.rs`.
+    fn parsed_with_keywords(keywords: Vec<Keyword>) -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: keywords,
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// The `DynamicQty` `SwallowedClause` descriptions in `diagnostics`, in order.
+    fn dynamic_qty_descriptions(diagnostics: &[OracleDiagnostic]) -> Vec<&str> {
+        diagnostics
+            .iter()
+            .filter_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause {
+                    detector,
+                    description,
+                    ..
+                } if detector == "DynamicQty" => Some(description.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: a Compound Ward cost whose components
+    /// include `PayLifeEqualToPower` ("Ward—{2}, Pay life equal to ~'s power", the
+    /// comma-separated form `oracle_keyword::parse_ward_cost` lowers) represents the
+    /// same dynamic payment as the bare spelling, so the DynamicQty detector must
+    /// stay silent. The discriminating control — the same text with a Compound that
+    /// carries NO power-life payment — must still warn, proving the silence comes
+    /// from the recursive count and not from the text or the marker gate.
+    #[test]
+    fn dynamic_qty_accepts_compound_ward_with_power_life_payment() {
+        let with_power = parsed_with_keywords(vec![Keyword::Ward(WardCost::Compound(vec![
+            WardCost::Mana(ManaCost::generic(2)),
+            WardCost::PayLifeEqualToPower,
+        ]))]);
+        let evidence = UnitEvidence::of(&with_power);
+
+        let cleaned = "ward\u{2014}{2}, pay life equal to ~'s power.";
+        // Reach guard: the fixture raises the " equal to " marker the leg keys on,
+        // or the silence below could just mean the detector never engaged.
+        assert!(
+            !super::active_dynamic_markers(cleaned, &evidence).is_empty(),
+            "fixture must raise the dynamic marker"
+        );
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut diagnostics);
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "a compound Ward with a power-life payment must not report DynamicQty: {diagnostics:?}"
+        );
+
+        // Discriminating control: same text, compound WITHOUT the power-life
+        // payment. The marker is still raised and nothing else carries it, so the
+        // warning must fire.
+        let without_power = parsed_with_keywords(vec![Keyword::Ward(WardCost::Compound(vec![
+            WardCost::Mana(ManaCost::generic(2)),
+            WardCost::PayLife(2),
+        ]))]);
+        let control_evidence = UnitEvidence::of(&without_power);
+        assert!(
+            !super::active_dynamic_markers(cleaned, &control_evidence).is_empty(),
+            "control fixture must raise the dynamic marker"
+        );
+        let mut control_diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            cleaned,
+            cleaned,
+            &control_evidence,
+            &mut control_diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&control_diagnostics).len(),
+            1,
+            "the compound without a power-life payment must warn: {control_diagnostics:?}"
+        );
+    }
+
+    /// CR 702.21a + CR 608.2h + CR 113.7a: each represented Ward power-life payment
+    /// discharges exactly ONE raised " equal to " occurrence — the consumption
+    /// contract `dynamic_markers_are_all_recorded_unrecognized` documents, applied to
+    /// the Ward carrier. A unit carrying the Ward clause PLUS a second, unrepresented
+    /// dynamic clause must still warn; the whole-unit boolean this leg replaces
+    /// suppressed both, and the second clause's dropped quantity was reported by
+    /// nothing at all.
+    #[test]
+    fn dynamic_qty_still_warns_for_a_second_unrepresented_marker_in_a_ward_unit() {
+        // Evidence: exactly ONE represented Ward power-life payment and no other
+        // carrier (no abilities/statics/replacements at all).
+        let parsed = parsed_with_keywords(vec![Keyword::Ward(WardCost::PayLifeEqualToPower)]);
+        let evidence = UnitEvidence::of(&parsed);
+
+        // Positive reach/control: the ward-only text stays silent with this
+        // evidence — one occurrence, one payment.
+        let ward_only = "ward\u{2014}pay life equal to ~'s power.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(ward_only, ward_only, &evidence, &mut diagnostics);
+        assert!(
+            dynamic_qty_descriptions(&diagnostics).is_empty(),
+            "the ward-only text must stay silent: {diagnostics:?}"
+        );
+
+        // A second, unrepresented " equal to " clause: one payment cannot discharge
+        // two occurrences. (The clause carries only the " equal to " marker, so the
+        // raised set is exactly [" equal to "] and the occurrence count is what
+        // refuses.)
+        let second_equal_to = "ward\u{2014}pay life equal to ~'s power. whenever ~ attacks, it \
+                               deals damage equal to its power to any target.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            second_equal_to,
+            second_equal_to,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a second unrepresented \" equal to \" clause must warn: {diagnostics:?}"
+        );
+
+        // A second clause that also raises "the number of " — the raised marker set
+        // is no longer exactly [" equal to "], so the Ward leg cannot discharge it.
+        let second_number_of = "ward\u{2014}pay life equal to ~'s power. whenever ~ attacks, it \
+                                deals damage equal to the number of cards in your hand to any target.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            second_number_of,
+            second_number_of,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a second \"the number of \" clause must warn: {diagnostics:?}"
+        );
+
+        // A second clause with a different marker ("for each ") also warns: the
+        // raised marker set is no longer exactly [" equal to "].
+        let second_for_each = "ward\u{2014}pay life equal to ~'s power. put a soul counter on ~ \
+                               for each player who lost life this turn.";
+        let mut diagnostics = Vec::new();
+        super::detect_dynamic_qty(
+            second_for_each,
+            second_for_each,
+            &evidence,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            dynamic_qty_descriptions(&diagnostics).len(),
+            1,
+            "a second \"for each \" clause must warn: {diagnostics:?}"
+        );
     }
 
     /// CR 702.143d: Singing Towers of Darillium grants foretell whose cost is
