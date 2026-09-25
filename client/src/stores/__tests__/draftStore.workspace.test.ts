@@ -1066,6 +1066,62 @@ describe("draft store workspace authority", () => {
     localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
   });
 
+  it("refuses a persisted stage owned by another draft on resume and launch", async () => {
+    vi.useRealTimers();
+    const draftId = "stage-owner";
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"],
+      usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId, gameId: "same-stage", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    const wrongOwnerRun: DraftRunState = {
+      ...run, activeMatch: { ...run.activeMatch!, draftId: "another-draft" },
+    };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "custom-cube", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, wrongOwnerRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+    });
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null });
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(wrongOwnerRun);
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
+    await actualPersistence.saveDraftRun(draftId, wrongOwnerRun);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(wrongOwnerRun);
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, gameId: "same-stage",
+    }));
+    expect(navigate).toHaveBeenCalledOnce();
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
   it("refuses a nonfinite in-memory difficulty changed through the store after a valid resume", async () => {
     const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
       opponentDeck: ["Opponent"], usedBotSeats: [1] };

@@ -926,7 +926,7 @@ function arraysEqual(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function validRun(run: DraftRunState, setCode: string): boolean {
+function validRun(run: DraftRunState, draftId: string, setCode: string): boolean {
   return (run.format === "single" || run.format === "bo3" || run.format === "run")
     && Array.isArray(run.results)
     && run.results.every((entry) => typeof entry?.gameId === "string"
@@ -941,7 +941,7 @@ function validRun(run: DraftRunState, setCode: string): boolean {
     && (setCode !== "custom-cube" || Array.isArray(run.booster_pack_pool))
     && (run.activeMatch === undefined
       || (typeof run.activeMatch === "object" && run.activeMatch !== null
-        && isCoherentUnresolvedDraftStage(run, run.activeMatch.draftId, run.activeMatch.gameId)));
+        && isCoherentUnresolvedDraftStage(run, draftId, run.activeMatch.gameId)));
 }
 
 /** Transport identity for a submitted, unresolved match. The run is the authority. */
@@ -1224,7 +1224,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     if (submitted && !run) return unavailable("Missing durable draft run");
     const installRunOnly = (): DraftResumeOutcome => {
       if (!run || lifecycle !== lifecycleGeneration) return unavailable("Missing durable draft run");
-      if (!validDifficulty(meta.difficulty) || !validRun(run, meta.setCode)) {
+      if (!validDifficulty(meta.difficulty) || !validRun(run, meta.id, meta.setCode)) {
         return unavailable("Saved draft run is unavailable");
       }
       set({
@@ -1756,7 +1756,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (!fresh()) return;
       const durableRun = withBoosterPackPool(savedRun, boosterPackPool);
       if (runOnly && (!validDifficulty(state.difficulty)
-        || !validRun(durableRun, state.selectedSet))) {
+        || !validRun(durableRun, state.draftId, state.selectedSet))) {
         throw new Error("Saved draft run is unavailable");
       }
       const playerDeck = runOnly ? durableRun.playerDeck
