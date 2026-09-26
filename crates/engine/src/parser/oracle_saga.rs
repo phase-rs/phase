@@ -294,12 +294,13 @@ pub(crate) fn is_saga_chapter(lower: &str) -> bool {
 /// A continuous effect "lasts as long as stated by the spell or ability
 /// creating it", so each grant is judged by the duration ITS OWN clause states,
 /// which the effect-chain parser records on that clause's definition
-/// (`AbilityDefinition::duration`, set for a leading "Until end of turn, ?" as
-/// for a trailing "? until end of turn"). Every clause of the chain is visited:
+/// (`AbilityDefinition::duration`, set for a leading "Until end of turn, …" as
+/// for a trailing "… until end of turn"). Every clause of the chain is visited:
 /// an earlier instruction neither shields a later duration-free grant nor lends
-/// it a duration. Roar of the Fifth People IV ("? gain double strike and trample
+/// it a duration (see `promote_duration_free_grants` for which later grants are
+/// promoted). Roar of the Fifth People IV ("… gain double strike and trample
 /// until end of turn.") and Firja's Retribution II ("Until end of turn, Angels
-/// you control gain ?") keep their stated duration.
+/// you control gain …") keep their stated duration.
 fn promote_grant_duration_for_chapter(execute: &mut AbilityDefinition) {
     // CR 700.2 + CR 611.2a: a MODAL chapter's root is a mode-dispatch marker that
     // grants nothing on its own; any granted ability lives in the chosen mode,
@@ -313,15 +314,48 @@ fn promote_grant_duration_for_chapter(execute: &mut AbilityDefinition) {
     promote_duration_free_grants(execute);
 }
 
-/// Promote every `GenericEffect` grant in `ability`'s chain whose own clause
+/// Promote the `GenericEffect` grants in `ability`'s chain whose own clause
 /// states no duration (see `promote_grant_duration_for_chapter`).
+///
+/// The chain's root keeps the chapter promotion as it was, now judged on the
+/// root clause's recorded duration. A LATER clause is promoted only where the
+/// result is exact: a grant to the Saga itself ("This Saga gains …") whose
+/// clause the parser recorded with no duration at all. That grant lasts as long
+/// as the Saga does (CR 400.7: the Saga that leaves is a new object), so
+/// `UntilHostLeavesPlay` is its CR 611.2a lifetime. A later grant to anything
+/// else, or one carrying a duration on its effect ("… can't be blocked this
+/// turn"), is left exactly as the effect-chain parser produced it: the parser
+/// leaves the second conjunct of a leading "Until end of turn, …" duration-less
+/// (World War Hulk III's "… and it gains trample"), and only the GenericEffect
+/// resolver's end-of-turn fallback expires it. The same conjunct shape granting
+/// to the Saga itself is not distinguishable here and has no printed Saga.
 fn promote_duration_free_grants(ability: &mut AbilityDefinition) {
     if ability.duration.is_none() {
         promote_generic_effect_duration(&mut ability.effect);
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        promote_duration_free_grants(sub);
+    let mut node = ability.sub_ability.as_deref_mut();
+    while let Some(sub) = node {
+        if sub.duration.is_none() && is_duration_free_grant_to_the_saga(&sub.effect) {
+            promote_generic_effect_duration(&mut sub.effect);
+        }
+        node = sub.sub_ability.as_deref_mut();
     }
+}
+
+/// A `GenericEffect` whose every static affects the Saga itself (`SelfRef`) and
+/// whose effect carries no duration.
+fn is_duration_free_grant_to_the_saga(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect {
+            duration: None,
+            static_abilities,
+            ..
+        } if !static_abilities.is_empty()
+            && static_abilities
+                .iter()
+                .all(|def| matches!(def.affected, Some(TargetFilter::SelfRef)))
+    )
 }
 
 /// Promote a `GenericEffect` whose duration is the parser default
@@ -1240,8 +1274,55 @@ mod tests {
                 "Draw a card. This Saga gains \"{T}: Add {C}.\" until end of turn.",
                 Duration::UntilEndOfTurn,
             ),
+            // Victory of the Pyrohammer I's shape.
+            (
+                "This Saga deals 4 damage to each creature and each planeswalker. This Saga gains \"Damage isn't removed from creatures during cleanup steps.\"",
+                Duration::UntilHostLeavesPlay,
+            ),
         ] {
             assert_eq!(one_chapter_grant_duration(body), Some(expected), "{body}");
+        }
+    }
+
+    /// A later clause that isn't a duration-free grant to the Saga keeps exactly
+    /// what the effect-chain parser produced. The Kang Dynasty III's "can't be
+    /// blocked this turn" stays end-of-turn. World War Hulk III's "it gains
+    /// trample" is the second conjunct of a leading "Until end of turn,", which the
+    /// parser leaves duration-less and the GenericEffect resolver's end-of-turn
+    /// fallback expires (effects/effect.rs), so promoting it would make the
+    /// trample outlast the turn.
+    #[test]
+    fn chapter_leaves_a_later_grant_to_another_object_as_parsed() {
+        for (body, expected) in [
+            (
+                "Target creature you control gets +1/+1 until end of turn for each card in your hand and can't be blocked this turn.",
+                Some(Duration::UntilEndOfTurn),
+            ),
+            (
+                "Choose target creature you control. Until end of turn, double its power and toughness and it gains trample.",
+                None,
+            ),
+        ] {
+            let line = format!("III \u{2014} {body}");
+            let lines = vec![
+                "(As this Saga enters and after your draw step, add a lore counter.)",
+                line.as_str(),
+            ];
+            let (triggers, _, _) = saga_test_chapters(&lines, "Duration Saga");
+            let root = triggers[0]
+                .execute
+                .as_deref()
+                .expect("chapter has an ability");
+            let mut later = Vec::new();
+            let mut node = root.sub_ability.as_deref();
+            while let Some(def) = node {
+                if let Effect::GenericEffect { duration, .. } = &*def.effect {
+                    later.push(duration.clone());
+                }
+                node = def.sub_ability.as_deref();
+            }
+            assert!(!later.is_empty(), "reach: {body} has a later grant clause");
+            assert_eq!(later, vec![expected], "{body}");
         }
     }
 
