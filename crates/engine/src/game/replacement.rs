@@ -99,6 +99,18 @@ const GRANTED_SUNBURST_INDEX: usize = usize::MAX - 7;
 /// form is CONDITIONAL (an opponent must have been dealt damage this turn), so the
 /// shared applier honors each granted instance's carried `condition`.
 const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
+/// CR 702.52a: Granted Dredge — a virtual Draw replacement keyed on a
+/// graveyard card that has Dredge only via a runtime grant (e.g. The
+/// Necrobloom's "Land cards in your graveyard have dredge 2"), not a printed
+/// keyword. Printed Dredge is synthesized into an object-carried
+/// `ReplacementDefinition` at database-build time
+/// (`database::synthesis::synthesize_dredge`); a runtime grant adds only the
+/// keyword (no stored definition), so this reserved candidate id lets the
+/// existing CR 616 replacement-ordering pipeline offer, label, and apply it
+/// exactly like the object-carried definitions it mirrors — the SAME
+/// definition shape, built by `database::synthesis::dredge_replacement_definition`
+/// (extracted from `synthesize_dredge` for this reuse).
+const GRANTED_DREDGE_INDEX: usize = usize::MAX - 9;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -331,6 +343,103 @@ fn granted_etb_keyword_replacement_id(object_id: ObjectId, kw: GrantedEtbKeyword
 
 fn is_granted_etb_keyword_replacement(rid: ReplacementId) -> bool {
     GrantedEtbKeyword::from_index(rid.index).is_some()
+}
+
+fn granted_dredge_replacement_id(object_id: ObjectId) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: GRANTED_DREDGE_INDEX,
+    }
+}
+
+fn is_granted_dredge_replacement(rid: ReplacementId) -> bool {
+    rid.index == GRANTED_DREDGE_INDEX
+}
+
+/// The PRINTED Dredge value carried by `obj`'s base (unmodified)
+/// characteristics, or `None` if Dredge is not printed on this card. Used
+/// only by `granted_dredge_value`'s redundancy comparison — see there for
+/// why equality with the resolved effective value means there is nothing
+/// distinct to offer, while a genuine difference means two distinct Dredge
+/// instances exist and both must surface.
+fn printed_dredge_value(obj: &GameObject) -> Option<u32> {
+    obj.base_keywords.iter().find_map(|kw| match kw {
+        crate::types::keywords::Keyword::Dredge(n) => Some(*n),
+        _ => None,
+    })
+}
+
+/// CR 702.52a + CR 613.1f: The GRANTED effective Dredge value for a
+/// graveyard object, usable as a replacement candidate DISTINCT from any
+/// printed Dredge the same object carries — or `None` when there is nothing
+/// distinct to offer.
+///
+/// `None` covers three cases: the object has no Dredge at all (printed or
+/// granted); it is not currently in a graveyard (CR 113.6b: Dredge functions
+/// only from the graveyard); or the resolved effective value is REDUNDANT
+/// with the object's own printed Dredge — either no grant is currently
+/// active (the resolved value is simply the printed one) or an active grant
+/// happens to carry the identical N. The redundant cases are already
+/// offered by the object-carried candidate `synthesize_dredge` installs, so
+/// a second virtual copy of the same number would only double-prompt for
+/// nothing.
+///
+/// When a grant's value DIFFERS from the printed N — some other effect
+/// granting dredge 3 to a card printed with dredge 2, say — printed and
+/// granted are two distinct instances of the ability, so both must surface
+/// for the existing CR 616.1 ordering machinery to offer a real choice
+/// between them (each labeled with its own N by
+/// `replacement_choice_label_for_rid`). Every granted-Dredge source shipped
+/// today (The Necrobloom) happens to grant the same value Dakmor Salvage
+/// already prints, so this differing-value branch is not exercised by any
+/// real card yet — it exists so a future differently-valued grant does not
+/// silently lose the granted option.
+///
+/// A card CAN carry a printed Dredge and a separately granted one at the same
+/// time — Dakmor Salvage (printed dredge 2) sitting in a graveyard while The
+/// Necrobloom's "Land cards in your graveyard have dredge 2" is on the
+/// battlefield is exactly that case. Nothing in CR 702.52 (verified against
+/// `docs/MagicCompRules.txt`: 702.52a defines Dredge, 702.52b covers an
+/// insufficient library — neither says anything about multiple instances)
+/// collapses two differently-sourced Dredge abilities on one card into a
+/// single value. The printed-value comparison below is therefore only a
+/// REDUNDANCY test, never by itself a reason to suppress the granted
+/// candidate.
+///
+/// Known limitation: two Dredge grants SIMULTANEOUSLY active on one graveyard
+/// card with DIFFERENT values collapse to a single virtual candidate.
+/// `effective_dredge_value` resolves one value — `upsert_keyword_contribution`
+/// (`off_zone_characteristics.rs`) replaces a same-kind contribution, since
+/// `Keyword::Dredge` is not in `instances_must_coexist` (`types/keywords.rs`) —
+/// and this family reserves one `GRANTED_DREDGE_INDEX` per object, so only the
+/// last-applied grant is offered. Unreachable today: The Necrobloom is the only
+/// shipped source that grants Dredge; a second differently-valued granter would
+/// need per-contribution candidate keying, not built speculatively.
+///
+/// The cheap zone check on the already-fetched `obj` gates the expensive
+/// `effective_dredge_value` resolve (a whole-game off-zone continuous-effect
+/// sweep, `off_zone_characteristics::effective_off_zone_keyword_contributions`).
+/// It is no longer the only thing standing in front of that sweep: the
+/// granted-dredge registration block in `find_applicable_replacements` now
+/// pre-gates the whole per-card call behind a hoisted, recipient-independent
+/// "can anything grant this keyword kind off-zone" query (see the
+/// cost-discipline comment at that site), so the zone check is the inner of
+/// two gates rather than the outer one. The printed-value comparison itself
+/// costs no extra state traversal — it reads `obj.base_keywords` on the
+/// object already in hand.
+fn granted_dredge_value(state: &GameState, object_id: ObjectId) -> Option<u32> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Graveyard {
+        return None;
+    }
+    let effective = crate::game::keywords::effective_dredge_value(state, object_id)?;
+    // `printed_dredge_value` returns `None` when Dredge is not printed, and
+    // `None == Some(_)` is `false`, so this single comparison is the whole
+    // redundancy test — no separate "has printed dredge" pre-check is needed.
+    if printed_dredge_value(obj) == Some(effective) {
+        return None;
+    }
+    Some(effective)
 }
 
 /// CR 604.1 + CR 613.1f: The count of GRANTED instances of `keyword` on
@@ -716,6 +825,56 @@ fn apply_granted_keyword_etb_replacement(
         source_id: rid.source,
         event_type: ReplacementEvent::Moved.to_string(),
     });
+    event
+}
+
+/// CR 702.52a + CR 614.6: Apply a granted-Dredge virtual Draw replacement.
+/// This candidate has no object-carried `ReplacementDefinition` (see
+/// [`granted_dredge_value`]), so unlike printed dredge it cannot run through
+/// the generic `execute`-branch dispatch further down in
+/// `apply_single_replacement` (that dispatch's `repl_def_ref` lookup — an
+/// object's stored `replacement_definitions` indexed by `rid.index` — always
+/// misses for `GRANTED_DREDGE_INDEX`); this early dispatch stands in for it.
+///
+/// On accept, the draw is fully replaced (CR 614.6): zero the proposed draw's
+/// count so `draw_applier`/the draw-delivery path sees a no-op draw, mirroring
+/// `draw_is_substituted_away`'s identical zeroing for a printed dredge card's
+/// `Effect::Mill` execute chain. The mill + return-to-hand work itself is
+/// delivered by the post-replacement continuation `continue_replacement_impl`
+/// stashes from `dredge_replacement_definition`'s `execute` — this applier
+/// only owns the count-zeroing half. On decline, the draw proceeds unmodified.
+///
+/// The candidate id is already recorded in `applied` by the pipeline's
+/// `mark_applied(rid)` before this applier runs (the optional accept/decline
+/// path in `continue_replacement_impl`), so no manual re-insert is needed —
+/// mirrors the comment just above on `apply_granted_keyword_etb_replacement`.
+fn apply_granted_dredge_replacement(
+    mut event: ProposedEvent,
+    rid: ReplacementId,
+    branch: ReplacementBranch,
+    events: &mut Vec<GameEvent>,
+) -> ProposedEvent {
+    // The `ReplacementApplied` push below is ACCEPT-ONLY, mirroring the closest
+    // optional-virtual precedent, `apply_commander_hand_or_library_return_replacement`,
+    // whose entire body (its own push included) is gated on
+    // `ReplacementBranch::Execute`. The generic object-carried path is the
+    // divergent one: its declined-optional early return covers only
+    // `QuantityModification::Prevent` and damage-shaped definitions, so a
+    // declined optional DRAW replacement (printed dredge) falls through to the
+    // applier and reaches an unconditional push — i.e. it reports "applied" for
+    // a replacement that replaced nothing. That divergence is deliberately not
+    // changed here; it is unobservable today because `log.rs` classifies
+    // `ReplacementApplied` as engine bookkeeping and filters it out of the
+    // narrative log, and `trigger_index.rs` indexes no trigger key for it.
+    if branch == ReplacementBranch::Execute {
+        if let ProposedEvent::Draw { count, .. } = &mut event {
+            *count = 0;
+        }
+        events.push(GameEvent::ReplacementApplied {
+            source_id: rid.source,
+            event_type: ReplacementEvent::Draw.to_string(),
+        });
+    }
     event
 }
 
@@ -1168,6 +1327,20 @@ fn optional_replacement_choice_labels(
         };
     }
 
+    if is_granted_dredge_replacement(replacement_id) {
+        // CR 702.52a + CR 616.1: granted dredge has no object-carried
+        // `ReplacementDefinition` for `replacement_definition_for_id` to read
+        // a mode from, so this candidate would otherwise fall straight to the
+        // generic `unwrap_or_else` default below. That default happens to
+        // already equal this branch's answer for a Draw replacement (the
+        // `ReplacementMode::Optional` Draw special case just below always
+        // yields "Accept" regardless of definition) — stated explicitly here,
+        // rather than relied on as a coincidence, so a future non-Draw
+        // granted-replacement family built from this one does not silently
+        // inherit unlabeled behavior.
+        return ("Accept".to_string(), "Decline".to_string());
+    }
+
     replacement_definition_for_id(state, replacement_id)
         .map(|replacement| match &replacement.mode {
             ReplacementMode::MayCost { cost, decline } => {
@@ -1480,6 +1653,29 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
             .map(|aura| format!("Umbra armor: destroy {} instead", aura.name))
             .unwrap_or_else(|| "Umbra armor: destroy the Aura instead".to_string());
     }
+    if is_granted_dredge_replacement(rid) {
+        // CR 702.52a + CR 616.1: granted dredge has no object-carried
+        // `ReplacementDefinition` to read a description from (see
+        // `granted_dredge_value`), so this label is built directly from the
+        // resolved value, interpolating the OBJECT'S OWN effective (granted)
+        // N — matching printed dredge's `repl.description`
+        // (`database::synthesis::dredge_replacement_definition`), which
+        // interpolates its own N too, so two dredge candidates with different
+        // values still read distinctly in a CR 616.1 ordering prompt.
+        //
+        // `None` means the grant vanished between registration and this
+        // display read (e.g. the granting effect ended) — a display-only
+        // seam, so a neutral placeholder is fine here. Never fabricate a
+        // value: `continue_replacement_impl`'s accept path is the one that
+        // must not synthesize a "Dredge 0" definition from this same `None`.
+        return match granted_dredge_value(state, rid.source) {
+            Some(n) => format!(
+                "Dredge {n}: mill {n} cards and return this card from graveyard to hand instead of drawing"
+            ),
+            None => "Dredge: mill and return this card from graveyard to hand instead of drawing"
+                .to_string(),
+        };
+    }
     match shield_counter_replacement_kind(rid) {
         Some(ShieldCounterReplacementKind::Destroy) => "Remove a shield counter".to_string(),
         Some(ShieldCounterReplacementKind::Damage) => {
@@ -1507,6 +1703,10 @@ pub(crate) fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
 /// replacements use the same prompt seam as optional card definitions.
 fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> bool {
     is_commander_hand_or_library_return_replacement(rid)
+        // CR 702.52a: granted dredge is always `ReplacementMode::Optional`
+        // ("you may instead..."), but it has no object-carried definition for
+        // `replacement_definition_for_id` to read that mode from.
+        || is_granted_dredge_replacement(rid)
         || replacement_definition_for_id(state, rid)
             .is_some_and(|repl| replacement_mode_is_optional(&repl.mode))
 }
@@ -1524,6 +1724,13 @@ fn replacement_choice_player(
                 .map(|obj| obj.owner)
                 .unwrap_or_else(|| proposed.affected_player(state)),
         );
+    }
+    if is_granted_dredge_replacement(rid) {
+        // CR 702.52a: mirrors printed dredge's default `choice_authority`
+        // (`ReplacementChoiceAuthority::AffectedPlayer`, `synthesize_dredge` /
+        // `dredge_replacement_definition` never override it) — the drawing
+        // player decides whether to dredge instead of drawing.
+        return Some(proposed.affected_player(state));
     }
     let definition = replacement_definition_for_id(state, rid)?;
     match definition.choice_authority {
@@ -7107,8 +7314,21 @@ fn object_replacement_candidate_applies(
     // zone half is declared on the definition (`active_zones = [Graveyard]`);
     // only this threshold depends on live library size, so only this half is
     // evaluated here.
+    //
+    // Deliberately `printed_dredge_value`, not `effective_dredge_value`: this
+    // `repl_def` was read from `obj.replacement_definitions` above, which is
+    // populated ONLY by build-time `synthesize_dredge` for a PRINTED Dredge
+    // keyword with the printed N baked into its mill effect (a granted-only
+    // Dredge card, e.g. a Necrobloom-animated land, never gets an entry there
+    // — `find_applicable_replacements`'s separate granted-dredge registration
+    // block surfaces that virtual candidate and applies its own CR 702.52b
+    // gate against the granted value). Gating THIS candidate's legality with
+    // the effective (grant-overridden) value would compare the wrong number
+    // when a grant is simultaneously active with a different N than the
+    // printed one — CR 702.52b judges each dredge ability by ITS OWN N, not a
+    // sibling ability's.
     if repl_def.event == ReplacementEvent::Draw && obj.zone == Zone::Graveyard {
-        if let Some(dredge) = crate::game::keywords::effective_dredge_value(state, obj.id) {
+        if let Some(dredge) = printed_dredge_value(obj) {
             let library_size = state
                 .players
                 .iter()
@@ -7911,6 +8131,168 @@ pub fn find_applicable_replacements(
                 )
             });
             if granted_etb_keyword_candidate_applies(state, *object_id, kw, event, live) {
+                candidates.push(rid);
+            }
+        }
+    }
+
+    // CR 702.52a + CR 613.1f + CR 121.2a: Granted Dredge — "[X] cards in your
+    // graveyard have dredge N" (The Necrobloom) grants Dredge to a graveyard
+    // card via a runtime continuous effect rather than printing it, so the
+    // card's `replacement_definitions` is empty and the ordinary
+    // object-carried scan (`object_replacement_candidate_applies`, which reads
+    // `obj.replacement_definitions.get(rid.index)`) never offers it. Surface
+    // one virtual Draw-replacement candidate per graveyard card with an
+    // effective GRANTED (non-printed) Dredge value.
+    //
+    // Restricted to the individual-draw stage: Dredge's `draw_scope` is always
+    // `IndividualDraw` (CR 121.2a — it modifies one draw, not the whole
+    // instruction), and there is no object-carried definition here for
+    // `draw_scope_matches_event_stage` to consult, so the stage is checked
+    // directly in the event pattern.
+    //
+    // Cheapest term first, mirroring the `GrantedEtbKeyword` block above, with
+    // the terms ordered by what they cost per graveyard card:
+    //
+    // 1. `event.already_applied` — a set lookup with no state access.
+    // 2. the registry's `ReplacementEvent::Draw` matcher — a `matches!` on the
+    //    event.
+    // 3. the HOISTED grant query below, which stands in front of the expensive
+    //    term. `granted_dredge_value`'s off-zone `effective_dredge_value`
+    //    resolve is a whole-game continuous-effect sweep
+    //    (`collect_shared_active_continuous_effects`), and this loop's candidate
+    //    set is a whole ZONE, so at HEAD the sweep was paid once per graveyard
+    //    card per individual draw. `shared_effects_can_grant_off_zone_keyword_kind`
+    //    answers the recipient-INDEPENDENT half of that question — CR 613.1f:
+    //    could any live Layer-6 effect add a keyword of this kind at all;
+    //    CR 611.3b: a battlefield source's grant does reach graveyard
+    //    recipients — so ONE sweep answers it for the whole zone. It is
+    //    memoized lazily, exactly like the `GrantedEtbKeyword` block's
+    //    `live_keywords`, so a CR 616.1f re-scan whose Draw matcher rejects
+    //    every card still pays zero sweeps. The recipient-DEPENDENT half is
+    //    `base_statics_can_grant_off_zone_keyword_kind`, which reads only this
+    //    object's own `base_static_definitions` (CR 113.6b) and never sweeps.
+    // 4. `granted_dredge_value` itself, reached only when some grant of the kind
+    //    could exist.
+    //
+    // Skipping on a `false` from BOTH halves is EXACT, not heuristic. Those two
+    // halves pre-filter precisely the two effect sources
+    // `collect_applicable_off_zone_keyword_effects` draws from, so a `false`
+    // from both means no live effect can ADD Dredge to this card; the remaining
+    // admitted arms only remove, so the resolved contribution list can only
+    // shrink from the card's printed keywords. Two exhaustive cases follow:
+    // the card ends with no Dredge, and `granted_dredge_value` returns `None`
+    // because `effective_dredge_value` is `None`; or it ends with exactly its
+    // printed Dredge, and `granted_dredge_value` returns `None` from its
+    // redundancy comparison against `printed_dredge_value` (which assumes a
+    // single printed instance of the kind, as every real card has). Either way
+    // the loop would have `continue`d, so the guard changes cost, never
+    // behavior.
+    //
+    // Cost when a Dredge grant IS live: one hoisted sweep plus
+    // `granted_dredge_value`'s per-card off-zone resolve, which MATCHES the
+    // engine-wide off-zone keyword cost model rather than being inherent to
+    // this block — the same per-recipient `effective_off_zone_keywords` resolve
+    // is paid, unguarded, by keyword-predicate filter evaluation (`filter.rs`),
+    // off-zone casting/activation enumeration (`casting.rs`), and off-zone
+    // trigger reconciliation (`triggers.rs`). A cross-cutting change that lets
+    // the off-zone authority accept a pre-collected shared effect list would
+    // lower all of those together and is the right home for removing the
+    // per-card term here; it is deliberately not special-cased for this one
+    // consumer.
+    //
+    // Once resolved, `granted_dredge_value` compares the effective value
+    // against any printed Dredge on the same object and returns `None` only
+    // when the two are identical (redundant with the object-carried
+    // candidate); a printed N and a differently-valued granted N both surface
+    // as distinct candidates.
+    if let ProposedEvent::Draw {
+        player_id,
+        stage: DrawEventStage::Individual,
+        ..
+    } = event
+    {
+        // A missing `ReplacementEvent::Draw` handler means the engine cannot apply
+        // a Draw replacement at all, so this family offers nothing — mirroring
+        // `object_replacement_candidate_applies`'s
+        // `let Some(handler) = registry.get(..) else { return false };`. This
+        // `else` is scoped to THIS block only: the object-carried scan and the
+        // state-level scan below perform their own handler lookups and must not be
+        // short-circuited by this one.
+        if let (Some(draw_handler), Some(player)) = (
+            registry.get(&ReplacementEvent::Draw),
+            state.players.iter().find(|p| p.id == *player_id),
+        ) {
+            let library_size = player.library.len() as u32;
+            // The hoisted, recipient-independent half of the grant query,
+            // filled at most ONCE per event and shared by every graveyard card
+            // — the same `Option<_>` + `get_or_insert_with` idiom the
+            // `GrantedEtbKeyword` block above uses for `live_keywords`.
+            let mut dredge_grant_live: Option<bool> = None;
+            for object_id in player.graveyard.iter().copied() {
+                let rid = granted_dredge_replacement_id(object_id);
+                if event.already_applied(&rid) {
+                    continue;
+                }
+                // CR 616.1f: the CR 616.1 repetition takes "into account only
+                // replacement or prevention effects that would now be
+                // applicable", and CR 614.6: a replaced event never happens.
+                // The registry's `ReplacementEvent::Draw` matcher (`draw_matcher`:
+                // `count > 0`) is this engine's single authority for "is there
+                // still a draw here to replace", and BOTH other candidate sources
+                // consult it — the object-carried scan via
+                // `object_replacement_candidate_applies` and the state-level scan
+                // before its own `candidates.push`. This virtual family must pass
+                // through the SAME gate or the paths disagree: once an accepted
+                // dredge has substituted the draw away — `apply_granted_dredge_replacement`
+                // zeroes the count, exactly as `apply_single_replacement` pre-zeroes
+                // it for the printed path when `draw_is_substituted_away` classifies
+                // the accept as a substitution — no further dredge is applicable
+                // to it. Without this gate the CR 616.1f re-scan re-offered every
+                // OTHER granted-dredge graveyard card against the dead draw, and
+                // answering that stray prompt either abandoned the accepted
+                // dredge's post-replacement continuation (decline: no draw, no
+                // mill, no return) or overwrote it with the sibling's (accept: the
+                // chosen card lost, the sibling dredged) — both CR 614.5
+                // violations.
+                //
+                // Called PER CANDIDATE with that candidate's own source, exactly as
+                // the two sibling scans call it with `obj.id` / `source_host` (see
+                // the parity rule stated on the state-level scan). It is a
+                // `matches!` on the event — far cheaper than `granted_dredge_value`'s
+                // off-zone continuous-effect sweep below — so the block's
+                // cheap-before-expensive ordering is preserved.
+                if !(draw_handler.matcher)(event, object_id, state) {
+                    continue;
+                }
+                // CR 613.1f + CR 611.3b + CR 113.6b: memo-first — the shared
+                // sweep short-circuits the per-card base-static build on a
+                // grant-live board, and on a no-grant board the per-card term
+                // runs only after the single shared sweep has answered `false`.
+                // See the cost-discipline comment above for why skipping here
+                // is exact.
+                if !*dredge_grant_live.get_or_insert_with(|| {
+                    crate::game::off_zone_characteristics::shared_effects_can_grant_off_zone_keyword_kind(
+                        state,
+                        crate::types::keywords::KeywordKind::Dredge,
+                    )
+                }) && !crate::game::off_zone_characteristics::base_statics_can_grant_off_zone_keyword_kind(
+                    state,
+                    object_id,
+                    crate::types::keywords::KeywordKind::Dredge,
+                ) {
+                    continue;
+                }
+                let Some(dredge) = granted_dredge_value(state, object_id) else {
+                    continue;
+                };
+                // CR 702.52b: "A player with fewer cards in their library than
+                // the number required by a dredge ability can't mill any of
+                // them this way" — mirrors the object-carried gate at
+                // `object_replacement_candidate_applies` above.
+                if library_size < dredge {
+                    continue;
+                }
                 candidates.push(rid);
             }
         }
@@ -8958,6 +9340,22 @@ fn apply_single_replacement(
         ));
     }
 
+    if is_granted_dredge_replacement(rid) {
+        // CR 702.52a: mirror the generic vanished-definition fallback the
+        // `repl_def_ref` lookup below takes (`None => return Ok(proposed)`)
+        // — if the grant has disappeared since this candidate was
+        // registered/parked, there is no real Dredge value left to act on.
+        // Treat the event as unaffected rather than unconditionally zeroing
+        // the draw for a value that no longer exists; `continue_replacement_
+        // impl` mirrors the same `None` degrade on the accept/continuation
+        // side (no post-effect stashed), so together the pair never leaves a
+        // zeroed draw with no compensating mill+return.
+        return Ok(match granted_dredge_value(state, rid.source) {
+            Some(_) => apply_granted_dredge_replacement(proposed, rid, branch, events),
+            None => proposed,
+        });
+    }
+
     if let Some(kind) = shield_counter_replacement_kind(rid) {
         return apply_shield_counter_replacement(state, proposed, rid, kind, events);
     }
@@ -9992,6 +10390,23 @@ fn candidate_materiality(
         };
     }
 
+    // CR 702.52a + CR 616.1: granted dredge has no object-carried definition
+    // to walk via the generic execute-chain classifier below (that walk reads
+    // `state.objects...replacement_definitions.get(rid.index)`, which always
+    // misses for `GRANTED_DREDGE_INDEX`), so mirror here what that walk would
+    // find for PRINTED dredge: the execute chain's head (`Effect::Mill`)
+    // matches no specific arm in the walk and falls to its conservative
+    // default, `Unconditional` (verified by trace: `Effect::Mill` is not
+    // `ChangeZone`/`BecomeCopy`/`SetTapState`/`PutCounter`/`Choose`/
+    // `ChoosePermanent`/CreateToken-`Token`, so it hits the `_ =>` catch-all).
+    // Both paths already agree — this branch is a defensive
+    // architectural-consistency addition (matching every other virtual
+    // family's practice of never relying on the conservative fallback), not a
+    // correctness-load-bearing fix.
+    if is_granted_dredge_replacement(rid) {
+        return CandidateMateriality::Unconditional;
+    }
+
     // CR 614.10: the turn-scoped combat skip fully prevents the BeginPhase event,
     // so it is unconditional like the umbra-armor / shield-counter destroy.
     if is_turn_scoped_combat_skip_replacement(rid) {
@@ -10831,21 +11246,55 @@ fn continue_replacement_impl(
         // continuation installed below is text on THIS object, so its "you" is
         // this object's controller, not the affected object's.
         let (accept_effect, decline_effect, may_cost, branch_controller) =
-            replacement_definition_for_id(state, rid)
-                .map(|repl| {
-                    let accept = repl.execute.clone();
-                    let decline = replacement_mode_decline_cloned(&repl.mode);
-                    let may_cost = match &repl.mode {
-                        ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
-                        ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
-                    };
-                    // Same authority the mandatory path uses, so an optional
-                    // replacement's accept/decline rider and a mandatory one's
-                    // execute rider can never disagree about who "you" is.
-                    let controller = replacement_ability_controller(state, rid, repl);
-                    (accept, decline, may_cost, Some(controller))
-                })
-                .unwrap_or((None, None, None, None));
+            if is_granted_dredge_replacement(rid) {
+                // CR 702.52a: granted dredge has no object-carried
+                // `ReplacementDefinition` for `replacement_definition_for_id`
+                // to read — synthesize the SAME shape printed dredge uses
+                // (`database::synthesis::dredge_replacement_definition`),
+                // interpolating this object's own resolved (granted) N, then
+                // extract accept/decline/may_cost/controller identically to
+                // the object-carried path below.
+                //
+                // If the grant has vanished since this candidate was parked
+                // (e.g. the granting effect ended before the player answered
+                // the accept/decline prompt), there is no real N left to
+                // synthesize a definition from. Degrade exactly like the
+                // object-carried path's `.unwrap_or((None, None, None,
+                // None))` fallback just below: no accept/decline/continuation
+                // — never fabricate a "Dredge 0" definition (mill 0 cards,
+                // return the card for free) out of a value that no longer
+                // exists.
+                match granted_dredge_value(state, rid.source) {
+                    Some(n) => {
+                        let repl = crate::database::synthesis::dredge_replacement_definition(n);
+                        let accept = repl.execute.clone();
+                        let decline = replacement_mode_decline_cloned(&repl.mode);
+                        let may_cost = match &repl.mode {
+                            ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
+                            ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
+                        };
+                        let controller = replacement_ability_controller(state, rid, &repl);
+                        (accept, decline, may_cost, Some(controller))
+                    }
+                    None => (None, None, None, None),
+                }
+            } else {
+                replacement_definition_for_id(state, rid)
+                    .map(|repl| {
+                        let accept = repl.execute.clone();
+                        let decline = replacement_mode_decline_cloned(&repl.mode);
+                        let may_cost = match &repl.mode {
+                            ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
+                            ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
+                        };
+                        // Same authority the mandatory path uses, so an optional
+                        // replacement's accept/decline rider and a mandatory one's
+                        // execute rider can never disagree about who "you" is.
+                        let controller = replacement_ability_controller(state, rid, repl);
+                        (accept, decline, may_cost, Some(controller))
+                    })
+                    .unwrap_or((None, None, None, None))
+            };
 
         // CR 614.12a: on accept, pay the MayCost (skipped on a paid resume). A
         // `PausedForChoice` outcome means the payment surfaced an interactive
@@ -11002,6 +11451,22 @@ fn continue_replacement_impl(
         // path has always OVERWRITTEN a resident continuation rather than
         // discarding the incoming one. The two policies genuinely disagree; both
         // are preserved exactly here, and naming them is the point.
+        //
+        // Open question (deferred, NOT resolved here): on a DECLINE this path's
+        // sibling arm (`None => abandon_active_post_replacement_drains`) drops a
+        // resident continuation installed by an earlier accepted candidate. For
+        // an accepted DREDGE this is now unreachable: the accept zeroes the
+        // draw's count (`apply_granted_dredge_replacement` / the printed path's
+        // `draw_is_substituted_away`) and the registration gate in
+        // `find_applicable_replacements`'s granted-dredge block (CR 616.1f /
+        // CR 614.6) then stops any sibling from being re-offered. It is NOT
+        // closed in general — not even for Draw: `draw_is_substituted_away`
+        // classifies a rescaled or same-player `Effect::Draw` accept as a
+        // SURVIVING draw while this path still installs its continuation, so a
+        // non-dredge optional Draw replacement can leave `count > 0` with a
+        // drain resident and a legitimately co-applicable sibling (CR 616.1f).
+        // That shape, and any event family whose applier MODIFIES rather than
+        // annihilates its event, is unmeasured; see the PR's follow-up note.
         //
         // CR 615.5 + CR 609.7: an optional/decline post-effect carries no
         // prevention-event-source semantics, so `event_source`/`event_target` are
@@ -15119,6 +15584,499 @@ mod tests {
         assert!(
             indexed_replacement_consults() > 0,
             "small-library draw still proves the indexed path was consulted"
+        );
+    }
+
+    /// CR 616.1: `candidate_materiality`'s explicit granted-dredge branch
+    /// (Unit B item 11) must classify identically to PRINTED dredge's
+    /// generic execute-chain walk — both land on `Unconditional`, since a
+    /// dredge execute chain's head is `Effect::Mill`, which matches no
+    /// specific arm in the walk. This is a defensive architectural-
+    /// consistency assertion, not a revert-discriminating one: the walk's
+    /// own conservative "unknown definition" default already agrees with
+    /// this branch for a `GRANTED_DREDGE_INDEX` rid, so removing the
+    /// explicit branch would not flip this assertion (see the comment on
+    /// the branch itself for the verified trace).
+    #[test]
+    fn candidate_materiality_agrees_for_printed_and_granted_dredge() {
+        let state = dredge_state(2);
+        let proposed = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let printed_rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let granted_rid = granted_dredge_replacement_id(ObjectId(20));
+        assert!(
+            matches!(
+                candidate_materiality(&state, printed_rid, &proposed),
+                CandidateMateriality::Unconditional
+            ),
+            "printed dredge's Mill-headed execute chain must classify Unconditional"
+        );
+        assert!(
+            matches!(
+                candidate_materiality(&state, granted_rid, &proposed),
+                CandidateMateriality::Unconditional
+            ),
+            "granted dredge must classify Unconditional, matching printed dredge"
+        );
+    }
+
+    /// CR 702.52a (review finding: granted dredge over-suppressed when
+    /// printed dredge exists): `granted_dredge_value`'s redundancy check must
+    /// distinguish a GRANTED Dredge from a DIFFERENTLY-valued PRINTED Dredge
+    /// on the same graveyard card. Printed dredge 2 (Dakmor Salvage-shaped,
+    /// from `dredge_state`) plus an independent grant of dredge 5 are two
+    /// distinct instances of the ability, and both must surface so the
+    /// existing CR 616.1 ordering machinery can offer a real choice between
+    /// them. Before the fix, `granted_dredge_value` returned `None` whenever
+    /// ANY printed Dredge existed on the object, regardless of value —
+    /// silently dropping the granted-5 option every time.
+    #[test]
+    fn granted_dredge_with_differing_value_surfaces_alongside_printed() {
+        let mut state = dredge_state(10);
+        // The granted-dredge registration loop in `find_applicable_
+        // replacements` walks `player.graveyard`, unlike the object-carried
+        // scan (which reads `state.objects` directly and needs no such
+        // push — see every printed-only dredge test above).
+        state.players[0].graveyard.push_back(ObjectId(10));
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: ObjectId(10) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(5),
+            }],
+            None,
+        );
+
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "printed dredge 2 and a differently-valued granted dredge 5 must \
+             BOTH surface as distinct candidates, got {candidates:?}"
+        );
+
+        let granted_rid = granted_dredge_replacement_id(ObjectId(10));
+        let printed_rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        assert!(
+            candidates.contains(&granted_rid),
+            "the granted-dredge virtual candidate must be one of the two"
+        );
+        assert!(
+            candidates.contains(&printed_rid),
+            "the printed object-carried candidate must still be offered"
+        );
+
+        let granted_label = replacement_choice_label_for_rid(&state, granted_rid);
+        let printed_label = replacement_choice_label_for_rid(&state, printed_rid);
+        assert_ne!(
+            granted_label, printed_label,
+            "the two candidates must read distinctly in a CR 616.1 ordering prompt"
+        );
+        assert!(
+            granted_label.contains("Dredge 5"),
+            "the granted candidate's label must interpolate its OWN (granted) \
+             value, not the printed one: {granted_label}"
+        );
+    }
+
+    /// Sibling to the test above, and the real-world grounding for issues
+    /// #9040/#8396: The Necrobloom grants dredge 2, and Dakmor Salvage
+    /// already prints dredge 2, so the two values coincide. In that shape —
+    /// today's only shipped granted-dredge source — the granted candidate is
+    /// REDUNDANT with the printed one and must still collapse to a single
+    /// candidate, exactly as it did before this fix.
+    #[test]
+    fn granted_dredge_with_identical_value_still_collapses_to_one() {
+        let mut state = dredge_state(10);
+        state.players[0].graveyard.push_back(ObjectId(10));
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: ObjectId(10) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(2),
+            }],
+            None,
+        );
+
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "a grant matching the printed value must collapse to the single \
+             object-carried candidate, got {candidates:?}"
+        );
+    }
+
+    /// Matrix row 9 — F1's cost invariant, made falsifiable. The granted-dredge
+    /// registration block must pay a number of whole-game continuous-effect
+    /// sweeps that does NOT scale with the drawing player's graveyard size when
+    /// no Dredge grant is live, and exactly one extra sweep per graveyard card
+    /// when one is.
+    ///
+    /// Instrument: `layers::{reset_active_effect_collection_count,
+    /// active_effect_collection_count}`, a `#[cfg(test)]` thread-local counter
+    /// incremented on every entry to `collect_shared_active_continuous_effects`
+    /// — precisely the sweep `granted_dredge_value`'s off-zone resolve performs
+    /// per card. Thread-local, so parallel libtest threads cannot interfere, and
+    /// the counter is reset immediately before each measured call. This test
+    /// must live in the lib `mod tests`: that counter pair is `#[cfg(test)]
+    /// pub(crate)` and is invisible from `crates/engine/tests/`.
+    ///
+    /// This is F1's ONLY revert-failing assertion: remove the hoisted guard from
+    /// the registration block and the size-invariance pair below reads 5 vs 20.
+    /// Deliberately NO absolute upper bound — an absolute would couple this row
+    /// to every other sweep the Draw path may legitimately perform.
+    #[test]
+    fn granted_dredge_registration_sweeps_do_not_scale_with_graveyard_size() {
+        // (sweeps, candidate count, granted-rid-present) for ONE individual draw
+        // against a graveyard holding exactly `graveyard_size` cards.
+        fn sweeps_for(graveyard_size: usize, with_grant: bool) -> (usize, usize, bool) {
+            let mut state = dredge_state(10);
+            // `dredge_state`'s printed-dredge card is the first graveyard
+            // member; the rest is granted-free filler, so the registration loop
+            // really iterates `graveyard_size` candidates.
+            state.players[0].graveyard.push_back(ObjectId(10));
+            for i in 0..(graveyard_size - 1) {
+                let object_id = ObjectId(500 + i as u64);
+                state.objects.insert(
+                    object_id,
+                    GameObject::new(
+                        object_id,
+                        CardId(500 + i as u64),
+                        PlayerId(0),
+                        format!("Graveyard Filler {i}"),
+                        Zone::Graveyard,
+                    ),
+                );
+                state.players[0].graveyard.push_back(object_id);
+            }
+            if with_grant {
+                // A real battlefield TRANSIENT (not a `static_definitions`
+                // source): the shape a `static_definitions`-only guard would
+                // miss. Dredge 3 differs from the printed 2, so the granted
+                // virtual candidate is non-redundant and really registers.
+                let granter = ObjectId(99);
+                state.objects.insert(
+                    granter,
+                    GameObject::new(
+                        granter,
+                        CardId(99),
+                        PlayerId(0),
+                        "Test Granter".to_string(),
+                        Zone::Battlefield,
+                    ),
+                );
+                state.battlefield.push_back(granter);
+                state.add_transient_continuous_effect(
+                    granter,
+                    PlayerId(0),
+                    Duration::UntilEndOfTurn,
+                    TargetFilter::SpecificObject { id: ObjectId(10) },
+                    vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Dredge(3),
+                    }],
+                    None,
+                );
+            }
+            // Fixture reach-guard: a silently-empty graveyard would leave the
+            // invariance pair comparing 0 == 0 and disarm the tripwire.
+            assert_eq!(
+                state.players[0].graveyard.len(),
+                graveyard_size,
+                "fixture reach-guard: the graveyard must really hold {graveyard_size} cards"
+            );
+
+            let registry = build_replacement_registry();
+            let owner_draw = ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                stage: DrawEventStage::Individual,
+                applied: HashSet::new(),
+            };
+            crate::game::layers::reset_active_effect_collection_count();
+            let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+            let sweeps = crate::game::layers::active_effect_collection_count();
+            let granted_present = candidates.contains(&granted_dredge_replacement_id(ObjectId(10)));
+            (sweeps, candidates.len(), granted_present)
+        }
+
+        let (sweeps_5, candidates_5, granted_5) = sweeps_for(5, false);
+        let (sweeps_20, candidates_20, granted_20) = sweeps_for(20, false);
+        let (sweeps_grant_20, candidates_grant_20, granted_grant_20) = sweeps_for(20, true);
+
+        // Positive control: the instrument fired at all (the invariance pair
+        // alone bounds only from below).
+        assert!(
+            sweeps_20 > 0,
+            "instrument reach-guard: the Draw path must perform at least one \
+             continuous-effect collection, got {sweeps_20}"
+        );
+        // THE revert-failing assertion for F1.
+        assert_eq!(
+            sweeps_5, sweeps_20,
+            "the no-grant sweep count must not scale with graveyard size \
+             (5 cards: {sweeps_5}, 20 cards: {sweeps_20}) — without the hoisted \
+             guard in the granted-dredge registration block these read 5 and 20"
+        );
+        // The honest cost of the hoist, stated relative to the no-grant figure
+        // rather than as an absolute.
+        assert_eq!(
+            sweeps_grant_20,
+            sweeps_20 + 20,
+            "with one Dredge grant live, each of the 20 graveyard cards pays its \
+             own per-recipient resolve on top of the single hoisted sweep, got \
+             {sweeps_grant_20}"
+        );
+
+        // Behavior pairing (matrix row 6, measured on these same boards): the
+        // guard moves cost, never candidates.
+        assert_eq!(
+            (candidates_5, candidates_20),
+            (1, 1),
+            "with no grant, only the printed object-carried candidate may surface"
+        );
+        assert!(
+            !granted_5 && !granted_20,
+            "no granted-dredge virtual candidate may exist without a live grant"
+        );
+        assert_eq!(
+            candidates_grant_20, 2,
+            "with a differently-valued grant live, printed and granted must both \
+             surface, got {candidates_grant_20}"
+        );
+        assert!(
+            granted_grant_20,
+            "positive reach-guard: the granted-dredge virtual candidate must really \
+             be registered, or the instrument never reached the registration block"
+        );
+    }
+
+    /// CR 702.52b boundary regression: `object_replacement_candidate_applies`'s
+    /// library-size gate on the PRINTED candidate must compare against the
+    /// PRINTED N, not the grant-overridden effective value. `dredge_state`
+    /// bakes in printed dredge 2 (Dakmor Salvage-shaped). Here an independent
+    /// effect additionally grants dredge 5 to the same graveyard object, and
+    /// the library sits strictly between the two values (3: `>= 2`, `< 5`).
+    ///
+    /// CR 702.52b judges each dredge ability by its own N: the printed
+    /// dredge-2 ability is legal (library 3 >= 2) and the granted dredge-5
+    /// ability is illegal (3 < 5). Before the fix, the printed candidate's
+    /// gate read `effective_dredge_value` — which resolves to the GRANTED 5
+    /// whenever a grant is active, because `upsert_keyword_contribution`
+    /// overwrites same-kind contributions for non-summing keywords (Dredge is
+    /// not in `instances_must_coexist`) — so `3 < 5` wrongly excluded the
+    /// legal printed-2 candidate too. This asserts the fixed behavior: the
+    /// printed candidate survives and the granted candidate is correctly
+    /// gated out, so exactly one candidate remains.
+    #[test]
+    fn printed_dredge_gate_uses_printed_value_not_grant_overridden_effective_value() {
+        let mut state = dredge_state(3);
+        state.players[0].graveyard.push_back(ObjectId(10));
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: ObjectId(10) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(5),
+            }],
+            None,
+        );
+
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let candidates = find_applicable_replacements(&state, &owner_draw, &registry);
+
+        let printed_rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let granted_rid = granted_dredge_replacement_id(ObjectId(10));
+
+        assert!(
+            candidates.contains(&printed_rid),
+            "printed dredge 2 must remain legal at library size 3 (3 >= 2), \
+             got {candidates:?}"
+        );
+        assert!(
+            !candidates.contains(&granted_rid),
+            "granted dredge 5 must be gated out at library size 3 (3 < 5), \
+             got {candidates:?}"
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "exactly the printed candidate should survive this boundary, \
+             got {candidates:?}"
+        );
+    }
+
+    /// CR 614.6 + CR 616.1f: once an accepted dredge has substituted the draw
+    /// away, the draw "never happens", so the CR 616.1 repetition may consider
+    /// only effects that "would now be applicable" — and no dredge is
+    /// applicable to a `count: 0` draw. The granted-dredge registration block
+    /// must therefore consult the registry's `ReplacementEvent::Draw` matcher
+    /// (`draw_matcher`: `count > 0`) exactly as the object-carried and
+    /// state-level scans do.
+    ///
+    /// The fixture carries TWO granted-only graveyard cards on purpose: with a
+    /// single card the empty-candidate assertion would be satisfied by the CR
+    /// 614.5 `already_applied` guard alone once that card had been accepted,
+    /// so a one-card fixture proves nothing about the event-payload gate.
+    #[test]
+    fn granted_dredge_not_offered_once_the_draw_is_substituted_away() {
+        let mut state = dredge_state(10);
+
+        // Two granted-ONLY graveyard cards (no printed `Keyword::Dredge`).
+        // `granted_dredge_value` starts from `state.objects.get(&object_id)?`
+        // and then gates on `obj.zone != Zone::Graveyard`, so each card must be
+        // inserted into `state.objects` as well as pushed into the player's
+        // graveyard — mirroring `dredge_state`'s own create-and-insert pattern.
+        let granted_a = ObjectId(50);
+        let granted_b = ObjectId(51);
+        for (id, name) in [(granted_a, "Granted Land A"), (granted_b, "Granted Land B")] {
+            state.objects.insert(
+                id,
+                GameObject::new(
+                    id,
+                    CardId(id.0),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Graveyard,
+                ),
+            );
+            state.players[0].graveyard.push_back(id);
+        }
+
+        let granter = ObjectId(99);
+        state.objects.insert(
+            granter,
+            GameObject::new(
+                granter,
+                CardId(99),
+                PlayerId(0),
+                "Test Granter".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(granter);
+        for id in [granted_a, granted_b] {
+            state.add_transient_continuous_effect(
+                granter,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Dredge(2),
+                }],
+                None,
+            );
+        }
+
+        let registry = build_replacement_registry();
+
+        // Positive reach-guard FIRST: on a live draw both granted candidates
+        // are registered, so the fixture demonstrably reaches the block's
+        // `candidates.push` for two distinct sources.
+        let live_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let live_candidates = find_applicable_replacements(&state, &live_draw, &registry);
+        assert!(
+            live_candidates.contains(&granted_dredge_replacement_id(granted_a))
+                && live_candidates.contains(&granted_dredge_replacement_id(granted_b)),
+            "fixture precondition: both granted-dredge cards must be offered \
+             against a live (count 1) draw, got {live_candidates:?}"
+        );
+
+        // CR 614.6: the identical board, with the draw already substituted
+        // away, must offer nothing at all.
+        let spent_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 0,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let spent_candidates = find_applicable_replacements(&state, &spent_draw, &registry);
+        assert!(
+            spent_candidates.is_empty(),
+            "CR 614.6 + CR 616.1f: a draw that was replaced never happens, so no \
+             dredge candidate may be registered against it, got {spent_candidates:?}"
         );
     }
 

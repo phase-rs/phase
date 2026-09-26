@@ -43,7 +43,7 @@
 # fails until a human reviews it and re-freezes.
 #
 crates/engine/src/database/forge/replacement.rs	translate_replacement_event	event-decode	1
-crates/engine/src/database/synthesis.rs	synthesize_dredge	constructor	1
+crates/engine/src/database/synthesis.rs	dredge_replacement_definition	constructor	1
 crates/engine/src/game/effects/create_draw_replacement.rs	resolve	constructor	1
 crates/engine/src/parser/oracle_replacement.rs	parse_conditional_draw_replacement	constructor	1
 crates/engine/src/parser/oracle_replacement.rs	parse_draw_replacement	constructor	1

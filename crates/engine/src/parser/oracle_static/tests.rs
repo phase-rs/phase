@@ -30753,6 +30753,49 @@ fn static_graveyard_cards_have_retrace_during_your_turn() {
 }
 
 #[test]
+fn necrobloom_land_cards_in_graveyard_have_dredge() {
+    // The Necrobloom: "Land cards in your graveyard have dredge 2."
+    // CR 702.52a: Dredge is a keyword granted here via a graveyard-zone static,
+    // the same keyword-agnostic Pattern 3 proven by
+    // `static_graveyard_cards_have_retrace_during_your_turn` — differing only
+    // in the granted keyword (Dredge, not a casting keyword) and the absence
+    // of a leading condition clause.
+    let text = "Land cards in your graveyard have dredge 2.";
+    assert!(
+        parse_spells_have_keyword_for_test(text).is_some(),
+        "parse_spells_have_keyword should handle graveyard-zone Dredge grants (Necrobloom)"
+    );
+    let def = parse_static_line(text).unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(2),
+            }),
+        "Expected AddKeyword(Dredge(2)), got {:?}",
+        def.modifications
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }),
+                "Expected InZone(Graveyard), got {:?}",
+                tf.properties
+            );
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Land),
+                "Expected Land type filter, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
+}
+
+#[test]
 fn continuous_gets_for_each_counter_on_source_equipment() {
     // CR 122.1: "Equipped creature gets +1/+1 for each counter on this Equipment."
     // (Gavel of the Righteous). The "for each counter on this Equipment" quantity

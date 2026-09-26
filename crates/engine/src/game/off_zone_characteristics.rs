@@ -196,6 +196,75 @@ pub(crate) fn collect_applicable_off_zone_keyword_effects(
         .collect()
 }
 
+/// CR 613.1f + CR 611.3b: Could ANY currently-active SHARED continuous effect
+/// add a keyword of `kind` to an object outside the battlefield?
+///
+/// Together with [`base_statics_can_grant_off_zone_keyword_kind`] this pair
+/// pre-filters EXACTLY the two effect sources
+/// [`collect_applicable_off_zone_keyword_effects`] draws from — the shared
+/// collect and the recipient's own base statics — and nothing else. When BOTH
+/// answer `false`, that function cannot produce a keyword-ADDING effect for
+/// ANY recipient, so every off-zone keyword query on that board resolves to
+/// the object's printed keywords or fewer.
+///
+/// CR 611.3b is why the shared half must be consulted at all: a static's
+/// continuous effect applies while its SOURCE is on the battlefield (or in
+/// whichever zone it functions from), even though its recipients sit in a
+/// graveyard. CR 613.1f is the layer that grant is applied in, which is why
+/// the predicate is scoped to `Layer::Ability`.
+///
+/// Safe to hoist ACROSS recipients because `collect_shared_active_continuous_effects`
+/// takes no recipient at all — one sweep answers the question for every card
+/// in a zone. The recipient filter (`matches_off_zone_keyword_recipient`) and
+/// the per-effect `condition` are deliberately NOT applied here: they are the
+/// recipient-dependent half that cannot be hoisted. That makes a `true`
+/// conservative (a grant aimed at someone else's graveyard still answers
+/// `true`, and the caller then pays the full per-recipient resolve) and a
+/// `false` exact.
+///
+/// Intended use: ONE shared call per event, with
+/// [`base_statics_can_grant_off_zone_keyword_kind`] called per candidate.
+pub(crate) fn shared_effects_can_grant_off_zone_keyword_kind(
+    state: &GameState,
+    kind: crate::types::keywords::KeywordKind,
+) -> bool {
+    collect_shared_active_continuous_effects(state)
+        .iter()
+        .any(|effect| effect_can_add_off_zone_keyword_kind(state, effect, kind))
+}
+
+/// CR 613.1f + CR 113.6b: Could `object_id`'s OWN base statics add a keyword of
+/// `kind` to it while it is off the battlefield?
+///
+/// The per-object half of the pair documented on
+/// [`shared_effects_can_grant_off_zone_keyword_kind`] — it pre-filters
+/// [`collect_applicable_off_zone_keyword_effects`]'s second input, the
+/// `active_continuous_effects_from_base_static_source` extension. CR 113.6b is
+/// the rule behind that builder's zone gate: an ability that states which
+/// zones it functions in functions only from those zones, which is how a
+/// graveyard card's own printed static ("as long as this card is in your
+/// graveyard, …") reaches itself while a battlefield-only static does not.
+///
+/// This half never sweeps the game. It reads one already-hashed object,
+/// short-circuits on an empty `base_static_definitions`, and otherwise re-uses
+/// [`active_continuous_effects_from_base_static_source`] — the SAME builder
+/// the real collector calls — so the pre-filter cannot drift from it.
+pub(crate) fn base_statics_can_grant_off_zone_keyword_kind(
+    state: &GameState,
+    object_id: ObjectId,
+    kind: crate::types::keywords::KeywordKind,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if obj.base_static_definitions.is_empty() {
+        return false;
+    }
+    active_continuous_effects_from_base_static_source(state, obj)
+        .iter()
+        .any(|effect| effect_can_add_off_zone_keyword_kind(state, effect, kind))
+}
+
 /// CR 109.5 + CR 400.3: "your" cards in hand/library/graveyard are scoped by owner,
 /// not by a stale object controller/LKI. Delegates to
 /// `filter::matches_target_filter_for_zone`, the single authority for that
@@ -234,6 +303,156 @@ fn supports_off_zone_keyword_query(modification: &ContinuousModification) -> boo
             // applicability as `AddKeyword`.
             | ContinuousModification::AddChosenKeyword
     )
+}
+
+/// The Layer-6 ADD subset of [`supports_off_zone_keyword_query`]: does this
+/// already-collected effect ADD a keyword of `kind` to whatever it applies to?
+///
+/// Reuses verbatim the same two conjuncts
+/// [`collect_applicable_off_zone_keyword_effects`] applies —
+/// `effect.layer == Layer::Ability` and the superset predicate above — so this
+/// can neither admit a class the real collector rejects nor reject one it
+/// admits. The collector's other two conjuncts (the recipient filter and the
+/// per-effect condition) are the recipient-dependent half and are deliberately
+/// omitted; see [`shared_effects_can_grant_off_zone_keyword_kind`].
+fn effect_can_add_off_zone_keyword_kind(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+    kind: crate::types::keywords::KeywordKind,
+) -> bool {
+    effect.layer == Layer::Ability
+        && supports_off_zone_keyword_query(&effect.modification)
+        && modification_can_add_keyword_kind(state, effect, kind)
+}
+
+/// Which of the seven arms [`supports_off_zone_keyword_query`] admits can
+/// actually produce a `Keyword` of `kind`? Mirrors [`apply_keyword_modification`]
+/// arm for arm, which is why the two sit in the same module: a new arm added to
+/// one is read next to the other.
+///
+/// The four ADD arms report the kind they would produce. The `with_value(0)` /
+/// `with_cost(ManaCost::generic(0))` placeholders are deliberate: the concrete
+/// `Keyword` VARIANT each of those arms produces is a function of its
+/// `DynamicKeywordKind` / `CostBearingKeywordKind` alone, never of the payload,
+/// so a placeholder payload reads the produced `KeywordKind` EXACTLY. Calling
+/// the real constructors rather than writing a `kind -> KeywordKind` mapping
+/// table here is what makes this drift-proof — a new variant on either enum
+/// updates this predicate automatically, where a hand mapping would silently
+/// miss it.
+///
+/// The three removal arms return `false` because a removal can only SHRINK the
+/// contribution list `effective_off_zone_keyword_contributions` seeds from
+/// `base_keywords`. With no ADD arm live, the recipient therefore ends with
+/// either no keyword of this kind, or exactly its printed one — and both cases
+/// are already `None` at the consumer (`granted_dredge_value` returns `None`
+/// when `effective_dredge_value` is `None`, and again when its redundancy
+/// comparison against `printed_dredge_value` matches). `printed_dredge_value`
+/// assumes a single printed instance of the kind, as every real card has.
+/// Skipping the resolve on `false` is therefore exact, not merely conservative.
+fn modification_can_add_keyword_kind(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+    kind: crate::types::keywords::KeywordKind,
+) -> bool {
+    match &effect.modification {
+        // `apply_keyword_modification` upserts this keyword verbatim.
+        ContinuousModification::AddKeyword { keyword } => keyword.kind() == kind,
+        // `apply_keyword_modification` builds `kind.with_value(resolved)`.
+        ContinuousModification::AddDynamicKeyword { kind: dynamic, .. } => {
+            dynamic.with_value(0).kind() == kind
+        }
+        // `apply_keyword_modification` builds `kind.with_cost(derived)`. Its
+        // per-recipient "recipient already has one ⇒ no-op" dedup can only make
+        // the real result NARROWER than this predicate, never wider.
+        ContinuousModification::AddKeywordWithDerivedCost { kind: bearing, .. } => {
+            bearing
+                .with_cost(crate::types::mana::ManaCost::generic(0))
+                .kind()
+                == kind
+        }
+        // CR 608.2d: the keyword identity lives on the granting SOURCE's
+        // `chosen_attributes`, never on the modification or on the recipient,
+        // so this arm reads `effect.source_id` exactly as
+        // `apply_keyword_modification` does. A missing source or an empty
+        // chosen list makes the real arm a no-op, so `false` is exact there.
+        ContinuousModification::AddChosenKeyword => state
+            .objects
+            .get(&effect.source_id)
+            .is_some_and(|src| src.chosen_keywords().iter().any(|kw| kw.kind() == kind)),
+        // Removal-only arms: `retain` by discriminant, `retain` by the source's
+        // chosen keyword, and `keywords.clear()` respectively. None can create a
+        // keyword — see the exactness argument on this function's doc.
+        ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::RemoveAllAbilities => false,
+        // Non-keyword arms: rejected by `supports_off_zone_keyword_query`, so
+        // unreachable under that conjunct in `effect_can_add_off_zone_keyword_kind`.
+        // Listed exhaustively (no wildcard) so a new `ContinuousModification`
+        // variant is a compile error here and must be classified explicitly —
+        // otherwise a new keyword-ADDING arm would silently answer `false` and
+        // stop offering granted dredge.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => {
+            // The exhaustive list catches a NEW variant at compile time; this
+            // assertion catches an EXISTING listed variant later admitted by
+            // `supports_off_zone_keyword_query` without being classified above.
+            debug_assert!(
+                !supports_off_zone_keyword_query(&effect.modification),
+                "a modification admitted by `supports_off_zone_keyword_query` must be \
+                 classified explicitly above: {:?}",
+                effect.modification
+            );
+            false
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -542,6 +761,261 @@ mod tests {
         );
     }
 
+    /// Matrix row 1 (F1) — CR 613.1f + CR 611.3b: the hoisted shared guard
+    /// answers `false` on a board where nothing can grant Dredge outside the
+    /// battlefield, and `true` the moment one real grant is live. The `true`
+    /// case carries a positive reach-guard through the production authority
+    /// (`effective_off_zone_keyword`), so the `false` case cannot pass merely
+    /// because the instrument is inert.
+    #[test]
+    fn guard_is_false_without_a_dredge_grant_and_true_with_one() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(&mut state, PlayerId(0), "The Necrobloom", Zone::Battlefield);
+        let target_id = create_card(&mut state, PlayerId(0), "Forest", Zone::Graveyard);
+
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "a board with no keyword-granting continuous effect must answer false"
+        );
+
+        state.add_transient_continuous_effect(
+            source_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target_id },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Dredge(2),
+            }],
+            None,
+        );
+
+        // Positive reach-guard: the fixture's grant really reaches the graveyard
+        // card through the production authority, so the `true` below measures a
+        // live grant rather than an inert board.
+        assert_eq!(
+            effective_off_zone_keyword(&state, target_id, KeywordKind::Dredge),
+            Some(Keyword::Dredge(2)),
+            "reach-guard: the transient must really grant Dredge 2 to the graveyard card"
+        );
+        assert!(
+            shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "one live AddKeyword {{ Dredge(2) }} must make the shared guard true"
+        );
+
+        // Kind discrimination: the guard answers for the KIND asked about, not
+        // for "some grant exists somewhere".
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Flashback),
+            "a live Dredge grant must not answer true for an unrelated keyword kind"
+        );
+
+        // Hostile fixture: a board whose only live effects REMOVE. Removal arms
+        // can only shrink the contribution list, so the guard must stay `false`
+        // — this is the exactness claim, not a conservative approximation.
+        let mut removal_only = GameState::new_two_player(42);
+        let remover = create_card(
+            &mut removal_only,
+            PlayerId(0),
+            "Stripping Source",
+            Zone::Battlefield,
+        );
+        let victim = create_card(
+            &mut removal_only,
+            PlayerId(0),
+            "Dakmor Salvage",
+            Zone::Graveyard,
+        );
+        removal_only
+            .objects
+            .get_mut(&victim)
+            .unwrap()
+            .base_keywords
+            .push(Keyword::Dredge(2));
+        removal_only.add_transient_continuous_effect(
+            remover,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: victim },
+            vec![
+                ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Dredge(2),
+                },
+                ContinuousModification::RemoveAllAbilities,
+            ],
+            None,
+        );
+        // Reach-guard on the hostile board: the removals really are live and
+        // really do reach the recipient (they strip its printed Dredge), so the
+        // `false` below cannot pass because the board is empty.
+        assert_eq!(
+            effective_off_zone_keyword(&removal_only, victim, KeywordKind::Dredge),
+            None,
+            "reach-guard: the removal effects must really apply to the graveyard card"
+        );
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&removal_only, KeywordKind::Dredge),
+            "removal-only arms cannot create a Dredge candidate, so the guard must stay false"
+        );
+    }
+
+    /// Matrix row 2 (F1): `modification_can_add_keyword_kind` is exhaustive over
+    /// the seven arms `supports_off_zone_keyword_query` admits. Every ADD arm is
+    /// reported for the kind it actually produces and refused for a kind it does
+    /// not; every REMOVE arm is refused on a board where the keyword it acts on
+    /// really is present, so the refusal is measured on a live arm rather than a
+    /// trivially absent one.
+    ///
+    /// The `AddChosenKeyword` pair is the multi-authority row: the keyword
+    /// identity lives on the granting SOURCE's `chosen_attributes` (CR 608.2d),
+    /// never on the modification or the recipient, so a guard that read the
+    /// recipient would answer `false` where the truth is `true`.
+    #[test]
+    fn guard_admits_every_add_arm_and_refuses_every_remove_arm() {
+        use crate::types::ability::ChosenAttribute;
+
+        fn board(modifications: Vec<ContinuousModification>) -> (GameState, ObjectId, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_card(
+                &mut state,
+                PlayerId(0),
+                "Granting Source",
+                Zone::Battlefield,
+            );
+            let target_id = create_card(&mut state, PlayerId(0), "Graveyard Card", Zone::Graveyard);
+            state.add_transient_continuous_effect(
+                source_id,
+                PlayerId(0),
+                Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id: target_id },
+                modifications,
+                None,
+            );
+            (state, source_id, target_id)
+        }
+
+        // --- ADD arm 1: AddKeyword (the keyword verbatim).
+        let (state, _, target_id) = board(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Dredge(2),
+        }]);
+        assert_eq!(
+            effective_off_zone_keyword(&state, target_id, KeywordKind::Dredge),
+            Some(Keyword::Dredge(2)),
+            "reach-guard: AddKeyword must really grant Dredge 2"
+        );
+        assert!(shared_effects_can_grant_off_zone_keyword_kind(
+            &state,
+            KeywordKind::Dredge
+        ));
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Modular),
+            "AddKeyword must be refused for a kind it does not produce"
+        );
+
+        // --- ADD arm 2: AddDynamicKeyword (variant is a function of the kind).
+        let (state, _, target_id) = board(vec![ContinuousModification::AddDynamicKeyword {
+            kind: DynamicKeywordKind::Modular,
+            value: QuantityExpr::Fixed { value: 2 },
+        }]);
+        assert_eq!(
+            effective_off_zone_keyword(&state, target_id, KeywordKind::Modular),
+            Some(Keyword::Modular(2)),
+            "reach-guard: AddDynamicKeyword must really grant Modular 2"
+        );
+        assert!(shared_effects_can_grant_off_zone_keyword_kind(
+            &state,
+            KeywordKind::Modular
+        ));
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "a Modular grant must not answer true for Dredge"
+        );
+
+        // --- ADD arm 3: AddKeywordWithDerivedCost (same placeholder argument).
+        let (state, _, target_id) =
+            board(vec![ContinuousModification::AddKeywordWithDerivedCost {
+                kind: CostBearingKeywordKind::Foretell,
+                derivation: CostDerivation::ManaCostReducedBy(ManaCost::generic(2)),
+            }]);
+        assert!(
+            effective_off_zone_keyword(&state, target_id, KeywordKind::Foretell).is_some(),
+            "reach-guard: AddKeywordWithDerivedCost must really grant Foretell"
+        );
+        assert!(shared_effects_can_grant_off_zone_keyword_kind(
+            &state,
+            KeywordKind::Foretell
+        ));
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "a Foretell grant must not answer true for Dredge"
+        );
+
+        // --- ADD arm 4: AddChosenKeyword, both polarities of the SOURCE's list.
+        let (mut state, source_id, target_id) =
+            board(vec![ContinuousModification::AddChosenKeyword]);
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "AddChosenKeyword with an empty chosen list is a no-op, so false is exact"
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Keyword(Keyword::Dredge(3)));
+        assert_eq!(
+            effective_off_zone_keyword(&state, target_id, KeywordKind::Dredge),
+            Some(Keyword::Dredge(3)),
+            "reach-guard: AddChosenKeyword must really grant the SOURCE's chosen Dredge"
+        );
+        assert!(
+            shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "AddChosenKeyword's keyword identity lives on the granting source"
+        );
+
+        // --- REMOVE arms: refused, each on a board where the keyword the arm
+        // acts on is really present on the recipient.
+        for (label, modification) in [
+            (
+                "RemoveKeyword",
+                ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Dredge(2),
+                },
+            ),
+            (
+                "RemoveChosenKeyword",
+                ContinuousModification::RemoveChosenKeyword,
+            ),
+            (
+                "RemoveAllAbilities",
+                ContinuousModification::RemoveAllAbilities,
+            ),
+        ] {
+            let (mut state, source_id, target_id) = board(vec![modification]);
+            state
+                .objects
+                .get_mut(&target_id)
+                .unwrap()
+                .base_keywords
+                .push(Keyword::Dredge(2));
+            state
+                .objects
+                .get_mut(&source_id)
+                .unwrap()
+                .chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::Dredge(2)));
+            // Reach-guard: the arm really strips the recipient's printed Dredge.
+            assert_eq!(
+                effective_off_zone_keyword(&state, target_id, KeywordKind::Dredge),
+                None,
+                "{label}: the removal arm must really apply to the recipient"
+            );
+            assert!(
+                !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+                "{label}: a removal-only board cannot create a Dredge candidate"
+            );
+        }
+    }
+
     /// V8 — CR 608.2d + CR 613.1f: the off-zone `AddChosenKeyword` arm must read
     /// the PLURAL chosen-keyword list off the granting source (Greymond's two
     /// chosen abilities), not just the first. A battlefield source carrying TWO
@@ -783,6 +1257,71 @@ mod tests {
                 generic: 2,
                 shards: vec![ManaCostShard::Green],
             })))
+        );
+    }
+
+    /// Matrix row 3 (F1) — CR 613.1f + CR 113.6b, the guard's hostile fixture:
+    /// the ONLY Dredge grant on the board is the recipient's OWN base static
+    /// (`affected: SelfRef`), the source a shared-only guard would overlook.
+    /// Modeled on `self_static_in_graveyard_grants_keyword_to_self` above, which
+    /// is the live proof that this shape is reachable rather than `UNREACHABLE`.
+    ///
+    /// The configuration asserted here is the only one that proves the two
+    /// halves are independent — the shared half `false` WHILE the per-object
+    /// half is `true`. Dropping the per-object half would silently skip exactly
+    /// this card.
+    #[test]
+    fn base_statics_half_sees_a_self_granting_graveyard_card() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_card(&mut state, PlayerId(0), "Dredging Spawn", Zone::Graveyard);
+
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&card_id)
+                .unwrap()
+                .base_static_definitions,
+        )
+        .push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Dredge(2),
+                }]),
+        );
+        let base_static_definitions = state
+            .objects
+            .get(&card_id)
+            .unwrap()
+            .base_static_definitions
+            .clone();
+        state.objects.get_mut(&card_id).unwrap().static_definitions =
+            (*base_static_definitions).clone().into();
+
+        // Reach-guard: the self-static really grants Dredge through the
+        // production authority, so the two guard answers below are measured on a
+        // live grant.
+        assert_eq!(
+            effective_off_zone_keyword(&state, card_id, KeywordKind::Dredge),
+            Some(Keyword::Dredge(2)),
+            "reach-guard: the card's own base static must really grant it Dredge 2"
+        );
+        assert!(
+            base_statics_can_grant_off_zone_keyword_kind(&state, card_id, KeywordKind::Dredge),
+            "the per-object half must see a graveyard card's OWN base-static grant"
+        );
+        assert!(
+            !shared_effects_can_grant_off_zone_keyword_kind(&state, KeywordKind::Dredge),
+            "the shared half must NOT see it — that is exactly what makes the \
+             per-object half load-bearing rather than redundant"
+        );
+
+        // Negative sibling: the same shape with an empty `base_static_definitions`.
+        let mut bare = GameState::new_two_player(42);
+        let bare_id = create_card(&mut bare, PlayerId(0), "Plain Land", Zone::Graveyard);
+        assert!(
+            !base_statics_can_grant_off_zone_keyword_kind(&bare, bare_id, KeywordKind::Dredge),
+            "a graveyard card with no base statics cannot self-grant"
         );
     }
 
