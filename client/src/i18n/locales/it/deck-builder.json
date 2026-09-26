@@ -263,7 +263,24 @@
     "showBreakdown": "Mostra dettagli",
     "hideBreakdownButton": "▲ Nascondi dettagli",
     "showBreakdownButton": "▼ Mostra dettagli",
-    "forced": "(forzato B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Negazione di massa delle terre",
+      "extraTurns": "Turni extra",
+      "efficientTutors": "Tutori efficienti"
+    },
+    "check": {
+      "fired": "{{observed}} — impone B{{tier}} {{label}}",
+      "clear": "{{observed}} di {{threshold}} — ne mancano {{remaining}} per passare a B{{tier}}",
+      "clearMax": "{{observed}} — B{{tier}} non può essere raggiunto aggiungendo carte",
+      "source": "{{document}}, {{published}}"
+    },
+    "uncounted": "Conteggiato come prova — a questo asse non si applica alcuna regola del bracket.",
+    "uncalibrated": "WotC non pubblica un numero per le «quantità ridotte»; questo conteggio non è calibrato.",
+    "coverage": "Lette {{resolved}} di {{counted}} carte del mazzo",
+    "confidencePartial": "{{n}} nomi di carte non sono stati trovati nei dati delle carte — questi conteggi sono limiti inferiori.",
+    "unresolvedHeading": "Non trovato nei dati delle carte",
+    "baseFloor": "Il Bracket 1 è definito dal tema del mazzo, che lo stimatore non può rilevare. Le stime iniziano da B2.",
     "dataVersion": "Dati: {{version}}",
     "aboutBrackets": "Informazioni sui bracket ↗",
     "estimatedChip": "Stimato: B{{tier}}",

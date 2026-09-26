@@ -263,7 +263,24 @@
     "showBreakdown": "Aufschlüsselung anzeigen",
     "hideBreakdownButton": "▲ Aufschlüsselung ausblenden",
     "showBreakdownButton": "▼ Aufschlüsselung anzeigen",
-    "forced": "(erzwungen B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Massenhafte Landzerstörung",
+      "extraTurns": "Extrazüge",
+      "efficientTutors": "Effiziente Tutoren"
+    },
+    "check": {
+      "fired": "{{observed}} — erzwingt B{{tier}} {{label}}",
+      "clear": "{{observed}} von {{threshold}} — noch {{remaining}} bis B{{tier}}",
+      "clearMax": "{{observed}} — B{{tier}} kann durch Hinzufügen von Karten nicht erreicht werden",
+      "source": "{{document}}, {{published}}"
+    },
+    "uncounted": "Als Nachweis gezählt — für diese Achse gilt keine Bracket-Regel.",
+    "uncalibrated": "WotC veröffentlicht keine Zahl für „geringe Mengen“; diese Anzahl ist nicht kalibriert.",
+    "coverage": "{{resolved}} von {{counted}} Deckkarten gelesen",
+    "confidencePartial": "{{n}} Kartennamen wurden in den Kartendaten nicht gefunden — diese Zählungen sind Untergrenzen.",
+    "unresolvedHeading": "Nicht in den Kartendaten gefunden",
+    "baseFloor": "Bracket 1 wird durch das Deckthema definiert, das der Schätzer nicht erkennen kann. Schätzungen beginnen bei B2.",
     "dataVersion": "Daten: {{version}}",
     "aboutBrackets": "Über Brackets ↗",
     "estimatedChip": "Geschätzt: B{{tier}}",

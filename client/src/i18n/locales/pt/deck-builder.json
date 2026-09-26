@@ -263,7 +263,24 @@
     "showBreakdown": "Mostrar detalhamento",
     "hideBreakdownButton": "▲ Ocultar detalhamento",
     "showBreakdownButton": "▼ Mostrar detalhamento",
-    "forced": "(B{{tier}} forçado)",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Negação em massa de terrenos",
+      "extraTurns": "Turnos extras",
+      "efficientTutors": "Tutores eficientes"
+    },
+    "check": {
+      "fired": "{{observed}} — força B{{tier}} {{label}}",
+      "clear": "{{observed}} de {{threshold}} — faltam {{remaining}} para passar a B{{tier}}",
+      "clearMax": "{{observed}} — não é possível alcançar B{{tier}} adicionando cartas",
+      "source": "{{document}}, {{published}}"
+    },
+    "uncounted": "Contado como evidência — nenhuma regra de bracket se aplica a este eixo.",
+    "uncalibrated": "A WotC não publica um número para «quantidades baixas»; esta contagem não está calibrada.",
+    "coverage": "Lidas {{resolved}} de {{counted}} cartas do deck",
+    "confidencePartial": "{{n}} nomes de cartas não foram encontrados nos dados de cartas — estas contagens são limites inferiores.",
+    "unresolvedHeading": "Não encontrado nos dados de cartas",
+    "baseFloor": "O Bracket 1 é definido pelo tema do deck, que o estimador não consegue detectar. As estimativas começam em B2.",
     "dataVersion": "Dados: {{version}}",
     "aboutBrackets": "Sobre brackets ↗",
     "estimatedChip": "Estimado: B{{tier}}",

@@ -263,7 +263,24 @@
     "showBreakdown": "Mostrar desglose",
     "hideBreakdownButton": "▲ Ocultar desglose",
     "showBreakdownButton": "▼ Mostrar desglose",
-    "forced": "(forzado B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Negación masiva de tierras",
+      "extraTurns": "Turnos extra",
+      "efficientTutors": "Tutores eficientes"
+    },
+    "check": {
+      "fired": "{{observed}} — fuerza B{{tier}} {{label}}",
+      "clear": "{{observed}} de {{threshold}} — faltan {{remaining}} para pasar a B{{tier}}",
+      "clearMax": "{{observed}} — no se puede alcanzar B{{tier}} añadiendo cartas",
+      "source": "{{document}}, {{published}}"
+    },
+    "uncounted": "Contado como evidencia — ninguna regla de nivel se aplica a este eje.",
+    "uncalibrated": "WotC no publica una cifra para «cantidades bajas»; este recuento no está calibrado.",
+    "coverage": "Leídas {{resolved}} de {{counted}} cartas del mazo",
+    "confidencePartial": "No se encontraron {{n}} nombres de cartas en los datos de cartas — estos recuentos son cotas inferiores.",
+    "unresolvedHeading": "No encontrado en los datos de cartas",
+    "baseFloor": "El nivel 1 se define por la temática del mazo, que el estimador no puede detectar. Las estimaciones comienzan en B2.",
     "dataVersion": "Datos: {{version}}",
     "aboutBrackets": "Acerca de los niveles ↗",
     "estimatedChip": "Estimado: B{{tier}}",
