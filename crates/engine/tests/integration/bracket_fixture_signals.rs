@@ -75,7 +75,7 @@ fn committed_fixture_represents_all_four_curated_axes() {
 }
 
 #[test]
-fn aggravated_assault_currently_reads_as_an_extra_turn() {
+fn aggravated_assault_reads_as_extra_combat_evidence_not_an_extra_turn() {
     let Some(db) = shared_db() else {
         return;
     };
@@ -83,11 +83,10 @@ fn aggravated_assault_currently_reads_as_an_extra_turn() {
         return;
     };
 
-    // KNOWN DEFECT: step 61-02 moves this additional-combat card to an
-    // evidence-only extra_combats list and flips this assertion.
+    // The correction landed in 61-02 and reached the committed fixture in 61-06.
     assert!(
-        signals.extra_turn,
-        "current baseline classifies Aggravated Assault as an extra-turn card"
+        !signals.extra_turn,
+        "Aggravated Assault must not be classified as an extra-turn card"
     );
 }
 
