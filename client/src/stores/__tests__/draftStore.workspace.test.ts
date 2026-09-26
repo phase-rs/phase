@@ -38,7 +38,7 @@ const wasm = vi.hoisted(() => ({
   start_sealed_draft: vi.fn(),
   start_quick_cube_draft: vi.fn(),
   import_draft_session: vi.fn(),
-  load_card_database: vi.fn(() => 0),
+  load_card_database: vi.fn((_json: string) => 0),
   submit_pick: vi.fn(),
   submit_pick_with_draft_effect: vi.fn(),
   auto_pick: vi.fn(),
@@ -200,6 +200,7 @@ describe("draft store workspace authority", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("typed database")));
     formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
     // Module state, so it survives `reset()` and would otherwise leak the
@@ -233,6 +234,71 @@ describe("draft store workspace authority", () => {
 
     useDraftStore.getState().reset();
     expect(useDraftStore.getState().difficulty).toBe(4);
+  });
+
+  it("loads the typed database before a fresh difficulty-2 Quick match requests a bot deck", async () => {
+    let databaseLoaded = false;
+    wasm.load_card_database.mockImplementationOnce((database: string) => {
+      expect(database).toBe("typed database");
+      databaseLoaded = true;
+      return 0;
+    });
+    wasm.get_bot_deck.mockImplementationOnce(() => {
+      if (!databaseLoaded) throw new Error("card database unavailable");
+      return { main_deck: ["Opponent"], lands: {} };
+    });
+    wasm.start_quick_draft.mockReturnValue(view([card("human", "Forest")]));
+
+    await useDraftStore.getState().startDraft("pool", "TST", "Test", 2);
+    useDraftStore.setState({ phase: "launching" });
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+
+    expect(fetch).toHaveBeenCalledWith("/card-data.json");
+    expect(wasm.load_card_database).toHaveBeenCalledOnce();
+    expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+    expect(wasm.load_card_database.mock.invocationCallOrder[0])
+      .toBeLessThan(wasm.get_bot_deck.mock.invocationCallOrder[0]!);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("loads the typed database before a resumed difficulty-2 Quick match requests a bot deck", async () => {
+    let databaseLoaded = false;
+    wasm.load_card_database.mockImplementationOnce((database: string) => {
+      expect(database).toBe("typed database");
+      databaseLoaded = true;
+      return 0;
+    });
+    wasm.get_bot_deck.mockImplementationOnce(() => {
+      if (!databaseLoaded) throw new Error("card database unavailable");
+      return { main_deck: ["Opponent"], lands: {} };
+    });
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "saved-quick", setCode: "TST", setName: "Test", difficulty: 2,
+      kind: "Quick", phase: "launching", runFormat: "run",
+    });
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "saved session", mainDeck: ["Forest"], landCounts: {},
+      poolSortMode: "color", poolPanelOpen: true, workspace: null,
+    });
+    wasm.import_draft_session.mockReturnValue({
+      ...view([card("human", "Forest")]), status: "Pairing",
+    });
+
+    expect(await useDraftStore.getState().resumeDraft())
+      .toEqual({ status: "resumed", draftId: "saved-quick" });
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchMatch(navigate);
+
+    expect(fetch).toHaveBeenCalledWith("/card-data.json");
+    expect(wasm.load_card_database).toHaveBeenCalledOnce();
+    expect(wasm.import_draft_session).toHaveBeenCalledWith("saved session", 2);
+    expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
+    expect(wasm.load_card_database.mock.invocationCallOrder[0])
+      .toBeLessThan(wasm.get_bot_deck.mock.invocationCallOrder[0]!);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
   });
 
   it("applies_pending_destination_only_after_pool_acknowledgement", async () => {
@@ -1429,7 +1495,6 @@ describe("draft store workspace authority", () => {
       persistedPhase: "playing",
       sessionStatus: "Pairing",
       expectedPhase: "playing",
-      fetchDatabase: true,
     },
     {
       label: "Sealed run finished (session Pairing, run complete)",
@@ -1437,7 +1502,6 @@ describe("draft store workspace authority", () => {
       persistedPhase: "complete",
       sessionStatus: "Pairing",
       expectedPhase: "complete",
-      fetchDatabase: true,
     },
     {
       label: "Quick run between games (session Complete, run in progress)",
@@ -1445,7 +1509,6 @@ describe("draft store workspace authority", () => {
       persistedPhase: "playing",
       sessionStatus: "Complete",
       expectedPhase: "playing",
-      fetchDatabase: false,
     },
     {
       label: "Quick run finished (session Complete, run complete)",
@@ -1453,18 +1516,13 @@ describe("draft store workspace authority", () => {
       persistedPhase: "complete",
       sessionStatus: "Complete",
       expectedPhase: "complete",
-      fetchDatabase: false,
     },
   ])("resume keeps the run phase: $label", async ({
     kind,
     persistedPhase,
     sessionStatus,
     expectedPhase,
-    fetchDatabase,
   }) => {
-    if (fetchDatabase) {
-      vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
-    }
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
       id: "run-id",
       setCode: "TST",

@@ -534,8 +534,7 @@ function installWorkspace(operation: WorkspaceInstallOperation): void {
   if (operation.persistence === "schedule") schedulePersistence(0);
 }
 
-async function prepareCardDatabase(required: boolean): Promise<string | null> {
-  if (!required) return null;
+async function prepareCardDatabase(): Promise<string> {
   const response = await fetch(__CARD_DATA_URL__);
   return response.text();
 }
@@ -545,7 +544,6 @@ async function startLocalDraft(input: {
   setName: string;
   difficulty: number;
   kind: LocalDraftKind;
-  prepareDatabase: boolean;
   initialize: Parameters<typeof withDraftEngineOperation<DraftPlayerView>>[0];
 }): Promise<void> {
   const lifecycle = beginLifecycle();
@@ -554,11 +552,11 @@ async function startLocalDraft(input: {
     if (lifecycle !== lifecycleGeneration) return;
     await inspectActiveQuickDraftLifecycle("consume");
     if (lifecycle !== lifecycleGeneration) return;
-    const database = await prepareCardDatabase(input.prepareDatabase);
+    const database = await prepareCardDatabase();
     const adapter = new DraftAdapter();
     const view = await withDraftEngineOperation((lease) => {
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
-      if (database !== null) lease.loadCardDatabase(database);
+      lease.loadCardDatabase(database);
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
       return input.initialize(lease);
     });
@@ -1169,7 +1167,6 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName,
     difficulty,
     kind: "Quick",
-    prepareDatabase: difficulty >= 3,
     initialize: (lease) => lease.initialize(setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff)),
     });
   },
@@ -1190,7 +1187,6 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName,
     difficulty,
     kind: "Sealed",
-    prepareDatabase: true,
     initialize: (lease) => lease.initializeSealed(setPoolJson, difficulty, Math.floor(Math.random() * 0xffffffff)),
     });
   },
@@ -1200,7 +1196,6 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     setName: cubeName,
     difficulty,
     kind: "Quick",
-    prepareDatabase: true,
     initialize: (lease) => lease.initializeCube(
       cubeListText, cubeName, settings, difficulty, Math.floor(Math.random() * 0xffffffff),
     ),
@@ -1256,11 +1251,11 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     }
     if (!saved) return submitted ? installRunOnly() : unavailable("Saved draft session is unavailable");
     try {
-      const database = await prepareCardDatabase(meta.difficulty >= 3 || meta.kind === "Sealed");
+      const database = await prepareCardDatabase();
       const adapter = new DraftAdapter();
       const restored = await withDraftEngineOperation((lease) => {
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
-        if (database !== null) lease.loadCardDatabase(database);
+        lease.loadCardDatabase(database);
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
         return {
           view: lease.importSession(saved.sessionJson, meta.difficulty),
