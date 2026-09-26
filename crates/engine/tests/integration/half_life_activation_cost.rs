@@ -3,7 +3,8 @@ use engine::game::casting::can_activate_ability_now;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetRef,
+    AbilityCost, PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, RoundingMode,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -13,6 +14,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const BETRAYAL: &str =
@@ -60,7 +62,15 @@ fn betrayal_board(
             .add_land_from_oracle(P0, "Mana Confluence", CONFLUENCE)
             .id(),
     ];
-    let target = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let target = scenario
+        .add_creature(P1, "Grizzly Bears", 2, 2)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .description("Regenerate".to_string())
+                .regeneration_shield(),
+        )
+        .id();
     let other = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
     if floated {
         scenario.with_mana_pool(
@@ -121,6 +131,7 @@ fn targeted_half_life_locks_before_mana_abilities() {
         })
         .collect();
     assert_eq!(losses, vec![-1, -1, -4]);
+    // CR 701.19c: Murderous Betrayal bypasses the target's regeneration shield.
     assert_eq!(outcome.zone_of(target), Zone::Graveyard);
     assert_eq!(outcome.zone_of(other), Zone::Battlefield);
     assert!(outcome
@@ -330,6 +341,40 @@ fn untargeted_composite_half_life_locks_before_two_mana_abilities() {
         .events()
         .iter()
         .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+}
+
+#[test]
+fn positive_half_life_cost_is_refused_when_players_cannot_pay_life() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 7);
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Lurking Evil", LURKING_EVIL)
+        .id();
+    scenario.add_creature_from_oracle(
+        P0,
+        "Yasharn, Implacable Earth",
+        4,
+        4,
+        "When Yasharn enters, search your library for a basic Forest card and a basic Plains card, reveal those cards, put them into your hand, then shuffle.\nPlayers can't pay life or sacrifice nonland permanents to cast spells or activate abilities.",
+    );
+    let mut runner = scenario.build();
+    assert!(matches!(
+        runner.state().objects[&source].abilities[0].cost,
+        Some(AbilityCost::PayLife {
+            amount: QuantityExpr::DivideRounded { .. }
+        })
+    ));
+    assert!(!offered(&runner, source));
+    assert!(!can_activate_ability_now(runner.state(), P0, source, 0));
+    assert!(runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .is_err());
+    assert_eq!(runner.state().players[P0.0 as usize].life, 7);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().pending_cast.is_none());
 }
 
 #[test]
