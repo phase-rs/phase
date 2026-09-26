@@ -13453,7 +13453,11 @@ pub fn max_x_value(
     max_x_value_excluding(state, player, cost, object_id, &HashSet::new())
 }
 
-pub(super) fn max_x_value_excluding(
+/// [`max_x_value`] with `excluded_sources` withheld from the permanent-capacity
+/// sweep: the largest X payable without activating any mana ability of those
+/// objects. Lets a caller price how much of its X budget depends on particular
+/// sources (the Momir AI asks "how much X without tapping my creatures?").
+pub fn max_x_value_excluding(
     state: &GameState,
     player: PlayerId,
     cost: &ManaCost,

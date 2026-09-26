@@ -279,6 +279,12 @@ pub struct PolicyPenalties {
     /// Reward for choosing the scheduled X at the sink's `{X}` prompt, so the
     /// AI spends its turn's mana rather than taking the search's default.
     pub momir_curve_x_on_schedule: f64,
+    /// Share of a mana creature's board value the random-creature sink
+    /// schedule charges for TAPPING it to reach a higher X. The creature misses
+    /// one turn of combat while the larger token is permanent, so this is well
+    /// below 1.0; a creature that must be given up to make its mana is charged
+    /// in full regardless.
+    pub momir_curve_mana_creature_tap_weight: f64,
     /// Penalty for targeting a creature already doomed by pending stack effects.
     pub redundant_removal_penalty: f64,
     /// Penalty for targeting a creature with pending (but non-lethal) damage.
@@ -656,6 +662,11 @@ impl Default for PolicyPenalties {
             // Strong band: picking the scheduled X is the whole decision — a
             // smaller creature is a strictly worse use of the same card.
             momir_curve_x_on_schedule: 2.5,
+            // A quarter of the creature's combat body: a 1/1 or 2/2 dork is
+            // tapped to climb a rung below 8 (the mean pool body rises ~1.5-2.5
+            // per rung there), while a 6/6 mana creature keeps attacking rather
+            // than buying the ~2.5 a rung is worth near the cap.
+            momir_curve_mana_creature_tap_weight: 0.25,
             redundant_removal_penalty: -6.0,
             redundant_damage_penalty: -4.0,
             gift_card_penalty: -3.0,
@@ -1079,6 +1090,11 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     ),
     (
         "momir_curve_x_on_schedule",
+        "Momir's Madness schedule — same reason as momir_curve_activation: no \
+         Momir matchup exists in the ai-gate suite to calibrate against.",
+    ),
+    (
+        "momir_curve_mana_creature_tap_weight",
         "Momir's Madness schedule — same reason as momir_curve_activation: no \
          Momir matchup exists in the ai-gate suite to calibrate against.",
     ),
