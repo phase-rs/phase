@@ -80,6 +80,7 @@ import {
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
+import { isCoherentUnresolvedDraftStage } from "../stores/draftStore";
 import {
   assignRandomAvatars,
   avatarCardNameForName,
@@ -1500,7 +1501,6 @@ export function GameProvider({
         if (!meta || meta.id !== draftId) throw unavailableDraftStage();
         const run = await loadDraftRun(draftId!);
         if (!run) throw unavailableDraftStage();
-        const { isCoherentUnresolvedDraftStage } = await import("../stores/draftStore");
         if (!isCoherentUnresolvedDraftStage(run, draftId!, gameId)
           || (meta.setCode === "custom-cube" && !Array.isArray(run.booster_pack_pool))) {
           throw unavailableDraftStage();
