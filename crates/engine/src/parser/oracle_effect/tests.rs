@@ -41502,6 +41502,47 @@ fn reveal_until_followed_by_shuffle_emits_distinct_shuffle() {
     );
 }
 
+/// CR 401.4: unspecified order gives the owner a choice only for library placement.
+#[test]
+fn reveal_until_all_cards_unspecified_order_matches_destination() {
+    for (placement, destination, expected_order) in [
+        (
+            "on the bottom of your library",
+            Zone::Library,
+            DigRestOrder::PlayerChoice,
+        ),
+        (
+            "into your library",
+            Zone::Library,
+            DigRestOrder::PlayerChoice,
+        ),
+        ("into your hand", Zone::Hand, DigRestOrder::Preserve),
+        (
+            "into your graveyard",
+            Zone::Graveyard,
+            DigRestOrder::Preserve,
+        ),
+        ("into exile", Zone::Exile, DigRestOrder::Preserve),
+    ] {
+        let def = parse_effect_chain(
+            &format!("Reveal cards from the top of your library until you reveal a nonland card. Put all cards revealed this way {placement}."),
+            AbilityKind::Spell,
+        );
+        let Effect::RevealUntil {
+            kept_destination,
+            rest_destination,
+            rest_order,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected RevealUntil for {placement}, got {:?}", def.effect);
+        };
+        assert_eq!(*kept_destination, destination, "{placement}");
+        assert_eq!(*rest_destination, destination, "{placement}");
+        assert_eq!(*rest_order, expected_order, "{placement}");
+    }
+}
+
 /// CR 701.20a: All cards revealed on the bottom in a random order.
 #[test]
 fn reveal_until_all_cards_revealed_this_way_random_order() {

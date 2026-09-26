@@ -539,6 +539,61 @@ fn reveal_until_unspecified_bottom_order_is_owner_choice() {
     );
 }
 
+/// CR 401.4: synthetic grammar fixture, not a printed card. Omitting an order
+/// instruction must still let the owner order three cards placed on the bottom.
+#[test]
+fn reveal_until_all_unspecified_bottom_order_is_owner_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "All Unspecified Bottom Order Test",
+            true,
+            "Reveal cards from the top of your library until you reveal a nonland card. Put all cards revealed this way on the bottom of your library.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
+    let hit = scenario.add_spell_to_library_top(P0, "Hit", false).id();
+    let second = scenario
+        .add_spell_to_library_top(P0, "Second Land", false)
+        .as_land()
+        .id();
+    let first = scenario
+        .add_spell_to_library_top(P0, "First Land", false)
+        .as_land()
+        .id();
+    let mut runner = scenario.build();
+    let mut committed = runner.cast(spell).commit();
+    committed.act(GameAction::PassPriority).unwrap();
+    committed.act(GameAction::PassPriority).unwrap();
+    match &committed.state().waiting_for {
+        WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+            assert_eq!(*player, P0);
+            assert_eq!(cards, &[first, second, hit]);
+        }
+        other => panic!("expected owner ordering choice, got {other:?}"),
+    }
+    assert_eq!(committed.state().objects[&hit].zone, Zone::Library);
+    committed
+        .act(GameAction::SelectCards {
+            cards: vec![hit, second, first],
+        })
+        .unwrap();
+    let library = &committed
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library;
+    assert_eq!(
+        library.iter().copied().collect::<Vec<_>>(),
+        vec![deep, hit, second, first]
+    );
+}
+
 /// CR 701.24a: When a spell reveals until a condition and then instructs to shuffle the
 /// library (e.g. The Crimson Avenger, Underdark Beholder), the whole library including
 /// unrevealed cards must be shuffled, rather than only placing the revealed pile.

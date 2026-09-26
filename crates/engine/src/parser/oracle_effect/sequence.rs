@@ -519,7 +519,12 @@ fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, 
         ),
     )))
     .parse(input)?;
-    let rest_order = rest_order.unwrap_or(crate::types::ability::DigRestOrder::Preserve);
+    // CR 401.4: absent randomization, the owner orders cards placed together in a library.
+    let rest_order = rest_order.unwrap_or(if destination == Zone::Library {
+        DigRestOrder::PlayerChoice
+    } else {
+        DigRestOrder::Preserve
+    });
     let (input, _) = opt(tag(".")).parse(input)?;
     let (input, _) = eof(input)?;
     Ok((
