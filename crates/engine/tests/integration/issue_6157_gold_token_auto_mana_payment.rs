@@ -580,7 +580,10 @@ fn check_lions_eye_diamond_activates_with_priority() {
         })
         .expect("discarding the hand must complete Diamond's activation cost");
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::ChooseManaColor { player: P0, .. }),
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { player: P0, .. }
+        ),
         "Diamond activation waits for {:?}",
         runner.state().waiting_for
     );
