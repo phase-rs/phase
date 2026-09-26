@@ -1,3 +1,5 @@
+import type { CommanderBracketTier } from "../types/bracketEstimate";
+
 /** Minimal deck shape the bracket-estimate key depends on. */
 export interface BracketKeyEntry {
   name: string;
@@ -20,10 +22,12 @@ export interface BracketKeyDeck {
  * `estimate_bracket` does not read it — Commander has no sideboard, and dropping
  * it would buy nothing while making the key wrong the day a section is added.
  * Companion and signature spell ARE read by the estimator and must be in the key.
+ * The declaration is also an input to the estimate and must be in the key.
  */
 export function buildBracketDeckKey(
   commanders: string[],
   deck: BracketKeyDeck,
+  declaredTier: CommanderBracketTier | null,
 ): string {
   const parts: string[] = [...commanders.map((c) => `c:${c.toLowerCase()}`)];
   for (const e of deck.main) parts.push(`m:${e.count}x${e.name.toLowerCase()}`);
@@ -31,5 +35,8 @@ export function buildBracketDeckKey(
   if (deck.companion) parts.push(`co:${deck.companion.toLowerCase()}`);
   for (const name of deck.signature_spell ?? []) parts.push(`sig:${name.toLowerCase()}`);
   parts.sort();
-  return parts.join("|");
+  // Appended AFTER the sort so it is a suffix, not an interleaved part: the
+  // declaration is an input to the estimate (it produces `declaration`), not a
+  // deck member.
+  return `${parts.join("|")}#d:${declaredTier ?? "none"}`;
 }

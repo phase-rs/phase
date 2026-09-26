@@ -3,6 +3,7 @@ import { formatMetadata } from "../data/formatRegistry";
 import type { CommanderBracketTier } from "./bracketEstimate";
 export {
   BRACKET_AXES,
+  BRACKET_TIER_BY_NUMERIC,
   BRACKET_TIER_NUMERIC,
   type BracketAxis,
   type BracketCheck,
@@ -10,7 +11,9 @@ export {
   type BracketCoverage,
   type BracketDeckRequest,
   type BracketEstimate,
+  type BracketEstimateRequest,
   type CommanderBracketTier,
+  type DeclarationVerdict,
   type EstimateConfidence,
   isBracketEstimate,
 } from "./bracketEstimate";

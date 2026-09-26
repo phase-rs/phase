@@ -254,11 +254,11 @@
     "clearOverride": "Artwork-Überschreibung aufheben"
   },
   "bracket": {
-    "unavailable": "Die Bracket-Schätzung ist in diesem Build nicht verfügbar.",
+    "unavailable": "Für die Bracket-Schätzung werden Kartendaten benötigt, die noch nicht geladen wurden.",
     "addCommander": "Füge einen Kommandeur hinzu, um deine Bracket-Schätzung zu sehen.",
     "estimated": "Geschätzt: B{{tier}} {{label}}",
     "manual": "Manuell: B{{tier}} {{label}}",
-    "mismatch": " ⚠ Abweichung",
+    "belowFloor": " ⚠ unter dem B{{tier}}-Minimum",
     "hideBreakdown": "Aufschlüsselung ausblenden",
     "showBreakdown": "Aufschlüsselung anzeigen",
     "hideBreakdownButton": "▲ Aufschlüsselung ausblenden",

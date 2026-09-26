@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { GameFormat, MatchType } from "../adapter/types";
-import { getSharedAdapter } from "../adapter/wasm-adapter";
+import { estimateDeckBracket } from "./bracketEstimate";
 import { evaluateDeckCompatibility } from "./deckCompatibility";
 import {
   buildDeckCatalog,
@@ -65,14 +65,15 @@ async function resolveBracket(
   if (!isCommanderFamilyFormat(format)) return null;
   const request = expandParsedDeck(deck);
   if (request.commander.length === 0) return null;
-  try {
-    const estimate = await getSharedAdapter().estimateBracket(request);
-    return estimate ? BRACKET_TIER_NUMERIC[estimate.tier] : null;
-  } catch {
-    // Adapters without local estimation (Tauri/WebSocket/P2P/server-draft)
-    // throw BRACKET_ESTIMATION_UNSUPPORTED. Treat as untagged — the filter
-    // simply won't constrain these candidates in those builds.
-    return null;
+  const outcome = await estimateDeckBracket({ deck: request, declared_tier: null });
+  switch (outcome.kind) {
+    case "estimate":
+      return BRACKET_TIER_NUMERIC[outcome.estimate.tier];
+    case "no-commander":
+    case "card-data-unavailable":
+      // Without an engine reading, leave the candidate untagged so the filter
+      // does not constrain it to an invented bracket.
+      return null;
   }
 }
 

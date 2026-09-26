@@ -1,9 +1,12 @@
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderHook, act, waitFor } from "@testing-library/react";
-import { useBracketEstimate, clearBracketEstimateCache } from "../useBracketEstimate";
-import { AdapterError, AdapterErrorCode } from "../../adapter/types";
-import type { BracketEstimate } from "../../types/bracket";
+
+import { estimateDeckBracket } from "../../services/bracketEstimate";
 import type { ParsedDeck } from "../../services/deckParser";
+import type { BracketEstimate, CommanderBracketTier } from "../../types/bracket";
+import { clearBracketEstimateCache, useBracketEstimate } from "../useBracketEstimate";
+
+vi.mock("../../services/bracketEstimate", () => ({ estimateDeckBracket: vi.fn() }));
 
 const mockEstimate: BracketEstimate = {
   tier: "upgraded",
@@ -11,271 +14,166 @@ const mockEstimate: BracketEstimate = {
     game_changers: { count: 1, contributing: ["Smothering Tithe"] },
     mass_land_denial: { count: 0, contributing: [] },
     extra_turns: { count: 0, contributing: [] },
-    efficient_tutors: {
-      count: 2,
-      contributing: ["Demonic Tutor", "Vampiric Tutor"],
-    },
+    efficient_tutors: { count: 2, contributing: ["Demonic Tutor", "Vampiric Tutor"] },
   },
-  checks: [
-    {
-      axis: "game_changers",
-      comparator: "GE",
-      threshold: 1,
-      floor: "upgraded",
-      observed: 1,
-      outcome: { kind: "fired" },
-      official_line: "Bracket 1 and 2 decks exclude Game Changers.",
-      source_document: "MTG Commander Format — Game Changers",
-      source_published: "2026-02-09",
-      source_url: "https://magic.wizards.com/en/formats/commander",
-      evidence: ["Smothering Tithe"],
-    },
-  ],
+  checks: [],
   coverage: { counted: 4, resolved: 4, unresolved: [], confidence: "complete" },
   data_version: "test-1",
+  declaration: null,
 };
-
-const makeAdapter = (estimate: BracketEstimate | null = mockEstimate) => ({
-  estimateBracket: vi.fn().mockResolvedValue(estimate),
-});
 
 const deck: ParsedDeck = {
   main: [
     { name: "Smothering Tithe", count: 1 },
-    { name: "Demonic Tutor", count: 1 },
-    { name: "Vampiric Tutor", count: 1 },
-    { name: "Forest", count: 30 },
+    { name: "Forest", count: 2 },
   ],
-  sideboard: [],
+  sideboard: [{ name: "Pyroblast", count: 1 }],
+  companion: "Lutri, the Spellchaser",
+  signature_spell: ["Lightning Bolt"],
 };
 
+const baseOptions = {
+  deck,
+  commanders: ["Krenko, Mob Boss"],
+  format: "Commander" as const,
+  declaredTier: null,
+};
+
+function mockEstimateOutcome(estimate: BracketEstimate = mockEstimate): void {
+  vi.mocked(estimateDeckBracket).mockResolvedValue({ kind: "estimate", estimate });
+}
+
 describe("useBracketEstimate", () => {
-  afterEach(() => clearBracketEstimateCache());
-
-  it("returns null when format is not Commander", async () => {
-    const adapter = makeAdapter();
-    const { result } = renderHook(() =>
-      useBracketEstimate({ deck, commanders: ["Atraxa"], format: "Standard", adapter }),
-    );
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.estimate).toBeNull();
-    expect(adapter.estimateBracket).not.toHaveBeenCalled();
-  });
-
-  it("returns null when no commander is selected", async () => {
-    const adapter = makeAdapter();
-    const { result } = renderHook(() =>
-      useBracketEstimate({ deck, commanders: [], format: "Commander", adapter }),
-    );
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.estimate).toBeNull();
-    expect(adapter.estimateBracket).not.toHaveBeenCalled();
-  });
-
-  it("returns an estimate for a Commander deck", async () => {
-    const adapter = makeAdapter();
-    const { result } = renderHook(() =>
-      useBracketEstimate({ deck, commanders: ["Atraxa"], format: "Commander", adapter }),
-    );
-    await waitFor(() => expect(result.current.estimate).not.toBeNull());
-    expect(result.current.estimate?.tier).toBe("upgraded");
-    expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
-  });
-
-  it("sends companion and signature spell to the adapter", async () => {
-    const adapter = makeAdapter();
-    const deckWithCommanderSections: ParsedDeck = {
-      main: [{ name: "Forest", count: 2 }],
-      sideboard: [{ name: "Pyroblast", count: 1 }],
-      companion: "Lutri, the Spellchaser",
-      signature_spell: ["Lightning Bolt"],
-    };
-
-    renderHook(() =>
-      useBracketEstimate({
-        deck: deckWithCommanderSections,
-        commanders: ["Krenko, Mob Boss"],
-        format: "Commander",
-        adapter,
-      }),
-    );
-    await waitFor(() => expect(adapter.estimateBracket).toHaveBeenCalledTimes(1));
-
-    expect(adapter.estimateBracket.mock.calls[0][0]).toEqual({
-      commander: ["Krenko, Mob Boss"],
-      main_deck: ["Forest", "Forest"],
-      sideboard: ["Pyroblast"],
-      companion: ["Lutri, the Spellchaser"],
-      signature_spell: ["Lightning Bolt"],
-    });
-  });
-
-  it("debounces rapid deck updates into a single call", async () => {
-    vi.useFakeTimers();
-    const adapter = makeAdapter();
-    const { rerender } = renderHook(
-      ({ deck }) =>
-        useBracketEstimate({ deck, commanders: ["Atraxa"], format: "Commander", adapter }),
-      { initialProps: { deck } },
-    );
-    rerender({ deck: { ...deck, main: [...deck.main, { name: "Island", count: 1 }] } });
-    rerender({ deck: { ...deck, main: [...deck.main, { name: "Plains", count: 1 }] } });
-    await act(async () => { vi.advanceTimersByTime(200); });
-    expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
+  afterEach(() => {
+    clearBracketEstimateCache();
+    vi.clearAllMocks();
     vi.useRealTimers();
   });
 
-  it("memoizes by deck hash + data version (no re-call on identical input)", async () => {
-    const adapter = makeAdapter();
-    const props = { deck, commanders: ["Atraxa"], format: "Commander" as const, adapter };
-    const { rerender } = renderHook((p) => useBracketEstimate(p), { initialProps: props });
-    await new Promise((r) => setTimeout(r, 250));
-    rerender(props);
-    await new Promise((r) => setTimeout(r, 250));
-    expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
+  it("returns null without calling the service when the format is not Commander", async () => {
+    mockEstimateOutcome();
+    const { result } = renderHook(() =>
+      useBracketEstimate({ ...baseOptions, format: "Standard" }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.estimate).toBeNull();
+    expect(result.current.outcome).toBeNull();
+    expect(estimateDeckBracket).not.toHaveBeenCalled();
   });
 
-  it("discards a stale async result when a newer call supersedes it", async () => {
-    // Two adapter calls: first one resolves slowly, second resolves fast.
-    // The hook should display the second result, not the first.
-    const firstEstimate: BracketEstimate = {
-      ...mockEstimate,
-      tier: "core",
-      axes: {
-        ...mockEstimate.axes,
-        game_changers: { ...mockEstimate.axes.game_changers, contributing: ["FIRST"] },
-      },
-    };
-    const secondEstimate: BracketEstimate = {
-      ...mockEstimate,
-      tier: "optimized",
-      axes: {
-        ...mockEstimate.axes,
-        game_changers: { ...mockEstimate.axes.game_changers, contributing: ["SECOND"] },
-      },
-    };
+  it("returns null without calling the service when no commander is selected", async () => {
+    mockEstimateOutcome();
+    const { result } = renderHook(() =>
+      useBracketEstimate({ ...baseOptions, commanders: [] }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.estimate).toBeNull();
+    expect(estimateDeckBracket).not.toHaveBeenCalled();
+  });
 
-    let resolveFirst: (v: BracketEstimate) => void = () => {};
-    const firstPromise = new Promise<BracketEstimate>((r) => {
-      resolveFirst = r;
+  it("sends all five deck sections and the declared tier", async () => {
+    mockEstimateOutcome();
+    const { result } = renderHook(() =>
+      useBracketEstimate({ ...baseOptions, declaredTier: "optimized" }),
+    );
+
+    await waitFor(() => expect(result.current.estimate).toBe(mockEstimate));
+    expect(estimateDeckBracket).toHaveBeenCalledWith({
+      deck: {
+        commander: ["Krenko, Mob Boss"],
+        main_deck: ["Smothering Tithe", "Forest", "Forest"],
+        sideboard: ["Pyroblast"],
+        companion: ["Lutri, the Spellchaser"],
+        signature_spell: ["Lightning Bolt"],
+      },
+      declared_tier: "optimized",
     });
-    const secondPromise = Promise.resolve(secondEstimate);
+  });
 
-    const adapter = {
-      estimateBracket: vi
-        .fn()
-        .mockImplementationOnce(() => firstPromise)
-        .mockImplementationOnce(() => secondPromise),
-    };
+  it("debounces rapid deck updates into one service call", async () => {
+    vi.useFakeTimers();
+    mockEstimateOutcome();
+    const { rerender } = renderHook(
+      ({ currentDeck }) => useBracketEstimate({ ...baseOptions, deck: currentDeck }),
+      { initialProps: { currentDeck: deck } },
+    );
+    rerender({ currentDeck: { ...deck, main: [{ name: "Island", count: 1 }] } });
+    rerender({ currentDeck: { ...deck, main: [{ name: "Plains", count: 1 }] } });
 
-    // Render with deck v1.
-    const deckV1: ParsedDeck = { main: [{ name: "A", count: 1 }], sideboard: [] };
-    const deckV2: ParsedDeck = { main: [{ name: "B", count: 1 }], sideboard: [] };
+    await act(async () => vi.advanceTimersByTime(200));
+    expect(estimateDeckBracket).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the cache when identical input is rendered again", async () => {
+    mockEstimateOutcome();
+    const { rerender } = renderHook((options) => useBracketEstimate(options), {
+      initialProps: baseOptions,
+    });
+    await waitFor(() => expect(estimateDeckBracket).toHaveBeenCalledTimes(1));
+    rerender(baseOptions);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(estimateDeckBracket).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards a stale result when a newer request resolves first", async () => {
+    const firstEstimate = { ...mockEstimate, tier: "core" as const };
+    const secondEstimate = { ...mockEstimate, tier: "optimized" as const };
+    let resolveFirst!: (value: { kind: "estimate"; estimate: BracketEstimate }) => void;
+    const first = new Promise<{ kind: "estimate"; estimate: BracketEstimate }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    vi.mocked(estimateDeckBracket)
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce({ kind: "estimate", estimate: secondEstimate });
 
     const { result, rerender } = renderHook(
-      ({ deck: d }: { deck: ParsedDeck }) =>
-        useBracketEstimate({
-          deck: d,
-          commanders: ["Atraxa"],
-          format: "Commander",
-          adapter,
-        }),
-      { initialProps: { deck: deckV1 } },
+      ({ currentDeck }) => useBracketEstimate({ ...baseOptions, deck: currentDeck }),
+      { initialProps: { currentDeck: { ...deck, main: [{ name: "A", count: 1 }] } } },
     );
-
-    // Wait past debounce so the first call fires.
-    await new Promise((r) => setTimeout(r, 250));
-    expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
-
-    // Now switch to deck v2 before the first call resolves.
-    rerender({ deck: deckV2 });
-    await new Promise((r) => setTimeout(r, 250));
-    // Second call has fired and resolved with the optimized estimate.
-    expect(adapter.estimateBracket).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(estimateDeckBracket).toHaveBeenCalledTimes(1));
+    rerender({ currentDeck: { ...deck, main: [{ name: "B", count: 1 }] } });
     await waitFor(() => expect(result.current.estimate?.tier).toBe("optimized"));
 
-    // Now resolve the first promise late. It should be discarded.
-    resolveFirst(firstEstimate);
-    await new Promise((r) => setTimeout(r, 50));
-    // Hook should still show the second (newer) estimate.
+    resolveFirst({ kind: "estimate", estimate: firstEstimate });
+    await act(async () => Promise.resolve());
     expect(result.current.estimate?.tier).toBe("optimized");
-    expect(result.current.estimate?.axes.game_changers.contributing).toEqual(["SECOND"]);
   });
 
-  it("returns an estimate for Brawl format (commander family)", async () => {
-    const adapter = makeAdapter();
-    renderHook(() =>
-      useBracketEstimate({ deck, commanders: ["Atraxa"], format: "Brawl", adapter }),
-    );
-    await waitFor(() => expect(adapter.estimateBracket).toHaveBeenCalledTimes(1));
-  });
+  it("propagates card-data-unavailable and leaves the estimate null", async () => {
+    vi.mocked(estimateDeckBracket).mockResolvedValue({
+      kind: "card-data-unavailable",
+      reason: "card database failed",
+    });
+    const { result } = renderHook(() => useBracketEstimate(baseOptions));
 
-  it("returns null for undefined format", async () => {
-    const adapter = makeAdapter();
-    const { result } = renderHook(() =>
-      useBracketEstimate({ deck, commanders: ["Atraxa"], format: undefined, adapter }),
-    );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.estimate).toBeNull();
-    expect(adapter.estimateBracket).not.toHaveBeenCalled();
-  });
-
-  it("flags `unsupported` when the adapter throws BRACKET_ESTIMATION_UNSUPPORTED", async () => {
-    const adapter = {
-      estimateBracket: vi.fn().mockRejectedValue(
-        new AdapterError(
-          AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-          "Not available in this build",
-          false,
-        ),
-      ),
-    };
-    // Use a unique deck so the module cache doesn't satisfy this from a
-    // sibling test's resolved promise.
-    const uniqueDeck: ParsedDeck = {
-      main: [{ name: `Unsupported-${Date.now()}`, count: 1 }],
-      sideboard: [],
-    };
-    const { result } = renderHook(() =>
-      useBracketEstimate({ deck: uniqueDeck, commanders: ["Atraxa"], format: "Commander", adapter }),
-    );
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.unsupported).toBe(true);
+    expect(result.current.outcome).toEqual({
+      kind: "card-data-unavailable",
+      reason: "card database failed",
+    });
     expect(result.current.estimate).toBeNull();
   });
 
-  it("does not flag `unsupported` for generic adapter failures", async () => {
-    const adapter = {
-      estimateBracket: vi.fn().mockRejectedValue(new Error("boom")),
-    };
-    const uniqueDeck: ParsedDeck = {
-      main: [{ name: `Generic-${Date.now()}`, count: 1 }],
-      sideboard: [],
-    };
-    const { result } = renderHook(() =>
-      useBracketEstimate({ deck: uniqueDeck, commanders: ["Atraxa"], format: "Commander", adapter }),
+  it("changing only declaredTier refires the service exactly once", async () => {
+    mockEstimateOutcome();
+    const { rerender } = renderHook(
+      ({ declaredTier }) => useBracketEstimate({ ...baseOptions, declaredTier }),
+      { initialProps: { declaredTier: "core" as CommanderBracketTier } },
     );
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.unsupported).toBe(false);
-    expect(result.current.estimate).toBeNull();
+    await waitFor(() => expect(estimateDeckBracket).toHaveBeenCalledTimes(1));
+
+    rerender({ declaredTier: "optimized" as const });
+    await waitFor(() => expect(estimateDeckBracket).toHaveBeenCalledTimes(2));
+    expect(estimateDeckBracket).toHaveBeenLastCalledWith(
+      expect.objectContaining({ declared_tier: "optimized" }),
+    );
   });
 
-  it("shares results across hook instances via module-level cache", async () => {
-    const adapter = makeAdapter();
-    // Use a deck that the cache hasn't seen — a unique fingerprint per test run.
-    const uniqueDeck: ParsedDeck = {
-      main: [{ name: `Unique-${Date.now()}`, count: 1 }],
-      sideboard: [],
-    };
-    const props = {
-      deck: uniqueDeck,
-      commanders: ["Atraxa"],
-      format: "Commander" as const,
-      adapter,
-    };
-    renderHook(() => useBracketEstimate(props));
-    renderHook(() => useBracketEstimate(props));
-    await new Promise((r) => setTimeout(r, 250));
-    expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
+  it("shares an in-flight result across hook instances", async () => {
+    mockEstimateOutcome();
+    renderHook(() => useBracketEstimate(baseOptions));
+    renderHook(() => useBracketEstimate(baseOptions));
+
+    await waitFor(() => expect(estimateDeckBracket).toHaveBeenCalledTimes(1));
   });
 });

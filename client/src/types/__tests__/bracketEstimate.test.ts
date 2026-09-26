@@ -28,6 +28,7 @@ function estimate() {
     ],
     coverage: { counted: 2, resolved: 2, unresolved: [], confidence: "complete" },
     data_version: "test-1",
+    declaration: null,
   };
 }
 
@@ -66,5 +67,34 @@ describe("isBracketEstimate", () => {
     const value = estimate();
     (value.axes.game_changers as { contributing: unknown[] }).contributing = [1];
     expect(isBracketEstimate(value)).toBe(false);
+  });
+
+  it("accepts a null declaration", () => {
+    expect(isBracketEstimate({ ...estimate(), declaration: null })).toBe(true);
+  });
+
+  it("accepts a valid below-floor declaration", () => {
+    expect(
+      isBracketEstimate({
+        ...estimate(),
+        declaration: {
+          kind: "below_floor",
+          floor: "optimized",
+          raised_by: ["mass_land_denial"],
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts a payload with the declaration field absent", () => {
+    const value = estimate();
+    delete (value as Partial<typeof value>).declaration;
+    expect(isBracketEstimate(value)).toBe(true);
+  });
+
+  it("rejects an unknown declaration kind", () => {
+    expect(
+      isBracketEstimate({ ...estimate(), declaration: { kind: "nonsense" } }),
+    ).toBe(false);
   });
 });

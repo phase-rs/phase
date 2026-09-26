@@ -44,7 +44,7 @@ interface StatsPanelProps {
   estimate: BracketEstimate | null;
   manualBracket: CommanderBracket | null;
   onBracketChange: (bracket: CommanderBracket | null) => void;
-  auditEmptyReason?: "not-commander" | "no-commander" | "unsupported";
+  auditEmptyReason?: "not-commander" | "no-commander" | "card-data-unavailable";
   onCardClick: (cardName: string) => void;
 }
 
@@ -70,9 +70,8 @@ export function StatsPanel({
     <div data-stats-panel-analysis className="flex flex-col gap-3">
       {isCommander && (
         <div className="space-y-2">
-          {/* The bracket picker lives beside the audit it's compared against, so
-              setting a bracket and seeing the deck's estimated tier (and any
-              mismatch) read as one unit. Both are Commander-only. */}
+          {/* The bracket picker lives beside the audit so the player's declaration
+              and the engine's estimate read as one unit. Both are Commander-only. */}
           <div className="space-y-1.5">
             <span className="text-[10px] uppercase tracking-wider text-gray-500">
               {t("toolbar.bracket")}

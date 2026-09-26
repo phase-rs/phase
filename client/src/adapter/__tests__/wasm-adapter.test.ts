@@ -46,6 +46,7 @@ const mockWorkerClient = {
       standard: { compatible: true, reasons: [] },
       color_distribution: [],
     }),
+  estimateBracketForDeck: vi.fn().mockResolvedValue(null),
   evaluateDeckFormatGate: vi.fn().mockResolvedValue({ compatible: true, reasons: [] }),
   customFormatFromLobbyConfig: vi.fn().mockResolvedValue({ label: "My Format" }),
   formatConfigForCustomRules: vi.fn().mockResolvedValue({ format: "Custom:0" }),
@@ -519,6 +520,25 @@ describe("WasmAdapter", () => {
         standard: { compatible: true, reasons: [] },
         color_distribution: [],
       });
+    });
+  });
+
+  describe("estimateBracket", () => {
+    it("rejects before delegating when the card database fails to load", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("card DB error"));
+      const request = {
+        deck: {
+          commander: ["Atraxa, Praetors' Voice"],
+          main_deck: ["Forest"],
+          sideboard: [],
+          companion: [],
+          signature_spell: [],
+        },
+        declared_tier: null,
+      };
+
+      await expect(adapter.estimateBracket(request)).rejects.toThrow("card DB error");
+      expect(mockWorkerClient.estimateBracketForDeck).not.toHaveBeenCalled();
     });
   });
 

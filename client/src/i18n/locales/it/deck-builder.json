@@ -254,11 +254,11 @@
     "clearOverride": "Cancella sostituzione illustrazione"
   },
   "bracket": {
-    "unavailable": "La stima del bracket non è disponibile in questa build.",
+    "unavailable": "La stima del bracket richiede dati delle carte che non sono ancora stati caricati.",
     "addCommander": "Aggiungi un comandante per vedere la stima del tuo bracket.",
     "estimated": "Stimato: B{{tier}} {{label}}",
     "manual": "Manuale: B{{tier}} {{label}}",
-    "mismatch": " ⚠ discordanza",
+    "belowFloor": " ⚠ sotto il minimo B{{tier}}",
     "hideBreakdown": "Nascondi dettagli",
     "showBreakdown": "Mostra dettagli",
     "hideBreakdownButton": "▲ Nascondi dettagli",
