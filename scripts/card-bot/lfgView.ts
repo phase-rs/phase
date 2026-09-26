@@ -107,10 +107,11 @@ function descriptionLines(lfg: Lfg): string[] {
 }
 
 /** The public post. The room code never appears in it. */
-export function renderLfg(lfg: Lfg): {
+export function renderLfg(lfg: Lfg, pingRoleId?: string): {
+  content?: string;
   embeds: [Embed];
   components: ActionRow[];
-  allowed_mentions: { parse: [] };
+  allowed_mentions: { parse: [] } | { roles: string[] };
 } {
   const embed: Embed = { title: `LFG · ${lfg.format.label}` };
   const lines = descriptionLines(lfg);
@@ -154,7 +155,14 @@ export function renderLfg(lfg: Lfg): {
     }
   }
   embed.description = lines.join("\n");
-  return { embeds: [embed], components, allowed_mentions: { parse: [] } };
+  return pingRoleId === undefined
+    ? { embeds: [embed], components, allowed_mentions: { parse: [] } }
+    : {
+        content: `<@&${pingRoleId}>`,
+        embeds: [embed],
+        components,
+        allowed_mentions: { roles: [pingRoleId] },
+      };
 }
 
 /** The post after its row is gone (swept, or from another guild). */

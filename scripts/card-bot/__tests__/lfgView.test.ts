@@ -295,6 +295,16 @@ describe("public post", () => {
     expect(post.allowed_mentions).toEqual({ parse: [] });
   });
 
+  test("only the create post allows its selected format role to notify members", () => {
+    const l = lfg({ state: "open", code: null, seated: ["111"] });
+    const created = renderLfg(l, "123456789");
+    expect(created.content).toBe("<@&123456789>");
+    expect(created.allowed_mentions).toEqual({ roles: ["123456789"] });
+    const updated = renderLfg(l);
+    expect(updated.content).toBeUndefined();
+    expect(updated.allowed_mentions).toEqual({ parse: [] });
+  });
+
   test("server mode names the server; cancelled and expired have no components", () => {
     expect(renderLfg(serverLfg()).embeds[0].description).toContain("Dedicated server: Phase 0");
     const cancelled = renderLfg(lfg({ state: "cancelled", code: null }));

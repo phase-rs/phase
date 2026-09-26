@@ -83,6 +83,7 @@ function deps(
     followup: async (appId, token, body) => void pings.push({ appId, token, body }),
     editOriginal: async (appId, token, body) => void edits.push({ appId, token, body }),
     threads,
+    roles: { resolve: async () => "role-commander" },
     pings,
     edits,
   };
@@ -138,9 +139,11 @@ interface Body {
     embeds?: { description?: string }[];
     components?: { components: { label: string; custom_id?: string }[] }[];
     choices?: { name: string; value: string }[];
+    allowed_mentions?: { roles?: string[]; parse?: string[] };
   };
 }
-const body = async (res: Response) => (await res.json()) as Body;
+const body = async (pendingResponse: Response | Promise<Response>) =>
+  (await (await pendingResponse).json()) as Body;
 const buttonLabels = (b: Body) => b.data.components?.flatMap((r) => r.components.map((c) => c.label)) ?? [];
 
 /** Every `store.create` result, so a test can tell whether a row was written. */
@@ -175,6 +178,8 @@ describe("/lfg command (T-cmd)", () => {
     const res = await body(lfgCommand(command([opt("format", "Commander")]), d));
     expect(res.type).toBe(ResponseType.CHANNEL_MESSAGE_WITH_SOURCE);
     expect(res.data.flags).toBeUndefined();
+    expect(res.data.content).toBe("<@&role-commander>");
+    expect(res.data.allowed_mentions).toEqual({ roles: ["role-commander"] });
     expect(buttonLabels(res)).toEqual(["Join", "Leave", "Start"]);
     expect(created()).toHaveLength(1);
     // Default seats: Commander's preferred 4; default build preview.

@@ -4,7 +4,7 @@
 // verify the Ed25519 signature, then:
 //   • PING            → PONG
 //   • /card           → defer, then follow up with the parse embed
-//   • /lfg            → post the LFG publicly (or refuse ephemerally), synchronously
+//   • /lfg            → post the LFG publicly (or refuse ephemerally)
 //   • autocomplete    → /lfg: eligible dedicated servers; otherwise card names
 //                       from the (warm) default build
 //   • button          → /lfg Join / Leave / Start / Get my link, and the game
@@ -12,7 +12,7 @@
 //
 // Deferring /card guarantees we never hit Discord's 3s response window, even on
 // a cold preview load or a slow Scryfall call. /lfg needs only in-memory and
-// sqlite state, so it answers directly.
+// sqlite state plus one cached guild-role lookup, so it answers directly.
 
 import {
   DEFAULT_BUILD,
@@ -50,6 +50,7 @@ import {
   lfgComponent,
 } from "./lfgInteractions";
 import { parseCustomId } from "./lfgView";
+import { LfgRoleCache } from "./lfgRoles";
 import type { Embed } from "./render";
 import {
   renderCardEmbed,
@@ -241,6 +242,7 @@ if (import.meta.main) {
   servers.start();
   const botToken = discord.tokenIfSet();
   const threads = botToken === undefined ? null : botThreadApi(botToken);
+  const roles = botToken === undefined ? null : new LfgRoleCache(discord.guildId(), botToken);
   const store = new LfgStore(LFG_DB_PATH);
   const deps: InteractionDeps = {
     publicKey: discord.publicKey(),
@@ -251,6 +253,7 @@ if (import.meta.main) {
       followup: createFollowupMessage,
       editOriginal: editOriginalResponse,
       threads,
+      roles,
     },
   };
   if (threads !== null) {
