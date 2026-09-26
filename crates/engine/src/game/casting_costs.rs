@@ -12766,6 +12766,28 @@ fn auto_tap_mana_sources_inner(
         );
         &available_buf
     };
+    // CR 304.5 + CR 605.3a: Do not auto-activate instant-only mana while paying a cost.
+    let allowed = |option: &ManaSourceOption| {
+        option.ability_index.is_none_or(|index| {
+            state
+                .objects
+                .get(&option.object_id)
+                .and_then(|object| object.abilities.get(index))
+                .is_some_and(|ability| {
+                    !ability
+                        .activation_restrictions
+                        .contains(&crate::types::ability::ActivationRestriction::AsInstant)
+                })
+        })
+    };
+    let filtered = available.iter().any(|option| !allowed(option)).then(|| {
+        available
+            .iter()
+            .filter(|option| allowed(option))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    let available = filtered.as_deref().unwrap_or(available);
 
     let mut to_tap: Vec<ManaSourceOption> = Vec::new();
     let mut used_sources: HashSet<ObjectId> = HashSet::new();

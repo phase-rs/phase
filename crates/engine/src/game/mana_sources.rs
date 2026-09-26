@@ -15,9 +15,9 @@
 
 use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction,
-    PlayerFilter, QuantityExpr, ResolvedAbility, SacrificeCost, SacrificeRequirement, TargetFilter,
-    TriggerDefinition, TriggerDefinitionRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef, Effect,
+    ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, TargetFilter, TriggerDefinition, TriggerDefinitionRef, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
@@ -1974,7 +1974,7 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
 /// CR 117.1d + CR 601.2g: Maximum net mana this permanent could contribute via
 /// **any** mana ability the controller could currently activate, including
 /// non-tap-cost mana abilities (Sacrifice — KCI, Phyrexian Altar, Ashnod's
-/// Altar; Discard — Lion's Eye Diamond; Pay Life; etc.).
+/// Altar; unrestricted discard costs; Pay Life; etc.).
 ///
 /// Unlike [`max_mana_yield`], this is NOT restricted to abilities that include
 /// `{T}` in their cost. It exists so the castability gate
@@ -1993,11 +1993,19 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
 // activate mana abilities before paying. Affordability must reflect what the
 // player COULD pay manually, not only what the engine could auto-tap.
 fn mana_ability_allowed_for_payment(
+    ability: &AbilityDefinition,
     restrictions: &[ManaSpendRestriction],
     state: &GameState,
     object_id: ObjectId,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
+    // CR 304.5 + CR 605.1: Mana classification does not override printed timing limits.
+    if ability
+        .activation_restrictions
+        .contains(&ActivationRestriction::AsInstant)
+    {
+        return false;
+    }
     let Some(ctx) = payment_context else {
         return true;
     };
@@ -2048,6 +2056,7 @@ pub(crate) fn feasible_mana_capacity(
             // the restriction permits it (issue #2011: Eldrazi Temple).
             match &*ability.effect {
                 Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+                    ability,
                     restrictions,
                     state,
                     object_id,
@@ -2091,21 +2100,12 @@ pub(crate) fn feasible_mana_capacity(
         })
         .max();
 
-    match explicit_max {
-        Some(amount) => amount,
-        // CR 305.1: Subtype-only basic-land fallback (same as `max_mana_yield`).
-        None if obj.card_types.core_types.contains(&CoreType::Land)
-            && !activatable_mana_options(state, object_id, controller).is_empty() =>
-        {
-            1
-        }
-        None => 0,
-    }
+    explicit_max.unwrap_or(0)
 }
 
 /// CR 117.1d + CR 601.2g: True when cost payment can involve a currently
 /// activatable non-tap mana ability that auto-tap cannot choose for the player
-/// (Treasure/Spawn/KCI-style sacrifice mana, Lion's Eye Diamond discard mana,
+/// (Treasure/Spawn/KCI-style sacrifice mana, unrestricted discard mana,
 /// pay-life mana abilities, etc.).
 pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
     state: &GameState,
@@ -2146,6 +2146,7 @@ pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
             }
             match &*ability.effect {
                 Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
+                    ability,
                     restrictions,
                     state,
                     object_id,
@@ -2311,7 +2312,13 @@ fn activatable_mana_profiles_for_object(
             else {
                 return None;
             };
-            if !mana_ability_allowed_for_payment(restrictions, state, object_id, payment_context) {
+            if !mana_ability_allowed_for_payment(
+                ability,
+                restrictions,
+                state,
+                object_id,
+                payment_context,
+            ) {
                 return None;
             }
             let resolved =
@@ -2541,7 +2548,7 @@ fn assign_profiles_to_shards(
 
 /// CR 117.1d + CR 601.2g: Whether residual mana shards could be paid by
 /// activating currently legal mana abilities (non-tap sources like Vivi
-/// Ornitier's {0} combination mana, Lion's Eye Diamond, etc.).
+/// Ornitier's {0} combination mana, unrestricted discard mana, etc.).
 ///
 /// Returns `(covered, consumed_pips)` where `consumed_pips` is the total mana
 /// produced by activations used for shard coverage — callers must subtract
@@ -3606,6 +3613,33 @@ mod tests {
             },
         )
         .cost(AbilityCost::Tap)
+    }
+
+    #[test]
+    fn instant_only_land_cannot_supply_payment_capacity() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority { player: controller };
+        let land = create_object(
+            &mut state,
+            CardId(901),
+            controller,
+            "Restricted Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&land).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut object.abilities).push(
+            verge_ability(ManaColor::Green)
+                .activation_restrictions(vec![ActivationRestriction::AsInstant]),
+        );
+
+        assert!(!activatable_mana_options(&state, land, controller).is_empty());
+        assert_eq!(feasible_mana_capacity(&state, land, controller, None), 0);
+
+        Arc::make_mut(&mut state.objects.get_mut(&land).unwrap().abilities)
+            .push(verge_ability(ManaColor::Blue));
+        assert_eq!(feasible_mana_capacity(&state, land, controller, None), 1);
     }
 
     use crate::game::test_fixtures::brushland_colored_ability;
