@@ -106,6 +106,11 @@ const mocks = vi.hoisted(() => {
     compatible: true,
     reasons: [] as string[],
   }));
+  const getViewerSnapshot = vi.fn(async (pid: number) => ({
+    state: { filteredFor: pid, players: [] },
+    actions: [],
+    autoPassRecommended: false,
+  }));
   // Local monotonic stamp — the hoisted factory runs before imports, so it
   // can't call the adapter module's `nextSnapshotSeq`. Only ordering matters
   // to these assertions, and `seq` is never compared across clients.
@@ -145,10 +150,10 @@ const mocks = vi.hoisted(() => {
       filteredFor: pid,
       players: [],
     })),
-    getViewerSnapshot: vi.fn(async (pid: number) => ({
-      state: { filteredFor: pid, players: [] },
-      actions: [],
-      autoPassRecommended: false,
+    getViewerSnapshot,
+    getViewerTransitionSnapshot: vi.fn(async (pid: number, events: unknown[]) => ({
+      ...(await getViewerSnapshot(pid)),
+      events,
     })),
     getAiActionProposal: vi.fn(async (_difficulty: string, _playerId: number) => null),
     submitAiActionProposal: vi.fn(async () => ({
@@ -269,6 +274,7 @@ const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
 const mockEvaluateDeckFormatGate = mocks.evaluateDeckFormatGate;
 const mockGetSnapshot = mocks.getSnapshot as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
+const mockGetViewerTransitionSnapshot = mocks.getViewerTransitionSnapshot;
 const mockInitializeHostGame = mocks.initializeMultiplayerHostGame;
 const mockSetMultiplayerMode = mocks.setMultiplayerMode;
 const mockProjectSeatView = mocks.projectSeatView;
@@ -358,6 +364,7 @@ vi.mock("../wasm-adapter", () => {
     getLegalActionsForViewer: mocks.getLegalActionsForViewer,
     getFilteredState: mocks.getFilteredState,
     getViewerSnapshot: mocks.getViewerSnapshot,
+    getViewerTransitionSnapshot: mocks.getViewerTransitionSnapshot,
     getAiActionProposal: mocks.getAiActionProposal,
     submitAiActionProposal: mocks.submitAiActionProposal,
     exportPersistenceState: mocks.exportPersistenceState,
@@ -389,7 +396,17 @@ beforeEach(() => {
   mockSubmitAction.mockClear();
   mockCheckDeckCompatibility.mockClear();
   mockEvaluateDeckFormatGate.mockClear();
-  mockGetViewerSnapshot.mockClear();
+  mockGetViewerSnapshot.mockReset();
+  mockGetViewerSnapshot.mockImplementation(async (pid: number) => ({
+    state: { filteredFor: pid, players: [] },
+    actions: [],
+    autoPassRecommended: false,
+  }));
+  mockGetViewerTransitionSnapshot.mockReset();
+  mockGetViewerTransitionSnapshot.mockImplementation(async (pid: number, events: unknown[]) => ({
+    ...(await mockGetViewerSnapshot(pid)),
+    events,
+  }));
   mockSetMultiplayerMode.mockClear();
   mockProjectSeatView.mockClear();
   mockGetState.mockClear();
@@ -2086,14 +2103,263 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     });
     await adapter.initializeGame();
     mockGetViewerSnapshot.mockClear();
+    mockGetViewerTransitionSnapshot.mockClear();
 
     await adapter.submitAction({ type: "PassPriority" }, 0);
 
-    // One filtered-state lookup per connected guest (host doesn't need one
-    // for itself — local state is authoritative).
+    // One viewer-transition projection per connected guest (host doesn't need
+    // one for itself — local state is authoritative).
+    expect(mockGetViewerTransitionSnapshot).toHaveBeenCalledTimes(2);
+    expect(mockGetViewerTransitionSnapshot).toHaveBeenCalledWith(1, []);
+    expect(mockGetViewerTransitionSnapshot).toHaveBeenCalledWith(2, []);
+    // The test double delegates its combined projection to the state snapshot,
+    // so this also proves each guest gets its own viewer read.
     expect(mockGetViewerSnapshot).toHaveBeenCalledTimes(2);
     expect(mockGetViewerSnapshot).toHaveBeenCalledWith(1);
     expect(mockGetViewerSnapshot).toHaveBeenCalledWith(2);
+  });
+
+  it("sends each viewer's projected events on setup and state_update", async () => {
+    const rawSetupEvent = { type: "raw-setup-event" } as unknown as GameEvent;
+    const rawActionEvent = { type: "raw-action-event" } as unknown as GameEvent;
+    const setupEventForGuest1 = { type: "setup-visible-to-1" } as unknown as GameEvent;
+    const actionEventForGuest1 = { type: "action-visible-to-1" } as unknown as GameEvent;
+    const setupEventsByGuest: Record<number, GameEvent[]> = {
+      1: [setupEventForGuest1],
+      2: [],
+    };
+    const actionEventsByGuest: Record<number, GameEvent[]> = {
+      1: [actionEventForGuest1],
+      2: [],
+    };
+    (mockInitializeHostGame as unknown as { mockResolvedValueOnce: (value: unknown) => void }).mockResolvedValueOnce({
+      events: [rawSetupEvent],
+    });
+    (mockSubmitAction as unknown as { mockResolvedValueOnce: (value: unknown) => void }).mockResolvedValueOnce({
+      events: [rawActionEvent],
+      log_entries: [debugLogEntry("projected-action")],
+    });
+    (mockGetViewerTransitionSnapshot as unknown as {
+      mockImplementation: (
+        implementation: (pid: number, events: GameEvent[]) => Promise<unknown>,
+      ) => void;
+    }).mockImplementation(async (pid: number, events: GameEvent[]) => ({
+      ...(await mockGetViewerSnapshot(pid)),
+      events: events[0] === rawSetupEvent
+        ? setupEventsByGuest[pid]
+        : actionEventsByGuest[pid],
+    }));
+
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+    const guest1 = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const guest2 = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const setup1 = (await guest1.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "game_setup",
+    ) as { events: GameEvent[] } | undefined;
+    const setup2 = (await guest2.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "game_setup",
+    ) as { events: GameEvent[] } | undefined;
+    expect(setup1?.events).toEqual([setupEventForGuest1]);
+    expect(setup2?.events).toEqual([]);
+    expect(setup1?.events).not.toEqual([rawSetupEvent]);
+    expect(setup2?.events).not.toContain(rawSetupEvent);
+
+    guest1.sent.length = 0;
+    guest2.sent.length = 0;
+    await adapter.submitAction({ type: "PassPriority" }, 0);
+
+    const update1 = (await guest1.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "state_update",
+    ) as { events: GameEvent[] } | undefined;
+    const update2 = (await guest2.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "state_update",
+    ) as { events: GameEvent[] } | undefined;
+    expect(update1?.events).toEqual([actionEventForGuest1]);
+    expect(update2?.events).toEqual([]);
+    expect(update1?.events).not.toEqual([rawActionEvent]);
+    expect(update2?.events).not.toContain(rawActionEvent);
+    expect(mockGetViewerTransitionSnapshot).toHaveBeenCalledWith(1, [rawSetupEvent]);
+    expect(mockGetViewerTransitionSnapshot).toHaveBeenCalledWith(2, [rawSetupEvent]);
+    expect(mockGetViewerTransitionSnapshot).toHaveBeenCalledWith(1, [rawActionEvent]);
+    expect(mockGetViewerTransitionSnapshot).toHaveBeenCalledWith(2, [rawActionEvent]);
+    adapter.dispose();
+  });
+
+  it("falls back to a current state-only frame when a state_update projection is overtaken", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    guest.sent.length = 0;
+
+    const stateA = remoteState("transition-a") as GameState & { label: string };
+    const stateB = remoteState("transition-b") as GameState & { label: string };
+    let viewerState = stateA;
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { ...viewerState, label: `${viewerState.label}-viewer-${pid}` },
+      actions: [],
+      autoPassRecommended: false,
+    }));
+
+    const eventA = { type: "transition-a" } as unknown as GameEvent;
+    const eventB = { type: "transition-b" } as unknown as GameEvent;
+    const projectionEntered = deferred<void>();
+    const releaseProjection = deferred<void>();
+    let projectionCount = 0;
+    (mockGetViewerTransitionSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number, events: GameEvent[]) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number, events: GameEvent[]) => {
+      const snapshot = await mockGetViewerSnapshot(pid);
+      projectionCount += 1;
+      if (projectionCount === 1) {
+        projectionEntered.resolve();
+        await releaseProjection.promise;
+      }
+      return { ...snapshot, events };
+    });
+
+    (mockSubmitAction as unknown as { mockResolvedValueOnce: (value: unknown) => void }).mockResolvedValueOnce({
+      events: [eventA],
+      log_entries: [debugLogEntry("transition-a")],
+    });
+    const first = adapter.submitAction({ type: "PassPriority" }, 0);
+    await projectionEntered.promise;
+
+    viewerState = stateB;
+    (mockSubmitAction as unknown as { mockResolvedValueOnce: (value: unknown) => void }).mockResolvedValueOnce({
+      events: [eventB],
+      log_entries: [debugLogEntry("transition-b")],
+    });
+    const second = adapter.submitAction({ type: "PassPriority" }, 0);
+    await flushPromises();
+    expect(mockSubmitAction).toHaveBeenCalledTimes(2);
+
+    releaseProjection.resolve();
+    await Promise.all([first, second]);
+
+    const updates = (await guest.getSentMessages()).filter(
+      (message): message is { type: "state_update"; state: GameState; events: GameEvent[]; logEntries?: GameLogEntry[] } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: string }).type === "state_update",
+    );
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({
+      state: { label: "transition-b-viewer-1" },
+      events: [],
+    });
+    expect(updates[0]).not.toHaveProperty("logEntries");
+    expect(updates[1]).toMatchObject({
+      state: { label: "transition-b-viewer-1" },
+      events: [eventB],
+      logEntries: [debugLogEntry("transition-b")],
+    });
+    adapter.dispose();
+  });
+
+  it("keeps a later game_setup coherent when an early guest acts during setup fan-out", async () => {
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+    const guest1 = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    const guest2 = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+
+    const initialState = remoteState("initial") as GameState & { label: string };
+    const postActionState = remoteState("post-action") as GameState & { label: string };
+    let viewerState = initialState;
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { ...viewerState, label: `${viewerState.label}-viewer-${pid}` },
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    const initialEvent = { type: "initial" } as unknown as GameEvent;
+    const actionEvent = { type: "guest-action" } as unknown as GameEvent;
+    (mockInitializeHostGame as unknown as { mockResolvedValueOnce: (value: unknown) => void }).mockResolvedValueOnce({
+      events: [initialEvent],
+    });
+
+    const secondSetupEntered = deferred<void>();
+    const releaseSecondSetup = deferred<void>();
+    let secondSetupBlocked = false;
+    (mockGetViewerTransitionSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number, events: GameEvent[]) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number, events: GameEvent[]) => {
+      const snapshot = await mockGetViewerSnapshot(pid);
+      if (pid === 2 && !secondSetupBlocked) {
+        secondSetupBlocked = true;
+        secondSetupEntered.resolve();
+        await releaseSecondSetup.promise;
+      }
+      return { ...snapshot, events };
+    });
+
+    const start = adapter.initializeGame();
+    await secondSetupEntered.promise;
+    const guest1Setup = (await guest1.getSentMessages()).find(
+      (message) => (message as { type?: string }).type === "game_setup",
+    ) as { state: GameState; events: GameEvent[] } | undefined;
+    expect(guest1Setup).toMatchObject({
+      state: { label: "initial-viewer-1" },
+      events: [initialEvent],
+    });
+
+    (mockSubmitAction as unknown as { mockResolvedValueOnce: (value: unknown) => void }).mockResolvedValueOnce({
+      events: [actionEvent],
+      log_entries: [debugLogEntry("guest-action")],
+    });
+    const guestAction = guest1.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    viewerState = postActionState;
+
+    releaseSecondSetup.resolve();
+    await Promise.all([start, guestAction]);
+
+    const guest2Messages = await guest2.getSentMessages();
+    const setupIndex = guest2Messages.findIndex(
+      (message) => (message as { type?: string }).type === "game_setup",
+    );
+    const updateIndex = guest2Messages.findIndex(
+      (message) => (message as { type?: string }).type === "state_update",
+    );
+    expect(setupIndex).toBeGreaterThanOrEqual(0);
+    expect(updateIndex).toBeGreaterThan(setupIndex);
+    expect(guest2Messages[setupIndex]).toMatchObject({
+      state: { label: "post-action-viewer-2" },
+      events: [],
+    });
+    expect(guest2Messages[setupIndex]).not.toHaveProperty("logEntries");
+    expect(guest2Messages[updateIndex]).toMatchObject({
+      state: { label: "post-action-viewer-2" },
+      events: [actionEvent],
+      logEntries: [debugLogEntry("guest-action")],
+    });
+    adapter.dispose();
   });
 
   const isStateBearingWithRevision = (m: unknown): m is P2PMessage & { revision: number } =>
@@ -2618,8 +2884,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const host = adapter as unknown as {
       enqueueDelivery: (operation: () => Promise<void>) => Promise<void>;
       broadcastStateUpdate: (
-        events: GameEvent[],
-        logEntries?: GameLogEntry[],
+        transition: {
+          result: { events: GameEvent[]; log_entries?: GameLogEntry[] };
+          generation: number;
+        },
         terminalReason?: string,
       ) => Promise<void>;
     };
@@ -2634,7 +2902,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       playerToken: setup!.playerToken,
     });
     viewerState = finalState;
-    const finalBroadcast = host.broadcastStateUpdate([], [], "Game complete");
+    const finalBroadcast = host.broadcastStateUpdate({
+      result: { events: [], log_entries: [] },
+      generation: (adapter as unknown as { browserMutationGeneration: number }).browserMutationGeneration,
+    }, "Game complete");
 
     releaseDelivery.resolve();
     await inFlightDelivery;
@@ -3106,8 +3377,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     // as `{ actions: never[]; autoPassRecommended: boolean }`, which would
     // reject our richer payload. The adapter consumes the full
     // `LegalActionsResult` / `ViewerSnapshot` shape regardless of the mock's
-    // narrow signature. Populate `getViewerSnapshot` because `broadcastStateUpdate`
-    // and `game_setup` now use the combined viewer-snapshot call.
+    // narrow signature. Populate `getViewerSnapshot` because the transition
+    // mock delegates its viewer-scoped state/actions to that read.
     // Same unknown-cast pattern as the original `mocks.getLegalActions.mockResolvedValue`
     // — the hoisted mock's default return type is narrower than a full
     // `ViewerSnapshot`, so we widen through `unknown` to inject a richer payload.
@@ -5325,7 +5596,7 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
     mockSubmitAction.mockClear();
     const before = (await guest.getSentMessages()).length;
     // `publishHostSnapshot` is the first `getSnapshot` caller after this point;
-    // the fan-out's own per-guest reads use `getViewerSnapshot` and still work.
+    // the fan-out's own per-guest transition projections still work.
     const injection = failNextHostSnapshotRead();
 
     await guest.simulateData({
@@ -6647,6 +6918,7 @@ describe("P2P interaction preview", () => {
     await flushPromises();
     persistenceMocks.saveP2PHostSession.mockClear();
     mocks.getViewerSnapshot.mockClear();
+    mocks.getViewerTransitionSnapshot.mockClear();
     const before = (await guest.getSentMessages()).length;
 
     await guest.simulateData({ type: "preview_interaction", request: request("req-1") as never });
@@ -6659,6 +6931,7 @@ describe("P2P interaction preview", () => {
     expect((after[after.length - 1] as { type?: string }).type).toBe("interaction_preview");
     expect(persistenceMocks.saveP2PHostSession).not.toHaveBeenCalled();
     expect(mocks.getViewerSnapshot).not.toHaveBeenCalled();
+    expect(mocks.getViewerTransitionSnapshot).not.toHaveBeenCalled();
 
     // Reach guard: a real submission on the same connection DOES take those
     // paths, so the absences above are the preview arm and not a dead host.
@@ -6668,7 +6941,7 @@ describe("P2P interaction preview", () => {
       submission: { interactionId: "interaction-1", response: { type: "choose", data: { choiceId: "a" } } } as never,
     });
     await flushPromises();
-    expect(mocks.getViewerSnapshot).toHaveBeenCalled();
+    expect(mocks.getViewerTransitionSnapshot).toHaveBeenCalled();
     adapter.dispose();
   });
 });

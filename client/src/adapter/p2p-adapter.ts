@@ -16,6 +16,7 @@ import type {
   PersistedGameState,
   RestoredGameStateResult,
   SubmitResult,
+  ViewerSnapshot,
   WaitingFor,
 } from "./types";
 import type {
@@ -559,6 +560,17 @@ function isDeckListPlayerShape(x: unknown): x is DeckListPayload["player"] {
  */
 type GameRunState = "running" | "paused-disconnect" | "paused-manual" | "terminal";
 
+interface BrowserTransition {
+  result: SubmitResult;
+  generation: number;
+}
+
+interface ProjectedBrowserTransition {
+  snapshot: ViewerSnapshot;
+  events: GameEvent[];
+  fresh: boolean;
+}
+
 /** Default grace window for guest auto-reconnect, in milliseconds. */
 const DEFAULT_GRACE_PERIOD_MS = 30_000;
 
@@ -928,6 +940,8 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Monotonic authority revision for WASM hosts; native hosts replace this
    * with the local phase-server's revision before fan-out. */
   private authoritativeRevision = 0;
+  /** Browser-only fence for pairing an accepted transition with its projection. */
+  private browserMutationGeneration = 0;
   /**
    * How far along each guest seat is, on two different signals — because the
    * two failure directions are not symmetric:
@@ -1438,6 +1452,47 @@ export class P2PHostAdapter implements EngineAdapter {
     return result;
   }
 
+  /**
+   * Single authority for stamping ordinary browser-host gameplay mutations.
+   * The operation is awaited first, so rejected/stale/error calls never move
+   * the browser-only coherence fence.
+   */
+  private async applyBrowserMutation(
+    operation: () => Promise<SubmitResult>,
+  ): Promise<BrowserTransition> {
+    const browserMutation = this.nativeBridge === null;
+    return this.stampBrowserMutation(await operation(), browserMutation);
+  }
+
+  /** Stamp a successful browser-WASM gameplay mutation after the engine accepts it. */
+  private stampBrowserMutation(
+    result: SubmitResult,
+    browserMutation = this.nativeBridge === null,
+  ): BrowserTransition {
+    if (browserMutation) this.browserMutationGeneration += 1;
+    return { result, generation: this.browserMutationGeneration };
+  }
+
+  /**
+   * Project one accepted transition for one recipient. If another browser
+   * mutation overtakes the projection, send a current state-only snapshot so
+   * stale events and logs cannot be paired with newer state.
+   */
+  private async projectTransitionForViewer(
+    viewer: PlayerId,
+    events: GameEvent[],
+    expectedGeneration: number,
+  ): Promise<ProjectedBrowserTransition> {
+    if (expectedGeneration !== this.browserMutationGeneration) {
+      return { snapshot: await this.wasm.getViewerSnapshot(viewer), events: [], fresh: false };
+    }
+    const transition = await this.wasm.getViewerTransitionSnapshot(viewer, events);
+    if (expectedGeneration === this.browserMutationGeneration) {
+      return { snapshot: transition, events: transition.events, fresh: true };
+    }
+    return { snapshot: await this.wasm.getViewerSnapshot(viewer), events: [], fresh: false };
+  }
+
   private rejectSuperseded(session: PeerSession): void {
     void session.send({ type: "reconnect_rejected", reason: "Host session superseded" });
     session.close("Host session superseded");
@@ -1664,9 +1719,9 @@ export class P2PHostAdapter implements EngineAdapter {
         throw actionRejectionError(outcome.rejection);
       }
       staleRetries = 0;
-      const result = outcome.result;
-      await this.publishHostSnapshot(result);
-      await this.broadcastStateUpdate(result.events, result.log_entries);
+      const transition = this.stampBrowserMutation(outcome.result);
+      await this.publishHostSnapshot(transition.result);
+      await this.broadcastStateUpdate(transition);
       void this.persistAuthoritativeState();
     }
   }
@@ -2250,18 +2305,18 @@ export class P2PHostAdapter implements EngineAdapter {
       // would leave a window for a local `initializeGame` to land in between
       // and destroy the hosted game (or be destroyed by it). A refusal arrives
       // as `AdapterErrorCode.ENGINE_OCCUPIED`.
-      let result: SubmitResult;
+      let transition: BrowserTransition;
       const owner = createHostSessionOwner();
       this.wasmHostOwner = owner;
       try {
-        result = await this.wasm.initializeMultiplayerHostGame(
+        transition = await this.applyBrowserMutation(() => this.wasm.initializeMultiplayerHostGame(
           deckPayload,
           this.formatConfig,
           playerCount,
           this.matchConfig,
           undefined,
           owner,
-        );
+        ));
       } catch (err) {
         // Nothing to compensate. The engine claims itself only on a successful
         // install, so a rejection — an occupied-engine refusal, a deck error,
@@ -2308,34 +2363,33 @@ export class P2PHostAdapter implements EngineAdapter {
 
       const revision = ++this.authoritativeRevision;
       let setupFailure: unknown = null;
-      for (const [pid, session] of this.guestSessions) {
-        const token = this.playerTokens.get(pid)!;
-        try {
-          const snapshot = await this.wasm.getViewerSnapshot(pid);
-          void this.send(session, {
-            type: "game_setup",
-            wireProtocolVersion: WIRE_PROTOCOL_VERSION,
-            assignedPlayerId: pid,
-            playerToken: token,
-            revision,
-            state: snapshot.state,
-            events: result.events,
-            playerNames: allNames,
-            ...legalActionsToWire(snapshot),
-          }).then((accepted) => {
+      await this.enqueueDelivery(async () => {
+        for (const [pid, session] of this.guestSessions) {
+          const token = this.playerTokens.get(pid)!;
+          try {
+            const projected = await this.projectTransitionForViewer(
+              pid,
+              transition.result.events,
+              transition.generation,
+            );
+            const accepted = await this.send(session, {
+              type: "game_setup",
+              wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+              assignedPlayerId: pid,
+              playerToken: token,
+              revision,
+              state: projected.snapshot.state,
+              events: projected.events,
+              playerNames: allNames,
+              ...legalActionsToWire(projected.snapshot),
+            });
             if (accepted) this.seedGuestEntry(pid, revision);
-          });
-        } catch (err) {
-          // Isolate per seat. Unisolated, one rejected read left every LATER
-          // seat without its setup frame — and those seats are then stuck for
-          // good: no `game_setup` means no entry to seed, so the sweep skips
-          // them by design, and a second start returns early because
-          // `gameStarted` is already true. The seat whose own read failed
-          // still belongs to the setup/reconnect path, not to the sweep.
-          console.error(`[P2PHost] game_setup for seat ${pid} failed:`, err);
-          setupFailure ??= err;
+          } catch (err) {
+            console.error(`[P2PHost] game_setup for seat ${pid} failed:`, err);
+            setupFailure ??= err;
+          }
         }
-      }
+      });
       // Isolation buys the LATER seats their frame; it must not also buy
       // silence. Before it, the throw reached the host. A seat that never got
       // `game_setup` waits on a promise that never settles (the guest's
@@ -2344,7 +2398,7 @@ export class P2PHostAdapter implements EngineAdapter {
       if (setupFailure !== null) throw setupFailure;
 
       await this.runAiLoop();
-      return result;
+      return transition.result;
   }
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
@@ -2363,14 +2417,14 @@ export class P2PHostAdapter implements EngineAdapter {
         true,
       );
     }
-    const result = this.nativeBridge
-      ? await this.nativeBridge.submitAction(action, actor)
-      : await this.wasm.submitAction(action, actor);
-    if (isZeroCountDebugCreate(action)) return result;
-    await this.broadcastStateUpdate(result.events, result.log_entries);
+    const transition = await this.applyBrowserMutation(() => this.nativeBridge
+      ? this.nativeBridge.submitAction(action, actor)
+      : this.wasm.submitAction(action, actor));
+    if (isZeroCountDebugCreate(action)) return transition.result;
+    await this.broadcastStateUpdate(transition);
     await this.runAiLoop();
     void this.persistAuthoritativeState();
-    return result;
+    return transition.result;
   }
 
   async submitInteraction(
@@ -2388,13 +2442,13 @@ export class P2PHostAdapter implements EngineAdapter {
         true,
       );
     }
-    const result = this.nativeBridge
-      ? await this.nativeBridge.submitInteraction(submission, actor)
-      : await this.wasm.submitInteraction(submission, actor);
-    await this.broadcastStateUpdate(result.events, result.log_entries);
+    const transition = await this.applyBrowserMutation(() => this.nativeBridge
+      ? this.nativeBridge.submitInteraction(submission, actor)
+      : this.wasm.submitInteraction(submission, actor));
+    await this.broadcastStateUpdate(transition);
     await this.runAiLoop();
     void this.persistAuthoritativeState();
-    return result;
+    return transition.result;
   }
 
   async previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]> {
@@ -2625,10 +2679,12 @@ export class P2PHostAdapter implements EngineAdapter {
 
   /**
    * Fan out a state update to every connected guest. Each guest gets its own
-   * `ViewerSnapshot` via the engine's combined filter+legal-actions call (one
-   * WASM round-trip per guest instead of two). Only the acting guest gets a
-   * populated `legalActions` map; non-acting guests receive empty legal
-   * actions from the engine-side viewer gate (`legal_actions_for_viewer`).
+   * `ViewerTransitionSnapshot` via the engine's combined filter+legal-actions
+   * call (one WASM round-trip per guest instead of two). If the transition was
+   * overtaken, the helper deliberately falls back to a current state-only
+   * `ViewerSnapshot`. Only the acting guest gets a populated `legalActions` map;
+   * non-acting guests receive empty legal actions from the engine-side viewer
+   * gate (`legal_actions_for_viewer`).
    * Skips disconnected seats (their state is delivered via `reconnect_ack`).
    *
    * Delivery contract (#7924): only the recipient's own `state_ack` advances
@@ -2638,16 +2694,14 @@ export class P2PHostAdapter implements EngineAdapter {
    * failure aborts neither the other seats nor the terminal close.
    */
   private async broadcastStateUpdate(
-    events: GameEvent[],
-    logEntries?: GameLogEntry[],
+    transition: BrowserTransition,
     terminalReason?: string,
   ): Promise<void> {
-    return this.enqueueDelivery(() => this.broadcastStateUpdateInner(events, logEntries, terminalReason));
+    return this.enqueueDelivery(() => this.broadcastStateUpdateInner(transition, terminalReason));
   }
 
   private async broadcastStateUpdateInner(
-    events: GameEvent[],
-    logEntries?: GameLogEntry[],
+    transition: BrowserTransition,
     terminalReason?: string,
   ): Promise<void> {
     if (!this.ownsAuthority()) return;
@@ -2657,14 +2711,18 @@ export class P2PHostAdapter implements EngineAdapter {
     for (const [pid, session] of this.guestSessions) {
       if (this.disconnectedSeats.has(pid)) continue;
       try {
-        const snapshot = await this.wasm.getViewerSnapshot(pid);
+        const projected = await this.projectTransitionForViewer(
+          pid,
+          transition.result.events,
+          transition.generation,
+        );
         sends.push(this.send(session, {
           type: "state_update",
           revision,
-          state: snapshot.state,
-          events,
-          logEntries,
-          ...legalActionsToWire(snapshot),
+          state: projected.snapshot.state,
+          events: projected.events,
+          logEntries: projected.fresh ? transition.result.log_entries : undefined,
+          ...legalActionsToWire(projected.snapshot),
         }));
       } catch (err) {
         console.error(`[P2PHost] viewer snapshot for seat ${pid} failed; the redelivery sweep resyncs it:`, err);
@@ -2963,7 +3021,8 @@ export class P2PHostAdapter implements EngineAdapter {
     }
     const outcome = await this.wasm.submitAiActionProposal(proposal);
     if (outcome.status === "applied") {
-      await this.broadcastStateUpdate(outcome.result.events, outcome.result.log_entries);
+      const transition = this.stampBrowserMutation(outcome.result);
+      await this.broadcastStateUpdate(transition);
       await this.runAiLoop();
       void this.persistAuthoritativeState();
     }
@@ -3194,7 +3253,7 @@ export class P2PHostAdapter implements EngineAdapter {
           }
           return;
         }
-        let result: SubmitResult;
+        let transition: BrowserTransition;
         try {
           // CRITICAL: pass `pid` (the session-bound PlayerId), NEVER
           // `msg.senderPlayerId`. The envelope check above already guarantees
@@ -3202,9 +3261,9 @@ export class P2PHostAdapter implements EngineAdapter {
           // tag with the authenticated session identity — the wire payload
           // is untrusted. This is the defense-in-depth that makes the engine
           // guard meaningful for P2P.
-          result = this.nativeBridge
-            ? await this.nativeBridge.submitAction(msg.action, pid)
-            : await this.wasm.submitAction(msg.action, pid);
+          transition = await this.applyBrowserMutation(() => this.nativeBridge
+            ? this.nativeBridge.submitAction(msg.action, pid)
+            : this.wasm.submitAction(msg.action, pid));
         } catch (err) {
           // The engine refused the action: nothing applied, so this — and only
           // this — is an action failure the guest must hear about.
@@ -3223,8 +3282,8 @@ export class P2PHostAdapter implements EngineAdapter {
             break;
           }
           // Host screen first, then the guests (see `publishHostSnapshot`).
-          await this.publishHostSnapshot(result);
-          await this.broadcastStateUpdate(result.events, result.log_entries);
+          await this.publishHostSnapshot(transition.result);
+          await this.broadcastStateUpdate(transition);
           // Wake the AI loop. After a guest's action lands, priority may have
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
@@ -3250,19 +3309,19 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           return;
         }
-        let result: SubmitResult;
+        let transition: BrowserTransition;
         try {
-          result = this.nativeBridge
-            ? await this.nativeBridge.submitInteraction(msg.submission, pid)
-            : await this.wasm.submitInteraction(msg.submission, pid);
+          transition = await this.applyBrowserMutation(() => this.nativeBridge
+            ? this.nativeBridge.submitInteraction(msg.submission, pid)
+            : this.wasm.submitInteraction(msg.submission, pid));
         } catch (err) {
           void this.send(session, actionFailureFrame(err));
           break;
         }
         // Applied — same delivery contract as the "action" case above (#7924).
         try {
-          await this.publishHostSnapshot(result);
-          await this.broadcastStateUpdate(result.events, result.log_entries);
+          await this.publishHostSnapshot(transition.result);
+          await this.broadcastStateUpdate(transition);
           await this.runAiLoop();
           void this.persistAuthoritativeState();
         } catch (err) {
@@ -3696,19 +3755,19 @@ export class P2PHostAdapter implements EngineAdapter {
       // Concede's engine guard requires `actor === player_id`. `pid` is both
       // the seat being conceded and the authenticated identity we're acting
       // on behalf of (e.g. grace-expiry or kick).
-      const result = this.nativeBridge
-        ? await this.nativeBridge.submitAction(concedeAction, pid)
-        : await this.wasm.submitAction(concedeAction, pid);
+      const transition = await this.applyBrowserMutation(() => this.nativeBridge
+        ? this.nativeBridge.submitAction(concedeAction, pid)
+        : this.wasm.submitAction(concedeAction, pid));
       // Both host emissions precede the fan-out: the concession has applied,
       // and a guest link failure must not hide it from the host's own screen
       // (#7924). Order between them is unchanged — state, then the notice.
-      await this.publishHostSnapshot(result);
+      await this.publishHostSnapshot(transition.result);
       this.emit(
         origin === "kick"
           ? { type: "playerKicked", playerId: pid, reason }
           : { type: "playerConceded", playerId: pid, reason },
       );
-      await this.broadcastStateUpdate(result.events, result.log_entries, reason);
+      await this.broadcastStateUpdate(transition, reason);
       await this.runAiLoop();
       void this.persistAuthoritativeState();
     } catch (err) {
