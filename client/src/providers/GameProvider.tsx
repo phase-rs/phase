@@ -49,7 +49,7 @@ import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
-import { clearGameStrict, loadGameStrict } from "../services/gamePersistence";
+import { loadGameStrict } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
@@ -1565,7 +1565,6 @@ export function GameProvider({
         }
       };
       let draftDeckRaw: string | null = null;
-      let draftDeckReadSucceeded = false;
       let savedState;
       try {
         savedState = await (soloDraft ? loadGameStrict(gameId) : loadGame(gameId));
@@ -1579,7 +1578,6 @@ export function GameProvider({
       if (soloDraft) {
         try {
           draftDeckRaw = sessionStorage.getItem(draftDeckKey);
-          draftDeckReadSucceeded = true;
         } catch (error) {
           if (!savedState) {
             reportDraftError(error);
@@ -1606,31 +1604,8 @@ export function GameProvider({
           await resumeGame(gameId, adapter, savedState);
         } catch (error) {
           if (cancelled) return;
-          console.warn("Failed to resume saved draft game, starting fresh:", error);
-          const wasAutoUpdate = consumeRecentAutoUpdateMarker();
-          const reason = wasAutoUpdate
-            ? tRef.current("gameProvider.resumeReset.appUpdated")
-            : tRef.current("gameProvider.resumeReset.restoreFailed", {
-                error: error instanceof Error ? error.message : String(error),
-              });
-          onResumeResetRef.current?.(reason);
-          try {
-            await clearGameStrict(gameId);
-          } catch (deleteError) {
-            reportDraftError(deleteError);
-            return;
-          }
-          if (cancelled) return;
-          if (!draftDeckReadSucceeded) {
-            try {
-              draftDeckRaw = sessionStorage.getItem(draftDeckKey);
-            } catch (readError) {
-              reportDraftError(readError);
-              return;
-            }
-          }
-          if (draftDeckRaw !== null) await startDraftDeck(draftDeckRaw);
-          else await startExactDraftStage();
+          console.warn("Failed to resume saved draft game:", error);
+          reportDraftError(error);
           return;
         }
         if (cancelled) return;

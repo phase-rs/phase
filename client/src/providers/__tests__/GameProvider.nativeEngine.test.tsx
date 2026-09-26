@@ -1076,142 +1076,71 @@ describe("GameProvider native AI routing", () => {
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
   });
 
-  it("uses the exact staged draft run after a solo saved snapshot fails to restore", async () => {
-    loadGameStrict.mockResolvedValueOnce({} as never);
-    gameStoreState.resumeGame.mockRejectedValueOnce(new Error("saved snapshot is partial"));
-    inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "saved-run", setCode: "TST" });
-    loadDraftRun.mockResolvedValue({ format: "run", results: [], playerDeck: ["Player"],
-      opponentDeck: ["Opponent"], usedBotSeats: [1],
-      activeMatch: { draftId: "saved-run", gameId: "saved-game", format: "run",
-        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } });
-    render(<GameProvider gameId="saved-game" mode="ai" source="draft" draftId="saved-run"><div /></GameProvider>);
-    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledOnce());
-    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
-    expect(gameStoreState.initGame.mock.calls[0][2]).toMatchObject({ player: { main_deck: ["Player"] } });
-  });
-
-  it.each([false, true])("waits for strict deletion before solo fallback with raw handoff=%s", async (withRaw) => {
-    const gameId = withRaw ? "raw-reset" : "staged-reset";
-    seedSoloRun("run", gameId);
-    const raw = JSON.stringify(publishedPayload());
-    if (withRaw) sessionStorage.setItem(`phase:draft-deck:${gameId}`, raw);
-    const savedState = { players: [{}, {}], turn: 8 } as never;
-    loadGameStrict.mockResolvedValueOnce(savedState);
-    gameStoreState.resumeGame.mockRejectedValueOnce(new Error("incompatible snapshot"));
-    let resolveDelete!: () => void;
-    clearGameStrict.mockReturnValueOnce(new Promise<undefined>((resolve) => { resolveDelete = () => resolve(undefined); }));
-    const onResumeReset = vi.fn();
-    render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onResumeReset={onResumeReset}><div /></GameProvider>);
-    await waitFor(() => expect(clearGameStrict).toHaveBeenCalledWith(gameId));
-    expect(gameStoreState.resumeGame).toHaveBeenCalledWith(gameId, expect.anything(), savedState);
-    expect(onResumeReset).toHaveBeenCalledOnce();
-    expect(gameStoreState.initGame).not.toHaveBeenCalled();
-    expect(sessionStorage.getItem(`phase:draft-deck:${gameId}`)).toBe(withRaw ? raw : null);
-    await act(async () => { resolveDelete(); });
-    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
-    expect(gameStoreState.initGame.mock.calls[0][2]).toMatchObject(publishedPayload());
-  });
-
-  it("reports strict deletion failure and retains raw bytes", async () => {
-    seedSoloRun("run", "delete-failed");
-    const raw = JSON.stringify(publishedPayload());
-    sessionStorage.setItem("phase:draft-deck:delete-failed", raw);
-    loadGameStrict.mockResolvedValueOnce({ players: [{}, {}] } as never);
-    gameStoreState.resumeGame.mockRejectedValueOnce(new Error("incompatible"));
-    const originalError = new Error("checkpoint delete failed");
-    clearGameStrict.mockRejectedValueOnce(originalError);
-    const onNoDeck = vi.fn();
-    render(<GameProvider gameId="delete-failed" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
-    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(originalError.message));
-    expect(gameStoreState.initGame).not.toHaveBeenCalled();
-    expect(sessionStorage.getItem("phase:draft-deck:delete-failed")).toBe(raw);
-  });
-
-  it.each([0, 1, 2].flatMap((failedIndex) =>
-    [false, true].map((withRaw) => [failedIndex, withRaw] as const),
-  ))("retries a saved solo game after delete index %i fails across mounts with raw=%s", async (failedIndex, withRaw) => {
-    const gameId = `partial-delete-${failedIndex}-${withRaw}`;
+  it.each([
+    ["card database unavailable", false],
+    ["card database unavailable", true],
+    ["incompatible snapshot", false],
+    ["incompatible snapshot", true],
+  ])("preserves a progressed solo save after %s with raw handoff=%s and retries it", async (message, withRaw) => {
+    const gameId = `restore-retry-${message.replace(/ /g, "-")}-${withRaw}`;
     const key = `phase:draft-deck:${gameId}`;
     const raw = JSON.stringify(publishedPayload());
     if (withRaw) sessionStorage.setItem(key, raw);
     seedSoloRun("run", gameId);
     const savedState = { players: [{}, {}], turn: 13 } as never;
-    const scopedKeys = [
-      `phase-game-checkpoints:${gameId}`,
-      `phase-p2p-host:${gameId}`,
-      `phase-game:${gameId}`,
-    ];
-    const records = new Map<string, unknown>([
-      [scopedKeys[0], [{ turn: 13 }]], [scopedKeys[1], { roomCode: "ABCDE" }],
-      [scopedKeys[2], savedState],
-    ]);
-    // The fake has the same transaction boundary as idb-keyval: a rejecting
-    // delete leaves its key present and never invokes a later delete.
-    let failKey: string | null = scopedKeys[failedIndex];
-    const deleted: string[] = [];
-    loadGameStrict.mockImplementation(async () => records.get(scopedKeys[2]) as never ?? null);
-    clearGameStrict.mockImplementation(async () => {
-      for (const recordKey of scopedKeys) {
-        deleted.push(recordKey);
-        if (recordKey === failKey) throw new Error(`delete ${failedIndex} failed`);
-        records.delete(recordKey);
-      }
-    });
-    gameStoreState.resumeGame.mockRejectedValueOnce(new Error("incompatible snapshot"));
+    loadGameStrict.mockResolvedValue(savedState);
+    gameStoreState.resumeGame.mockRejectedValueOnce(new Error(message));
     const onNoDeck = vi.fn();
-    const first = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
-    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(`delete ${failedIndex} failed`));
+    const onResumeReset = vi.fn();
+    const first = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck} onResumeReset={onResumeReset}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(message));
+    expect(loadGameStrict).toHaveBeenCalledWith(gameId);
+    expect(gameStoreState.resumeGame).toHaveBeenCalledOnce();
     expect(gameStoreState.resumeGame).toHaveBeenCalledWith(gameId, expect.anything(), savedState);
-    expect(deleted).toEqual(scopedKeys.slice(0, failedIndex + 1));
-    expect(records.has(scopedKeys[2])).toBe(true);
-    expect(records.has(scopedKeys[0])).toBe(failedIndex === 0);
+    expect(onResumeReset).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(createGameLoopController).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(key)).toBe(withRaw ? raw : null);
     first.unmount();
 
-    const readError = new Error("retained game read failed");
-    loadGameStrict.mockRejectedValueOnce(readError);
-    const readFailure = vi.fn();
-    const second = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={readFailure}><div /></GameProvider>);
-    await waitFor(() => expect(readFailure).toHaveBeenCalledWith(readError.message));
-    expect(gameStoreState.resumeGame).toHaveBeenCalledTimes(1);
-    expect(clearGameStrict).toHaveBeenCalledTimes(1);
+    const second = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck} onResumeReset={onResumeReset}><div /></GameProvider>);
+    await waitFor(() => expect(createGameLoopController).toHaveBeenCalledOnce());
+    expect(loadGameStrict).toHaveBeenCalledTimes(2);
+    expect(gameStoreState.resumeGame).toHaveBeenCalledTimes(2);
+    expect(gameStoreState.resumeGame).toHaveBeenNthCalledWith(2, gameId, expect.anything(), savedState);
+    expect(vi.mocked(createGameLoopController).mock.results[0]?.value.start).toHaveBeenCalledOnce();
+    expect(onNoDeck).toHaveBeenCalledTimes(1);
+    expect(onResumeReset).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
-    expect(records.has(scopedKeys[2])).toBe(true);
-    expect(sessionStorage.getItem(key)).toBe(withRaw ? raw : null);
+    await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
     second.unmount();
-
-    failKey = null;
-    gameStoreState.resumeGame.mockRejectedValueOnce(new Error("still incompatible"));
-    const third = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run"><div /></GameProvider>);
-    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
-    expect(clearGameStrict).toHaveBeenCalledTimes(2);
-    expect(deleted.slice(failedIndex + 1)).toEqual(scopedKeys);
-    expect(scopedKeys.every((recordKey) => !records.has(recordKey))).toBe(true);
-    expect(gameStoreState.initGame.mock.calls[0][2]).toMatchObject(publishedPayload());
-    third.unmount();
-    expect(await loadGameStrict(gameId)).toBeNull();
-    expect(records.has(scopedKeys[0])).toBe(false);
   });
 
-  it("does not initialize after strict deletion resolves post-unmount", async () => {
-    seedSoloRun("run", "delete-delayed");
-    const raw = JSON.stringify(publishedPayload());
-    sessionStorage.setItem("phase:draft-deck:delete-delayed", raw);
-    loadGameStrict.mockResolvedValueOnce({ players: [{}, {}] } as never);
-    gameStoreState.resumeGame.mockRejectedValueOnce(new Error("incompatible"));
-    let resolveDelete!: () => void;
-    clearGameStrict.mockReturnValueOnce(new Promise<undefined>((resolve) => { resolveDelete = () => resolve(undefined); }));
+  it("reports a saved solo restore failure even when its optional handoff cannot be read", async () => {
+    const gameId = "unreadable-restore";
+    seedSoloRun("run", gameId);
+    const savedState = { players: [{}, {}], turn: 8 } as never;
+    loadGameStrict.mockResolvedValueOnce(savedState);
+    const error = new Error("card database unavailable");
+    gameStoreState.resumeGame.mockRejectedValueOnce(error);
+    const originalGet = sessionStorage.getItem.bind(sessionStorage);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation((key) => {
+      if (key === `phase:draft-deck:${gameId}`) throw new Error("handoff read failed");
+      return originalGet(key);
+    });
     const onNoDeck = vi.fn();
-    const mounted = render(<GameProvider gameId="delete-delayed" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
-    await waitFor(() => expect(clearGameStrict).toHaveBeenCalledWith("delete-delayed"));
-    mounted.unmount();
-    await act(async () => { resolveDelete(); });
-    expect(gameStoreState.initGame).not.toHaveBeenCalled();
-    expect(createGameLoopController).not.toHaveBeenCalled();
-    expect(onNoDeck).not.toHaveBeenCalled();
-    expect(sessionStorage.getItem("phase:draft-deck:delete-delayed")).toBe(raw);
+    try {
+      render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(error.message));
+      expect(gameStoreState.resumeGame).toHaveBeenCalledWith(gameId, expect.anything(), savedState);
+      expect(clearGameStrict).not.toHaveBeenCalled();
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(createGameLoopController).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
   });
 
   it.each([false, true])("does not reset a solo saved game when restore rejects after unmount with raw handoff=%s", async (withRaw) => {
