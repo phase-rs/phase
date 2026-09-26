@@ -8,6 +8,7 @@ import wasm from "vite-plugin-wasm";
 import { VitePWA } from "vite-plugin-pwa";
 import { compression } from "vite-plugin-compression2";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
 import type { Plugin } from "vite";
 
 
@@ -160,6 +161,11 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
     // lobby a preview client cannot handshake with.
     __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
     __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
+    // Self-hosted builds may mint short-lived TURN credentials from their own
+    // endpoint. Keep the official endpoint as the compatibility default.
+    __TURN_CREDENTIALS_URL__: JSON.stringify(
+      resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL),
+    ),
     // True only for tagged production releases (release.yml sets RELEASE_BUILD).
     // The staging deploy (deploy.yml) is also a production Vite build, so we
     // cannot key off import.meta.env.PROD — that would surface the "try the

@@ -27,7 +27,7 @@
 //! reads as TRUE and which would make the PERMISSION apply to every defender.
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{is_not, tag};
 use nom::combinator::{all_consuming, opt, peek, value};
 use nom::Parser;
 
@@ -272,6 +272,27 @@ pub(crate) fn defender_exception_ir(
     })
     // The in-tree idiom for "a hand-rolled scan declined" (e.g. `oracle.rs:226`).
     .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))?;
+    // The interposed segment is a PLAYER CLASS, and a player class does
+    // not span sentences. `scan_preceded` walks forward to the FIRST position where
+    // the tail parses, with nothing stopping it stepping over a sentence terminator
+    // — so a card whose LATER sentence happens to print
+    // "as though it didn't have defender" would have everything between swallowed
+    // into the class, including the intervening sentence.
+    //
+    // Containment was previously EMPIRICAL: no corpus card prints that shape, and
+    // the failure is fail-CLOSED anyway (an unrecognized class becomes the inert
+    // marker, so the card goes red in coverage rather than granting something
+    // wrong). This makes it STRUCTURAL — a property of the grammar rather than of
+    // the current card pool.
+    //
+    // `opt` is DEFENSIVE, not load-bearing: `scan_preceded` advances past the leading
+    // space before the tail matches, so the segment on this path is always at least
+    // `" "` and `is_not` never sees a truly empty input. The wrapper costs nothing and
+    // keeps the check correct for a future caller that trims the segment first.
+    // Measured, not assumed — removing the `opt` leaves
+    // `interposed_class_may_not_span_a_sentence_boundary` GREEN, so that row does not
+    // discriminate this wrapper and must not be read as covering it.
+    all_consuming(opt(is_not::<_, _, VE>("."))).parse(segment)?;
     Ok((rest, classify_interposed_segment(segment.trim())))
 }
 
@@ -480,6 +501,83 @@ mod tests {
             ),
             DefenderExceptionSegment::UnrecognizedClass { .. }
         ));
+    }
+
+    /// The interposed segment is a PLAYER CLASS, and a player class does
+    /// not span sentences.
+    ///
+    /// `scan_preceded` walks forward to the FIRST position where the
+    /// `"as though … didn't have defender"` tail parses. Nothing stopped it stepping
+    /// over a sentence terminator, so a card whose LATER sentence prints that tail
+    /// would have everything between swallowed into the class — the first sentence's
+    /// remainder included.
+    ///
+    /// Containment used to be EMPIRICAL (no corpus card prints that shape) and
+    /// fail-CLOSED (an unrecognized class becomes the inert marker, so the card goes
+    /// red in coverage rather than granting something wrong). This row makes it
+    /// STRUCTURAL: a property of the grammar, not of the current card pool.
+    ///
+    /// FOUR-SIDED. The risk a boundary check introduces is OVER-rejection, so three
+    /// of the four fixtures exist to catch that:
+    ///  * a segment spanning a terminator is REFUSED;
+    ///  * the unrestricted form still parses and still classifies `Unrestricted`;
+    ///  * a populated single-sentence segment still parses, and still classifies;
+    ///  * a trailing terminator after the tail is untouched, since the bound applies
+    ///    to the SEGMENT, not to the line.
+    ///
+    /// WHAT THIS ROW DOES NOT COVER. An earlier revision claimed the unrestricted
+    /// fixture protects the `opt` wrapper on the bound — that removing `opt` would
+    /// kill this shape. Mutation testing falsified it: removing `opt` leaves every
+    /// fixture here GREEN, because `scan_preceded` advances past the leading space and
+    /// the segment is `" "` rather than `""`. The wrapper is defensive only, and this
+    /// row is not evidence for it.
+    #[test]
+    fn interposed_class_may_not_span_a_sentence_boundary() {
+        // REFUSED: the tail appears in a later sentence, so the "class" would span
+        // the boundary and swallow the first sentence's remainder.
+        assert!(
+            parse_defender_exception_predicate(
+                "can attack only if defending player controls a swamp. this creature \
+                 can attack as though it didn't have defender."
+            )
+            .is_none(),
+            "a segment spanning a sentence terminator must be refused"
+        );
+
+        // CONTROL 1 — the no-class form. The bound must not cost us the shape with
+        // no interposed class at all. NOT a test of the `opt` wrapper: the segment
+        // here is `" "`, not `""` (see the row doc), so `is_not` matches it with or
+        // without `opt`.
+        let (empty_seg, _) =
+            parse_defender_exception_predicate("can attack as though it didn't have defender.")
+                .expect("control: the unrestricted form must still parse");
+        assert!(
+            matches!(empty_seg, DefenderExceptionSegment::Unrestricted),
+            "control: the segment TRIMS empty and classifies Unrestricted; got {empty_seg:?}"
+        );
+
+        // CONTROL 2 — a populated single-sentence segment still parses AND still
+        // classifies, so the bound did not turn every class into a refusal.
+        let (anchored, _) = parse_defender_exception_predicate(&format!(
+            "can attack players who {ANCHORED_CLAUSE} as though it didn't have defender."
+        ))
+        .expect("control: a single-sentence interposed class must still parse");
+        assert!(
+            matches!(anchored, DefenderExceptionSegment::AnchoredClass(_)),
+            "control: the class must still classify; got {anchored:?}"
+        );
+
+        // CONTROL 3 — the bound applies to the SEGMENT, not the line. A terminator
+        // AFTER the tail is ordinary punctuation and must not be rejected; the
+        // fixtures above already end in one, and this pins the distinction on a line
+        // whose segment is populated.
+        assert!(
+            parse_defender_exception_predicate(&format!(
+                "can attack players who {ANCHORED_CLAUSE} as though they didn't have defender."
+            ))
+            .is_some(),
+            "control: a terminator after the tail is not part of the segment"
+        );
     }
 
     /// The word-boundary guard after the verb phrase.

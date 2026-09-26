@@ -7174,13 +7174,14 @@ fn matches_filter_prop(
         // (e.g., the seed was just exiled by the preceding effect).
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
-        FilterProp::SameNameAsExiledBySource => state.exile_links.iter().any(|link| {
-            link.source_id == source.id
-                && state
+        FilterProp::SameNameAsExiledBySource => {
+            crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
+                state
                     .objects
                     .get(&link.exiled_id)
                     .is_some_and(|exiled| obj.name.eq_ignore_ascii_case(&exiled.name))
-        }),
+            })
+        }
         // CR 201.2 + CR 201.2a: Matches if `obj.name` equals the name of any
         // permanent on the battlefield (optionally narrowed by controller).
         // Name comparison is case-insensitive per `FilterProp::Named` /
@@ -8147,13 +8148,14 @@ fn zone_change_record_matches_property(
         // target (parent target). Mirrors the live-object evaluator.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
-        FilterProp::SameNameAsExiledBySource => state.exile_links.iter().any(|link| {
-            link.source_id == source.id
-                && state
+        FilterProp::SameNameAsExiledBySource => {
+            crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
+                state
                     .objects
                     .get(&link.exiled_id)
                     .is_some_and(|exiled| record.name.eq_ignore_ascii_case(&exiled.name))
-        }),
+            })
+        }
 
         // -------- Group 3: combat snapshot state --------
         // CR 508.1k / CR 509.1g / CR 509.1h: Combat state as of the zone change.

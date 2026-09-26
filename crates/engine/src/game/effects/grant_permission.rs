@@ -4,7 +4,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::TrackedSetId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::player::PlayerId;
 
 #[cfg(test)]
@@ -14,11 +14,34 @@ use crate::types::ability::{AbilityDefinition, AbilityKind, ManaSpendPermission,
 #[cfg(test)]
 use crate::types::card_type::CoreType;
 #[cfg(test)]
-use crate::types::identifiers::ObjectId;
-#[cfg(test)]
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 #[cfg(test)]
 use std::sync::Arc;
+
+/// CR 608.2h + CR 108.3: the player `grantee` binds to for `obj_id`, fixed once at resolution;
+/// `ObjectOwner` binds each object's owner, the others one player for the whole resolution.
+pub(crate) fn resolve_grantee(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    grantee: PermissionGrantee,
+    obj_id: ObjectId,
+) -> PlayerId {
+    match grantee {
+        PermissionGrantee::AbilityController => ability.controller,
+        PermissionGrantee::ParentTargetController => ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .unwrap_or(ability.controller),
+        PermissionGrantee::ObjectOwner => state
+            .objects
+            .get(&obj_id)
+            .map_or(ability.controller, |o| o.owner),
+    }
+}
 
 /// Grant a CastingPermission to the target object (CR 604.6).
 ///
@@ -126,35 +149,10 @@ pub fn resolve(
         }
     };
 
-    // CR 611.2a/b + CR 108.3: Resolve `grantee` to the `PlayerId` that a
-    // `PlayFromExile` permission's `granted_to` should bind to. For
-    // `ObjectOwner`, this varies per iterated object and is computed inside
-    // the loop. For the other variants it is constant across iterations.
-    let constant_grantee: Option<PlayerId> = match grantee {
-        PermissionGrantee::AbilityController => Some(ability.controller),
-        PermissionGrantee::ParentTargetController => ability
-            .targets
-            .iter()
-            .find_map(|t| match t {
-                TargetRef::Player(pid) => Some(*pid),
-                TargetRef::Object(_) => None,
-            })
-            .or(Some(ability.controller)),
-        PermissionGrantee::ObjectOwner => None, // per-iteration
-    };
-
     // CR 611.2b: set when a host-bound lifetime was attached below.
     let mut needs_lifetime_check = false;
     for obj_id in target_ids {
-        // Compute `granted_to` for this object. For `ObjectOwner` we read the
-        // object's owner here so each iteration binds independently (CR 108.3).
-        let granted_to_pid = constant_grantee.unwrap_or_else(|| {
-            state
-                .objects
-                .get(&obj_id)
-                .map(|o| o.owner)
-                .unwrap_or(ability.controller)
-        });
+        let granted_to_pid = resolve_grantee(state, ability, grantee, obj_id);
         // CR 702.143d: compute any effective foretell cost (printed OR granted by
         // a static such as Singing Towers of Darillium, with its derived cost)
         // BEFORE the mutable object borrow below — `foretell_cost` takes `&state`

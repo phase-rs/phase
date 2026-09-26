@@ -624,11 +624,12 @@ mod tests {
     /// duplicate of the top card of their library into your hand. It
     /// perpetually gains \"You may spend mana as though it were mana of any
     /// color to cast this spell.\" Then they exile the top card of their
-    /// library face down." routes its quoted grant body through
-    /// `classify_quoted_inner`'s default `GrantAbility` fallback, wrapping
-    /// `Effect::GenericEffect { static_abilities:
+    /// library face down." routed its quoted grant body through
+    /// `classify_quoted_inner`'s default `GrantAbility` fallback, which then
+    /// wrapped `Effect::GenericEffect { static_abilities:
     /// [SpendManaAsAnyColor { spell_filter: None, .. }], target:
-    /// Some(Controller), .. }`. Before this fix,
+    /// Some(Controller), .. }` (today it wraps the standalone concession gap
+    /// instead). Before this fix,
     /// `PerpetualGrantModification::try_from`'s `GrantAbility` arm rejected
     /// only an `Effect::Unimplemented`-bearing tree (Blocker 1); a
     /// `GenericEffect` is not `Unimplemented`, so it was ACCEPTED -- a green
@@ -636,7 +637,7 @@ mod tests {
     /// `AbilityDefinition` onto the conjured duplicate's
     /// `abilities`/`base_abilities` (wrongly board-wide in scope, AND never
     /// even checked: `static_abilities.rs`'s
-    /// `player_can_spend_as_any_color_for_spell_object` only ever scans
+    /// `player_mana_spend_permission_for_spell_object` only ever scans
     /// `game_active_statics` -- battlefield + command zone -- never hand or
     /// the stack, per CR 113.6e the very zones this self-cast concession
     /// would need to function in).
@@ -652,11 +653,13 @@ mod tests {
     /// parse produces is applied (or not) exactly as a real game would. The
     /// duplicate is then CAST for real with only off-color mana in the pool.
     ///
-    /// Mutation-tested: reverting the `types/ability.rs` gate makes
-    /// `parse_effect` return `Effect::ApplyPerpetual` again, so this test's
-    /// `match` takes the "install the modification" arm, the duplicate
-    /// receives the extra granted ability, and the first assertion below
-    /// (no extra ability on the duplicate) fails.
+    /// The quoted concession is now the standalone mana-spend concession gap,
+    /// so `PerpetualGrantModification::try_from` rejects it at its
+    /// `Effect::Unimplemented` arm; the `GenericEffect`-static arm this test
+    /// used to reach is pinned by
+    /// `perpetual_grant_ability_rejects_resolution_time_generic_effect_body`.
+    /// Accepting the grant would still make this test's `match` take the
+    /// "install the modification" arm and fail the first assertion below.
     #[test]
     fn perpetual_grant_ability_rejects_agent_of_raffine_spend_any_color_to_cast_this_spell() {
         use crate::game::scenario::GameScenario;
@@ -777,9 +780,8 @@ mod tests {
         // {U} cost before the cast is allowed to proceed at all
         // (`casting_costs.rs`); with only Green available it cannot, so the
         // action is rejected outright regardless of whether the parser gate
-        // above works. NON-DISCRIMINATING (see the mutation-test note above
-        // this test): `static_abilities.rs`'s
-        // `player_can_spend_as_any_color_for_spell_object` only ever scans
+        // above works. NON-DISCRIMINATING (see the doc above this test): `static_abilities.rs`'s
+        // `player_mana_spend_permission_for_spell_object` only ever scans
         // `game_active_statics` -- battlefield + command zone -- so even a
         // rejected-gate regression that let the grant install onto the
         // duplicate's HAND-zone `abilities` would never be found by that

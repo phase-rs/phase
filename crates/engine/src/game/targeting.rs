@@ -1003,13 +1003,13 @@ pub fn resolved_targets(
     {
         return ability.live_object_targets(state);
     }
-    // CR 608.2c: ParentTargetSlot needs the accumulated targets from the entire
-    // chain, not just the current ability's targets. During normal resolution
-    // the root stack entry has already been popped and is exposed through
-    // `resolving_stack_entry`; the live stack lookup covers target resolution
-    // before the entry is popped.
+    // CR 608.2c: ParentTargetSlot needs the accumulated targets from the slot
+    // base (`parent_slot_base`), not just the current ability's targets. During
+    // normal resolution the root stack entry has already been popped and is
+    // exposed through `resolving_stack_entry`; the live stack lookup covers
+    // target resolution before the entry is popped.
     if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
-        return parent_chain_targets_from_root(state, ability);
+        return super::ability_utils::flatten_targets_in_chain(parent_slot_base(state, ability));
     }
     // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
     // event-context resolution when the player chose targets at activation/
@@ -1097,15 +1097,7 @@ fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
             .is_some_and(chain_declares_chooseable_target_slots)
 }
 
-/// CR 608.2c: The full flattened target chain from the resolving root stack
-/// entry, so a `ParentTargetSlot { index }` anaphor can index a specific earlier
-/// declared slot even after the current node's local `targets` were replaced by
-/// chain propagation (`resolve_chain_body`'s most-recent-parent clone). This is
-/// the single authority for the root-entry lookup — previously inlined in
-/// `resolved_targets` — reused by the counter resolver so the stack walk is not
-/// duplicated. During normal resolution the root stack entry has already been
-/// popped and is exposed through `resolving_stack_entry`; the live `stack`
-/// lookup covers target resolution before the entry is popped.
+/// CR 608.2c: Every declared target of the resolving chain, in slot order, for chain-wide readers.
 pub(crate) fn parent_chain_targets_from_root(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1134,6 +1126,22 @@ pub(crate) fn resolving_root_ability<'a>(
         .unwrap_or(ability)
 }
 
+/// CR 700.2 + CR 700.2c + CR 608.2c: the node a `ParentTargetSlot` index counts from — the root of
+/// the mode now resolving (the parser numbers slots within one mode's text), else the chain root.
+fn parent_slot_base<'a>(state: &'a GameState, ability: &'a ResolvedAbility) -> &'a ResolvedAbility {
+    let root = resolving_root_ability(state, ability);
+    // `resolving_modal_instruction` outlives its resolution, so it names a mode only of the carrier's chain.
+    let Some(ordinal) = state
+        .resolving_modal_instruction
+        .filter(|_| resolution_carrier_entry(state, ability).is_some())
+    else {
+        return root;
+    };
+    std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
+        .find(|node| node.modal_instruction_ordinal == Some(ordinal))
+        .unwrap_or(root)
+}
+
 /// Whether `entry` is the stack entry `ability` (a node of its chain) belongs to.
 fn entry_carries_ability(entry: &StackEntry, ability: &ResolvedAbility) -> bool {
     entry.id == ability.source_id || entry.source_id == ability.source_id
@@ -1150,7 +1158,7 @@ fn resolution_carrier_entry<'a>(
         .filter(|entry| entry_carries_ability(entry, ability))
 }
 
-/// CR 608.2c: The DECLARED target of slot `index` in the flattened chain root,
+/// CR 608.2c: The DECLARED target of slot `index`, counted from `parent_slot_base`,
 /// with no legality or pin check. `None` when the index is out of range. Only
 /// for reading the chain's declared shape (the dual-fighter recovery in
 /// `effects::fight`); a consumer that AFFECTS or MATCHES the referent must use
@@ -1160,13 +1168,13 @@ pub(crate) fn resolve_parent_slot_from_root(
     ability: &ResolvedAbility,
     index: usize,
 ) -> Option<TargetRef> {
-    parent_chain_targets_from_root(state, ability)
+    super::ability_utils::flatten_targets_in_chain(parent_slot_base(state, ability))
         .into_iter()
         .nth(index)
 }
 
 /// CR 608.2c + CR 608.2b + CR 400.7 + CR 603.7c: Resolve the declared slot
-/// `index` from the flattened chain root, then drop it when
+/// `index`, counted from `parent_slot_base`, then drop it when
 /// - its target failed the legality check made as the chain began to resolve
 ///   (CR 608.2b: "Illegal targets, if any, won't be affected by parts of a
 ///   resolving spell's effect for which they're illegal"), read from the
@@ -1187,7 +1195,7 @@ pub(crate) fn resolve_parent_slot_from_root(
 /// `effects::resolve_player_for_context_ref`), slot conditions, filter
 /// matching, and every effect subject resolved by
 /// `effects::resolved_effect_object_ids`. Callers that still read
-/// `resolved_targets`' whole-chain return for a `ParentTargetSlot` filter
+/// `resolved_targets`' return for a `ParentTargetSlot` filter
 /// (first object or whole list) bypass it: destroy, bounce, sacrifice, counter,
 /// put-on-top-or-bottom, exchange control, pair with, change targets, the
 /// damage-replacement filters, gain control's give, and the
@@ -1201,7 +1209,23 @@ pub(crate) fn resolve_live_parent_slot_from_root(
 ) -> Option<TargetRef> {
     let illegal_at_resolution = resolution_carrier_entry(state, ability)
         .and_then(StackEntry::ability)
-        .is_some_and(|root| root.illegal_target_slots.contains(&index));
+        .is_some_and(|root| {
+            use super::ability_utils::flatten_targets_in_chain as flatten;
+            let base = parent_slot_base(state, ability);
+            let branch =
+                |node: Option<&ResolvedAbility>| node.map_or(0, |node| flatten(node).len());
+            // CR 608.2b: illegal targets won't be affected by parts of the effect for which they're illegal.
+            let ahead: usize =
+                std::iter::successors(Some(root), |node| node.sub_ability.as_deref())
+                    .take_while(|node| !std::ptr::eq(*node, base))
+                    .map(|node| {
+                        flatten(node).len()
+                            - branch(node.sub_ability.as_deref())
+                            - branch(node.else_ability.as_deref())
+                    })
+                    .sum();
+            root.illegal_target_slots.contains(&(ahead + index))
+        });
     if illegal_at_resolution {
         return None;
     }
@@ -6868,6 +6892,149 @@ mod tests {
             resolve_live_parent_slot_from_root(&state, &body, 0),
             Some(first),
             "a stamp on a non-resolving stack entry is not a legality check"
+        );
+    }
+
+    /// CR 700.2c + CR 608.2c: while a chosen mode resolves, a slot index counts
+    /// from that mode's root; the legality stamp keeps whole-chain numbering.
+    #[test]
+    fn parent_slots_count_from_the_resolving_mode() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let creature = TargetRef::Object(ObjectId(1));
+        let player = TargetRef::Player(PlayerId(1));
+        let target_only = |target: TargetRef, ordinal: Option<usize>| {
+            let mut node = ResolvedAbility::new(
+                crate::types::ability::Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![target],
+                source,
+                PlayerId(0),
+            );
+            node.modal_instruction_ordinal = ordinal;
+            node
+        };
+        let root = target_only(creature.clone(), Some(0))
+            .sub_ability(target_only(player.clone(), Some(1)));
+        let body = target_only(player.clone(), None);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(creature.clone()),
+            "no mode resolving: slots count from the chain root"
+        );
+
+        state.resolving_modal_instruction = Some(1);
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(player.clone())
+        );
+        assert_eq!(
+            resolved_targets(&body, &TargetFilter::ParentTargetSlot { index: 0 }, &state),
+            vec![player.clone()]
+        );
+
+        let set_illegal = |state: &mut GameState, slots: Vec<usize>| {
+            state
+                .resolving_stack_entry
+                .as_mut()
+                .and_then(StackEntry::ability_mut)
+                .unwrap()
+                .illegal_target_slots = slots;
+        };
+        set_illegal(&mut state, vec![0]);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            Some(player.clone()),
+            "an illegal earlier mode's slot does not drop this mode's slot 0"
+        );
+        set_illegal(&mut state, vec![1]);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            None,
+            "whole-chain slot 1 is this mode's slot 0"
+        );
+
+        let entry = state.resolving_stack_entry.take().unwrap();
+        state.stack.push_back(entry);
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(creature),
+            "a leftover ordinal does not renumber a chain that is not resolving"
+        );
+    }
+
+    /// CR 608.2b: an earlier mode's else-branch targets are numbered after the
+    /// resolving mode's in the stamp, so they do not shift its slots.
+    #[test]
+    fn earlier_mode_else_targets_do_not_shift_the_resolving_mode_slots() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(99);
+        let creature = TargetRef::Object(ObjectId(1));
+        let other = TargetRef::Object(ObjectId(3));
+        let player = TargetRef::Player(PlayerId(1));
+        let target_only = |target: TargetRef, ordinal: Option<usize>| {
+            let mut node = ResolvedAbility::new(
+                crate::types::ability::Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![target],
+                source,
+                PlayerId(0),
+            );
+            node.modal_instruction_ordinal = ordinal;
+            node
+        };
+        // Stamp numbering: [creature, player, other].
+        let root = target_only(creature, Some(0))
+            .else_ability(target_only(other, None))
+            .sub_ability(target_only(player.clone(), Some(1)));
+        let body = target_only(player.clone(), None);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+        state.resolving_modal_instruction = Some(1);
+        assert_eq!(
+            resolve_parent_slot_from_root(&state, &body, 0),
+            Some(player.clone()),
+            "reach guard: this mode's declared slot 0 is the player"
+        );
+
+        let set_illegal = |state: &mut GameState, slots: Vec<usize>| {
+            state
+                .resolving_stack_entry
+                .as_mut()
+                .and_then(StackEntry::ability_mut)
+                .unwrap()
+                .illegal_target_slots = slots;
+        };
+        set_illegal(&mut state, vec![2]);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            Some(player),
+            "an illegal else-branch target does not drop this mode's slot 0"
+        );
+        set_illegal(&mut state, vec![1]);
+        assert_eq!(
+            resolve_live_parent_slot_from_root(&state, &body, 0),
+            None,
+            "whole-chain slot 1 is this mode's slot 0"
         );
     }
 

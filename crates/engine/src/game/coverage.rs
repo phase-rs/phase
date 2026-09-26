@@ -210,7 +210,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the spell-filtered `Some` shape (Vizier of the Menagerie) carries
             // an unbounded filter value space, so coverage support lives here.
             // Runtime enforcement is in
-            // casting.rs::player_can_spend_as_any_color_for_optional_spell.
+            // casting.rs::player_mana_spend_permission_for_optional_spell.
             | StaticMode::SpendManaAsAnyColor { .. }
             // CR 121.6: CantDraw carries `who` (controller vs all_players) —
             // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.

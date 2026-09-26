@@ -2156,7 +2156,9 @@ pub enum StaticMode {
     },
     /// CR 609.4b: "You may spend mana as though it were mana of any color" /
     /// "You may spend mana of any type to cast [filtered] spells." Allows the
-    /// controller to pay colored mana costs with mana of any type or color.
+    /// controller to pay colored mana costs with mana of any color — and, when
+    /// `concession` is `AnyTypeOrColor` ("mana of any type", CR 118.14), a
+    /// colorless (`{C}`) requirement too.
     ///
     /// `spell_filter` is the leaf parameterization of the spell-class axis (same
     /// CR 609.4b section, so a field, not a sibling variant):
@@ -2167,18 +2169,27 @@ pub enum StaticMode {
     ///   filter (Vizier of the Menagerie: "creature spells"). The concession is
     ///   re-derived against the spell object at spend time and never applies to
     ///   non-spell payments. Consulted by
-    ///   `casting::player_can_spend_as_any_color_for_optional_spell`.
+    ///   `casting::player_mana_spend_permission_for_optional_spell`.
     /// - `activation_source_filter: Some(filter)` — scoped to activated abilities
     ///   whose source permanent matches the filter (Agatha's Soul Cauldron /
     ///   Joiner Adept: "to activate abilities of creatures you control"). The
     ///   concession is re-derived against the activating permanent at spend time
     ///   and never applies to spell casts or effect payments. Consulted by
-    ///   `static_abilities::player_can_spend_as_any_color_for_activation_source`.
+    ///   `static_abilities::player_mana_spend_permission_for_activation_source`.
+    ///
+    /// `concession` is the printed word after "mana of any": "color" →
+    /// `AnyColor` (the default, omitted on the wire), "type" → `AnyTypeOrColor`
+    /// (Vizier of the Menagerie).
     SpendManaAsAnyColor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         activation_source_filter: Option<TargetFilter>,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::ManaSpendPermission::is_any_color"
+        )]
+        concession: crate::types::ability::ManaSpendPermission,
     },
     /// CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than pay
     /// that mana." Player-scope payment substitution; the indicated color may
@@ -5319,6 +5330,7 @@ mod tests {
         let board_wide = StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: crate::types::ability::ManaSpendPermission::AnyColor,
         };
         let json = serde_json::to_string(&board_wide).unwrap();
         assert_eq!(
@@ -5333,10 +5345,29 @@ mod tests {
         let filtered = StaticMode::SpendManaAsAnyColor {
             spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
             activation_source_filter: None,
+            concession: crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
         };
         let json = serde_json::to_string(&filtered).unwrap();
+        assert!(
+            json.contains(r#""concession":"AnyTypeOrColor""#),
+            "a non-default concession is written: {json}"
+        );
         let back: StaticMode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, filtered, "the spell-filtered shape must round-trip");
+
+        // (b2) a payload written before `concession` existed reads as the
+        // any-color default it always meant.
+        let pre_concession = json.replace(r#","concession":"AnyTypeOrColor""#, "");
+        assert_ne!(pre_concession, json);
+        let back: StaticMode = serde_json::from_str(&pre_concession).unwrap();
+        assert_eq!(
+            back,
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                activation_source_filter: None,
+                concession: crate::types::ability::ManaSpendPermission::AnyColor,
+            }
+        );
 
         // (c) legacy bare string downgrades to Other through the fwd-compat path.
         #[derive(serde::Deserialize, PartialEq, Debug)]

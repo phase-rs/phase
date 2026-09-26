@@ -4767,7 +4767,7 @@ pub enum CastingPermission {
         /// CR 609.4b: Optional payment permission scoped to this specific grant.
         /// `AnyColor` and `AnyTypeOrColor` both relax colored mana requirements;
         /// only the latter also relaxes mana-type requirements. Read at payment
-        /// time by `casting::player_can_spend_as_any_color_for_optional_spell`,
+        /// time by `casting::player_mana_spend_permission_for_optional_spell`,
         /// keyed on `granted_to == player`. Mirrors
         /// `PlayFromExile.mana_spend_permission`; `None` (the common case) leaves
         /// payment unchanged for every other exile/graveyard alt-cost grant.
@@ -5182,25 +5182,57 @@ pub enum PlayPermissionInvalidation {
 }
 
 /// CR 609.4b: Permission modifying how mana may be spent to pay a cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaSpendPermission {
     /// CR 609.4b + CR 106.1a: Mana may be spent as though it were mana of any
     /// color for this payment. This relaxes colored requirements but does not
     /// make colored mana satisfy a colorless (`{C}`) or snow (`{S}`) requirement.
+    #[default]
     AnyColor,
-    /// CR 609.4b + CR 106.1b: Mana may be spent as though it were mana of any
-    /// type or color for this payment. This preserves the broader Oracle
-    /// distinction without changing the actual mana spent.
+    /// CR 118.14 + CR 106.1b: "Mana of any type can be spent" — mana may be
+    /// spent as though it were colorless mana or mana of any color, so it also
+    /// pays a colorless (`{C}`) requirement. Like `AnyColor`, it never changes
+    /// the mana actually spent (CR 609.4b), and never pays `{S}`.
     AnyTypeOrColor,
 }
 
 impl ManaSpendPermission {
-    /// CR 609.4b: Projects the shared colored-requirement relaxation without
-    /// claiming that `AnyColor` and `AnyTypeOrColor` are semantically equal.
-    pub const fn allows_spending_as_any_color(self) -> bool {
+    /// CR 118.14 + CR 609.4b: May any mana pay a `required` mana type under this
+    /// permission? "Any type" includes colorless (CR 106.1b); "any color" does
+    /// not (CR 106.1a). The single payment-time projection of the permission:
+    /// it decides eligibility, never the type of mana actually spent.
+    pub const fn allows_payment_as(self, required: crate::types::mana::ManaType) -> bool {
         match self {
-            Self::AnyColor | Self::AnyTypeOrColor => true,
+            Self::AnyColor => !matches!(required, crate::types::mana::ManaType::Colorless),
+            Self::AnyTypeOrColor => true,
         }
+    }
+
+    /// CR 609.4b: each concession only changes how the cost may be paid; with
+    /// several in force the payment may use any of them, so the broader decides
+    /// ("any type" covers "any color").
+    pub const fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::AnyColor, Self::AnyColor) => Self::AnyColor,
+            (Self::AnyColor, Self::AnyTypeOrColor)
+            | (Self::AnyTypeOrColor, Self::AnyColor)
+            | (Self::AnyTypeOrColor, Self::AnyTypeOrColor) => Self::AnyTypeOrColor,
+        }
+    }
+
+    /// CR 609.4b: `union` over optional concessions — `None` means "no
+    /// concession" and yields to the other side.
+    pub const fn union_optional(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        }
+    }
+
+    /// Serde helper: `AnyColor` is the default a static concession omits.
+    pub const fn is_any_color(&self) -> bool {
+        matches!(self, Self::AnyColor)
     }
 }
 
@@ -15767,9 +15799,10 @@ pub enum PerpetualGrantModification {
     /// `abilities` + `base_abilities`. Agent of Raffine's superficially similar
     /// "You may spend mana as though it were mana of any color to cast this
     /// spell." is REJECTED before it ever reaches this variant — see
-    /// `TryFrom<ContinuousModification>`'s `GenericEffect`-static gate below,
-    /// which fails the whole grant closed rather than install a board-wide
-    /// mana concession under a "this spell only" card.
+    /// `TryFrom<ContinuousModification>`'s `Unimplemented` gate below (the quoted
+    /// concession is the standalone concession gap), which fails the whole grant
+    /// closed rather than install a board-wide mana concession under a "this
+    /// spell only" card.
     GrantAbility { definition: Box<AbilityDefinition> },
 }
 
@@ -15839,22 +15872,26 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // the static this clause describes is never installed as a
             // functioning ability by that arm.
             //
-            // Agent of Raffine (MTGJSON-verified) is the regression case: "It
-            // perpetually gains \"You may spend mana as though it were mana of
-            // any color to cast this spell.\"" has no cost separator, so
-            // `parse_quoted_ability` treats the whole quoted sentence as a
-            // spell-like effect chain and `classify_quoted_inner` falls through
-            // its default `GrantAbility` fallback (no static/trigger/keyword
-            // recognizer matched), wrapping
-            // `Effect::GenericEffect { static_abilities: [SpendManaAsAnyColor
-            // { spell_filter: None, .. }], target: Some(Controller), .. }`.
-            // Accepting it here would look green (`Effect::ApplyPerpetual`,
+            // Pinned by `perpetual_grant_ability_rejects_resolution_time_generic_effect_body`
+            // ("Until end of turn, creatures you control gain flying."). Agent
+            // of Raffine (MTGJSON-verified) was the original case — its quoted
+            // concession is now the standalone concession gap, rejected by the
+            // `Unimplemented` arm above. "It perpetually gains \"You may spend
+            // mana as though it were mana of any color to cast this spell.\""
+            // has no cost separator, so `parse_quoted_ability` treats the whole
+            // quoted sentence as a spell-like effect chain and
+            // `classify_quoted_inner` falls through its default `GrantAbility`
+            // fallback (no static/trigger/keyword recognizer matched), which
+            // wrapped `Effect::GenericEffect { static_abilities:
+            // [SpendManaAsAnyColor { spell_filter: None, .. }], target:
+            // Some(Controller), .. }` until that clause became the gap.
+            // Accepting such a grant here would look green (`Effect::ApplyPerpetual`,
             // never `Effect::Unimplemented`) while being wrong on TWO independent
             // axes: (1) `spell_filter: None` is the documented BOARD-WIDE path
             // (every spell the controller casts), not "this spell" -- a real
             // rules defect, not just a coverage gap; and (2) even a correctly
             // self-scoped static would still need a NEW self-referential runtime
-            // check, because `player_can_spend_as_any_color_for_spell_object`
+            // check, because `player_mana_spend_permission_for_spell_object`
             // (static_abilities.rs) only scans `game_active_statics`
             // (battlefield + command zone) for a granting permanent's OWN
             // static, while CR 113.6e says an ability that modifies how that
@@ -15963,8 +16000,8 @@ pub enum PerpetualModification {
     /// conjured duplicate is the architectural motivator for that LastCreated
     /// antecedent, but Agent of Raffine's OWN granted ability text ("You may
     /// spend mana as though it were mana of any color to cast this spell.") is
-    /// currently REJECTED by `PerpetualGrantModification::try_from`'s
-    /// `GenericEffect`-static gate (see its doc comment), so Agent of Raffine
+    /// currently REJECTED by `PerpetualGrantModification::try_from` (the quoted
+    /// concession is the standalone concession gap), so Agent of Raffine
     /// does not itself reach `Effect::ApplyPerpetual` — it fails closed to
     /// `Effect::Unimplemented` — a future card whose conjured-duplicate grant
     /// classifies to an installable kind would exercise this binding end to
@@ -17285,6 +17322,10 @@ pub enum Effect {
     HideawayConceal {
         #[serde(default = "default_target_filter_parent")]
         target: TargetFilter,
+        /// CR 406.3: `Some` binds the look to that player at resolution; `None`
+        /// leaves it with the source's controller (CR 702.75a).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grantee: Option<PermissionGrantee>,
     },
     /// CR 509.1g + CR 506.3e + CR 707.2: For each attacking creature matched by
     /// `source_filter`, create a token that's a copy of it and put that token
@@ -19204,8 +19245,8 @@ pub enum Effect {
     /// Heist finalizer — continuation stashed by `Effect::Heist`. The chosen
     /// card (carried on `ability.targets` by the `ChooseFromZoneChoice` answer
     /// handler) is exiled from its owner's library, turned face down (CR 406.3),
-    /// linked to the source so the controller may look at it (mirrors Hideaway's
-    /// `ExileLinkKind::HideawayLookable`), and granted a permanent
+    /// linked to the source with a look link bound to the heister (CR 406.3),
+    /// and granted a permanent
     /// `PlayFromExile` permission with any-type-or-color mana so it can be cast
     /// for as long as it remains exiled. Unit variant — no fields; the target is
     /// implicit in `ability.targets`.
@@ -21596,7 +21637,7 @@ impl Effect {
             // from the parent `Dig` continuation (`ParentTarget`); it is never
             // announced as a target, but surfacing the filter keeps chain-time
             // resolution consistent.
-            Effect::HideawayConceal { target } => Some(target),
+            Effect::HideawayConceal { target, .. } => Some(target),
 
             // Heist targets the opponent whose library is heisted.
             Effect::Heist { target, .. } => Some(target),
@@ -35587,7 +35628,7 @@ mod tests {
     /// leaf by whether its lowered runtime gate can return `true` at a reachable
     /// production payment site today, and short-circuit `Any` in both directions.
     /// CR 609.4b + CR 106.1a + CR 106.1b: the two spend permissions are distinct wire
-    /// discriminants even though both project the colored-payment relaxation.
+    /// discriminants, and they differ at payment: only "any type" pays `{C}`.
     #[test]
     fn mana_spend_permission_serde_preserves_color_vs_type_distinction() {
         let any_color = ManaSpendPermission::AnyColor;
@@ -35606,8 +35647,10 @@ mod tests {
             serde_json::from_str::<ManaSpendPermission>(r#""AnyTypeOrColor""#).unwrap(),
             any_type_or_color
         );
-        assert!(any_color.allows_spending_as_any_color());
-        assert!(any_type_or_color.allows_spending_as_any_color());
+        assert!(any_color.allows_payment_as(crate::types::mana::ManaType::Green));
+        assert!(any_type_or_color.allows_payment_as(crate::types::mana::ManaType::Green));
+        assert!(!any_color.allows_payment_as(crate::types::mana::ManaType::Colorless));
+        assert!(any_type_or_color.allows_payment_as(crate::types::mana::ManaType::Colorless));
         assert_ne!(any_color, any_type_or_color);
     }
 

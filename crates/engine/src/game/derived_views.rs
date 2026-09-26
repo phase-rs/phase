@@ -678,6 +678,9 @@ pub struct DerivedViews {
     /// next one belongs too.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+    /// CR 400.7 + CR 607.2a: the cards currently exiled with each battlefield permanent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub linked_exile_ids: BTreeMap<ObjectId, Vec<ObjectId>>,
 
     /// CR 509.1b + CR 611.2c: creatures with a live, temporary
     /// `CantBeBlocked` grant. The optional value is the granting source only
@@ -1177,15 +1180,9 @@ pub struct ClientGameState {
 /// cast — activated-ability mana payment keeps its full-cost display, and
 /// convoke/improvise/delve pay via board taps tracked by their own staged UI.
 ///
-/// KNOWN LIMITATION: reduces with `any_color = false` and no life-for-color
-/// permissions, so under an any-color spend permission (Chromatic Orrery) or a
-/// K'rrik-style life-as-colored-mana grant the displayed residual can over-state
-/// the cost (a colorless unit pinned toward `{R}` reads as not covering it).
-/// This is deliberately consistent with the pin-eligibility gate
-/// (`mana_unit_eligible_for_cost`), which is also `any_color`-blind and would
-/// reject such a pin — both layers agree on the stricter behavior, and the
-/// common cases (generic + plain colored costs) are exact. Threading the real
-/// permission bundle through both sites is the follow-up to lift this.
+/// Uses the current spell's typed mana-spend permission when matching pinned
+/// units to colored or colorless requirements. This projection subtracts only
+/// pinned mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
     use crate::types::game_state::WaitingFor;
     use crate::types::mana::{ManaPool, PaymentContext};
@@ -1227,7 +1224,12 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
         &selected,
         &cost,
         ctx.as_ref(),
-        false,
+        crate::game::casting::player_mana_spend_permission_for_payment(
+            state,
+            viewer,
+            Some(pending.object_id),
+            ctx.as_ref(),
+        ),
         None,
     ))
 }
@@ -1581,6 +1583,12 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             .collect();
         if !badges.is_empty() {
             views.battlefield_keyword_badges.insert(obj_id, badges);
+        }
+        let linked: Vec<ObjectId> = crate::game::exile_links::live_links_for_source(state, obj_id)
+            .map(|link| link.exiled_id)
+            .collect();
+        if !linked.is_empty() {
+            views.linked_exile_ids.insert(obj_id, linked);
         }
         if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
             views.temporary_cant_be_blocked.insert(obj_id, source_id);

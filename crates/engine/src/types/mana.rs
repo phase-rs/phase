@@ -158,8 +158,8 @@ impl FromIterator<ManaColor> for LifePaymentColors {
 /// `compute_phyrexian_shards`, `maybe_pause_for_phyrexian_choice`, etc.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CostPermissionContext {
-    /// CR 609.4b: `SpendManaAsAnyColor` grants (Chromatic Lantern etc.).
-    pub any_color: bool,
+    /// CR 118.14 + CR 609.4b: preserve whether the concession also covers {C}.
+    pub mana_spend_permission: Option<super::ability::ManaSpendPermission>,
     /// CR 119.8 budget: maximum life this player can spend on Phyrexian-shape
     /// shards in this payment (respects CantLoseLife → 0).
     pub max_life: u32,

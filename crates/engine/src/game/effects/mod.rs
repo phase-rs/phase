@@ -223,6 +223,7 @@ pub mod solve_case;
 pub mod specialize;
 pub mod speed_effects;
 pub mod spellbook;
+pub mod stack_reach;
 pub mod stickers;
 pub mod turn_face_down;
 pub mod turn_face_up;
@@ -3313,16 +3314,22 @@ fn prepare_one_sided_fight_child(
     state: &mut GameState,
 ) -> ResolvedAbility {
     let mut prepared = child.clone();
+    apply_parent_chain_context(&mut prepared, parent, effect_context_object, state);
+    bind_one_sided_fight_subject(&mut prepared, subject);
+    prepared
+}
+
+/// CR 120.1 + CR 608.2b: apply the `[subject, recipient…]` contract to a
+/// one-sided-fight damage child and record how its subject bound.
+fn bind_one_sided_fight_subject(child: &mut ResolvedAbility, subject: OneSidedFightSubject) {
     let binding = match subject {
         OneSidedFightSubject::Prepend(source) => {
-            prepared.targets.insert(0, TargetRef::Object(source));
+            child.targets.insert(0, TargetRef::Object(source));
             TargetDamageSourceBinding::Bound
         }
         OneSidedFightSubject::Illegal => TargetDamageSourceBinding::Illegal,
     };
-    apply_parent_chain_context(&mut prepared, parent, effect_context_object, state);
-    prepared.context.target_damage_source = Some(binding);
-    prepared
+    child.context.target_damage_source = Some(binding);
 }
 
 // CR 608.2c: Most legacy effect resolvers bind `ParentTarget` through the
@@ -13417,101 +13424,7 @@ pub fn resolve_ability_chain(
     // Clear stale revealed IDs at the top-level chain entry to prevent leaking
     // across unrelated ability resolutions.
     if depth == 0 {
-        state.last_revealed_ids.clear();
-        // CR 608.2c + CR 122.1: `ChooseCounterKind` overwrites this before
-        // every instruction, and a new top-level resolution cannot inherit a
-        // prior resolution's "that kind" if no such instruction is reached.
-        state.chosen_counter_kind_this_resolution = None;
-        // CR 608.2d: same reasoning, one axis over — a new top-level
-        // resolution cannot inherit a prior resolution's announced colour.
-        state.chosen_color_this_resolution = None;
-        // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
-        // `apply_parent_chain_context` already consumes this at the very next
-        // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets
-        // it, but one with no sub_ability at all would otherwise leave it
-        // dangling `Some` until some unrelated LATER resolution's first
-        // hand-off (e.g. Avenging Angel's LTB self-return). Reset at every
-        // fresh resolution so that can never happen.
-        state.last_parent_target_missing_reason = None;
-        // CR 701.20e: A new top-level resolution ends any prior private "look at"
-        // peek window — the looked-at card from an unrelated resolution must not
-        // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
-        // decision (which re-enters at depth 1) preserves the peek it depends on.
-        state.private_look_ids.clear();
-        state.private_look_player = None;
-        state.last_zone_changed_ids.clear();
-        state.exile_rider_countered_ids.clear();
-        // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
-        // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
-        // alongside `last_zone_changed_ids` so cross-resolution leakage is
-        // impossible.
-        state.last_vote_ballots = crate::im::Vector::new();
-        // CR 101.4 + CR 608.2d: Per-resolution secret-number ledger. A per-player
-        // `Effect::Choose { NumberRange }` fan-out records each answer as
-        // `ChosenAttribute::Number` on the chooser (`bind_named_choice`), and
-        // `QuantityRef::PlayerChosenNumber` folds those into "the highest/lowest
-        // number". `Player::chosen_attributes` is otherwise DURABLE (players never
-        // change zones), so without this reset a later card whose choosers are a
-        // SUBSET of the table — Life at Stake's "you and target creature's
-        // controller" — would fold in bystanders' numbers left over from an
-        // earlier Wheel of Misfortune. Cleared alongside `last_vote_ballots`, the
-        // sibling per-player choice ledger, for the same reason. The player axis
-        // stores no other `Number`, so nothing else is disturbed.
-        for player in state.players.iter_mut() {
-            player.chosen_attributes.retain(|attribute| {
-                !matches!(
-                    attribute,
-                    ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
-                )
-            });
-        }
-        state.last_effect_amount = None;
-        // CR 120.10: resolution-local excess channel resets with its total twin.
-        state.last_effect_excess_amount = None;
-        // NOTE: `state.die_result_this_resolution` is intentionally NOT cleared
-        // here. `roll_die::resolve` stamps it AFTER this depth-0 prelude runs
-        // (the prelude runs once at chain top, before `RollDie` executes), so
-        // the inline class still reads a live value. Clearing it here would wipe
-        // the value carried onto a reflexive "When you do … the result"
-        // sub-ability entry before that entry resolves (CR 603.12). Cross-
-        // resolution isolation comes from the four `stack.rs` reset sites and
-        // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
-        state.last_effect_counts_by_player.clear();
-        state.exiled_from_hand_this_resolution = 0;
-        // CR 603.12a: a completed repeated-payment frame retains K while its
-        // reflexive modal is open. The next top-level resolution no longer
-        // needs that cap, so discard only an owner whose driver is absent.
-        if state
-            .active_repeated_optional_payment_frame()
-            .is_some_and(|frame| frame.pending.is_none())
-        {
-            state
-                .take_active_repeated_optional_payment_frame()
-                .expect("completed repeated-payment frame must remain active");
-        }
-        // CR 608.2e: The clause-local equalization snapshot is resolution-
-        // scoped. It is overwritten per `player_scope` link within a chain
-        // (and survives the interactive `EffectZoneChoice` drain, which
-        // resumes at depth 1), so clearing it only at depth-0 chain entry
-        // disposes of any residue without disturbing an in-flight Balance.
-        state.clause_minimum_snapshot = None;
-        // CR 603.7: Chain-local tracked-set identity — resets per top-level
-        // ability resolution so compound zone changes within one chain
-        // coalesce into a single tracked set, while unrelated resolutions
-        // stay isolated.
-        state.chain_tracked_set_id = None;
-        // CR 700.2: the edge latch for the mode boundary below. It is cleared
-        // HERE, in the same line group as `chain_tracked_set_id`, and that
-        // ADJACENCY IS LOAD-BEARING: the latch means "the chain set has already
-        // been cleared for this mode", so a prelude that cleared one without the
-        // other would either suppress the first mode's reset (stale `Some(0)`
-        // from a previous resolution) or fire it against a set the previous
-        // resolution owned. Keep them together.
-        state.resolving_modal_instruction = None;
-        // CR 608.2c + CR 109.5: Player-action accumulator resets per
-        // top-level chain so "each opponent who searched this way" only sees
-        // players who acted in the current resolution.
-        state.player_actions_this_way.clear();
+        reset_top_level_resolution_state(state);
     }
 
     // CR 700.2 ("each of those options is a mode") + CR 608.2c (instructions in
@@ -13569,32 +13482,7 @@ pub fn resolve_ability_chain(
     // `casting_costs::push_ability_entry` (and the loyalty path in
     // `planeswalker`), so they DO bump this counter.
     if depth == 0 {
-        if let Some(idx) = ability.ability_index {
-            let count = state
-                .ability_resolutions_this_turn
-                .entry((ability.source_id, idx))
-                .or_insert(0);
-            *count += 1;
-        }
-        // CR 705.2 + CR 608.2c: `resolution_coin_flip` is scoped to a single
-        // resolution — a `CoinFlipOutcome` gate ("if you lose the flip, repeat
-        // this process") must read only a flip performed DURING this resolution,
-        // never one left over from a prior spell/ability. Top-level entry is the
-        // authoritative resolution-lifetime boundary (CR 608.2c: a resolution is
-        // one ordered execution of the object's instructions), so clear any
-        // prior resolution's flip here, before any instruction runs. This single
-        // reset covers every exit shape uniformly — a `WhileCondition` loop that
-        // ran to COMPLETION, a bounded loop that hit its cap, and the no-loop
-        // case — so a stale result can never survive into the next resolution.
-        // (A resumed continuation or a repeated iteration re-enters at depth > 0
-        // and intentionally preserves the flip it just produced; the per-iteration
-        // clear inside the `WhileCondition` branch handles the intra-loop boundary.)
-        // NOTE: `run_flip_branch` resolves a flip's win/lose sub-effect at depth 0,
-        // so this clear also fires there — harmless because a `CoinFlipOutcome`
-        // gate is only ever produced for the BARE-flip "repeat this process"
-        // pattern (`strip_coin_flip_conditional` requires the body to be the
-        // repeat directive), and a bare flip has no win/lose branch to re-enter.
-        state.resolution_coin_flip = None;
+        count_top_level_resolution(state, ability);
     }
 
     // CR 608.2c + CR 107.1c: "Repeat this process" dispatch — the non-count
@@ -13737,6 +13625,137 @@ pub fn resolve_ability_chain(
             }
         }
     }
+}
+
+/// The per-resolution state `resolve_ability_chain` clears before a top-level
+/// chain's first instruction.
+fn reset_top_level_resolution_state(state: &mut GameState) {
+    state.last_revealed_ids.clear();
+    // CR 608.2c + CR 122.1: `ChooseCounterKind` overwrites this before
+    // every instruction, and a new top-level resolution cannot inherit a
+    // prior resolution's "that kind" if no such instruction is reached.
+    state.chosen_counter_kind_this_resolution = None;
+    // CR 608.2d: same reasoning, one axis over — a new top-level
+    // resolution cannot inherit a prior resolution's announced colour.
+    state.chosen_color_this_resolution = None;
+    // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
+    // `apply_parent_chain_context` already consumes this at the very next
+    // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets
+    // it, but one with no sub_ability at all would otherwise leave it
+    // dangling `Some` until some unrelated LATER resolution's first
+    // hand-off (e.g. Avenging Angel's LTB self-return). Reset at every
+    // fresh resolution so that can never happen.
+    state.last_parent_target_missing_reason = None;
+    // CR 701.20e: A new top-level resolution ends any prior private "look at"
+    // peek window — the looked-at card from an unrelated resolution must not
+    // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
+    // decision (which re-enters at depth 1) preserves the peek it depends on.
+    state.private_look_ids.clear();
+    state.private_look_player = None;
+    state.last_zone_changed_ids.clear();
+    state.exile_rider_countered_ids.clear();
+    // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
+    // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
+    // alongside `last_zone_changed_ids` so cross-resolution leakage is
+    // impossible.
+    state.last_vote_ballots = crate::im::Vector::new();
+    // CR 101.4 + CR 608.2d: Per-resolution secret-number ledger. A per-player
+    // `Effect::Choose { NumberRange }` fan-out records each answer as
+    // `ChosenAttribute::Number` on the chooser (`bind_named_choice`), and
+    // `QuantityRef::PlayerChosenNumber` folds those into "the highest/lowest
+    // number". `Player::chosen_attributes` is otherwise DURABLE (players never
+    // change zones), so without this reset a later card whose choosers are a
+    // SUBSET of the table — Life at Stake's "you and target creature's
+    // controller" — would fold in bystanders' numbers left over from an
+    // earlier Wheel of Misfortune. Cleared alongside `last_vote_ballots`, the
+    // sibling per-player choice ledger, for the same reason. The player axis
+    // stores no other `Number`, so nothing else is disturbed.
+    for player in state.players.iter_mut() {
+        player.chosen_attributes.retain(|attribute| {
+            !matches!(
+                attribute,
+                ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+            )
+        });
+    }
+    state.last_effect_amount = None;
+    // CR 120.10: resolution-local excess channel resets with its total twin.
+    state.last_effect_excess_amount = None;
+    // NOTE: `state.die_result_this_resolution` is intentionally NOT cleared
+    // here. `roll_die::resolve` stamps it AFTER this depth-0 prelude runs
+    // (the prelude runs once at chain top, before `RollDie` executes), so
+    // the inline class still reads a live value. Clearing it here would wipe
+    // the value carried onto a reflexive "When you do … the result"
+    // sub-ability entry before that entry resolves (CR 603.12). Cross-
+    // resolution isolation comes from the four `stack.rs` reset sites and
+    // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
+    state.last_effect_counts_by_player.clear();
+    state.exiled_from_hand_this_resolution = 0;
+    // CR 603.12a: a completed repeated-payment frame retains K while its
+    // reflexive modal is open. The next top-level resolution no longer
+    // needs that cap, so discard only an owner whose driver is absent.
+    if state
+        .active_repeated_optional_payment_frame()
+        .is_some_and(|frame| frame.pending.is_none())
+    {
+        state
+            .take_active_repeated_optional_payment_frame()
+            .expect("completed repeated-payment frame must remain active");
+    }
+    // CR 608.2e: The clause-local equalization snapshot is resolution-
+    // scoped. It is overwritten per `player_scope` link within a chain
+    // (and survives the interactive `EffectZoneChoice` drain, which
+    // resumes at depth 1), so clearing it only at depth-0 chain entry
+    // disposes of any residue without disturbing an in-flight Balance.
+    state.clause_minimum_snapshot = None;
+    // CR 603.7: Chain-local tracked-set identity — resets per top-level
+    // ability resolution so compound zone changes within one chain
+    // coalesce into a single tracked set, while unrelated resolutions
+    // stay isolated.
+    state.chain_tracked_set_id = None;
+    // CR 700.2: the edge latch for the mode boundary in `resolve_ability_chain`. It is cleared
+    // HERE, in the same line group as `chain_tracked_set_id`, and that
+    // ADJACENCY IS LOAD-BEARING: the latch means "the chain set has already
+    // been cleared for this mode", so a prelude that cleared one without the
+    // other would either suppress the first mode's reset (stale `Some(0)`
+    // from a previous resolution) or fire it against a set the previous
+    // resolution owned. Keep them together.
+    state.resolving_modal_instruction = None;
+    // CR 608.2c + CR 109.5: Player-action accumulator resets per
+    // top-level chain so "each opponent who searched this way" only sees
+    // players who acted in the current resolution.
+    state.player_actions_this_way.clear();
+}
+
+/// The per-resolution counters `resolve_ability_chain` keeps for a top-level
+/// chain before its first instruction.
+fn count_top_level_resolution(state: &mut GameState, ability: &ResolvedAbility) {
+    if let Some(idx) = ability.ability_index {
+        let count = state
+            .ability_resolutions_this_turn
+            .entry((ability.source_id, idx))
+            .or_insert(0);
+        *count += 1;
+    }
+    // CR 705.2 + CR 608.2c: `resolution_coin_flip` is scoped to a single
+    // resolution — a `CoinFlipOutcome` gate ("if you lose the flip, repeat
+    // this process") must read only a flip performed DURING this resolution,
+    // never one left over from a prior spell/ability. Top-level entry is the
+    // authoritative resolution-lifetime boundary (CR 608.2c: a resolution is
+    // one ordered execution of the object's instructions), so clear any
+    // prior resolution's flip here, before any instruction runs. This single
+    // reset covers every exit shape uniformly — a `WhileCondition` loop that
+    // ran to COMPLETION, a bounded loop that hit its cap, and the no-loop
+    // case — so a stale result can never survive into the next resolution.
+    // (A resumed continuation or a repeated iteration re-enters at depth > 0
+    // and intentionally preserves the flip it just produced; the per-iteration
+    // clear inside the `WhileCondition` branch handles the intra-loop boundary.)
+    // NOTE: `run_flip_branch` resolves a flip's win/lose sub-effect at depth 0,
+    // so this clear also fires there — harmless because a `CoinFlipOutcome`
+    // gate is only ever produced for the BARE-flip "repeat this process"
+    // pattern (`strip_coin_flip_conditional` requires the body to be the
+    // repeat directive), and a bare flip has no win/lose branch to re-enter.
+    state.resolution_coin_flip = None;
 }
 
 /// CR 608.2c: Loop-continuation predicate for `RepeatContinuation::WhileCondition`.
@@ -14072,16 +14091,7 @@ fn resolve_chain_body(
     // and must not get one: splitting it per player would give each iteration
     // its own chain tracked set, breaking the single accumulated "this way" set
     // its sub-chain reads (Kozilek, the Broken Reality).
-    if ability.multi_target.is_some()
-        && effect_target_filter(&ability.effect).is_some_and(is_multi_target_player_filter)
-        && !matches!(
-            ability.effect,
-            Effect::ChooseFromZone {
-                zone_owner: crate::types::ability::ZoneOwner::Each(_),
-                ..
-            }
-        )
-    {
+    if resolves_for_each_target_player(ability) {
         let chosen_players: Vec<PlayerId> = ability
             .targets
             .iter()
@@ -14168,36 +14178,7 @@ fn resolve_chain_body(
     // effect, preserving the full resolution flow (tracked sets, continuations).
     let ability = if let Some(ref sub) = ability.sub_ability {
         // CR 608.2c: "Instead" kicker — swap parent effect with override sub's effect.
-        let should_swap = if matches!(
-            sub.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        ) {
-            ability.context.additional_cost_paid
-        } else if let Some(AbilityCondition::CastVariantPaidInstead { variant }) = sub.condition {
-            // CR 608.2c + CR 702.49 + CR 702.190a: Read from GameObject, not SpellContext
-            state
-                .objects
-                .get(&ability.source_id)
-                .map(|obj| obj.cast_variant_paid == Some((variant, state.turn_number)))
-                .unwrap_or(false)
-        } else if let Some(AbilityCondition::TargetHasKeywordInstead { ref keyword }) =
-            sub.condition
-        {
-            // CR 608.2c: Check if the first resolved object target has the keyword.
-            ability
-                .targets
-                .iter()
-                .find_map(|t| match t {
-                    TargetRef::Object(id) => state.objects.get(id),
-                    _ => None,
-                })
-                .is_some_and(|obj| obj.has_keyword(keyword))
-        } else if let Some(AbilityCondition::ConditionInstead { ref inner }) = sub.condition {
-            // CR 608.2c: General "instead" replacement — evaluate the wrapped condition.
-            evaluate_condition(inner, state, ability)
-        } else {
-            false
-        };
+        let should_swap = instead_swap_applies(state, ability, sub);
         if should_swap {
             // CR 608.2c: Single-authority swap helper preserves
             // every effect-shape field on the sub (player_scope, optional,
@@ -15112,74 +15093,7 @@ fn resolve_chain_body(
             // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
-            let resolved_cost = match &unless_pay.cost {
-                AbilityCost::PerCounter {
-                    counter,
-                    target,
-                    base,
-                } => {
-                    // CR 702.24a + CR 702.24b: Count counters on `target` at
-                    // resolution time so multi-instance reads the post-tick
-                    // total.
-                    let n = match target {
-                        TargetFilter::SelfRef => state
-                            .objects
-                            .get(&ability.source_id)
-                            .map(|obj| obj.counters.get(counter).copied().unwrap_or(0))
-                            .unwrap_or(0),
-                        other => {
-                            // CR 702.24a: No current mechanic constructs a
-                            // non-SelfRef `PerCounter`. If one ever does,
-                            // returning 0 routes through the CR 118.5 zero-
-                            // cost short-circuit (the unless-effect proceeds
-                            // without prompting), which is the least-
-                            // surprising default until the target-resolution
-                            // branch is implemented.
-                            // CR 113.6b: TargetFilter resolution against game
-                            // state belongs in `game/filter.rs`; wire it here
-                            // when the second mechanic lands.
-                            tracing::warn!(
-                                "PerCounter resolution against non-SelfRef target {:?} \
-                                 not yet implemented; defaulting to n=0",
-                                other
-                            );
-                            0
-                        }
-                    };
-                    expand_per_counter(base, n)
-                }
-                AbilityCost::ManaDynamic { quantity } => {
-                    // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
-                    // X drives the unless-cost. The plain resolve_quantity path
-                    // passes chosen_x=None, making a bare {X} unless-cost always
-                    // resolve to 0 and wrongly short-circuit via CR 118.5.
-                    let amount = crate::game::quantity::resolve_quantity_with_targets(
-                        state, quantity, ability,
-                    );
-                    AbilityCost::Mana {
-                        cost: ManaCost::generic(amount.max(0) as u32),
-                    }
-                }
-                // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
-                // the ability source's OWN printed mana cost at resolution time. The
-                // cost is dynamic because the granting Aura can be attached to any
-                // permanent (Pendrell Flux, Disruption Aura). An absent source or a
-                // costless source (land, token, other permanent with no mana cost)
-                // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
-                // as an UNPAYABLE cost; the dedicated unpayable branch below handles
-                // it (kept distinct from the `{0}` "always payable" short-circuit).
-                AbilityCost::Mana {
-                    cost: ManaCost::SelfManaCost,
-                } => {
-                    let cost = state
-                        .objects
-                        .get(&ability.source_id)
-                        .map(|obj| obj.mana_cost.clone())
-                        .unwrap_or(ManaCost::NoCost);
-                    AbilityCost::Mana { cost }
-                }
-                other => other.clone(),
-            };
+            let resolved_cost = resolved_unless_cost(state, ability, &unless_pay.cost);
             // CR 118.5 + CR 118.12a: Zero-mana unless cost short-circuit.
             // Pre-fold (2026-05-09 audit) the counter and tax/trigger paths
             // had divergent behavior here:
@@ -15452,23 +15366,7 @@ fn resolve_chain_body(
 
         // CR 608.2b: Validate SharesQuality group constraints before applying effects.
         // If targets don't share the required quality, skip the effect.
-        let shares_quality_failed = if effective.targets.len() >= 2 {
-            if let Some(target_filter) = effect_target_filter(&effective.effect) {
-                let constraints = extract_shares_quality_props(target_filter);
-                constraints.iter().any(|(quality, relation)| {
-                    let shares =
-                        filter::validate_shares_quality(state, &effective.targets, quality);
-                    match relation {
-                        SharedQualityRelation::Shares => !shares,
-                        SharedQualityRelation::DoesNotShare => shares,
-                    }
-                })
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let shares_quality_failed = fails_shared_quality(state, effective);
 
         if shares_quality_failed {
             // Group constraint not met — emit EffectResolved but skip execution.
@@ -17583,16 +17481,7 @@ fn resolve_chain_body(
             // bound. Broken Bond's land-put
             // (`ChangeZone { target: Typed(Land ∧ InZone(Hand)), .. }`)
             // matches; Beseech's tracked-set-bound cast and fallback do not.
-            let has_independent_target_slot = sub_has_independent_object_target_slot(sub);
-            sub_with_targets.targets = ability
-                .targets
-                .iter()
-                .filter(|target_ref| match target_ref {
-                    TargetRef::Player(_) => true,
-                    TargetRef::Object(_) => !has_independent_target_slot,
-                })
-                .cloned()
-                .collect();
+            sub_with_targets.targets = inherited_parent_targets(ability, sub);
             apply_parent_chain_context(
                 &mut sub_with_targets,
                 ability,
@@ -17670,6 +17559,170 @@ pub(crate) fn record_player_action_this_turn(
     action: PlayerActionKind,
 ) {
     state.player_actions_this_turn.push((player, action));
+}
+
+/// A single-player-recipient instruction over "any number of target players",
+/// which `resolve_chain_body` resolves once per chosen player unless exactly one
+/// was chosen.
+fn resolves_for_each_target_player(ability: &ResolvedAbility) -> bool {
+    ability.multi_target.is_some()
+        && effect_target_filter(&ability.effect).is_some_and(is_multi_target_player_filter)
+        && !matches!(
+            ability.effect,
+            Effect::ChooseFromZone {
+                zone_owner: crate::types::ability::ZoneOwner::Each(_),
+                ..
+            }
+        )
+}
+
+/// CR 608.2c: whether `sub`, an "instead" override, replaces `ability`'s effect.
+fn instead_swap_applies(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    sub: &ResolvedAbility,
+) -> bool {
+    if matches!(
+        sub.condition,
+        Some(AbilityCondition::AdditionalCostPaidInstead)
+    ) {
+        ability.context.additional_cost_paid
+    } else if let Some(AbilityCondition::CastVariantPaidInstead { variant }) = sub.condition {
+        // CR 608.2c + CR 702.49 + CR 702.190a: Read from GameObject, not SpellContext
+        state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.cast_variant_paid == Some((variant, state.turn_number)))
+            .unwrap_or(false)
+    } else if let Some(AbilityCondition::TargetHasKeywordInstead { ref keyword }) = sub.condition {
+        // CR 608.2c: Check if the first resolved object target has the keyword.
+        ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => state.objects.get(id),
+                _ => None,
+            })
+            .is_some_and(|obj| obj.has_keyword(keyword))
+    } else if let Some(AbilityCondition::ConditionInstead { ref inner }) = sub.condition {
+        // CR 608.2c: General "instead" replacement — evaluate the wrapped condition.
+        evaluate_condition(inner, state, ability)
+    } else {
+        false
+    }
+}
+
+/// CR 118.4 + CR 107.3c: an unless cost as a fixed cost, resolved from the
+/// current game state.
+fn resolved_unless_cost(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    cost: &AbilityCost,
+) -> AbilityCost {
+    match cost {
+        AbilityCost::PerCounter {
+            counter,
+            target,
+            base,
+        } => {
+            // CR 702.24a + CR 702.24b: Count counters on `target` at
+            // resolution time so multi-instance reads the post-tick
+            // total.
+            let n = match target {
+                TargetFilter::SelfRef => state
+                    .objects
+                    .get(&ability.source_id)
+                    .map(|obj| obj.counters.get(counter).copied().unwrap_or(0))
+                    .unwrap_or(0),
+                other => {
+                    // CR 702.24a: No current mechanic constructs a
+                    // non-SelfRef `PerCounter`. If one ever does,
+                    // returning 0 routes through the CR 118.5 zero-
+                    // cost short-circuit (the unless-effect proceeds
+                    // without prompting), which is the least-
+                    // surprising default until the target-resolution
+                    // branch is implemented.
+                    // CR 113.6b: TargetFilter resolution against game
+                    // state belongs in `game/filter.rs`; wire it here
+                    // when the second mechanic lands.
+                    tracing::warn!(
+                        "PerCounter resolution against non-SelfRef target {:?} \
+                         not yet implemented; defaulting to n=0",
+                        other
+                    );
+                    0
+                }
+            };
+            expand_per_counter(base, n)
+        }
+        AbilityCost::ManaDynamic { quantity } => {
+            // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
+            // X drives the unless-cost. The plain resolve_quantity path
+            // passes chosen_x=None, making a bare {X} unless-cost always
+            // resolve to 0 and wrongly short-circuit via CR 118.5.
+            let amount =
+                crate::game::quantity::resolve_quantity_with_targets(state, quantity, ability);
+            AbilityCost::Mana {
+                cost: ManaCost::generic(amount.max(0) as u32),
+            }
+        }
+        // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
+        // the ability source's OWN printed mana cost at resolution time. The
+        // cost is dynamic because the granting Aura can be attached to any
+        // permanent (Pendrell Flux, Disruption Aura). An absent source or a
+        // costless source (land, token, other permanent with no mana cost)
+        // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
+        // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
+        // it (kept distinct from the `{0}` "always payable" short-circuit).
+        AbilityCost::Mana {
+            cost: ManaCost::SelfManaCost,
+        } => {
+            let cost = state
+                .objects
+                .get(&ability.source_id)
+                .map(|obj| obj.mana_cost.clone())
+                .unwrap_or(ManaCost::NoCost);
+            AbilityCost::Mana { cost }
+        }
+        other => other.clone(),
+    }
+}
+
+/// CR 608.2b: a group constraint ("that share a color") that the targets fail,
+/// so `resolve_chain_body` skips the effect.
+fn fails_shared_quality(state: &GameState, effective: &ResolvedAbility) -> bool {
+    if effective.targets.len() >= 2 {
+        if let Some(target_filter) = effect_target_filter(&effective.effect) {
+            let constraints = extract_shares_quality_props(target_filter);
+            constraints.iter().any(|(quality, relation)| {
+                let shares = filter::validate_shares_quality(state, &effective.targets, quality);
+                match relation {
+                    SharedQualityRelation::Shares => !shares,
+                    SharedQualityRelation::DoesNotShare => shares,
+                }
+            })
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+/// CR 115.6 + CR 608.2c: the parent targets an undeclared child inherits on the
+/// chain's ordinary descent: every player, and every object unless the child
+/// owns an independent object slot.
+fn inherited_parent_targets(parent: &ResolvedAbility, sub: &ResolvedAbility) -> Vec<TargetRef> {
+    let has_independent_target_slot = sub_has_independent_object_target_slot(sub);
+    parent
+        .targets
+        .iter()
+        .filter(|target_ref| match target_ref {
+            TargetRef::Player(_) => true,
+            TargetRef::Object(_) => !has_independent_target_slot,
+        })
+        .cloned()
+        .collect()
 }
 
 /// CR 608.2c + CR 609.3: Whether a producer already bound this node's referent

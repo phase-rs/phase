@@ -1,4 +1,6 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -38,8 +40,12 @@ pub fn resolve(
             rng,
             ..
         } = state;
-        if let Some(set) = tracked_object_sets.get_mut(&id) {
+        let pile = tracked_object_sets.get_mut(&id).map(|set| {
             set.shuffle(rng);
+            set.clone()
+        });
+        if let Some(pile) = pile {
+            crate::game::exile_links::reset_look_latches(state, &pile);
         }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Shuffle,
@@ -49,15 +55,25 @@ pub fn resolve(
         return Ok(());
     }
 
-    let target_player = if matches!(shuffle_target, TargetFilter::Owner) {
+    let target_player = match &shuffle_target {
         // CR 400.3: "its owner's library" resolves to the owner of source_id.
-        state
+        TargetFilter::Owner => state
             .objects
             .get(&ability.source_id)
             .map(|obj| obj.owner)
-            .unwrap_or(ability.controller)
-    } else {
-        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+            .unwrap_or(ability.controller),
+        // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
+        TargetFilter::ParentTargetSlot { index } => {
+            match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+            {
+                Some(TargetRef::Player(player)) => player,
+                Some(TargetRef::Object(_)) => {
+                    super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                }
+                None => return Ok(()),
+            }
+        }
+        _ => super::resolve_player_for_context_ref(state, ability, &shuffle_target),
     };
 
     // CR 701.24a: the target player must exist before any shuffle logic runs.

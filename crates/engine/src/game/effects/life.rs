@@ -595,7 +595,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-fn resolve_life_loss_target(
+pub(super) fn resolve_life_loss_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: Option<&TargetFilter>,

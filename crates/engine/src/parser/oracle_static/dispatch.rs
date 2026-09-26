@@ -1265,6 +1265,7 @@ pub(crate) fn parse_static_line_inner(
             StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
                 spell_filter: None,
                 activation_source_filter: None,
+                concession: crate::types::ability::ManaSpendPermission::AnyColor,
             })
             .affected(TargetFilter::Player)
             .description(text.to_string()),

@@ -35577,12 +35577,12 @@ fn phyrexian_submit_rejects_stale_paylife_under_insufficient_life() {
     // will reject PayLife. This path is exercised through the dispatcher, not directly.
     // Here we assert the shape is correct by re-computing shards.
     let spell_meta = build_spell_meta(&state, PlayerId(0), spell);
-    let any_color =
-        crate::game::static_abilities::player_can_spend_as_any_color(&state, PlayerId(0));
+    let mana_spend_permission =
+        crate::game::static_abilities::player_board_wide_mana_spend_permission(&state, PlayerId(0));
     let permissions = crate::game::static_abilities::build_cost_permission_context(
         &state,
         PlayerId(0),
-        any_color,
+        mana_spend_permission,
     );
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let current_shards = crate::game::mana_payment::compute_phyrexian_shards(
@@ -49067,9 +49067,10 @@ fn exile_static_any_color_casts_off_color_for_authorized_controller_only() {
         !spell_objects_available_to_cast(&state, PlayerId(1)).contains(&spell),
         "the card owner must not inherit the source controller's static permission"
     );
-    assert!(exile_static_permission_grants_any_color(
-        &state, player, spell, source
-    ));
+    assert_eq!(
+        exile_static_mana_spend_permission(&state, player, spell, source),
+        Some(ManaSpendPermission::AnyColor)
+    );
 
     let mut runner = crate::game::scenario::GameRunner::from_state(state);
     let outcome = runner.cast(spell).resolve();
@@ -49146,6 +49147,7 @@ fn add_vizier_filtered_any_type_source(state: &mut GameState, player: PlayerId) 
     let def = StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
         spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
         activation_source_filter: None,
+        concession: crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
     })
     .affected(TargetFilter::Controller);
     state
@@ -49188,8 +49190,8 @@ fn add_single_blue_spell(
 /// form, the noncreature assertion below flips (a sorcery would also become
 /// payable). If the static is removed entirely, the creature assertion flips
 /// (the {U} cost becomes unpayable from a red-only pool). The seam under test
-/// is `player_can_spend_as_any_color_for_spell_object` →
-/// `player_can_spend_as_any_color_for_optional_spell` →
+/// is `player_mana_spend_permission_for_spell_object` →
+/// `player_mana_spend_permission_for_optional_spell` →
 /// `can_pay_cost_after_auto_tap`.
 #[test]
 fn vizier_filtered_static_grants_any_type_mana_for_creature_spells() {
@@ -49220,10 +49222,11 @@ fn vizier_filtered_static_grants_any_type_mana_for_creature_spells() {
     add_mana(&mut state, player, ManaType::Red, 2);
 
     // POSITIVE: a creature spell matches the filter, so off-color mana pays.
-    assert!(
-        crate::game::static_abilities::player_can_spend_as_any_color_for_spell_object(
+    assert_eq!(
+        crate::game::static_abilities::player_mana_spend_permission_for_spell_object(
             &state, player, creature
         ),
+        Some(ManaSpendPermission::AnyTypeOrColor),
         "the filtered static must grant any-type-mana spend for a creature spell"
     );
     assert!(
@@ -49239,10 +49242,11 @@ fn vizier_filtered_static_grants_any_type_mana_for_creature_spells() {
     // NEGATIVE: a noncreature spell does NOT match the filter — off-color mana
     // must NOT help. This is what distinguishes the filtered static from the
     // unfiltered board-wide form.
-    assert!(
-        !crate::game::static_abilities::player_can_spend_as_any_color_for_spell_object(
+    assert_eq!(
+        crate::game::static_abilities::player_mana_spend_permission_for_spell_object(
             &state, player, sorcery
         ),
+        None,
         "the filtered static must NOT grant any-type-mana spend for a noncreature spell"
     );
     assert!(
@@ -53582,7 +53586,7 @@ mod plot_from_library {
 /// must (a) forward the concession onto the granted `ExileWithAltCost`
 /// (`grant_lingering_permissions`) at the spell's PRINTED cost, and (b) let the
 /// grantee pay an off-color cost from a red-only pool
-/// (`player_can_spend_as_any_color_for_optional_spell`). Drives the production
+/// (`player_mana_spend_permission_for_optional_spell`). Drives the production
 /// grant resolver (`cast_from_zone::resolve`) and the production payability
 /// gate (`can_pay_cost_after_auto_tap`), then a full cast through `apply`.
 ///
@@ -54682,7 +54686,7 @@ fn graveyard_paid_cast_accept_off_color_pays_via_any_type_concession() {
     );
     // The concession is scoped to THIS spell via the granted permission.
     assert!(
-        player_can_spend_as_any_color_for_optional_spell(&state, PlayerId(0), Some(spell)),
+        player_mana_spend_permission_for_optional_spell(&state, PlayerId(0), Some(spell)).is_some(),
         "the any-type concession must be in force for the granted spell (CR 609.4b)"
     );
 
@@ -56184,7 +56188,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
 
     assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
     assert!(
-        !player_can_spend_as_any_color_for_optional_spell(&state, PlayerId(0), Some(spell)),
+        player_mana_spend_permission_for_optional_spell(&state, PlayerId(0), Some(spell)).is_none(),
         "the later sibling's AnyColor concession must not bind to the elected slot"
     );
     assert!(

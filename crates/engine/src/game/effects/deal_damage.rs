@@ -1345,35 +1345,9 @@ pub fn resolve(
     }
 
     // CR 120.3: Determine damage source.
-    let mut ctx = match damage_source {
-        // CR 120.1 + CR 608.2b: "Target creature deals damage..." — the chosen
-        // subject is the damage source, not the ability source. No subject
-        // means no damage at all; there is deliberately NO fallback to the
-        // spell here, because attributing the damage to the spell would let a
-        // clause whose subject is gone still deal it.
-        Some(DamageSource::Target) => match target_damage_source(state, ability) {
-            Some(ctx) => ctx,
-            None => {
-                no_damage_source_resolved(ability, events);
-                return Ok(());
-            }
-        },
-        // "That creature/permanent deals damage..." inside a triggered ability
-        // binds the damage source to the triggering event object.
-        Some(DamageSource::TriggeringSource) => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_source_from_event)
-            .and_then(|id| DamageContext::from_source(state, id))
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        None => DamageContext::from_source(state, ability.source_id)
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        // CR 120.1: multi-source per-power damage is dispatched to
-        // `resolve_each_target_power_damage` above (each source has its own
-        // `DamageContext`), so this single-source `ctx` match is never reached.
-        Some(DamageSource::EachTarget) => {
-            unreachable!("EachTarget handled by resolve_each_target_power_damage")
-        }
+    let Some(mut ctx) = single_damage_source(state, ability, damage_source) else {
+        no_damage_source_resolved(ability, events);
+        return Ok(());
     };
 
     // CR 120.4a + CR 608.2c: attach the active excess-redirect rider parsed onto
@@ -1395,23 +1369,7 @@ pub fn resolve(
     //
     // Other implicit-target filters (`Controller`) keep the pre-existing
     // "fall back when targets are empty" semantic.
-    let effective_targets = if matches!(target_filter, TargetFilter::EventTarget) {
-        // CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style non-target damage
-        // uses the exact object or player recipient carried by the triggering
-        // DamageDealt event. This is intentionally DealDamage-local; generic
-        // EventTarget filter resolution remains object-only.
-        match state.current_trigger_event.as_ref() {
-            Some(GameEvent::DamageDealt { target, .. }) => vec![target.clone()],
-            _ => Vec::new(),
-        }
-    } else {
-        resolve_effect_recipients(
-            state,
-            ability,
-            target_filter,
-            matches!(damage_source, Some(DamageSource::Target)),
-        )
-    };
+    let effective_targets = damage_recipients(state, ability);
 
     // CR 601.2d: If the caster distributed damage among targets at cast time,
     // apply per-target amounts from ability.distribution instead of uniform damage.
@@ -1500,6 +1458,129 @@ pub fn resolve_post_replacement(
     Ok(())
 }
 
+/// CR 120.2b: the object that deals a single-source `DealDamage` node's damage,
+/// or `None` where no object deals it.
+fn single_damage_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    damage_source: Option<DamageSource>,
+) -> Option<DamageContext> {
+    match damage_source {
+        // CR 120.1 + CR 608.2b: "Target creature deals damage..." — the chosen
+        // subject is the damage source, not the ability source. No subject
+        // means no damage at all; there is deliberately NO fallback to the
+        // spell here, because attributing the damage to the spell would let a
+        // clause whose subject is gone still deal it.
+        Some(DamageSource::Target) => target_damage_source(state, ability),
+        // "That creature/permanent deals damage..." inside a triggered ability
+        // binds the damage source to the triggering event object.
+        Some(DamageSource::TriggeringSource) => Some(
+            state
+                .current_trigger_event
+                .as_ref()
+                .and_then(crate::game::targeting::extract_source_from_event)
+                .and_then(|id| DamageContext::from_source(state, id))
+                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        ),
+        None => Some(
+            DamageContext::from_source(state, ability.source_id)
+                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        ),
+        // CR 120.1: multi-source per-power damage is dispatched to
+        // `resolve_each_target_power_damage` (each source has its own
+        // `DamageContext`) before a single source is asked for.
+        Some(DamageSource::EachTarget) => {
+            unreachable!("EachTarget handled by resolve_each_target_power_damage")
+        }
+    }
+}
+
+/// CR 120.2b: the objects that may deal a `DealDamage` node's damage: the one
+/// `resolve` binds for a single-source node, and every source target of a
+/// multi-source one. Shared with `stack_reach`, which proposes the node's
+/// damage events from them.
+pub(super) fn damage_sources(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    let Effect::DealDamage {
+        damage_source,
+        target: target_filter,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    if matches!(damage_source, Some(DamageSource::EachTarget)) {
+        return each_target_damage_split(state, ability, target_filter)
+            .map(|(_, sources)| sources)
+            .unwrap_or_default();
+    }
+    single_damage_source(state, ability, *damage_source)
+        .map(|ctx| ctx.source_id)
+        .into_iter()
+        .collect()
+}
+
+/// CR 120.3: the recipients of a `DealDamage` node. Shared by `resolve` and
+/// `stack_reach`, so a pending node is read with the resolver's own binding.
+pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let Effect::DealDamage {
+        damage_source,
+        target: target_filter,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    if matches!(damage_source, Some(DamageSource::EachTarget)) {
+        return each_target_damage_split(state, ability, target_filter)
+            .map(|(recipient, _)| vec![recipient])
+            .unwrap_or_default();
+    }
+    if matches!(target_filter, TargetFilter::EventTarget) {
+        // CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style non-target damage
+        // uses the exact object or player recipient carried by the triggering
+        // DamageDealt event. This is intentionally DealDamage-local; generic
+        // EventTarget filter resolution remains object-only.
+        return match state.current_trigger_event.as_ref() {
+            Some(GameEvent::DamageDealt { target, .. }) => vec![target.clone()],
+            _ => Vec::new(),
+        };
+    }
+    resolve_effect_recipients(
+        state,
+        ability,
+        target_filter,
+        matches!(damage_source, Some(DamageSource::Target)),
+    )
+}
+
+/// CR 120.1: a multi-source damage node's `(recipient, sources)`, or `None`
+/// when no target was chosen.
+fn each_target_damage_split(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<(TargetRef, Vec<ObjectId>)> {
+    // Partition the object targets into sources (all but the last) and the
+    // shared recipient (the last object target). A non-object implicit recipient
+    // (e.g. "deal damage to <player>") is resolved via `player_context_target`.
+    let object_targets: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+
+    if let Some(player_recipient) = player_context_target(state, ability, target_filter) {
+        // CR 120.3a: implicit/context player recipient (damage to a player
+        // causes life loss) — every object target is a source.
+        return Some((player_recipient, object_targets));
+    }
+    let (last, sources) = object_targets.split_last()?;
+    Some((TargetRef::Object(*last), sources.to_vec()))
+}
+
 /// CR 120.1 + CR 601.2c + CR 208.1 + CR 608.2: Resolve "each [of N target
 /// creatures] deals damage equal to their power to <recipient>"
 /// (`DamageSource::EachTarget`).
@@ -1547,34 +1628,17 @@ fn resolve_each_target_power_damage(
         _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
     };
 
-    // Partition the object targets into sources (all but the last) and the
-    // shared recipient (the last object target). A non-object implicit recipient
-    // (e.g. "deal damage to <player>") is resolved via `player_context_target`.
-    let object_targets: Vec<ObjectId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        .collect();
-
-    let (recipient, source_ids): (TargetRef, &[ObjectId]) =
-        if let Some(player_recipient) = player_context_target(state, ability, target_filter) {
-            // CR 120.3a: implicit/context player recipient (damage to a player
-            // causes life loss) — every object target is a source.
-            (player_recipient, object_targets.as_slice())
-        } else if let Some((last, sources)) = object_targets.split_last() {
-            (TargetRef::Object(*last), sources)
-        } else {
-            // No targets chosen ("up to N" with zero chosen) — nothing happens.
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-                subject: None,
-            });
-            return Ok(());
-        };
+    let Some((recipient, source_ids)) = each_target_damage_split(state, ability, target_filter)
+    else {
+        // No targets chosen ("up to N" with zero chosen) — nothing happens.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    };
+    let source_ids = source_ids.as_slice();
 
     // CR 608.2 + CR 208.1: read every source's own power up front, before any
     // damage is marked, so the simultaneous batch reads the pre-batch power for

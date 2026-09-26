@@ -22,8 +22,8 @@
 //! - [`HeistExile`](crate::types::ability::Effect::HeistExile) — the finalizer
 //!   continuation. The chosen card (carried on `ability.targets` by the answer
 //!   handler) is exiled from its owner's library, turned face down (CR 406.3),
-//!   linked to the source so the controller may look at it (mirrors Hideaway's
-//!   [`ExileLinkKind::HideawayLookable`]), and granted a permanent
+//!   linked to the source with a look link bound to the heister, who looked at
+//!   it and exiled it face down (CR 406.3), and granted a permanent
 //!   [`PlayFromExile`](crate::types::ability::CastingPermission::PlayFromExile)
 //!   permission with any-type-or-color mana. The controller may then cast that
 //!   card for as long as it remains exiled.
@@ -36,7 +36,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLinkKind, GameState, PendingContinuation, WaitingFor};
+use crate::types::game_state::{GameState, LookGrant, PendingContinuation, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::statics::CastFrequency;
 use crate::types::zones::Zone;
@@ -190,10 +190,8 @@ pub fn resolve_exile(
             return Ok(());
         }
 
-        // CR 406.3: turn the exiled card face down. CR 702.75a analogue: link it
-        // to the source with `HideawayLookable` so `visibility.rs` grants the
-        // controller the "may look at this card in exile" permission (the
-        // opponent cannot see it).
+        // CR 406.3: the heister looked at the card and exiled it face down, so
+        // they may keep looking at it while it stays in exile unshuffled.
         let linked = state.objects.get_mut(&obj_id).is_some_and(|obj| {
             if obj.zone == Zone::Exile {
                 obj.face_down = true;
@@ -203,7 +201,13 @@ pub fn resolve_exile(
             }
         });
         if linked {
-            exile_links::push_with_kind(state, obj_id, source_id, ExileLinkKind::HideawayLookable);
+            exile_links::push_look_link(
+                state,
+                obj_id,
+                source_id,
+                LookGrant::Player { player: controller },
+                controller,
+            );
 
             // Permanent "cast from exile" permission with any-type-or-color mana
             // (reminder: "for as long as it remains exiled" + "spend mana as

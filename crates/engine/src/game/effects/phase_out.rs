@@ -156,7 +156,7 @@ fn attachment_host_in_set(state: &GameState, oid: ObjectId, targets: &HashSet<Ob
 /// Resolve the target object set for a `PhaseOut` effect. Explicit
 /// `ability.targets` (from the targeting phase) take precedence; mass filters
 /// (e.g., `Typed Permanent / You`) are expanded against the battlefield.
-fn collect_object_targets(
+pub(super) fn collect_object_targets(
     state: &GameState,
     ability: &ResolvedAbility,
     target: &TargetFilter,

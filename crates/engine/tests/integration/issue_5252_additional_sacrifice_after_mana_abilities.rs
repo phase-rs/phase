@@ -852,6 +852,7 @@ fn deferred_sacrifice_artifact_granting_spend_permission_is_paid_before_it_leave
         .with_static(StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: engine::types::ability::ManaSpendPermission::AnyColor,
         })
         .with_ability_definition(
             AbilityDefinition::new(
@@ -1027,6 +1028,7 @@ fn finalize_rejection_happens_before_deferred_sacrifice_costs_are_paid() {
         .with_static(StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: engine::types::ability::ManaSpendPermission::AnyColor,
         })
         .with_ability_definition(
             AbilityDefinition::new(

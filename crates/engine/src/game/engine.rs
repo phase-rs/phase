@@ -13167,14 +13167,14 @@ fn apply_non_priority_pass_action(
                             Some(ability_index),
                         );
                     let activation_ctx = activation_context.as_payment_context();
-                    let any_color = casting::player_can_spend_as_any_color_for_payment(
+                    let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
                         state,
                         player,
                         Some(spell_object),
                         Some(&activation_ctx),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
-                        state, player, any_color,
+                        state, player, mana_spend_permission,
                     );
                     mana_payment::compute_phyrexian_shards(
                         &player_pool,
@@ -13187,14 +13187,14 @@ fn apply_non_priority_pass_action(
                     let spell_ctx = spell_meta
                         .as_ref()
                         .map(crate::types::mana::PaymentContext::Spell);
-                    let any_color = casting::player_can_spend_as_any_color_for_payment(
+                    let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
                         state,
                         player,
                         Some(spell_object),
                         spell_ctx.as_ref(),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
-                        state, player, any_color,
+                        state, player, mana_spend_permission,
                     );
                     mana_payment::compute_phyrexian_shards(
                         &player_pool,
@@ -16382,6 +16382,21 @@ fn record_exile_play_permission(
     state: &mut GameState,
     authorization: Option<casting::ExileLandPlayAuthorization>,
 ) {
+    // CR 116.2a + CR 611.2a: a single-use grant authorizes ONE play across its
+    // whole window, shared by every object stamped with the same tracked set.
+    // Spent here rather than inside the frequency match below because the two are
+    // independent axes: `single_use` is a grant-scoped budget, `CastFrequency` is
+    // a per-source per-turn slot, and a grant can carry either, both, or neither.
+    // Folding this into an arm of that match would silently skip it for every
+    // frequency the arm does not name — which is exactly how the land path came
+    // to spend nothing at all.
+    if let Some(casting::ExileLandPlayAuthorization::ObjectAttached {
+        single_use_group: Some(group),
+        ..
+    }) = authorization
+    {
+        super::casting::consume_single_use_play_from_exile(state, group);
+    }
     match authorization {
         Some(casting::ExileLandPlayAuthorization::ObjectAttached {
             source,
@@ -16610,14 +16625,23 @@ fn handle_play_land(
     let in_hand = player_data.hand.contains(&object_id);
     // CR 305.1 + CR 604.2: Check graveyard for play-from-graveyard permission
     // CR 604.2: Find graveyard play permission source (if any) for once-per-turn tracking.
-    let gy_permission_source = if player_data.graveyard.contains(&object_id) {
+    //
+    // DELIBERATELY NOT PRE-GATED on the acting player's OWN graveyard. CR 116.2a:
+    // a land is put onto the battlefield "from the zone it was in", and a
+    // `PlayFromExile` grant names the player it authorizes rather than the
+    // card's owner, so a land milled from an opponent's library is inside the
+    // printed permission. `graveyard_lands_playable_by_permission` is the single
+    // authority for that question and answers it across every graveyard (see
+    // `non_owner_graveyard_play_from_exile_grants`), so an owner test here is
+    // redundant with the lookup it guards and only makes the two DISAGREE:
+    // discovery would offer the land and this gate would reject the submitted
+    // opposite direction, where the gate admitted what discovery never offered.
+    // `an_opponent_owned_milled_land_is_offered_and_playable` pins the pair.
+    let gy_permission_source =
         super::casting::graveyard_lands_playable_by_permission(state, player)
             .iter()
             .find(|(obj_id, _)| *obj_id == object_id)
-            .map(|(_, source_id)| *source_id)
-    } else {
-        None
-    };
+            .map(|(_, source_id)| *source_id);
     let in_graveyard_with_permission = gy_permission_source.is_some();
 
     // CR 401.5 + CR 305.1: Check top of library for
@@ -16653,7 +16677,18 @@ fn handle_play_land(
             Some((src_id, frequency))
         });
     let in_library_with_permission = library_permission_src.is_some();
-    let exile_play_authorization = if state.exile.contains(&object_id) {
+    // CR 116.2a: a land is put onto the battlefield "from the zone it was in", so
+    // the play authority is elected by ZONE ELIGIBILITY, not by the exile zone
+    // alone. Gated on exile-or-graveyard to match
+    // `play_from_exile_object_in_cast_path`'s own zone contract — a land in the
+    // LIBRARY must not become playable through this route. Before this, a milled
+    // land carrying an object-attached grant was admitted above and then reached
+    // `finalize_committed_land_play` with no authorization, so its single-use
+    // budget was never spent and a sibling stayed playable.
+    let exile_play_authorization = if matches!(
+        state.objects.get(&object_id).map(|obj| obj.zone),
+        Some(Zone::Exile | Zone::Graveyard)
+    ) {
         super::casting::exile_land_play_authorization(state, player, object_id)
     } else {
         None
@@ -17154,7 +17189,13 @@ pub(super) fn handle_spend_pool_mana(
             .map(crate::types::mana::PaymentContext::Spell)
     };
 
-    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref()) {
+    let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
+        state,
+        player,
+        Some(object_id),
+        ctx.as_ref(),
+    );
+    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref(), mana_spend_permission) {
         return Err(EngineError::ActionNotAllowed(
             "Mana unit cannot pay any part of this cost".to_string(),
         ));
@@ -17180,13 +17221,14 @@ pub(super) fn handle_unspend_pool_mana(
 }
 
 /// CR 118.3a: True when `unit` could legally pay at least one shard or generic
-/// pip of `cost` under the spell's spend-restriction context. Combines
-/// restriction gating (`ManaRestriction::allows`) with shard color/attribute
-/// matching (`shard_to_mana_type`) — the same predicates the spend funnel uses.
+/// pip of `cost` under the payment's spend-restriction context and mana-spend
+/// permission. Combines restriction gating (`ManaRestriction::allows`) with
+/// shard color/attribute matching (`shard_to_mana_type`).
 fn mana_unit_eligible_for_cost(
     unit: &crate::types::mana::ManaUnit,
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
 ) -> bool {
     use crate::types::mana::{ManaCost, ManaType};
     use mana_payment::ShardRequirement;
@@ -17216,7 +17258,10 @@ fn mana_unit_eligible_for_cost(
     shards.iter().any(|&shard| {
         // CR 107.4: a unit pays a shard if its color (or attribute, for {S}/{Z})
         // is among those the shard accepts.
-        let accepts = |c: ManaType| unit.color == c;
+        let accepts = |c: ManaType| {
+            unit.color == c
+                || mana_spend_permission.is_some_and(|permission| permission.allows_payment_as(c))
+        };
         match mana_payment::shard_to_mana_type(shard) {
             ShardRequirement::Single(mt) => accepts(mt),
             ShardRequirement::Hybrid(a, b) => accepts(a) || accepts(b),

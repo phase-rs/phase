@@ -9,8 +9,8 @@ use crate::game::functioning_abilities::{
 use crate::game::game_object::GameObject;
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_context, ConditionContext};
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, CostCategory, StaticCondition, StaticDefinition,
-    TargetFilter, TypedFilter,
+    ContinuousModification, ControllerRef, CostCategory, ManaSpendPermission, StaticCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -248,18 +248,25 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 702.179e: Card-specific rule modification allowing speed to exceed 4.
     registry.insert(StaticMode::SpeedCanIncreaseBeyondFour, handle_rule_mod);
     // CR 609.4b: "You may spend mana as though it were mana of any color."
-    // Runtime enforcement is in mana_payment.rs via player_can_spend_as_any_color().
-    // The board-wide (`spell_filter: None`) shape is registry-keyed here; the
-    // spell-filtered (`Some`) shape (Vizier of the Menagerie) carries an
+    // Runtime enforcement is in mana_payment.rs via
+    // player_board_wide_mana_spend_permission(). The board-wide
+    // (`spell_filter: None`) shape is registry-keyed here, once per concession;
+    // the spell-filtered (`Some`) shape (Vizier of the Menagerie) carries an
     // unbounded `TargetFilter` value space, so it gets coverage support via
     // `coverage::is_data_carrying_static` instead (mirrors SkipStep / RevealHand).
-    registry.insert(
-        StaticMode::SpendManaAsAnyColor {
-            spell_filter: None,
-            activation_source_filter: None,
-        },
-        handle_rule_mod,
-    );
+    for concession in [
+        crate::types::ability::ManaSpendPermission::AnyColor,
+        crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
+    ] {
+        registry.insert(
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: None,
+                concession,
+            },
+            handle_rule_mod,
+        );
+    }
     // CR 107.4f: PayLifeAsColoredMana — "For each {C} in a cost, you may pay
     // 2 life rather than pay that mana" (K'rrik, Son of Yawgmoth). Data-carrying
     // (ManaColor); registered per concrete instance via
@@ -1169,11 +1176,12 @@ pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: Obje
     )
 }
 
-/// CR 609.4b: Check if a player has an unfiltered ("any spell/cost")
-/// "spend mana as any color/type" static active. Scans battlefield and command
+/// CR 609.4b + CR 118.14: The unfiltered ("any spell/cost") "spend mana as any
+/// color/type" concession `player_id` has, if any. Scans battlefield and command
 /// zone for `StaticMode::SpendManaAsAnyColor { spell_filter: None,
-/// activation_source_filter: None }` whose
-/// affected filter matches the given player.
+/// activation_source_filter: None }` whose affected filter matches the given
+/// player; with both an any-color and an any-type static active, the broader
+/// one applies.
 ///
 /// This is the board-wide path (Chromatic Orrery) — used for cost
 /// payments that have no spell object in context (effects, activations without
@@ -1181,45 +1189,55 @@ pub(crate) fn object_has_active_cant_phase_in(state: &GameState, object_id: Obje
 /// activation-source-scoped checks. Spell-filtered statics (Vizier of the
 /// Menagerie) and activation-source-filtered statics (Agatha's Soul Cauldron /
 /// Joiner Adept) are NOT consulted here; see
-/// [`player_can_spend_as_any_color_for_spell_object`] and
-/// [`player_can_spend_as_any_color_for_activation_source`].
-pub fn player_can_spend_as_any_color(state: &GameState, player_id: PlayerId) -> bool {
-    check_static_ability(
-        state,
-        StaticMode::SpendManaAsAnyColor {
-            spell_filter: None,
-            activation_source_filter: None,
-        },
-        &StaticCheckContext {
-            player_id: Some(player_id),
-            ..Default::default()
-        },
-    )
+/// [`player_mana_spend_permission_for_spell_object`] and
+/// [`player_mana_spend_permission_for_activation_source`].
+pub fn player_board_wide_mana_spend_permission(
+    state: &GameState,
+    player_id: PlayerId,
+) -> Option<ManaSpendPermission> {
+    [
+        ManaSpendPermission::AnyTypeOrColor,
+        ManaSpendPermission::AnyColor,
+    ]
+    .into_iter()
+    .find(|&concession| {
+        check_static_ability(
+            state,
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: None,
+                concession,
+            },
+            &StaticCheckContext {
+                player_id: Some(player_id),
+                ..Default::default()
+            },
+        )
+    })
 }
 
-/// CR 609.4b: Check if `player_id` may spend mana of any type/color to pay the
-/// mana cost of an activated ability whose source is `source_id`. True when
-/// either an unfiltered board-wide static is active (the
-/// [`player_can_spend_as_any_color`] base case) OR an activation-source-filtered
+/// CR 609.4b: The concession `player_id` has to pay the mana cost of an
+/// activated ability whose source is `source_id`: the board-wide one
+/// ([`player_board_wide_mana_spend_permission`]) united with every
+/// activation-source-filtered
 /// `StaticMode::SpendManaAsAnyColor { activation_source_filter: Some(filter) }`
-/// controlled by `player_id` is active and `source_id` matches that filter
-/// (Agatha's Soul Cauldron / Joiner Adept: "you may spend mana as though it were
-/// mana of any color to activate abilities of creatures you control").
+/// controlled by `player_id` whose filter `source_id` matches (Agatha's Soul
+/// Cauldron / Joiner Adept: "you may spend mana as though it were mana of any
+/// color to activate abilities of creatures you control").
 ///
 /// The filtered concession is re-derived against the activating permanent at
 /// spend time (CR 609.4b) and never applies to spell casts or effect payments.
-pub fn player_can_spend_as_any_color_for_activation_source(
+pub fn player_mana_spend_permission_for_activation_source(
     state: &GameState,
     player_id: PlayerId,
     source_id: ObjectId,
-) -> bool {
-    if player_can_spend_as_any_color(state, player_id) {
-        return true;
-    }
+) -> Option<ManaSpendPermission> {
+    let mut granted = player_board_wide_mana_spend_permission(state, player_id);
     for (obj, def) in game_active_statics(state) {
         let StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: Some(ref filter),
+            concession,
         } = def.mode
         else {
             continue;
@@ -1229,34 +1247,33 @@ pub fn player_can_spend_as_any_color_for_activation_source(
         }
         let ctx = FilterContext::from_source_with_controller(obj.id, player_id);
         if matches_target_filter(state, source_id, filter, &ctx) {
-            return true;
+            granted = Some(granted.map_or(concession, |g| g.union(concession)));
         }
     }
-    false
+    granted
 }
 
-/// CR 609.4b: Check if `player_id` may spend mana of any type/color to cast the
-/// spell object `spell_id`. True when either an unfiltered board-wide static is
-/// active (the [`player_can_spend_as_any_color`] base case) OR a spell-filtered
-/// `StaticMode::SpendManaAsAnyColor { spell_filter: Some(filter) }` controlled
-/// by `player_id` is active and `spell_id` matches that filter (Vizier of the
-/// Menagerie: "you may spend mana of any type to cast creature spells").
+/// CR 609.4b + CR 118.14: The concession `player_id` has to cast the spell
+/// object `spell_id`: the board-wide one
+/// ([`player_board_wide_mana_spend_permission`]) united with every
+/// spell-filtered `StaticMode::SpendManaAsAnyColor { spell_filter: Some(filter) }`
+/// controlled by `player_id` whose filter `spell_id` matches (Vizier of the
+/// Menagerie: "you can spend mana of any type to cast creature spells" — any
+/// type, so it also pays `{C}`).
 ///
 /// The filtered concession is re-derived against the spell object at spend time
 /// (CR 609.4b: it affects only how a cost is paid, never the cost itself), so it
 /// applies only to spells the controller casts that match the spell class and
 /// never to non-spell payments.
-pub fn player_can_spend_as_any_color_for_spell_object(
+pub fn player_mana_spend_permission_for_spell_object(
     state: &GameState,
     player_id: PlayerId,
     spell_id: ObjectId,
-) -> bool {
-    if player_can_spend_as_any_color(state, player_id) {
-        return true;
-    }
+) -> Option<ManaSpendPermission> {
+    let mut granted = player_board_wide_mana_spend_permission(state, player_id);
     // CR 604.1 + CR 113.6b: scan battlefield permanents plus command-zone
     // emblems (`game_active_statics`), matching the zone coverage of the
-    // unfiltered base case above (`player_can_spend_as_any_color` →
+    // unfiltered base case above (`player_board_wide_mana_spend_permission` →
     // `game_functioning_statics`); `active_static_definitions` already applies
     // the phased-out / condition gate. The filtered static is "you may" —
     // scoped to the source's controller.
@@ -1264,6 +1281,7 @@ pub fn player_can_spend_as_any_color_for_spell_object(
         let StaticMode::SpendManaAsAnyColor {
             spell_filter: Some(ref filter),
             activation_source_filter: None,
+            concession,
         } = def.mode
         else {
             continue;
@@ -1273,10 +1291,10 @@ pub fn player_can_spend_as_any_color_for_spell_object(
         }
         let ctx = FilterContext::from_source_with_controller(obj.id, player_id);
         if matches_target_filter(state, spell_id, filter, &ctx) {
-            return true;
+            granted = Some(granted.map_or(concession, |g| g.union(concession)));
         }
     }
-    false
+    granted
 }
 
 /// CR 107.4f + CR 118.1: Colors for which `player` may pay 2 life rather than
@@ -1285,7 +1303,7 @@ pub fn player_can_spend_as_any_color_for_spell_object(
 ///
 /// Scans active battlefield/command-zone statics for `PayLifeAsColoredMana`
 /// whose `affected` filter resolves to the given player (player-scope; mirrors
-/// the `player_can_spend_as_any_color` scan), and unions each granted
+/// the `player_board_wide_mana_spend_permission` scan), and unions each granted
 /// `ManaColor` into the returned bitmask.
 pub fn player_life_payment_colors(
     state: &GameState,
@@ -1322,16 +1340,16 @@ pub fn player_life_payment_colors(
 /// the single authority for constructing a `CostPermissionContext` at every
 /// cost-payment entry point (spell cast, activation, alt-cost effect).
 ///
-/// `any_color_for_source` is the `any_color` decision for the specific cost
+/// `mana_spend_permission` is the typed concession for the specific cost
 /// being paid (cast vs effect vs activation may compute this differently);
 /// callers pass it in so this helper stays cost-site-agnostic.
 pub fn build_cost_permission_context(
     state: &GameState,
     player_id: PlayerId,
-    any_color_for_source: bool,
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
 ) -> crate::types::mana::CostPermissionContext {
     crate::types::mana::CostPermissionContext {
-        any_color: any_color_for_source,
+        mana_spend_permission,
         max_life: super::life_costs::max_phyrexian_life_payments(state, player_id),
         life_colors: player_life_payment_colors(state, player_id),
     }

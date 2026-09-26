@@ -2417,14 +2417,21 @@ pub enum ExileLinkKind {
     /// permanent (`source_id`). Like `TrackedBySource` it tracks the card so the
     /// companion "you may play the exiled card" ability (`TargetFilter::
     /// ExiledBySource`, which is kind-agnostic) can later find it — but it
-    /// additionally grants a *look-permission*: the player who controls the
-    /// exiling permanent "may look at this card in the exile zone". Visibility
-    /// keys the controller's face-down look-through on this kind specifically, so
+    /// additionally grants a *look-permission* to the players its `grant` and
+    /// `lookers` admit. Visibility keys the face-down look-through on this kind
+    /// specifically, so
     /// plain `TrackedBySource` face-down exiles that grant no such permission
     /// (Bomat Courier's "(You can't look at it.)", Necropotence, Asmodeus) stay
-    /// redacted. Pruned on exile-exit / source-exit like `Cipher` (not an
-    /// `UntilSourceLeaves` link, so no automatic return).
-    HideawayLookable,
+    /// redacted. Pruned on exile-exit only (CR 406.3: the look outlives its
+    /// source); not an `UntilSourceLeaves` link, so no automatic return.
+    HideawayLookable {
+        grant: LookGrant,
+        /// CR 406.3: every player allowed to look since the link was created or
+        /// the card was last part of a shuffled pile.
+        lookers: BTreeSet<PlayerId>,
+        /// CR 400.7: the incarnation of the source that made this link.
+        source_incarnation: u64,
+    },
     /// CR 702.167c: Craft material — the card (`exiled_id`) was exiled to pay the
     /// craft activation cost of the permanent (`source_id`) that returns to the
     /// battlefield transformed. "An ability of a permanent may refer to the
@@ -2437,6 +2444,17 @@ pub enum ExileLinkKind {
     /// `ExiledBySource` / `CardsExiledBySource` consumers; pruned only when a
     /// material itself leaves exile (`zones.rs` exile-exit).
     CraftMaterial,
+}
+
+/// CR 406.3 + CR 702.75a: whom a face-down exile look link's live rule admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LookGrant {
+    /// CR 702.75a: the controller of the exiling permanent while it is the same
+    /// object (the link's `source_incarnation`) that exiled the card.
+    SourceController,
+    /// CR 406.3: the player instructed to look at the card and exile it face
+    /// down; admitted at creation and carried by the latch alone.
+    Player { player: PlayerId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19652,7 +19670,7 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
-    /// CR 508.6 + CR 514.2: For each player, the defending players they declared
+    /// CR 508.6: For each player, the defending players they declared
     /// attackers against during that player's MOST RECENT completed turn.
     /// Snapshotted from `attacked_defenders_this_turn` at cleanup
     /// (`execute_cleanup`), keyed by the ending active player, overwriting so a

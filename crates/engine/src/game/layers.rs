@@ -3363,6 +3363,7 @@ pub fn evaluate_layers(state: &mut GameState) {
     // characteristics are determined. These flags feed CR 510.1 combat damage
     // assignment and must observe final post-layer characteristics.
     apply_combat_assignment_rule_effects(state);
+    super::exile_links::latch_new_controllers(state, &prev_controllers);
 
     // CR 302.6: Re-apply summoning sickness for any permanent whose effective
     // controller changed during this evaluation. The diff is taken against

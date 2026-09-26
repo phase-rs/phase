@@ -6736,6 +6736,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
                 StaticMode::SpendManaAsAnyColor {
                     spell_filter: None,
                     activation_source_filter: None,
+                    concession: crate::types::ability::ManaSpendPermission::AnyColor,
                 }
             )),
             "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",

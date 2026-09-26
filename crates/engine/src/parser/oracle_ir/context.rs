@@ -5,7 +5,7 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    ControllerRef, Duration, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
     TargetChoiceTiming, TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
@@ -198,6 +198,42 @@ pub(crate) struct ParseContext {
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
     pub bare_card_aggregate_source: Option<crate::types::ability::TrackedAnaphorSource>,
+    /// CR 611.2a: the durational scope the clause currently being lowered stated
+    /// at a printed position the clause BODY can no longer see, because the
+    /// positional strip seams peel it before the body parser runs.
+    ///
+    /// Both printed positions are peeled: a leading "Until end of turn, …" by
+    /// `strip_leading_duration` (either the chunk expansion in
+    /// `sequence::expand_leading_duration_chunks` or the dispatch in
+    /// `parse_effect_clause_inner`), and a trailing "… this turn" by
+    /// `strip_trailing_duration` in `lower_imperative_clause`. MEASURED, not
+    /// assumed: Locke, Treasure Hunter ("Until end of turn, you may cast a spell
+    /// from among those cards") and Chiss-Goria, Forge Tyrant ("… from among them
+    /// this turn") reach the `from among` mechanism decision as
+    /// `"a spell from among those cards"` and `"an artifact spell from among them"`
+    /// — byte-identical to the NO-duration siblings Nathan Drake and Sanwell,
+    /// whose CR 608.2g resolution window must not become a lingering permission.
+    /// The fact is therefore unavailable in the fragment at any position, and the
+    /// only honest channel is to carry it.
+    ///
+    /// Third printed position, for completeness: a duration stated MID-clause
+    /// ("… from among them this turn without paying their mana costs" — Ral,
+    /// Leyline Prodigy) is never peeled and is read straight off the fragment by
+    /// `oracle_effect::clause_states_a_duration`. This field is the other two.
+    ///
+    /// LIFECYCLE — save/restore, never set/clear. Each strip seam swaps its own
+    /// value in around the body parse and restores the previous one afterwards,
+    /// and a seam that peeled nothing leaves the enclosing value intact (a
+    /// trailing seam that found no duration must not clobber the leading one its
+    /// own caller set). A set/clear lifecycle would fail OPEN: a duration stated
+    /// by clause N could promote a capped clause N+1 that states none, granting a
+    /// lingering permission the card never printed. `a_stated_duration_does_not_leak_into_the_next_clause`
+    /// is the pin.
+    ///
+    /// Consumed by `oracle_effect::from_among_batch_cast_driver` to promote a
+    /// paid, duration-scoped, capped-at-one `from among` batch grant to the
+    /// `GrantCastingPermission { PlayFromExile { single_use: true } }` shape.
+    pub stated_clause_duration: Option<Duration>,
     /// CR 608.2c + CR 400.7: the REST-partition destination zone of the
     /// nearest preceding `Effect::Dig` in this chain whose kept and rest
     /// destinations differ (a genuine reveal/split, e.g. Dihada, Binder of

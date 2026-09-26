@@ -4452,7 +4452,7 @@ fn select_cost_with_plan(
         &scratch_cost,
         None,
         ctx,
-        false,
+        None,
         None,
         crate::types::mana::LifePaymentColors::EMPTY,
         // CR 118.3a: mana-ability activation sub-costs are not pinnable.

@@ -7,6 +7,7 @@ declare const __ENGINE_FINGERPRINT__: string | undefined;
 declare const __ENGINE_WASM_URL__: string | undefined;
 declare const __OFFICIAL_MULTIPLAYER_SERVER_URL__: string;
 declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
+declare const __TURN_CREDENTIALS_URL__: string;
 
 /**
  * Per-deployment configuration, set by `/config.js` before the app bundle runs.

@@ -365,22 +365,20 @@ pub fn linked_exile_cards_for_source(
         }
     }
 
-    let live: Vec<LinkedExileSnapshot> = state
-        .exile_links
-        .iter()
-        .filter(|link| link.source_id == source_id)
-        .filter_map(|link| {
-            state.objects.get(&link.exiled_id).and_then(|obj| {
-                (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
-                    exiled_id: link.exiled_id,
-                    owner: obj.owner,
-                    // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
-                    // a split card records its combined mana value.
-                    mana_value: obj.effective_mana_value(),
+    let live: Vec<LinkedExileSnapshot> =
+        crate::game::exile_links::live_links_for_source(state, source_id)
+            .filter_map(|link| {
+                state.objects.get(&link.exiled_id).and_then(|obj| {
+                    (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
+                        exiled_id: link.exiled_id,
+                        owner: obj.owner,
+                        // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
+                        // a split card records its combined mana value.
+                        mana_value: obj.effective_mana_value(),
+                    })
                 })
             })
-        })
-        .collect();
+            .collect();
     if !live.is_empty() {
         return live;
     }

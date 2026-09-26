@@ -3017,7 +3017,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::DestroyAll { target, .. }
         | Effect::SwitchPT { target }
         | Effect::ExileHaunting { target }
-        | Effect::HideawayConceal { target }
+        | Effect::HideawayConceal { target, .. }
         | Effect::ChooseCard { target, .. }
         // CR 701.27a: both scopes write ObjectPt on the target/population filter.
         | Effect::Transform { target, .. }
@@ -6926,9 +6926,9 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
             reads_player_of(StateKind::JournalCast)
         }
-        // CR 508.6 + CR 514.2: reads the cleanup-time attack-history snapshot
-        // (`attacked_defenders_last_turn`), which changes only at turn
-        // boundaries. `TurnStructure` is the sequencing kind written by
+        // CR 508.6 defines when a player has attacked another player. This reads
+        // `attacked_defenders_last_turn`, the cleanup-time snapshot. It changes
+        // only at turn boundaries. `TurnStructure` is the sequencing kind written by
         // cleanup/turn advance; conservatively depending on it invalidates the
         // cached gate whenever the turn sequence changes.
         StaticCondition::AnyPlayerAttackedYouLastTurn {

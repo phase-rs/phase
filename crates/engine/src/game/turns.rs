@@ -2536,9 +2536,14 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// cleanup step begins" — either the control-reversion delayed triggers below,
 /// or a parked `deferred_triggers` batch settled at the tail of this function.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
-    // CR 508.6 + CR 514.2: Snapshot this turn's attacks so "attacked you during
-    // their last turn" (Avenge / O-Kagachi / Weathered Sentinels) can query each
-    // player's most recent completed turn. Overwrite the active (ending) player's
+    // Snapshot this turn's attacks so "attacked you during their last
+    // turn" (Avenge / O-Kagachi / Weathered Sentinels) can query each player's
+    // most recent completed turn. CR 508.6 supplies the SEMANTICS — a player has
+    // "attacked [a player]" if they declared one or more creatures attacking
+    // them. That the rollover happens HERE, at cleanup, is an ENGINE choice and
+    // not a CR mandate: CR 514.2 governs only damage removal and the end of
+    // "until end of turn" and "this turn" effects, and no rule defines an
+    // attack-history snapshot at all. Overwrite the active (ending) player's
     // entry — empty when they attacked no one, so a no-attack turn correctly
     // clears their record; other players' entries are untouched (a skipped player
     // never reaches cleanup, so it keeps its genuine last-turn record). Runs
@@ -7522,10 +7527,11 @@ mod tests {
         assert_eq!(state.objects[&id].damage_marked, 0);
     }
 
-    /// CR 508.6 + CR 514.2: cleanup snapshots this turn's attacks into
-    /// `attacked_defenders_last_turn`, keyed by the ending (active) player and
-    /// directional, so "attacked you during their last turn" can query it. A
-    /// no-attack turn overwrites only that player's entry to empty; other players'
+    /// CR 508.6 defines when a player has attacked another player. Cleanup
+    /// snapshots this turn's attacks into `attacked_defenders_last_turn` for the
+    /// ending (active) player. The record is directional, so "attacked you during
+    /// their last turn" can query it. A no-attack turn overwrites only that
+    /// player's entry to empty; other players'
     /// records persist (the skipped-player retention property).
     #[test]
     fn execute_cleanup_snapshots_attacked_defenders_last_turn() {

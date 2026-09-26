@@ -35,16 +35,16 @@ use crate::types::ability::{
     AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
     CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
     ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
-    ManaSpendPermission, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter,
-    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
-    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
+    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PtValue,
+    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::CostModifyMode;
 use crate::types::zones::{EtbTapState, Zone};
 
 // Parse-phase functions from the parent module (oracle_effect/mod.rs).
@@ -989,72 +989,6 @@ pub(super) fn normalize_exile_until_cast_bottom_cleanup(effect: &mut Effect) {
     }
 }
 
-pub(super) fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
-    let Effect::GenericEffect {
-        static_abilities, ..
-    } = &clause.parsed.effect
-    else {
-        return false;
-    };
-    if static_abilities.len() != 1
-        || static_abilities[0].mode
-            != (StaticMode::SpendManaAsAnyColor {
-                spell_filter: None,
-                activation_source_filter: None,
-            })
-    {
-        return false;
-    }
-
-    let lower = clause
-        .source
-        .fragment()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let parsed = all_consuming((
-        opt(alt((
-            tag::<_, _, OracleError<'_>>("if you cast a spell this way, "),
-            tag("if you cast it this way, "),
-        ))),
-        tag("you may spend mana as though it were mana of any "),
-        alt((tag("color"), tag("type"))),
-        tag(" to cast "),
-        alt((
-            tag("it"),
-            tag("that spell"),
-            tag("a spell this way"),
-            tag("spells this way"),
-            tag("those spells"),
-        )),
-        opt(tag(".")),
-    ))
-    .parse(lower.trim())
-    .is_ok();
-    parsed
-}
-
-pub(super) fn attach_any_color_mana_rider_to_previous_play_from_exile(
-    defs: &mut [AbilityDefinition],
-) -> bool {
-    let Some(previous) = defs.last_mut() else {
-        return false;
-    };
-    let Effect::GrantCastingPermission {
-        permission:
-            CastingPermission::PlayFromExile {
-                mana_spend_permission,
-                ..
-            },
-        ..
-    } = previous.effect.as_mut()
-    else {
-        return false;
-    };
-
-    *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
-    true
-}
-
 /// CR 614.1a + CR 608.2n: Fold a "if that spell would be put into a graveyard,
 /// [put it on the library / return it to its owner's hand] instead" rider onto
 /// the immediately-preceding optional `CastFromZone` as its canonical
@@ -1604,6 +1538,74 @@ pub(super) fn gate_other_revealed_card_on_multiplayer_reveal(def: &mut AbilityDe
         return;
     }
     rewrite_other_revealed_card_to_unimplemented(def);
+}
+
+/// The honest-gap name for a lingering cast grant whose "If you do, …" rider
+/// cannot be carried to the spell cast through it.
+pub(super) const CAST_RIDER_ON_LINGERING_GRANT_GAP: &str = "cast_rider_on_lingering_grant";
+
+/// CR 608.2c + CR 611.2f: refuse a `GrantCastingPermission` whose "If you do, …" rider cannot
+/// reach the spell it describes.
+///
+/// The two rules are the two halves of the problem. CR 608.2c: the rider is an
+/// instruction of the SAME resolution as the grant, followed in printed order, so
+/// it executes before any spell has been cast. CR 611.2f: an effect that modifies
+/// "the next spell a player casts" does not begin immediately; it applies when that
+/// spell is put on the stack. The card's rider needs the second behaviour, and this
+/// grant has no channel to deliver it.
+///
+/// A lingering grant is exercised at a LATER priority window. But its "If you do"
+/// rider — a sibling gated on `EffectOutcome(OptionalEffectPerformed)` — runs
+/// during the SAME resolution as the grant, when no spell has been cast yet. So
+/// the rider has nothing to act on and silently does nothing. Chiss-Goria, Forge
+/// Tyrant ("You may cast an artifact spell from among them this turn. If you do,
+/// it has affinity for artifacts") measured exactly that: the grant installed
+/// correctly, and the chosen artifact never gained affinity — no keyword and no
+/// transient effect anywhere.
+///
+/// Leaving that in place would make the card count as supported while part of
+/// its printed text is inert. The honest outcome is to report the grant as a gap
+/// until the grant can carry the rider to the cast. `PlayFromExile` has no channel
+/// for that today (`cast_cost_modifier` holds only a fixed `ManaCost`, and affinity
+/// is dynamic; `StaticMode::CastWithKeyword` is a battlefield static, not a
+/// per-permission rider).
+///
+/// SCOPED TO `GrantCastingPermission`, and that is deliberate. A lingering
+/// `Effect::CastFromZone` CAN carry a deferred rider: The Tomb of Aclazotz ("You
+/// may cast a creature spell from your graveyard this turn. If you do, it enters
+/// with a finality counter …") lowers its rider to `AddPendingETBCounters`, which
+/// binds when the spell later enters. Refusing every lingering cast with a rider
+/// would sweep that in. Measured over the card-data export: the only
+/// `GrantCastingPermission` followed by an `OptionalEffectPerformed`-gated rider is
+/// Chiss-Goria's, so this gate moves exactly one card. Should a deferred-binding
+/// rider ever reach this grant, the gate refuses it — fail-closed, an honest gap
+/// rather than a silent drop.
+pub(super) fn refuse_cast_rider_on_lingering_grant(def: &mut AbilityDefinition) {
+    let rider_is_if_you_do = def.sub_ability.as_deref().is_some_and(|sub| {
+        matches!(
+            sub.condition,
+            Some(crate::types::ability::AbilityCondition::EffectOutcome {
+                signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+                ..
+            })
+        )
+    });
+    if rider_is_if_you_do && matches!(&*def.effect, Effect::GrantCastingPermission { .. }) {
+        let fragment = def
+            .description
+            .clone()
+            .unwrap_or_else(|| "cast grant with an \"if you do\" rider on the cast spell".into());
+        *def.effect = Effect::unimplemented(CAST_RIDER_ON_LINGERING_GRANT_GAP, fragment);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        refuse_cast_rider_on_lingering_grant(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        refuse_cast_rider_on_lingering_grant(els);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        refuse_cast_rider_on_lingering_grant(mode);
+    }
 }
 
 /// True when any def in the chain is a `RevealTop` carrying a `multi_target` spec.

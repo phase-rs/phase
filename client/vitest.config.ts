@@ -2,6 +2,7 @@ import path from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
+import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
 
 const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[name]);
 
@@ -87,6 +88,9 @@ export default defineConfig({
     // Same resolver vite.config.ts uses — the order is single-authority.
     __OFFICIAL_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.official),
     __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(multiplayerServers.buildDefault),
+    __TURN_CREDENTIALS_URL__: JSON.stringify(
+      resolveTurnCredentialsUrl(process.env.TURN_CREDENTIALS_URL),
+    ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
     __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),

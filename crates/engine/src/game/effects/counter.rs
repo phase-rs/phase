@@ -57,21 +57,7 @@ pub fn resolve(
     // doc); a counter that exiles nothing leaves it empty.
     state.exile_rider_countered_ids.clear();
 
-    let targets = match &ability.effect {
-        Effect::Counter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
-            let event_target = targeting::resolve_event_context_target(
-                state,
-                &TargetFilter::TriggeringSource,
-                ability.source_id,
-            );
-            match event_target {
-                Some(target) => vec![target],
-                None => targeting::resolved_targets(ability, target, state),
-            }
-        }
-        Effect::Counter { target, .. } => targeting::resolved_targets(ability, target, state),
-        _ => ability.targets.clone(),
-    };
+    let targets = countered_targets(state, ability);
 
     // CR 115.1: `Effect::Counter` is single-target by construction — mass
     // counter is `Effect::CounterAll`. The post-loop rider therefore acts on at
@@ -123,10 +109,7 @@ pub fn resolve(
 
             // Remove from stack — search by both id (spells) and source_id (abilities).
             // Use rposition to match the most recently pushed entry.
-            let stack_idx = state
-                .stack
-                .iter()
-                .rposition(|e| e.id == obj_id || e.source_id == obj_id);
+            let stack_idx = countered_stack_index(state, obj_id);
             if let Some(idx) = stack_idx {
                 // CR 701.6a: the removal IS the counter, so it goes through the
                 // single CR 405.2 removal authority, which journals it and drops
@@ -321,6 +304,36 @@ pub fn resolve(
     }
 
     Ok(())
+}
+
+/// The stack entry `resolve` removes for a countered `obj_id`: the most recently
+/// pushed entry whose id (a spell) or source (an ability) is `obj_id`.
+pub(super) fn countered_stack_index(state: &GameState, obj_id: ObjectId) -> Option<usize> {
+    state
+        .stack
+        .iter()
+        .rposition(|e| e.id == obj_id || e.source_id == obj_id)
+}
+
+/// CR 701.6a: the spells or abilities a `Counter` node counters. Shared by
+/// `resolve` and `stack_reach`, so a pending node is read with the resolver's
+/// own binding.
+pub(super) fn countered_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    match &ability.effect {
+        Effect::Counter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
+            let event_target = targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::TriggeringSource,
+                ability.source_id,
+            );
+            match event_target {
+                Some(target) => vec![target],
+                None => targeting::resolved_targets(ability, target, state),
+            }
+        }
+        Effect::Counter { target, .. } => targeting::resolved_targets(ability, target, state),
+        _ => ability.targets.clone(),
+    }
 }
 
 /// CR 701.6 + CR 405.1: Mass counter — iterate every stack entry and counter

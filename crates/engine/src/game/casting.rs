@@ -1415,6 +1415,16 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         &player_data.graveyard,
     ));
 
+    // CR 601.2a: the same object-tagged `PlayFromExile` grant, on a card in
+    // SOMEONE ELSE'S graveyard. Kept as its own pass rather than folded into the
+    // walk above, which is owner-scoped for everything else it discovers; see
+    // `non_owner_graveyard_play_from_exile_grants`.
+    objects.extend(
+        non_owner_graveyard_play_from_exile_grants(state, player, CardPlayMode::Cast)
+            .into_iter()
+            .map(|(obj_id, _source)| obj_id),
+    );
+
     // CR 601.2a + CR 113.6b + CR 118.9: Cards in exile castable via a
     // `StaticMode::ExileCastPermission` static from a battlefield permanent
     // (Maralen, Fae Ascendant). Restricted to cards exiled "with" the source
@@ -1461,6 +1471,63 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
             })
         })
         .collect()
+}
+
+/// CR 601.2a + CR 116.2a: object-tagged `PlayFromExile` grants on cards sitting in
+/// ANOTHER player's graveyard. Serves both surfaces: CR 601.2a for the cast half
+/// (a spell is moved "from where it is" to the stack) and CR 116.2a for the land
+/// half (a land is put onto the battlefield "from the zone it was in").
+///
+/// A `PlayFromExile` permission names the player it was granted to
+/// (`granted_to`), and nothing in CR 601.2a ties that player to the card's owner
+/// or to which graveyard the card is in — "you may cast a spell from among those
+/// cards" covers every member of the batch, including cards milled from an
+/// opponent's library (Locke, Treasure Hunter: "each player mills a card").
+///
+/// This exists because the owner-scoped walk in
+/// `graveyard_spell_objects_available_to_cast` is correct for everything ELSE it
+/// discovers — flashback, escape, retrace, and the battlefield-static permission
+/// sources are all properties of the caster's own graveyard — so widening that
+/// walk would change all of them. A separate, permission-gated pass mirrors what
+/// the exile surface already does one screen up in
+/// `spell_objects_available_to_cast`, where an owner-scoped block is followed by
+/// a second block gated on `obj.owner != player` admitting only objects whose
+/// permission authorizes this player.
+///
+/// The admission gate (`castable_from_current_zone`) already had no owner test on
+/// this disjunct, so before this pass existed the two halves disagreed: the
+/// engine would have accepted the cast it never offered.
+fn non_owner_graveyard_play_from_exile_grants(
+    state: &GameState,
+    player: PlayerId,
+    mode: CardPlayMode,
+) -> Vec<(ObjectId, ObjectId)> {
+    let mut results = Vec::new();
+    for other in state.players.iter().filter(|p| p.id != player) {
+        for &obj_id in &other.graveyard {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            // CR 305.1: a land is played and a spell is cast; the caller's `mode`
+            // decides which surface this is, and the object has to match it.
+            let admitted = match mode {
+                CardPlayMode::Cast => play_from_exile_object_in_cast_path(obj),
+                CardPlayMode::Play => obj
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Land),
+            };
+            if !admitted {
+                continue;
+            }
+            if let Some((source, _)) =
+                play_from_exile_permission_source(state, obj, player, state.turn_number, Some(mode))
+            {
+                results.push((obj_id, source));
+            }
+        }
+    }
+    results
 }
 
 fn graveyard_spell_objects_available_to_cast(
@@ -3123,14 +3190,17 @@ pub fn pending_phyrexian_route_is_payable(
         .as_ref()
         .map(ActivationPaymentContext::as_payment_context)
         .or_else(|| spell_meta.as_ref().map(PaymentContext::Spell));
-    let any_color = player_can_spend_as_any_color_for_payment(
+    let mana_spend_permission = player_mana_spend_permission_for_payment(
         state,
         player,
         Some(spell_object),
         payment_context.as_ref(),
     );
-    let permissions =
-        super::static_abilities::build_cost_permission_context(state, player, any_color);
+    let permissions = super::static_abilities::build_cost_permission_context(
+        state,
+        player,
+        mana_spend_permission,
+    );
     let phyrexian_count = match &pending.cost {
         ManaCost::Cost { shards, .. } => shards
             .iter()
@@ -3201,7 +3271,7 @@ pub fn pending_phyrexian_route_is_payable(
         &pending.cost,
         Some(&hand_demand),
         payment_context.as_ref(),
-        any_color,
+        mana_spend_permission,
         Some(choices),
         permissions.life_colors,
         &pending.pinned_pool_units,
@@ -4468,12 +4538,37 @@ pub(crate) fn single_use_play_from_exile_group(
 /// CR 601.2a + CR 611.2a: Spend a single-use `PlayFromExile` grant. Records the
 /// `group` in `exile_play_single_use_consumed` and strips the now-void
 /// `PlayFromExile { single_use_group == group, single_use: true }` permission
-/// from every object still in exile, so the remaining cards in that tracked set
-/// are no longer castable (Chandra, Hope's Beacon +1 grants one cast total
+/// from every object still carrying it, so the remaining cards in that tracked
+/// set are no longer castable (Chandra, Hope's Beacon +1 grants one cast total
 /// across its until-end-of-next-turn window).
+///
+/// THE SWEEP IS ZONE-BLIND, and that is the fix rather than a detail. It used to
+/// iterate `state.exile` alone, which silently did nothing for a grant whose pool
+/// is any other zone: Locke, Treasure Hunter's batch is MILLED, so its siblings
+/// sit in graveyards and kept a permission this call had just declared spent.
+/// Membership in the set is what the permission is scoped by — `single_use_group`
+/// is a `TrackedSetId`, not a zone — so the tracked set is the authority here.
+/// The exile zone is still swept as well, because a grant whose set is absent
+/// from `tracked_object_sets` (a deserialized state, a legacy grant) would
+/// otherwise lose the sweep it has today; the union can only strip permissions
+/// carrying this exact group, so the extra leg cannot over-reach.
+///
+/// `exile_play_single_use_consumed` is the belt to this sweep's braces — the
+/// eligibility gate in `play_from_exile_permission_source_at_index` consults it
+/// independently and is itself zone-agnostic. Both are kept because a stale
+/// permission is visible to anything reading `casting_permissions` directly,
+/// including the AI's legal-action surface.
 pub(crate) fn consume_single_use_play_from_exile(state: &mut GameState, group: TrackedSetId) {
     state.exile_play_single_use_consumed.insert(group);
-    for obj_id in state.exile.clone() {
+    let scoped: Vec<ObjectId> = state
+        .tracked_object_sets
+        .get(&group)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(state.exile.iter().cloned())
+        .collect();
+    for obj_id in scoped {
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             obj.casting_permissions.retain(|p| {
                 !matches!(
@@ -4495,30 +4590,34 @@ fn player_can_spend_as_any_color_for_spell(
     player: PlayerId,
     source_id: ObjectId,
 ) -> bool {
-    player_can_spend_as_any_color_for_optional_spell(state, player, Some(source_id))
+    player_mana_spend_permission_for_optional_spell(state, player, Some(source_id)).is_some()
 }
 
-pub(super) fn player_can_spend_as_any_color_for_optional_spell(
+pub(super) fn player_mana_spend_permission_for_optional_spell(
     state: &GameState,
     player: PlayerId,
     source_id: Option<ObjectId>,
-) -> bool {
+) -> Option<crate::types::ability::ManaSpendPermission> {
     // CR 609.4b: When a spell object is in context, consult both the board-wide
     // (`spell_filter: None`) and spell-class-filtered (`Some`) statics; the
     // filtered form (Vizier of the Menagerie: "creature spells") is matched
     // against the spell object. With no spell in context (effect/activation
     // payments), only the unfiltered board-wide static applies.
     let static_grant = match source_id {
-        Some(spell_id) => super::static_abilities::player_can_spend_as_any_color_for_spell_object(
+        Some(spell_id) => super::static_abilities::player_mana_spend_permission_for_spell_object(
             state, player, spell_id,
         ),
-        None => super::static_abilities::player_can_spend_as_any_color(state, player),
+        None => super::static_abilities::player_board_wide_mana_spend_permission(state, player),
     };
-    if static_grant {
-        return true;
-    }
+    // CR 118.14 + CR 609.4b: every concession in force applies to the payment,
+    // so a static and the elected cast permission combine to the broader one —
+    // a global any-color static never masks the grant's any-type concession,
+    // nor the grant a static any-type one (Vizier of the Menagerie).
+    let with_static = |elected: Option<crate::types::ability::ManaSpendPermission>| {
+        crate::types::ability::ManaSpendPermission::union_optional(elected, static_grant)
+    };
     let Some(spell_id) = source_id else {
-        return false;
+        return static_grant;
     };
     let pending = state
         .pending_cast
@@ -4544,7 +4643,9 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
     // CR 601.2a + CR 609.4b: The static source recorded on the elected
     // `ExilePermission` is the only static permission whose rider applies.
     if let Some(CastingVariant::ExilePermission { source, .. }) = casting_variant {
-        return exile_static_permission_grants_any_color(state, player, spell_id, source);
+        return with_static(exile_static_mana_spend_permission(
+            state, player, spell_id, source,
+        ));
     }
 
     let permission_index = pending
@@ -4558,29 +4659,29 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
             })
         });
     if let Some(index) = permission_index {
-        return object_cast_permission_grants_any_color(state, player, spell_id, index);
+        return with_static(object_cast_mana_spend_permission(
+            state, player, spell_id, index,
+        ));
     }
 
     // Static-only pre-announcement affordability: bind to the same source the
     // prepared cast will elect instead of scanning every functioning source.
-    exile_cast_permission_source(state, player, spell_id).is_some_and(|(source, _, _)| {
-        exile_static_permission_grants_any_color(state, player, spell_id, source)
-    })
+    with_static(
+        exile_cast_permission_source(state, player, spell_id).and_then(|(source, _, _)| {
+            exile_static_mana_spend_permission(state, player, spell_id, source)
+        }),
+    )
 }
 
-fn object_cast_permission_grants_any_color(
+fn object_cast_mana_spend_permission(
     state: &GameState,
     player: PlayerId,
     spell_id: ObjectId,
     CastingPermissionIndex(index): CastingPermissionIndex,
-) -> bool {
-    let Some(obj) = state.objects.get(&spell_id) else {
-        return false;
-    };
-    let Some(permission) = obj.casting_permissions.get(index) else {
-        return false;
-    };
-    let spend_permission = match permission {
+) -> Option<crate::types::ability::ManaSpendPermission> {
+    let obj = state.objects.get(&spell_id)?;
+    let permission = obj.casting_permissions.get(index)?;
+    match permission {
         CastingPermission::PlayFromExile {
             mana_spend_permission,
             ..
@@ -4602,16 +4703,15 @@ fn object_cast_permission_grants_any_color(
             *mana_spend_permission
         }
         _ => None,
-    };
-    spend_permission.is_some_and(|permission| permission.allows_spending_as_any_color())
+    }
 }
 
-pub(super) fn player_can_spend_as_any_color_for_payment(
+pub(super) fn player_mana_spend_permission_for_payment(
     state: &GameState,
     player: PlayerId,
     source_id: Option<ObjectId>,
     ctx: Option<&PaymentContext<'_>>,
-) -> bool {
+) -> Option<crate::types::ability::ManaSpendPermission> {
     // CR 609.4b: Spend-as-any-color concessions change only how a cost is paid;
     // route each payment site to the static grants scoped for that context —
     // effect costs consult board-wide statics only, activation costs also
@@ -4619,20 +4719,17 @@ pub(super) fn player_can_spend_as_any_color_for_payment(
     // spell costs fall through to spell-class and exile-cast permission checks.
     match ctx {
         Some(PaymentContext::Effect) => {
-            super::static_abilities::player_can_spend_as_any_color(state, player)
+            super::static_abilities::player_board_wide_mana_spend_permission(state, player)
         }
-        Some(PaymentContext::Activation { .. }) => {
-            if source_id.is_some_and(|id| {
-                super::static_abilities::player_can_spend_as_any_color_for_activation_source(
+        Some(PaymentContext::Activation { .. }) => match source_id {
+            Some(id) => {
+                super::static_abilities::player_mana_spend_permission_for_activation_source(
                     state, player, id,
                 )
-            }) {
-                true
-            } else {
-                super::static_abilities::player_can_spend_as_any_color(state, player)
             }
-        }
-        _ => player_can_spend_as_any_color_for_optional_spell(state, player, source_id),
+            None => super::static_abilities::player_board_wide_mana_spend_permission(state, player),
+        },
+        _ => player_mana_spend_permission_for_optional_spell(state, player, source_id),
     }
 }
 
@@ -5120,25 +5217,18 @@ fn exile_cast_permission_source_full(
     })
 }
 
-/// CR 609.4b: True when an `ExileCastPermission` static granting "mana of any
-/// type can be spent to cast those spells" (Azula, Cunning Usurper) authorizes
-/// `player` to cast `exiled_id`. Consulted by
-/// `player_can_spend_as_any_color_for_spell` so the any-type-mana concession is
-/// scoped to spells offered by that static, mirroring the per-card
+/// CR 118.14 + CR 609.4b: Read the typed mana concession from the elected
+/// static that authorizes `player` to cast `exiled_id`. The concession applies
+/// only when casting through that source, as with the per-card
 /// `CastingPermission::PlayFromExile.mana_spend_permission` path.
-pub(crate) fn exile_static_permission_grants_any_color(
+pub(crate) fn exile_static_mana_spend_permission(
     state: &GameState,
     player: PlayerId,
     exiled_id: ObjectId,
     elected_source: ObjectId,
-) -> bool {
-    exile_cast_permission_source_full(state, player, exiled_id, Some(elected_source)).is_some_and(
-        |source| {
-            source.mana_spend_permission.is_some_and(
-                crate::types::ability::ManaSpendPermission::allows_spending_as_any_color,
-            )
-        },
-    )
+) -> Option<crate::types::ability::ManaSpendPermission> {
+    exile_cast_permission_source_full(state, player, exiled_id, Some(elected_source))
+        .and_then(|source| source.mana_spend_permission)
 }
 
 /// CR 601.3b + CR 702.8a: True when an `ExileCastPermission` static granting
@@ -5896,6 +5986,18 @@ pub fn graveyard_lands_playable_by_permission(
         }
     }
 
+    // CR 116.2a + CR 305.1: the land companion of the cross-owner cast pass. Same
+    // grant, same reason — a `mode: Play` `PlayFromExile` naming this player
+    // authorizes the land wherever it sits, and scanning only this player's own
+    // graveyard hid it. Measured as the same shape as the cast surface rather
+    // than assumed symmetric: the loop above is the identical object-tagged
+    // branch, restricted the identical way.
+    results.extend(non_owner_graveyard_play_from_exile_grants(
+        state,
+        player,
+        CardPlayMode::Play,
+    ));
+
     let sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Play));
     for source in &sources {
         let ctx =
@@ -5942,6 +6044,15 @@ pub(super) enum ExileLandPlayAuthorization {
         source: ObjectId,
         frequency: CastFrequency,
         casting_permission_index: CastingPermissionIndex,
+        /// CR 116.2a + CR 611.2a: the tracked-set budget this grant shares with
+        /// its siblings, captured pre-move so `record_exile_play_permission` can
+        /// spend it. `None` when the elected grant is not `single_use`.
+        ///
+        /// Carried here rather than re-derived at the completion seam because the
+        /// land has left its origin zone by then, and the grant travels with the
+        /// object: re-reading it after the move would find nothing and silently
+        /// leave the budget unspent, which is the defect this field closes.
+        single_use_group: Option<TrackedSetId>,
     },
     Static {
         source: ObjectId,
@@ -6007,9 +6118,14 @@ fn exile_land_playable_by_static_permission(
     })
 }
 
-/// CR 305.1 + CR 601.2a + CR 113.6b: Elect the exact exile-play authority for
-/// `land_id` before the land changes zones. Object-attached permissions take
-/// precedence over a static fallback, matching the public legal-actions surface.
+/// CR 116.2a + CR 305.1: Elect the exact play authority for
+/// `land_id` before the land changes zones. CR 116.2a puts the land onto the
+/// battlefield "from the zone it was in", so this is deliberately not
+/// exile-only: an object-attached `PlayFromExile { mode: Play }` grant is
+/// consultable from the graveyard on the same terms (a milled land — CR 701.17a
+/// puts each milled card into its owner's graveyard). Object-attached
+/// permissions take precedence over a static fallback, matching the public
+/// legal-actions surface.
 pub(super) fn exile_land_play_authorization(
     state: &GameState,
     player: PlayerId,
@@ -6036,7 +6152,39 @@ pub(super) fn exile_land_play_authorization(
             source,
             frequency,
             casting_permission_index,
+            // CR 611.2a: read while the land is still in its origin zone; see the
+            // field's own note on why this cannot be recovered afterwards.
+            single_use_group: single_use_play_from_exile_group(
+                state,
+                obj,
+                player,
+                casting_permission_index,
+            ),
         });
+    }
+    // The STATIC fallback is exile-only, and that has to be stated here rather
+    // than inherited. The object-attached branch above is zone-agnostic on
+    // purpose — a milled land carries its `PlayFromExile` grant into the
+    // graveyard. A static `ExileCastPermission` source is different: its printed
+    // scope is cards EXILED with it. Its this-turn pool
+    // (`cards_exiled_with_source_this_turn`) is keyed by `ObjectId`, which is
+    // stable across zone changes and is cleared only at turn end, never on zone
+    // exit — so a land exiled with such a source and then moved to a graveyard in
+    // the same turn is STILL in that pool. When the play-land capture was widened
+    // to graveyards, that land became playable from the graveyard through a
+    // permission that only covers exile, and CR 116.2a would then put it onto the
+    // battlefield "from the zone it was in" under an `Exile` origin it no longer
+    // occupies. Discovery never offered it; the action gate accepted it.
+    //
+    // Reachable only through a this-turn pool with a `SourceController` grantee:
+    // a persistent pool reads `exile_links`, which zone exit prunes, and an
+    // `EachPlayerOwnExiles` pool (Uba Mask) filters on `exiled_by`, which zone
+    // exit clears. No printed card has the reachable shape today (measured over
+    // the card-data export); the parser does support it, so this is a latent
+    // path, closed because the widening that opened it was this change's.
+    // `a_static_exile_permission_does_not_reach_a_land_that_left_exile` pins it.
+    if obj.zone != Zone::Exile {
+        return None;
     }
     let (source, frequency) = exile_land_playable_by_static_permission(state, player, land_id)?;
     Some(ExileLandPlayAuthorization::Static { source, frequency })
@@ -18786,12 +18934,16 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
     // castable while the real cast failed "Cannot pay mana cost").
     super::triggers::resolve_tap_mana_triggers_inline(simulated, &mut tap_events, 0);
 
-    let any_color = player_can_spend_as_any_color_for_payment(simulated, player, source_id, ctx);
+    let mana_spend_permission =
+        player_mana_spend_permission_for_payment(simulated, player, source_id, ctx);
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle the payer's
-    // payment-time permissions (`any_color`, `max_life`, `life_colors`) so
+    // payment-time permissions (`mana_spend_permission`, `max_life`, `life_colors`) so
     // K'rrik-style life-for-{B} grants are visible to the affordability check.
-    let permissions =
-        super::static_abilities::build_cost_permission_context(simulated, player, any_color);
+    let permissions = super::static_abilities::build_cost_permission_context(
+        simulated,
+        player,
+        mana_spend_permission,
+    );
     simulated
         .players
         .iter()
@@ -19236,7 +19388,7 @@ pub fn pending_cast_remaining_mana_cost(state: &GameState, player: PlayerId) -> 
         .find(|candidate| candidate.id == player)?;
     let spell_meta = build_spell_meta(state, player, pending.object_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
-    let any_color = player_can_spend_as_any_color_for_payment(
+    let mana_spend_permission = player_mana_spend_permission_for_payment(
         state,
         player,
         Some(pending.object_id),
@@ -19247,7 +19399,7 @@ pub fn pending_cast_remaining_mana_cost(state: &GameState, player: PlayerId) -> 
         &player_data.mana_pool,
         &pending.cost,
         spell_ctx.as_ref(),
-        any_color,
+        mana_spend_permission,
         None,
     ))
 }
@@ -19471,10 +19623,13 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
         return true;
     }
 
-    let any_color =
-        player_can_spend_as_any_color_for_payment(simulated, player, Some(source_id), ctx);
-    let permissions =
-        super::static_abilities::build_cost_permission_context(simulated, player, any_color);
+    let mana_spend_permission =
+        player_mana_spend_permission_for_payment(simulated, player, Some(source_id), ctx);
+    let permissions = super::static_abilities::build_cost_permission_context(
+        simulated,
+        player,
+        mana_spend_permission,
+    );
     let fused = simulated.pending_cast.as_ref().is_some_and(|pending| {
         pending.object_id == source_id && pending.casting_variant == CastingVariant::Fuse
     });
@@ -19572,8 +19727,8 @@ pub(crate) fn payment_mode_for_prepared_spell_cost(
         return CastPaymentMode::Auto;
     };
     let spell_ctx = PaymentContext::Spell(&spell_meta);
-    let any_color =
-        player_can_spend_as_any_color_for_payment(state, player, Some(source_id), Some(&spell_ctx));
+    let mana_spend_permission =
+        player_mana_spend_permission_for_payment(state, player, Some(source_id), Some(&spell_ctx));
     let residual = state
         .players
         .iter()
@@ -19583,7 +19738,7 @@ pub(crate) fn payment_mode_for_prepared_spell_cost(
                 &player_data.mana_pool,
                 cost,
                 Some(&spell_ctx),
-                any_color,
+                mana_spend_permission,
                 None,
             )
         })
@@ -19593,7 +19748,11 @@ pub(crate) fn payment_mode_for_prepared_spell_cost(
             .restrictions
             .iter()
             .all(|restriction| restriction.allows(&spell_ctx))
-            && mana_source_selection_can_contribute_to_cost(selection, &residual, any_color)
+            && mana_source_selection_can_contribute_to_cost(
+                selection,
+                &residual,
+                mana_spend_permission,
+            )
             && selection.penalty == super::mana_sources::ManaSourcePenalty::Sacrifices
     });
     if has_relevant_sacrificial_source
@@ -19612,7 +19771,7 @@ pub(crate) fn payment_mode_for_prepared_spell_cost(
 fn mana_source_selection_can_contribute_to_cost(
     selection: &ManaSourceSelection,
     cost: &ManaCost,
-    any_color: bool,
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
 ) -> bool {
     let ManaCost::Cost { shards, generic } = cost else {
         return false;
@@ -19630,7 +19789,10 @@ fn mana_source_selection_can_contribute_to_cost(
         }
         ManaSourceOutput::DeferredColorChoice => required != ManaType::Colorless,
     };
-    let pays = |required| (any_color && required != ManaType::Colorless) || produces(required);
+    let pays = |required| {
+        mana_spend_permission.is_some_and(|permission| permission.allows_payment_as(required))
+            || produces(required)
+    };
     shards.iter().any(|shard| {
         use mana_payment::ShardRequirement;
 
@@ -19934,14 +20096,14 @@ fn can_feasibly_pay_mana_cost_without_x_with_probe(
 
     let spell_meta = source_id.and_then(|sid| build_spell_meta(state, player, sid));
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
-    let any_color = source_id.is_some_and(|sid| {
-        player_can_spend_as_any_color_for_payment(state, player, Some(sid), spell_ctx.as_ref())
+    let mana_spend_permission = source_id.and_then(|sid| {
+        player_mana_spend_permission_for_payment(state, player, Some(sid), spell_ctx.as_ref())
     });
     let residual = mana_payment::reduce_cost_by_pool(
         &player_data.mana_pool,
         cost,
         spell_ctx.as_ref(),
-        any_color,
+        mana_spend_permission,
         None,
     );
 
@@ -20122,11 +20284,15 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
     // payment path uses, keeping preview and execution in lockstep.
     super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
 
-    let any_color = player_can_spend_as_any_color_for_optional_spell(&simulated, player, None);
+    let mana_spend_permission =
+        player_mana_spend_permission_for_optional_spell(&simulated, player, None);
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Effect-time resolution
     // mana payments share the same payment-permission bundle as cast/activation.
-    let permissions =
-        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
+    let permissions = super::static_abilities::build_cost_permission_context(
+        &simulated,
+        player,
+        mana_spend_permission,
+    );
     simulated
         .players
         .iter()
@@ -20371,13 +20537,13 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     let spell_meta = build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let permissions = {
-        let any_color = player_can_spend_as_any_color_for_payment(
+        let mana_spend_permission = player_mana_spend_permission_for_payment(
             state,
             player,
             Some(source_id),
             spell_ctx.as_ref(),
         );
-        super::static_abilities::build_cost_permission_context(state, player, any_color)
+        super::static_abilities::build_cost_permission_context(state, player, mana_spend_permission)
     };
     {
         let player_data = state
@@ -20410,7 +20576,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
         cost,
         Some(&hand_demand),
         spell_ctx.as_ref(),
-        permissions.any_color,
+        permissions.mana_spend_permission,
         phyrexian_choices,
         permissions.life_colors,
         &pins,
@@ -20935,8 +21101,9 @@ fn pay_non_cast_mana_cost(
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
 
     let permissions = {
-        let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
-        super::static_abilities::build_cost_permission_context(state, player, any_color)
+        let mana_spend_permission =
+            player_mana_spend_permission_for_optional_spell(state, player, None);
+        super::static_abilities::build_cost_permission_context(state, player, mana_spend_permission)
     };
     {
         let player_data = state
@@ -20962,7 +21129,7 @@ fn pay_non_cast_mana_cost(
         cost,
         None,
         Some(&ctx),
-        permissions.any_color,
+        permissions.mana_spend_permission,
         None,
         permissions.life_colors,
         // CR 118.3a: non-cast mana costs (effects/special actions) are not pinnable.
@@ -21076,12 +21243,12 @@ fn auto_tap_and_pay_cost_excluding(
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
 
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle payment-time permissions
-    // (`any_color`, `max_life`, `life_colors`) once for the cast — K'rrik-style
+    // (`mana_spend_permission`, `max_life`, `life_colors`) once for the cast — K'rrik-style
     // life-for-{B} grants flow through the same dry-run + execution helpers.
     let permissions = {
-        let any_color =
-            player_can_spend_as_any_color_for_payment(state, player, Some(source_id), ctx);
-        super::static_abilities::build_cost_permission_context(state, player, any_color)
+        let mana_spend_permission =
+            player_mana_spend_permission_for_payment(state, player, Some(source_id), ctx);
+        super::static_abilities::build_cost_permission_context(state, player, mana_spend_permission)
     };
     {
         let player_data = state
@@ -21132,7 +21299,7 @@ fn auto_tap_and_pay_cost_excluding(
         cost,
         Some(&combined_demand),
         ctx,
-        permissions.any_color,
+        permissions.mana_spend_permission,
         phyrexian_choices,
         permissions.life_colors,
         &pins,

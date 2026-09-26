@@ -9251,7 +9251,7 @@ fn trigger_evelyn_exiles_each_library_with_collection_counter_and_permission() {
         permission,
         CastingPermission::PlayFromExile {
             frequency: CastFrequency::OncePerTurn,
-            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
             ..
         }
     ));

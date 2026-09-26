@@ -34,7 +34,7 @@ use crate::types::zones::Zone;
 ///   as `grant_permission::resolve` binds it. Empty sets are not skipped: an
 ///   empty current set means the preceding effect affected nothing.
 /// - Any other filter → the ability's chosen targets (object refs only).
-fn tap_untap_target_ids(
+pub(super) fn tap_untap_target_ids(
     state: &GameState,
     ability: &ResolvedAbility,
     effect_target: &TargetFilter,

@@ -4,6 +4,7 @@ use crate::analysis::resource::ResourceAxis;
 use crate::game::quantity::{
     continuous_modification_uses_unspent_mana, static_condition_uses_unspent_mana,
 };
+use crate::types::ability::ManaSpendPermission;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, ShardChoice};
 use crate::types::identifiers::ObjectId;
@@ -769,8 +770,8 @@ fn phyrexian_deferred_order(
 /// When `spell` is `Some`, restricted mana (e.g., "only for creature spells") is only
 /// counted if the restriction permits the given spell. When `None`, all mana is eligible.
 ///
-/// CR 609.4b: When `any_color` is true, colored mana requirements can be paid with
-/// mana of any color (e.g., Chromatic Orrery, Joiner Adept).
+/// CR 118.14 + CR 609.4b: the typed permission relaxes colored requirements;
+/// only AnyTypeOrColor also relaxes a colorless requirement.
 ///
 /// CR 107.4f + CR 118.3 + CR 119.8: `max_life_payments` caps the number of
 /// Phyrexian shards that can be satisfied by paying 2 life. Callers compute this
@@ -793,7 +794,7 @@ pub fn can_pay_for_spell(
         cost,
         None,
         spell,
-        permissions.any_color,
+        permissions.mana_spend_permission,
         None,
         permissions.life_colors,
         &[],
@@ -813,7 +814,7 @@ pub fn pay_from_pool(
     pool: &mut ManaPool,
     cost: &ManaCost,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
-    pay_cost_with_demand(pool, cost, None, None, false)
+    pay_cost_with_demand(pool, cost, None, None, None)
 }
 
 /// CR 601.2g: Simulate paying `cost` from a clone of `pool` and return the
@@ -824,7 +825,7 @@ pub fn pay_from_pool(
 /// This is the dry-run twin of `pay_cost_with_demand_and_choices`: it mirrors
 /// that function's shard-by-shard eligibility checks against a scratch pool,
 /// but records unmet shards into a new `ManaCost` instead of erroring on
-/// shortfall. `spell`/`any_color` gate eligibility exactly as the real payment
+/// shortfall. `spell`/`mana_spend_permission` gate eligibility as the real payment
 /// does — restricted mana the spell can't use stays in the pool and the shard
 /// stays in the residual.
 ///
@@ -834,9 +835,10 @@ pub(crate) fn reduce_cost_by_pool(
     pool: &ManaPool,
     cost: &ManaCost,
     spell: Option<&PaymentContext<'_>>,
-    any_color: bool,
+    mana_spend_permission: Option<ManaSpendPermission>,
     demand: Option<&ColorDemand>,
 ) -> ManaCost {
+    let any_color = mana_spend_permission.is_some();
     let (shards, generic) = match cost {
         ManaCost::NoCost
         | ManaCost::SelfManaCost
@@ -857,7 +859,9 @@ pub(crate) fn reduce_cost_by_pool(
             // residual but auto-tap's `needs` then generates zero sources (requires_life
             // ordering handles it downstream).
             ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
-                if any_color && color != ManaType::Colorless {
+                if mana_spend_permission
+                    .is_some_and(|permission| permission.allows_payment_as(color))
+                {
                     spend_any_for_required_colors(&mut scratch, &[color], spell, None, &[])
                         .is_some()
                 } else {
@@ -1008,21 +1012,20 @@ pub(crate) fn reduce_cost_by_pool(
 /// symbols, the player announces whether to pay 2 life or the corresponding colored
 /// mana for each.
 ///
-/// CR 609.4b: When `any_color` is true, colored mana requirements can be paid with
-/// mana of any color (e.g., Chromatic Orrery).
+/// CR 118.14 + CR 609.4b: the typed permission distinguishes any color from any type.
 pub fn pay_cost_with_demand(
     pool: &mut ManaPool,
     cost: &ManaCost,
     hand_demand: Option<&ColorDemand>,
     spell: Option<&PaymentContext<'_>>,
-    any_color: bool,
+    mana_spend_permission: Option<ManaSpendPermission>,
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     pay_cost_with_demand_and_choices(
         pool,
         cost,
         hand_demand,
         spell,
-        any_color,
+        mana_spend_permission,
         None,
         crate::types::mana::LifePaymentColors::EMPTY,
         &[],
@@ -1044,7 +1047,7 @@ pub fn pay_cost_with_demand_and_choices(
     cost: &ManaCost,
     hand_demand: Option<&ColorDemand>,
     spell: Option<&PaymentContext<'_>>,
-    any_color: bool,
+    mana_spend_permission: Option<ManaSpendPermission>,
     phyrexian_choices: Option<&[ShardChoice]>,
     life_colors: crate::types::mana::LifePaymentColors,
     // CR 118.3a: player-directed pin hints. At the real finalize spend this is
@@ -1057,7 +1060,7 @@ pub fn pay_cost_with_demand_and_choices(
         cost,
         hand_demand,
         spell,
-        any_color,
+        mana_spend_permission,
         phyrexian_choices,
         life_colors,
         pins,
@@ -1077,7 +1080,7 @@ pub(crate) fn select_mana_payment(
     cost: &ManaCost,
     hand_demand: Option<&ColorDemand>,
     spell: Option<&PaymentContext<'_>>,
-    any_color: bool,
+    mana_spend_permission: Option<ManaSpendPermission>,
     phyrexian_choices: Option<&[ShardChoice]>,
     life_colors: crate::types::mana::LifePaymentColors,
     pins: &[ManaPipId],
@@ -1090,7 +1093,7 @@ pub(crate) fn select_mana_payment(
         cost,
         hand_demand,
         spell,
-        any_color,
+        mana_spend_permission,
         phyrexian_choices,
         life_colors,
         pins,
@@ -1103,7 +1106,7 @@ pub(crate) fn select_mana_payment(
                 cost,
                 None,
                 spell,
-                any_color,
+                mana_spend_permission,
                 phyrexian_choices,
                 life_colors,
                 pins,
@@ -1122,11 +1125,12 @@ fn pay_cost_with_demand_and_choices_once(
     cost: &ManaCost,
     hand_demand: Option<&ColorDemand>,
     spell: Option<&PaymentContext<'_>>,
-    any_color: bool,
+    mana_spend_permission: Option<ManaSpendPermission>,
     phyrexian_choices: Option<&[ShardChoice]>,
     life_colors: crate::types::mana::LifePaymentColors,
     pins: &[ManaPipId],
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
+    let any_color = mana_spend_permission.is_some();
     match cost {
         ManaCost::NoCost
         | ManaCost::SelfManaCost
@@ -1147,7 +1151,9 @@ fn pay_cost_with_demand_and_choices_once(
                 match effective_shard_requirement(shard_to_mana_type(shards[idx]), life_colors) {
                     ShardRequirement::Single(mt) => {
                         // CR 609.4b: When any_color, any mana can pay colored costs.
-                        if any_color && mt != ManaType::Colorless {
+                        if mana_spend_permission
+                            .is_some_and(|permission| permission.allows_payment_as(mt))
+                        {
                             let unit =
                                 spend_any_for_required_colors(pool, &[mt], spell, None, pins)
                                     .ok_or(PaymentError::InsufficientMana)?;
@@ -1503,7 +1509,8 @@ pub fn compute_phyrexian_shards(
 ) -> Vec<crate::types::game_state::PhyrexianShard> {
     use crate::types::game_state::{PhyrexianShard, ShardOptions};
 
-    let any_color = permissions.any_color;
+    let mana_spend_permission = permissions.mana_spend_permission;
+    let any_color = mana_spend_permission.is_some();
     let max_life_payments = permissions.max_life;
     let life_colors = permissions.life_colors;
     let (shards, generic) = match cost {
@@ -1528,7 +1535,8 @@ pub fn compute_phyrexian_shards(
     for idx in phyrexian_deferred_order(shards, life_colors) {
         match effective_shard_requirement(shard_to_mana_type(shards[idx]), life_colors) {
             ShardRequirement::Single(mt) => {
-                if any_color && mt != ManaType::Colorless {
+                if mana_spend_permission.is_some_and(|permission| permission.allows_payment_as(mt))
+                {
                     let _ = spend_any_for_required_colors(&mut sim, &[mt], spell, None, &[]);
                 } else {
                     let _ = spend_eligible(&mut sim, mt, spell, &[]);
@@ -2696,7 +2704,7 @@ mod tests {
                     generic: 1,
                 },
                 crate::types::mana::CostPermissionContext {
-                    any_color: true,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                     ..Default::default()
                 },
                 true,
@@ -2731,7 +2739,7 @@ mod tests {
                 &cost,
                 None,
                 Some(&context),
-                permissions.any_color,
+                permissions.mana_spend_permission,
                 None,
                 permissions.life_colors,
                 &[],
@@ -2771,7 +2779,7 @@ mod tests {
             &fallback_cost,
             Some(&[10, 0, 0, 0, 0]),
             Some(&context),
-            false,
+            None,
             None,
             crate::types::mana::LifePaymentColors::EMPTY,
             &[],
@@ -3354,7 +3362,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3366,7 +3374,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 1,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3378,7 +3386,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3400,7 +3408,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3410,7 +3418,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 1,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3420,7 +3428,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 2,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3444,7 +3452,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3454,7 +3462,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 1,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3464,7 +3472,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3597,7 +3605,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 1,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY,
             },
@@ -3649,7 +3657,7 @@ mod tests {
         let demand = [0, 1, 0, 0, 3];
 
         let (spent, life) =
-            pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, false).unwrap();
+            pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, None).unwrap();
 
         assert_eq!(spent.len(), 3);
         assert!(life.is_empty());
@@ -3668,7 +3676,7 @@ mod tests {
         };
 
         assert_eq!(
-            pay_cost_with_demand(&mut pool, &cost, None, None, false),
+            pay_cost_with_demand(&mut pool, &cost, None, None, None),
             Err(PaymentError::InsufficientMana)
         );
         assert_eq!(fingerprint(&pool.mana), before);
@@ -3694,7 +3702,7 @@ mod tests {
         let demand = [0, 1, 0, 0, 3];
 
         assert_eq!(
-            pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, false),
+            pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, None),
             Err(PaymentError::InsufficientMana)
         );
         assert_eq!(fingerprint(&pool.mana), before);
@@ -3717,7 +3725,7 @@ mod tests {
                 &cost,
                 None,
                 None,
-                false,
+                None,
                 Some(&[ShardChoice::PayMana]),
                 crate::types::mana::LifePaymentColors::EMPTY,
                 &[],
@@ -3758,7 +3766,7 @@ mod tests {
             &cost,
             None,
             None,
-            false,
+            None,
             None,
             crate::types::mana::LifePaymentColors::EMPTY,
             &[ManaPipId(12)],
@@ -3783,8 +3791,7 @@ mod tests {
             generic: 0,
         };
         let demand: ColorDemand = [1, 3, 0, 0, 0]; // W=1, U=3
-        let (spent, _) =
-            pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, false).unwrap();
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, None).unwrap();
         assert_eq!(spent[0].color, ManaType::White);
     }
 
@@ -3798,8 +3805,7 @@ mod tests {
             generic: 0,
         };
         let demand: ColorDemand = [2, 2, 0, 0, 0]; // Equal
-        let (spent, _) =
-            pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, false).unwrap();
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, None).unwrap();
         assert_eq!(spent[0].color, ManaType::White);
     }
 
@@ -3813,8 +3819,7 @@ mod tests {
             generic: 0,
         };
         let demand: ColorDemand = [0, 5, 0, 0, 0]; // Blue highly demanded but only option
-        let (spent, _) =
-            pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, false).unwrap();
+        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, Some(&demand), None, None).unwrap();
         assert_eq!(spent[0].color, ManaType::Blue);
     }
 
@@ -3872,7 +3877,7 @@ mod tests {
             &cost,
             Some(&elf_ctx),
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3899,7 +3904,7 @@ mod tests {
             &cost,
             Some(&goblin_ctx),
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3952,7 +3957,7 @@ mod tests {
             &thought_knot_cost,
             Some(&thought_knot_ctx),
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -3978,7 +3983,7 @@ mod tests {
             &thought_knot_cost,
             Some(&colored_eldrazi_ctx),
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4267,7 +4272,7 @@ mod tests {
             &cost,
             Some(&flashback_ctx),
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4293,7 +4298,7 @@ mod tests {
             &cost,
             Some(&normal_ctx),
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4342,7 +4347,7 @@ mod tests {
             &cost,
             Some(&gy_ctx),
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4368,11 +4373,72 @@ mod tests {
             &cost,
             Some(&hand_ctx),
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
         ));
+    }
+
+    #[test]
+    fn any_type_pays_colorless_with_real_colored_mana_but_any_color_does_not() {
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 0,
+        };
+        let pool = pool_with(&[(ManaType::Blue, 1)]);
+        for (permission, payable) in [
+            (None, false),
+            (Some(ManaSpendPermission::AnyColor), false),
+            (Some(ManaSpendPermission::AnyTypeOrColor), true),
+        ] {
+            let permissions = crate::types::mana::CostPermissionContext {
+                mana_spend_permission: permission,
+                ..Default::default()
+            };
+            assert_eq!(can_pay_for_spell(&pool, &cost, None, permissions), payable);
+            assert_eq!(
+                matches!(
+                    reduce_cost_by_pool(&pool, &cost, None, permission, None),
+                    ManaCost::NoCost
+                ),
+                payable
+            );
+            let mut paid_pool = pool.clone();
+            let paid = pay_cost_with_demand(&mut paid_pool, &cost, None, None, permission);
+            assert_eq!(paid.is_ok(), payable);
+            if let Ok((spent, life)) = paid {
+                assert_eq!(
+                    spent[0].color,
+                    ManaType::Blue,
+                    "the actual spent type is unchanged"
+                );
+                assert!(life.is_empty());
+                assert!(paid_pool.mana.is_empty());
+            } else {
+                assert_eq!(paid_pool.mana.len(), 1, "rejected payment remains atomic");
+            }
+        }
+    }
+
+    #[test]
+    fn any_type_does_not_supply_snow_or_turn_convoke_into_colorless_mana() {
+        let permission = Some(ManaSpendPermission::AnyTypeOrColor);
+        let mut ordinary = pool_with(&[(ManaType::Blue, 1)]);
+        let snow = ManaCost::Cost {
+            shards: vec![ManaCostShard::Snow],
+            generic: 0,
+        };
+        assert!(pay_cost_with_demand(&mut ordinary, &snow, None, None, permission).is_err());
+        for color in [ManaType::Colorless, ManaType::Blue] {
+            let mut convoke = ManaPool::default();
+            convoke.add(ManaUnit::convoke_payment(color, ObjectId(1)));
+            let cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Colorless],
+                generic: 0,
+            };
+            assert!(pay_cost_with_demand(&mut convoke, &cost, None, None, permission).is_err());
+        }
     }
 
     #[test]
@@ -4401,7 +4467,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: true,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4429,7 +4495,7 @@ mod tests {
             generic: 0,
         };
         let as_though_any_color = crate::types::mana::CostPermissionContext {
-            any_color: true,
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
             ..crate::types::mana::CostPermissionContext::default()
         };
         assert!(
@@ -4470,7 +4536,13 @@ mod tests {
             shards: vec![ManaCostShard::Blue],
             generic: 0,
         };
-        let result = pay_cost_with_demand(&mut pool, &cost, None, None, true);
+        let result = pay_cost_with_demand(
+            &mut pool,
+            &cost,
+            None,
+            None,
+            Some(ManaSpendPermission::AnyColor),
+        );
         assert!(result.is_ok());
         let (spent, _) = result.unwrap();
         assert_eq!(spent.len(), 1);
@@ -4491,12 +4563,19 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: true,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
         ));
-        assert!(pay_cost_with_demand(&mut pool, &cost, None, None, true).is_err());
+        assert!(pay_cost_with_demand(
+            &mut pool,
+            &cost,
+            None,
+            None,
+            Some(ManaSpendPermission::AnyColor)
+        )
+        .is_err());
     }
 
     #[test]
@@ -4513,12 +4592,19 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: true,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
         ));
-        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, None, None, true).unwrap();
+        let (spent, _) = pay_cost_with_demand(
+            &mut pool,
+            &cost,
+            None,
+            None,
+            Some(ManaSpendPermission::AnyColor),
+        )
+        .unwrap();
         assert_eq!(spent.len(), 1);
         assert!(spent[0].is_convoke_payment());
     }
@@ -4537,7 +4623,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: true,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4557,12 +4643,19 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: true,
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
         ));
-        let (spent, _) = pay_cost_with_demand(&mut pool, &cost, None, None, true).unwrap();
+        let (spent, _) = pay_cost_with_demand(
+            &mut pool,
+            &cost,
+            None,
+            None,
+            Some(ManaSpendPermission::AnyColor),
+        )
+        .unwrap();
         assert_eq!(spent.len(), 1);
         assert!(!spent[0].is_convoke_payment());
         assert!(pool.mana.iter().any(ManaUnit::is_convoke_payment));
@@ -4585,7 +4678,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 1,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4596,7 +4689,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4618,7 +4711,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4641,7 +4734,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 1,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4653,7 +4746,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4675,7 +4768,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 5,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4695,7 +4788,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 1,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
@@ -4705,7 +4798,7 @@ mod tests {
             &cost,
             None,
             crate::types::mana::CostPermissionContext {
-                any_color: false,
+                mana_spend_permission: None,
                 max_life: 0,
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }

@@ -2348,7 +2348,7 @@ fn record_lingering_permissions(
                     // that spell" (Quistis Trepe, Tinybones the Pickpocket) onto
                     // the grant so the concession is scoped to this specific
                     // cast, read at payment by
-                    // `player_can_spend_as_any_color_for_optional_spell`.
+                    // `player_mana_spend_permission_for_optional_spell`.
                     mana_spend_permission,
                     // CR 601.2f: "Spells you cast this way cost {N} less to
                     // cast" (Urianger Augurelt) — stamped onto the CAST
