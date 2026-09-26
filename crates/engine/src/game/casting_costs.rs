@@ -6,11 +6,11 @@ use crate::types::ability::{
     AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
     BeholdCostAction, CastTimingPermission, Comparator, CostMoveOutcome, CostPaidObjectRecord,
     CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, KickerVariant,
-    NotedManaPayment, ObjectProperty, QuantityExpr, QuantityRef, ReplacementDefinition,
-    ResolutionCastCleanup, ResolvedAbility, SacrificeCost, SacrificeRequirement,
-    SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
-    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
-    EXILE_COST_X,
+    NotedManaPayment, ObjectProperty, PlayerRecipientCost, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ResolutionCastCleanup, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement,
+    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
+    TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::casting_costs::{CostReductionElection, CostReductionEntry, ReductionProvenance};
@@ -50,7 +50,7 @@ use super::ability_utils::{
     build_target_slots, build_target_slots_labelled, flatten_targets_in_chain,
     modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
 };
-use super::life_costs::PayLifeCostResult;
+use super::life_costs::{GiveLifeCostResult, PayLifeCostResult};
 
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
 pub(crate) const ABANDONED_CAST_FINALIZATION_ERROR: &str = "__abandoned_cast_finalization__";
@@ -8396,6 +8396,52 @@ fn pay_additional_cost_with_source(
         });
     }
 
+    // CR 118.9 + CR 601.2h + CR 118.3 + CR 119.3: pay an effect-as-cost that acts on a
+    // player the payer chooses (Invigorate: "have an opponent gain 3 life").
+    // CR 115.10a: the recipient is a choice, not a target.
+    if let Some(view) = cost.player_recipient_cost() {
+        match view {
+            PlayerRecipientCost::GainLife { amount, recipient } => {
+                let amount =
+                    super::quantity::resolve_quantity_with_targets(state, amount, &pending.ability)
+                        .max(0) as u32;
+                let recipients = super::life_costs::life_gain_cost_recipients(
+                    state,
+                    player,
+                    pending.object_id,
+                    recipient,
+                );
+                // Same contract as the PayLife arm's unpayable branch: plain Err, no
+                // cancel. The offer gate (`is_payable`) makes this unreachable in
+                // phase 1; it is an invariant re-check, not a UI path.
+                // DEFERRED(phase 2): ≥2 recipients become a recipient prompt here.
+                let &[to] = recipients.as_slice() else {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Recipient effect-cost needs exactly one choosable recipient".to_string(),
+                    ));
+                };
+                let resume_at_resolution_depth = state.resolution_stack.len();
+                match super::life_costs::give_life_as_cost(state, to, amount, events) {
+                    GiveLifeCostResult::Paid { .. } => {}
+                    GiveLifeCostResult::Deferred => {
+                        // CR 616.1: the recipient (not the payer) may own the pending
+                        // prompt; the carrier resumes the payer's cast afterwards (see
+                        // `DeferredLifeCostResume` docs).
+                        state.pending_deferred_life_cost_resume =
+                            Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+                                player,
+                                pending: Some(Box::new(pending)),
+                                remaining_life_payments: Vec::new(),
+                                resume_at_resolution_depth,
+                            });
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
+        }
+    }
+
     match cost {
         AbilityCost::PayLife { amount } => {
             // CR 118.3 + CR 119.4 + CR 119.8: Pay life as an additional cost via
@@ -9057,7 +9103,9 @@ fn pay_additional_cost_with_source(
             )));
         }
         _ => {
-            // Other cost types (Exile, etc.) — not yet interactive
+            // Other cost types (Exile, etc.) — not yet interactive. The remaining
+            // `EffectCost` shapes (Land Grant's `RevealHand`) also reach this arm as
+            // a known no-op; recipient effect-costs are paid by the pre-dispatch above.
         }
     }
 

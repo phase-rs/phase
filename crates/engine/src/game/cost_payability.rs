@@ -21,8 +21,8 @@
 
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
-    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, TapCreaturesAggregateStat,
-    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
+    FilterProp, PlayerFilter, PlayerRecipientCost, QuantityExpr, QuantityRef,
+    TapCreaturesAggregateStat, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -873,9 +873,21 @@ impl AbilityCost {
                 !super::keywords::returnable_creatures_for_variant(state, player, variant)
                     .is_empty()
             }
-            // CR 118.3: Effect-as-cost is conservatively treated as payable.
-            // Runtime resolution determines actual outcome.
-            AbilityCost::EffectCost { .. } => true,
+            // CR 118.3: Effect-as-cost is conservatively payable (runtime resolution
+            // determines the actual outcome), except a recipient effect-cost
+            // (CR 118.9 + CR 601.2b + CR 115.10a), offered only when the payer can
+            // choose a recipient. Phase 1 requires exactly one choosable recipient:
+            // the ≥2 choice surface is DEFERRED(phase 2) (a parameterized cast-time
+            // opponent prompt). Until then the option is not offered rather than
+            // guessing a recipient; the printed cost stays castable.
+            AbilityCost::EffectCost { .. } => match self.player_recipient_cost() {
+                Some(PlayerRecipientCost::GainLife { recipient, .. }) => {
+                    super::life_costs::life_gain_cost_recipients(state, player, source, recipient)
+                        .len()
+                        == 1
+                }
+                None => true,
+            },
             // CR 601.2b: Unimplemented costs are conservatively treated as payable
             // so the existing `Unimplemented` fallback paths are not further gated.
             AbilityCost::Unimplemented { .. } => true,

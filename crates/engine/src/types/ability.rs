@@ -13597,6 +13597,21 @@ impl<'de> serde::Deserialize<'de> for SacrificeCost {
     }
 }
 
+/// CR 118.3 + CR 115.10a: typed view of an effect-as-cost whose instruction acts on
+/// a player the payer chooses during payment. Single recognizer
+/// ([`AbilityCost::player_recipient_cost`]); consumers match exhaustively.
+///
+/// A borrowed, unserialized projection over `AbilityCost::EffectCost` — not a new
+/// cost variant, so ability scanners and the wire format are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerRecipientCost<'a> {
+    /// CR 119.3: "have an opponent gain N life" (Invigorate).
+    GainLife {
+        amount: &'a QuantityExpr,
+        recipient: &'a TargetFilter,
+    },
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -14426,6 +14441,12 @@ impl AbilityCost {
     /// a player choice. This is shared by cumulative-upkeep synthesis and the
     /// resolution-time payment gate so supported cards never install a trigger
     /// whose cost will later be rejected.
+    ///
+    /// The recipient effect-cost shape ([`Self::player_recipient_cost`], e.g.
+    /// "have an opponent gain 3 life") is deliberately excluded: the activation,
+    /// resolution and unless payers have no recipient-choice surface, so they keep
+    /// refusing it. Only the spell payer
+    /// (`casting_costs::pay_additional_cost_with_source`) performs it.
     pub fn supports_effect_cost_payment(&self) -> bool {
         matches!(
             self,
@@ -14442,6 +14463,30 @@ impl AbilityCost {
                     }
                 )
         )
+    }
+
+    /// CR 118.3 + CR 115.10a: Single recognizer for an effect-as-cost whose
+    /// instruction acts on a player the payer chooses during payment. Consumers
+    /// (payability, the spell payer) match the returned view exhaustively, so a
+    /// new recipient shape is a compile error at each of them.
+    pub fn player_recipient_cost(&self) -> Option<PlayerRecipientCost<'_>> {
+        let AbilityCost::EffectCost { effect } = self else {
+            return None;
+        };
+        match effect.as_ref() {
+            Effect::GainLife {
+                amount,
+                player:
+                    recipient @ TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: Some(ControllerRef::Opponent),
+                        properties,
+                    }),
+            } if type_filters.is_empty() && properties.is_empty() => {
+                Some(PlayerRecipientCost::GainLife { amount, recipient })
+            }
+            _ => None,
+        }
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.

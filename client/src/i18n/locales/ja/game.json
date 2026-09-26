@@ -2295,7 +2295,8 @@
       "zoneExile": "追放領域",
       "zoneHand": "あなたの手札",
       "discard": "{{count}}{{cards}}を捨てる",
-      "exile": "{{zone}}から{{count}}{{cards}}を追放"
+      "exile": "{{zone}}から{{count}}{{cards}}を追放",
+      "haveOpponentGainLife": "対戦相手1人に{{amount}}点のライフを得させる"
     }
   },
   "topOrBottom": {

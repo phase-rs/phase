@@ -1286,6 +1286,54 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
+    // CR 118.3 + CR 119.3 + CR 115.10a: "have an opponent gain N life" — an effect
+    // performed as a cost (Invigorate). The opponent is CHOSEN by the payer during
+    // payment, not targeted. The effect fallback below happens to lower this text to
+    // the same value today, but only incidentally (via subject stripping); this arm
+    // is the explicit, tested authority for the recipient-cost shape that
+    // `AbilityCost::player_recipient_cost` recognizes.
+    if let Some((amount, _)) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = (tag("have "), tag("an opponent ")).parse(i)?;
+        let (i, _) = alt((tag("gains "), tag("gain "))).parse(i)?;
+        let (i, amount) = nom_primitives::parse_number(i)?;
+        let (i, _) = (tag(" life"), opt(tag(".")), eof).parse(i)?;
+        Ok((i, amount))
+    }) {
+        return AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed {
+                    value: amount as i32,
+                },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            }),
+        };
+    }
+
+    // CR 115.1 vs CR 115.10a: a targeted or all-opponents life-gain recipient is not
+    // the chosen-recipient cost above. The effect fallback would lower "have target
+    // opponent gain N life" to the SAME `GainLife { Typed(Opponent) }` value, silently
+    // turning a target into a payer's choice; refuse instead. Scoped to the gain-life
+    // verb so other "have target opponent <verb>" costs are untouched.
+    if nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            (
+                tag("have "),
+                alt((tag("target opponent "), tag("each opponent "))),
+                alt((tag("gains "), tag("gain "))),
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
+    {
+        return AbilityCost::Unimplemented {
+            description: text.to_string(),
+        };
+    }
+
     // "reveal your hand" — reveal the controller's entire hand.
     // CR 701.20a: Reveal means show to all players. Used as alternative cost
     // (Land Grant class). Modeled as EffectCost wrapping Effect::RevealHand.
@@ -5123,6 +5171,92 @@ mod tests {
             )
             .is_none(),
             "qualified \"by\" continuation must not truncate to EventContextAmount"
+        );
+    }
+
+    fn opponent_gains(value: i32) -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            }),
+        }
+    }
+
+    /// CR 118.3 + CR 119.3 + CR 115.10a: "have an opponent gain N life" is an
+    /// effect-as-cost with a payer-chosen opponent recipient (Invigorate).
+    #[test]
+    fn have_an_opponent_gain_life_cost_parses_to_recipient_effect_cost() {
+        for text in [
+            "have an opponent gain 3 life",
+            "Have an opponent gain 3 life.",
+            "have an opponent gains 3 life",
+            "have an opponent gain three life",
+        ] {
+            assert_eq!(parse_oracle_cost(text), opponent_gains(3), "{text}");
+        }
+    }
+
+    /// Only the chosen-opponent gain shape is a recipient cost. The positive
+    /// case is the reach-guard for every negative in this test.
+    #[test]
+    fn player_recipient_cost_recognizes_only_chosen_opponent_gain() {
+        let cost = parse_oracle_cost("have an opponent gain 3 life");
+        match cost.player_recipient_cost() {
+            Some(crate::types::ability::PlayerRecipientCost::GainLife { amount, recipient }) => {
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 3 });
+                assert_eq!(
+                    recipient,
+                    &TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            None => panic!("expected recipient cost, got {cost:?}"),
+        }
+        // Unchanged: other payers keep refusing this shape.
+        assert!(!cost.supports_effect_cost_payment());
+        assert!(!cost.payability_verdict_is_resource_based());
+
+        // CR 115.1: a targeted recipient is not the payer's choice; each-opponent is
+        // not a single recipient. Both are refused rather than colliding.
+        for text in [
+            "have target opponent gain 3 life",
+            "have each opponent gain 3 life",
+        ] {
+            let parsed = parse_oracle_cost(text);
+            assert!(
+                matches!(parsed, AbilityCost::Unimplemented { .. }),
+                "{text} must stay unimplemented, got {parsed:?}"
+            );
+            assert_eq!(parsed.player_recipient_cost(), None, "{text}");
+        }
+
+        // Other effect-costs and life costs are not recipient costs.
+        assert_eq!(
+            parse_oracle_cost("reveal your hand").player_recipient_cost(),
+            None
+        );
+        let self_counter = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }),
+        };
+        assert_eq!(self_counter.player_recipient_cost(), None);
+        let you_gain = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        };
+        assert_eq!(you_gain.player_recipient_cost(), None);
+        assert_eq!(
+            parse_oracle_cost("Pay 3 life").player_recipient_cost(),
+            None
         );
     }
 }

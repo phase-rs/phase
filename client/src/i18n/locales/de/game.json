@@ -2252,7 +2252,8 @@
       "zoneExile": "dem Exil",
       "zoneHand": "deiner Hand",
       "discard": "Wirf {{count}} {{cards}} ab",
-      "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil"
+      "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil",
+      "haveOpponentGainLife": "Lass einen Gegner {{amount}} Lebenspunkte dazugewinnen"
     }
   },
   "topOrBottom": {

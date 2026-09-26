@@ -2252,7 +2252,8 @@
       "zoneExile": "wygnania",
       "zoneHand": "twojej ręki",
       "discard": "Odrzuć {{count}} {{cards}}",
-      "exile": "Wygnaj {{count}} {{cards}} z {{zone}}"
+      "exile": "Wygnaj {{count}} {{cards}} z {{zone}}",
+      "haveOpponentGainLife": "Pozwól przeciwnikowi zyskać {{amount}} życia"
     }
   },
   "topOrBottom": {

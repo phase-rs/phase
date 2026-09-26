@@ -8647,6 +8647,69 @@ fn spell_casting_option_parses_ravenous_trap_alternative_cost() {
     );
 }
 
+// CR 118.9: Invigorate prints the swapped clause order "rather than pay this spell's
+// mana cost, you may [cost]". Verbatim Oracle text (local Scryfall-derived dataset).
+// The life gain is the alternative COST, never part of the spell's effect.
+#[test]
+fn spell_casting_option_parses_invigorate_swapped_order_alternative_cost() {
+    const PUMP_LINE: &str = "Target creature gets +4/+4 until end of turn.";
+    let r = parse(
+        "If you control a Forest, rather than pay this spell's mana cost, you may have an opponent gain 3 life.\nTarget creature gets +4/+4 until end of turn.",
+        "Invigorate",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    // Positive reach-guard for the negatives below: the first line became the option.
+    assert_eq!(
+        r.casting_options.len(),
+        1,
+        "warnings: {:?}",
+        r.parse_warnings
+    );
+    assert_eq!(
+        r.casting_options[0].kind,
+        crate::types::ability::SpellCastingOptionKind::AlternativeCost
+    );
+    assert!(r.casting_options[0].condition.is_some());
+    assert_eq!(
+        r.casting_options[0].cost,
+        Some(AbilityCost::EffectCost {
+            effect: Box::new(Effect::GainLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .controller(crate::types::ability::ControllerRef::Opponent)
+                ),
+            }),
+        })
+    );
+
+    // The spell ability is only the pump.
+    assert_eq!(r.abilities.len(), 1);
+    assert_eq!(
+        r.abilities[0].effect,
+        parse_effect_chain(PUMP_LINE, crate::types::ability::AbilityKind::Spell).effect
+    );
+    const PAY_PHRASE: &str = "rather than pay this spell's mana cost";
+    let mut link = Some(&r.abilities[0]);
+    while let Some(def) = link {
+        assert!(
+            !matches!(*def.effect, Effect::GainLife { .. }),
+            "life gain must not leak into the spell effect: {:?}",
+            r.abilities[0]
+        );
+        assert!(
+            !def.effect
+                .unimplemented_description()
+                .is_some_and(|d| d.to_lowercase().contains(PAY_PHRASE)),
+            "alt-cost must not leak as an unimplemented gap: {:?}",
+            r.abilities[0]
+        );
+        link = def.sub_ability.as_deref();
+    }
+}
+
 #[test]
 fn spell_casting_option_parses_composite_alternative_cost() {
     let r = parse(

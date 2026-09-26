@@ -7318,15 +7318,21 @@ fn default_origin_zone() -> Zone {
 }
 
 /// CR 118.3b + CR 119.4 + CR 616.1: Exact outer cost action suspended after a
-/// life payment committed but its replacement's interactive post-effect did
-/// not finish. The replacement continuation remains the immediate child; this
-/// owner resumes only after that child drains.
+/// life payment (CR 119.4) or a life-gain cost event (CR 119.3) committed but
+/// its replacement's interactive post-effect did not finish. The replacement
+/// continuation remains the immediate child; this owner resumes only after that
+/// child drains.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DeferredLifeCostResume {
     /// Continue a spell cast or activated-ability payment without replaying the
     /// life payment. Mana-payment callers set `cost` to `NoCost` and preserve
     /// the amount already spent in `prepaid_actual_mana_spent`.
+    ///
+    /// `player` is always the payer whose cast resumes. The prompt that parked
+    /// the root may belong to a different player: for a life-gain cost, CR 616.1
+    /// gives the replacement choice to the recipient. Consumers must key on the
+    /// resolution depth and `Priority` window, never on the answering player.
     Cast {
         player: PlayerId,
         /// The announcing caller attaches its complete cast/activation root

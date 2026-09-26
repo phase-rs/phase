@@ -2252,7 +2252,8 @@
       "zoneExile": "el exilio",
       "zoneHand": "tu mano",
       "discard": "Descarta {{count}} {{cards}}",
-      "exile": "Exilia {{count}} {{cards}} de {{zone}}"
+      "exile": "Exilia {{count}} {{cards}} de {{zone}}",
+      "haveOpponentGainLife": "Haz que un oponente gane {{amount}} vidas"
     }
   },
   "topOrBottom": {
