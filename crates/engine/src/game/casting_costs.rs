@@ -2451,6 +2451,24 @@ fn finish_cost_object_moves(
     park_events_after_completion: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 603.10a: `departed_subset` requires ids verified on the battlefield
+    // before the move; this seam also moves hand/graveyard cards (pitch,
+    // Collect Evidence, craft's graveyard materials), so the group is the
+    // chosen objects that are on the battlefield now. Only a call that moves
+    // the WHOLE selection (`start_at_index == 0`) can stamp: a resumed call
+    // holds only the tail, and a partial stamp would break the mutual relation.
+    let battlefield_group: Option<Vec<ObjectId>> = (start_at_index == 0).then(|| {
+        chosen
+            .iter()
+            .copied()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            })
+            .collect()
+    });
     for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
         match zone_pipeline::move_object(
             state,
@@ -2482,6 +2500,19 @@ fn finish_cost_object_moves(
                 unreachable!("a cost move to Hand or Exile cannot require an Aura attachment")
             }
         }
+    }
+
+    // CR 603.10a: permanents moved together to pay one cost component leave
+    // the battlefield simultaneously; stamp them so a co-departing
+    // leaves-the-battlefield observer sees each (mirrors the synchronous stamp
+    // in `handle_sacrifice_for_cost`). The cross-action paused case needs the
+    // record-ledger carry that `PendingCostMoveResume::SacrificeForCost` has
+    // and `::Cast` lacks.
+    if let Some(group) = battlefield_group {
+        crate::game::zones::mark_simultaneous_departures(
+            &mut events[cost_event_start..],
+            &crate::game::zones::departed_subset(state, &group),
+        );
     }
 
     // CR 400.7j + CR 400.7 + CR 608.2k + CR 608.2h: Every cost object move above is now
@@ -4225,15 +4256,12 @@ pub(crate) fn handle_return_to_hand_for_cost(
         }
     }
 
-    // CR 603.10a co-departed sibling (confirmed-excluded, mirrors the Ward
-    // GAP comment): permanents returned to hand as a cost leave the battlefield
-    // together, so a co-departing leaves-the-battlefield observer among them
-    // would under-observe — the same gap `handle_sacrifice_for_cost` closes with
-    // a `mark_simultaneous_departures` stamp. Not stamped here because
-    // return-to-hand-as-cost is effectively always a single permanent (Daze,
-    // Karoo lands, Cavern Harpy): `count` is almost always 1, so the stamp's
-    // `len() < 2` guard would no-op. If a >=2-permanent return-to-hand cost ever
-    // ships, mirror the A1 stamp from `handle_sacrifice_for_cost` here.
+    // CR 603.10a: permanents returned to hand as one cost leave the battlefield
+    // together. Counted return costs ship (Ensnare, Thwart, activated counted
+    // returns), so `finish_cost_object_moves` stamps the synchronous group —
+    // taken from the chosen objects on the battlefield before the move — the
+    // same way `handle_sacrifice_for_cost` does. A move paused by a replacement
+    // choice and resumed in a later action is not stamped (known limitation).
     // A self-return component is paid by `pay_ability_cost` above. Moving
     // that source a second time would emit a spurious Hand -> Hand event.
     let to_return: Vec<_> = chosen

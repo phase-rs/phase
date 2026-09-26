@@ -15176,13 +15176,71 @@ fn trigger_unless_you_return_two_forests_to_hand() {
     let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
     match &unless_pay.cost {
         AbilityCost::ReturnToHand {
-            count, from_zone, ..
+            count,
+            from_zone,
+            filter,
         } => {
             assert_eq!(*count, 2);
             assert!(from_zone.is_none());
+            // The counted plural subtype phrase keeps its subtype and controller.
+            match filter {
+                Some(TargetFilter::Typed(tf)) => {
+                    assert_eq!(tf.get_subtype(), Some("Forest"));
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("filter should be Typed Forest you control, got {other:?}"),
+            }
         }
         other => panic!("cost should be ReturnToHand, got {:?}", other),
     }
+}
+
+/// A plural owner destination with no parsed count token declines on the
+/// unless side instead of lowering as a count-1 return (r1 M2, second channel).
+#[test]
+fn unless_return_plural_without_count_declines() {
+    // Reach guard: the counted form of the same destination lowers.
+    assert!(matches!(
+        parse_unless_alt_cost("you return two lands you control to their owner's hand"),
+        Some(AbilityCost::ReturnToHand { count: 2, .. })
+    ));
+    assert!(
+        parse_unless_alt_cost("you return x lands you control to their owner's hand").is_none()
+    );
+    // Whole-trigger reach guard: the declined rider becomes the honest
+    // `Unsupported unless clause` gap rather than a count-1 return.
+    let def = parse_trigger_line(
+        "When ~ enters, sacrifice it unless you return X lands you control to their owner's hand.",
+        "Plural Return Witness",
+    );
+    assert!(
+        !matches!(
+            def.unless_pay.as_ref().map(|u| &u.cost),
+            Some(AbilityCost::ReturnToHand { .. })
+        ),
+        "a plural without a count must not lower to ReturnToHand: {:?}",
+        def.unless_pay
+    );
+    assert!(
+        format!("{:?}", def.execute).contains("Unsupported unless clause"),
+        "the declined rider must surface as a parser gap: {:?}",
+        def.execute
+    );
+}
+
+/// `parse_hand_possessive` delegates its owner-hand arms to the shared
+/// `parse_owner_hand_possessive` without changing its accepted set or results.
+#[test]
+fn hand_possessive_owner_forms_delegate() {
+    assert_eq!(parse_hand_possessive("their owners' hands"), Ok(("", None)));
+    assert_eq!(parse_hand_possessive("their owner's hand"), Ok(("", None)));
+    assert_eq!(parse_hand_possessive("its owner's hand"), Ok(("", None)));
+    assert_eq!(parse_hand_possessive("a hand"), Ok(("", None)));
+    // Reach guard: the non-delegated "your hand" arm still constrains.
+    assert_eq!(
+        parse_hand_possessive("your hand"),
+        Ok(("", Some(ControllerRef::You)))
+    );
 }
 
 #[test]

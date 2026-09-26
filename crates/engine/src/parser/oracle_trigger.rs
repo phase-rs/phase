@@ -38,6 +38,9 @@ use super::oracle_nom::primitives::{
 };
 use super::oracle_nom::target::parse_chosen_object_reference;
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
+use super::oracle_nom::target::{
+    parse_owner_hand_possessive, split_counted_return_to_hand_object, CountedReturnObject,
+};
 use super::oracle_static::{parse_commander_subject_filter_prefix, typed_filter_for_subtype};
 use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase_folding,
@@ -5097,27 +5100,19 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<AbilityCost> {
 /// - "an enchantment to its owner's hand" (Drake Familiar — no controller
 ///   restriction; any enchantment on the battlefield, yours or an
 ///   opponent's, may be returned)
+///
+/// CR 400.3: the destination is recognised through the shared
+/// `split_counted_return_to_hand_object` grammar — an owner possessive
+/// ("its owner's hand", "their owner's hand", "their owners' hands") or
+/// "your hand" — rather than split at any " to ". A plural destination with no
+/// count token ("x lands … to their owner's hand") declines here and falls
+/// through to the `Unsupported unless clause` gap instead of lowering as one.
 fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
-    let to_pos = rest.find(" to ")?; // allow-noncombinator: delimiter split on pre-tokenized unless clause text
-    let filter_part = rest[..to_pos].trim().trim_end_matches('.').trim();
-    if filter_part.is_empty() {
-        return None;
-    }
-
-    // Extract count: leading numeric word > 1 keeps as count, otherwise count=1.
-    let (count, filter_text) = if let Some((n, after_num)) = parse_number(filter_part) {
-        if n > 1 {
-            (n, after_num.trim().to_string())
-        } else {
-            (1u32, after_num.trim().to_string())
-        }
-    } else {
-        (1u32, filter_part.to_string())
-    };
-
-    if filter_text.is_empty() {
-        return None;
-    }
+    let CountedReturnObject {
+        count,
+        object: filter_text,
+        ..
+    } = split_counted_return_to_hand_object(rest.trim_start())?;
 
     // Delegate to parse_target which handles "another", articles, type phrases,
     // "you control" (controller suffix), and "from your graveyard" (zone suffix).
@@ -20114,14 +20109,14 @@ fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
 /// Recognises "your hand", "an opponent's hand", "its owner's hand",
 /// "their owner's hand", "their owners' hands", "a player's hand", "a hand",
 /// and bare "hand". Returns `Some(controller)` when the possessive constrains
-/// the destination owner, `None` when any player's hand matches.
+/// the destination owner, `None` when any player's hand matches. The three
+/// owner-hand forms delegate to `parse_owner_hand_possessive`.
 fn parse_hand_possessive(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
     alt((
         value(Some(ControllerRef::You), tag("your hand")),
         value(Some(ControllerRef::Opponent), tag("an opponent's hand")),
-        value(None, tag("its owner's hand")),
-        value(None, tag("their owner's hand")),
-        value(None, tag("their owners' hands")),
+        // The owner-hand forms are the shared cost/trigger literals.
+        value(None, parse_owner_hand_possessive),
         value(None, tag("a player's hand")),
         value(None, tag("a hand")),
         value(None, tag("hand")),

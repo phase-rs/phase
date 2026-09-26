@@ -170,6 +170,7 @@ mod cost_x_carrier_runtime;
 mod cost_zone_pipeline;
 mod council_of_four_nth_per_turn;
 mod count_form_draw_replacement;
+mod counted_return_to_hand_cost;
 mod counter_anaphor_binds_to_recipient;
 mod counter_anaphor_created_token_binding;
 mod counter_double_redirect_choice;

@@ -13,7 +13,9 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
-use super::oracle_nom::target::parse_cost_self_reference;
+use super::oracle_nom::target::{
+    parse_cost_self_reference, split_counted_return_to_hand_object, CountedReturnObject,
+};
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{
     distribute_shared_properties, fold_article_led_type_union, parse_target,
@@ -2082,23 +2084,16 @@ fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
     None
 }
 
-/// Parse "return a land you control to its owner's hand" style bounce costs.
+/// Parse "return [count|article] <filter> to <its owner's hand | their owner's
+/// hand | their owners' hands | your hand>" costs.
 fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
-    // Must end with "to its owner's hand" or "to your hand"
-    if !scan_contains(rest_lower, "to its owner's hand")
-        && !scan_contains(rest_lower, "to your hand")
-    {
-        return None;
-    }
-    // Strip the destination
-    let filter_text = split_once_on(rest_lower, " to its owner's hand")
-        .map(|(_, (before, _))| before)
-        .or_else(|_| split_once_on(rest_lower, " to your hand").map(|(_, (before, _))| before))
-        .ok()?;
-    // Strip article using nom
-    let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
-        .map(|((), rest)| rest)
-        .unwrap_or(filter_text);
+    // CR 400.3 + CR 601.2h: shared destination/count grammar (also used by
+    // trigger unless-costs). `trailing` is ignored exactly as before.
+    let CountedReturnObject {
+        count,
+        object: filter_text,
+        ..
+    } = split_counted_return_to_hand_object(rest_lower)?;
     // CR 201.5 / CR 201.5a: "~" / "this X" is the host self-reference; the
     // granter placeholder is a granted body's by-name reference to its granting
     // object. Preserve the explicit filter so the runtime does not treat an
@@ -2123,7 +2118,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     }) {
         if rest.trim().is_empty() {
             return Some(AbilityCost::ReturnToHand {
-                count: 1,
+                count,
                 filter: Some(filter),
                 from_zone: None,
             });
@@ -2138,26 +2133,27 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
         filter
     };
     let filter = match filter {
-        TargetFilter::Any => {
-            // CR 201.5: A cost using the source card's own name, such as
-            // "Return Recurring Nightmare to its owner's hand", refers to that
-            // source object.
-            TargetFilter::SelfRef
-        }
+        // CR 201.5: A cost using the source card's own name, such as
+        // "Return Recurring Nightmare to its owner's hand", refers to that
+        // source object. Only one object is the source, so an unreadable
+        // object phrase with a count above one is declined rather than
+        // lowered as an unpayable self-reference.
+        TargetFilter::Any if count == 1 => TargetFilter::SelfRef,
+        TargetFilter::Any => return None,
         TargetFilter::Typed(TypedFilter {
             type_filters,
             controller: None,
             properties,
         }) if type_filters.is_empty() && properties.is_empty() => {
-            // CR 201.5: A cost using the source card's own name, such as
-            // "Return Recurring Nightmare to its owner's hand", refers to that
-            // source object.
+            if count != 1 {
+                return None;
+            }
             TargetFilter::SelfRef
         }
         filter => filter,
     };
     Some(AbilityCost::ReturnToHand {
-        count: 1,
+        count,
         filter: Some(filter),
         from_zone: None,
     })
@@ -4403,6 +4399,126 @@ mod tests {
             }
             other => panic!("Expected ReturnToHand Forest filter, got {:?}", other),
         }
+    }
+
+    /// Asserts `text` parses as a counted `ReturnToHand` of `subtype` you control.
+    fn assert_counted_subtype_return(text: &str, expected_count: u32, subtype: &str) {
+        match parse_oracle_cost(text) {
+            AbilityCost::ReturnToHand {
+                count,
+                filter: Some(TargetFilter::Typed(filter)),
+                from_zone: None,
+            } => {
+                assert_eq!(count, expected_count, "{text}");
+                assert_eq!(filter.get_subtype(), Some(subtype), "{text}");
+                assert_eq!(filter.controller, Some(ControllerRef::You), "{text}");
+            }
+            other => panic!("Expected counted ReturnToHand for {text:?}, got {other:?}"),
+        }
+    }
+
+    /// Ensnare / Thwart class: a counted plural return with a plural owner
+    /// destination. BASE lowered this to `EffectCost { Bounce }`, which the
+    /// spell payer silently skipped.
+    #[test]
+    fn cost_return_two_islands_to_their_owners_hand() {
+        assert_counted_subtype_return(
+            "Return two Islands you control to their owner's hand",
+            2,
+            "Island",
+        );
+        assert_counted_subtype_return(
+            "Return three Islands you control to their owners' hands",
+            3,
+            "Island",
+        );
+        // Singular guard: same filter shape, count 1.
+        assert_counted_subtype_return(
+            "Return an Island you control to its owner's hand",
+            1,
+            "Island",
+        );
+        // "another" is not the article "an": count 1 and the Another property kept.
+        match parse_oracle_cost("Return another creature you control to its owner's hand") {
+            AbilityCost::ReturnToHand {
+                count,
+                filter: Some(TargetFilter::Typed(filter)),
+                ..
+            } => {
+                assert_eq!(count, 1);
+                assert!(filter.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("Expected ReturnToHand another creature, got {other:?}"),
+        }
+        // "to your hand" sibling stays a ReturnToHand.
+        assert!(matches!(
+            parse_oracle_cost("Return a creature card from your graveyard to your hand"),
+            AbilityCost::ReturnToHand { count: 1, .. }
+        ));
+    }
+
+    /// A plural owner destination with no parsed count token must not be
+    /// lowered as a count-1 return (r1 M2).
+    #[test]
+    fn cost_return_x_lands_to_their_owners_hand_declines() {
+        // Reach guard: the counted variant of the same destination shape parses.
+        assert!(matches!(
+            parse_oracle_cost("Return two lands you control to their owner's hand"),
+            AbilityCost::ReturnToHand { count: 2, .. }
+        ));
+        for text in [
+            "Return X lands you control to their owner's hand",
+            "Return any number of lands you control to their owners' hands",
+        ] {
+            let cost = parse_oracle_cost(text);
+            assert!(
+                !matches!(cost, AbilityCost::ReturnToHand { .. }),
+                "{text:?} must not lower to ReturnToHand, got {cost:?}"
+            );
+        }
+    }
+
+    /// "your hand" is number-neutral: a non-count quantity must not be lowered
+    /// as a count-1 return there either.
+    #[test]
+    fn cost_return_x_cards_to_your_hand_declines() {
+        // Reach guard: the same object phrase and destination with an article.
+        assert!(matches!(
+            parse_oracle_cost("Return a creature card from your graveyard to your hand"),
+            AbilityCost::ReturnToHand { count: 1, .. }
+        ));
+        for text in [
+            "Return X creature cards from your graveyard to your hand",
+            "Return any number of creature cards from your graveyard to your hand",
+        ] {
+            let cost = parse_oracle_cost(text);
+            assert!(
+                !matches!(cost, AbilityCost::ReturnToHand { .. }),
+                "{text:?} must not lower to ReturnToHand, got {cost:?}"
+            );
+        }
+    }
+
+    /// The source-name self-reference fallback names ONE object; a counted
+    /// return of an unreadable object phrase must not lower to an unpayable
+    /// `ReturnToHand { count: 2, filter: SelfRef }`.
+    #[test]
+    fn cost_counted_return_of_unreadable_phrase_is_not_self_ref() {
+        // Reach guard: the same object phrase with an article reaches the
+        // fallback and becomes the self-reference.
+        assert_eq!(
+            parse_oracle_cost("Return a Recurring Nightmare to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::SelfRef),
+                from_zone: None,
+            }
+        );
+        let cost = parse_oracle_cost("Return two Recurring Nightmares to their owner's hand");
+        assert!(
+            !matches!(cost, AbilityCost::ReturnToHand { .. }),
+            "counted unreadable phrase must not lower to ReturnToHand, got {cost:?}"
+        );
     }
 
     #[test]
