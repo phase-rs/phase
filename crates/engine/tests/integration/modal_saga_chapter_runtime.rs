@@ -237,3 +237,95 @@ fn random_mode_of_a_modal_chapter_resolves_exactly_one_mode() {
         );
     }
 }
+
+const OPTIONAL_CHAPTER: &str = "(As this Saga enters and after your draw step, add a lore counter.)\nI \u{2014} You may choose one \u{2014}\n\u{2022} Target creature gets +2/+2 until end of turn.\n\u{2022} You gain 2 life.\nII \u{2014} You gain 1 life.";
+
+/// Fire the optional modal chapter I and answer its optional-trigger prompt
+/// with `accept`. Returns whether a mode prompt followed, Grizzly Bears'
+/// power/toughness and P0's life change.
+fn fire_optional_chapter(accept: bool) -> (bool, (Option<i32>, Option<i32>), i32) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let saga = scenario
+        .add_creature(P0, "Optional Saga", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(OPTIONAL_CHAPTER)
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    scenario.with_library_top(P0, &["Plains"; 10]);
+    scenario.with_library_top(P1, &["Plains"; 10]);
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[0].life;
+    {
+        let state = runner.state_mut();
+        state.turn_number = 2;
+        state.active_player = P0;
+        state.phase = Phase::Upkeep;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(lore_count(&runner, saga), 1, "chapter I must trigger");
+
+    let mut offered_optional = false;
+    let mut mode_prompted = false;
+    for _ in 0..32 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                offered_optional = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept })
+                    .expect("answer the optional chapter");
+            }
+            WaitingFor::ModeChoice { .. } | WaitingFor::AbilityModeChoice { .. } => {
+                mode_prompted = true;
+                runner
+                    .act(GameAction::SelectModes { indices: vec![0] })
+                    .expect("select the +2/+2 mode");
+            }
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .choose_first_legal_target()
+                    .expect("choose the first legal target");
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt while resolving chapter I: {other:?}"),
+        }
+    }
+    assert!(offered_optional, "the optional chapter must ask first");
+    assert!(runner.state().stack.is_empty(), "chapter I must finish");
+    let obj = &runner.state().objects[&bears];
+    (
+        mode_prompted,
+        (obj.power, obj.toughness),
+        runner.state().players[0].life - life_before,
+    )
+}
+
+/// CR 603.3c + CR 700.2b: declining a "You may choose one" chapter chooses no
+/// mode: no mode prompt follows and no mode's effect applies.
+#[test]
+fn declining_an_optional_modal_chapter_applies_no_mode() {
+    let (mode_prompted, bears, life_change) = fire_optional_chapter(false);
+    assert!(!mode_prompted, "no mode prompt after declining");
+    assert_eq!(bears, (Some(2), Some(2)), "the +2/+2 mode must not apply");
+    assert_eq!(life_change, 0, "the life mode must not apply");
+}
+
+/// Control: accepting it leads to the mode prompt, and the chosen +2/+2 applies.
+#[test]
+fn accepting_an_optional_modal_chapter_asks_for_a_mode() {
+    let (mode_prompted, bears, life_change) = fire_optional_chapter(true);
+    assert!(mode_prompted, "accepting leads to the mode prompt");
+    assert_eq!(bears, (Some(4), Some(4)), "the chosen +2/+2 applies");
+    assert_eq!(life_change, 0);
+}

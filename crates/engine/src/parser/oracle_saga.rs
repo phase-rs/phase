@@ -219,9 +219,9 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
             // '{T}: Add {C}.'", Roar of the Fifth People: "II — This Saga gains
             // 'Creatures you control have ...'"), the granted ability must persist
             // while the Saga is on the battlefield. Override the default end-of-turn
-            // duration to `UntilHostLeavesPlay` when the chapter text has no explicit
-            // duration suffix.
-            promote_grant_duration_for_chapter(&mut execute, effect_text);
+            // duration to `UntilHostLeavesPlay` for each grant whose own clause
+            // states no duration.
+            promote_grant_duration_for_chapter(&mut execute);
             // CR 603.3c + CR 700.2b: a "you may choose one —" chapter lets the
             // controller choose no mode. The resolving execute ability already
             // carries the flag; stamp the definition too, as the block-level
@@ -286,94 +286,47 @@ pub(crate) fn is_saga_chapter(lower: &str) -> bool {
     parse_chapter_line(lower).is_some()
 }
 
-/// CR 611.2b + CR 714.2b: When a Saga chapter grants the Saga an ability with no
-/// explicit duration ("This Saga gains 'X.'"), promote the default `UntilEndOfTurn`
-/// to `UntilHostLeavesPlay` so the granted ability persists while the Saga is on
-/// the battlefield (and is automatically cleaned up at zone exit by
-/// `prune_host_left_effects`).
+/// CR 611.2a + CR 611.2b + CR 714.2b: When a Saga chapter grants an ability
+/// with no stated duration ("This Saga gains 'X.'"), the grant lasts while the
+/// Saga is on the battlefield, so its duration becomes `UntilHostLeavesPlay`
+/// (cleaned up at zone exit by `prune_host_left_effects`).
 ///
-/// Skip the promotion when the chapter text contains an explicit duration suffix
-/// (e.g. Roar of the Fifth People IV: "Dinosaurs you control gain double strike
-/// and trample until end of turn." — `strip_trailing_duration` already extracted
-/// the explicit `UntilEndOfTurn` and we must preserve it).
-fn promote_grant_duration_for_chapter(execute: &mut AbilityDefinition, chapter_text: &str) {
+/// A continuous effect "lasts as long as stated by the spell or ability
+/// creating it", so each grant is judged by the duration ITS OWN clause states,
+/// which the effect-chain parser records on that clause's definition
+/// (`AbilityDefinition::duration`, set for a leading "Until end of turn, ?" as
+/// for a trailing "? until end of turn"). Every clause of the chain is visited:
+/// an earlier instruction neither shields a later duration-free grant nor lends
+/// it a duration. Roar of the Fifth People IV ("? gain double strike and trample
+/// until end of turn.") and Firja's Retribution II ("Until end of turn, Angels
+/// you control gain ?") keep their stated duration.
+fn promote_grant_duration_for_chapter(execute: &mut AbilityDefinition) {
     // CR 700.2 + CR 611.2a: a MODAL chapter's root is a mode-dispatch marker that
-    // grants nothing on its own (`static_abilities` is empty) — any granted
-    // ability lives in the chosen mode. Each mode is its own printed instruction,
-    // and a continuous effect "lasts as long as stated by the spell or ability
-    // creating it", so each mode is judged on ITS OWN text (the bullet recorded
-    // in `mode_descriptions`), never on the joined chapter body: one mode's
-    // "until end of turn" must neither shield a sibling's duration-free grant
-    // from promotion nor be overwritten because a sibling has no suffix.
-    if let Some(modal) = &execute.modal {
-        let mode_texts = modal.mode_descriptions.clone();
-        for (mode, mode_text) in execute.mode_abilities.iter_mut().zip(&mode_texts) {
-            if !grant_clause_states_duration(mode_text) {
-                promote_generic_effect_duration(&mut mode.effect);
-            }
+    // grants nothing on its own; any granted ability lives in the chosen mode,
+    // and each mode's chain is judged clause by clause the same way.
+    if execute.modal.is_some() {
+        for mode in execute.mode_abilities.iter_mut() {
+            promote_duration_free_grants(mode);
         }
         return;
     }
-    if grant_clause_states_duration(chapter_text) {
-        return;
+    promote_duration_free_grants(execute);
+}
+
+/// Promote every `GenericEffect` grant in `ability`'s chain whose own clause
+/// states no duration (see `promote_grant_duration_for_chapter`).
+fn promote_duration_free_grants(ability: &mut AbilityDefinition) {
+    if ability.duration.is_none() {
+        promote_generic_effect_duration(&mut ability.effect);
     }
-    promote_generic_effect_duration(&mut execute.effect);
-}
-
-/// CR 611.2a: does the clause that lowers to the chapter's (or mode's) top-level
-/// effect state its own duration? A continuous effect "lasts as long as stated
-/// by the spell or ability creating it", so the duration is read from that
-/// clause alone: a later instruction in the same text ("… until end of turn.
-/// Draw a card.") neither hides a stated duration nor lends one to a grant that
-/// states none.
-fn grant_clause_states_duration(text: &str) -> bool {
-    let grant_clause = crate::parser::oracle_effect::first_clause_text(text);
-    chapter_has_explicit_duration_suffix(grant_clause.as_deref().unwrap_or(text))
-}
-
-/// Detect whether the chapter text carries an explicit duration suffix that
-/// `strip_trailing_duration` would have honored. Lower-cases the text and tests
-/// for the same suffix set the imperative-path stripper recognizes — keeping
-/// the two in lockstep prevents this promoter from clobbering a parser-honored
-/// explicit duration.
-fn chapter_has_explicit_duration_suffix(chapter_text: &str) -> bool {
-    let lower = chapter_text.to_lowercase();
-    // Match against the suffix set in `oracle_effect::strip_trailing_duration`.
-    // Trailing punctuation ('.', ',') is stripped before comparison so the
-    // exact-suffix match holds for either "this turn" or "this turn." forms.
-    let trimmed = lower
-        .trim_end()
-        .trim_end_matches(['.', ',', '!', '?'])
-        .trim_end();
-    const DURATION_SUFFIXES: &[&str] = &[
-        " this turn",
-        " until end of turn",
-        " until the end of your next turn",
-        " until the end of their next turn",
-        " until their next turn",
-        " until your next turn",
-        " until ~ leaves the battlefield",
-        " until this creature leaves the battlefield",
-    ];
-    // structural: not dispatch — content classification guard for the
-    // chapter-grant duration promoter. Mirrors the suffix set in
-    // `oracle_effect::strip_trailing_duration` (which itself uses `ends_with`).
-    if DURATION_SUFFIXES.iter().any(|s| trimmed.ends_with(s)) {
-        return true;
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        promote_duration_free_grants(sub);
     }
-    // CR 611.2b: "for as long as ..." conditions are also explicit durations.
-    // structural: not dispatch — same guard role as the suffix check above.
-    nom_primitives::scan_contains(trimmed, "for as long as")
 }
 
-/// Promote a top-level `GenericEffect` whose duration is the default
-/// `UntilEndOfTurn` (or `None`) to `UntilHostLeavesPlay`.
-///
-/// Scope is intentionally tight — only the chapter's top-level effect is
-/// considered. Saga chapters in the current dataset are flat single-effect
-/// grants ("This Saga gains 'X.'") so deeper traversal is unnecessary; if a
-/// future printing chains a one-shot effect with a sub-ability grant, extend
-/// this walker to descend through `AbilityDefinition.sub_ability` as well.
+/// Promote a `GenericEffect` whose duration is the parser default
+/// (`UntilEndOfTurn` or `None`) to `UntilHostLeavesPlay`. Called only for a
+/// clause that states no duration of its own.
 fn promote_generic_effect_duration(effect: &mut Effect) {
     if let Effect::GenericEffect { duration, .. } = effect {
         match duration {
@@ -1214,29 +1167,136 @@ mod tests {
         )));
     }
 
-    /// Detector unit test — `chapter_has_explicit_duration_suffix` must
-    /// recognize the same suffix set that `oracle_effect::strip_trailing_duration`
-    /// honors so the promoter never clobbers a parser-honored explicit duration.
+    /// Duration of the first `GenericEffect` grant in `ability`'s chain.
+    fn chain_grant_duration(ability: &AbilityDefinition) -> Option<Duration> {
+        let mut node = Some(ability);
+        while let Some(def) = node {
+            if let Effect::GenericEffect { duration, .. } = &*def.effect {
+                return duration.clone();
+            }
+            node = def.sub_ability.as_deref();
+        }
+        panic!("the chapter must lower to a GenericEffect grant somewhere in its chain")
+    }
+
+    fn one_chapter_grant_duration(body: &str) -> Option<Duration> {
+        let line = format!("I \u{2014} {body}");
+        let lines = vec![
+            "(As this Saga enters and after your draw step, add a lore counter.)",
+            line.as_str(),
+        ];
+        let (triggers, _, _) = saga_test_chapters(&lines, "Duration Saga");
+        chain_grant_duration(
+            triggers[0]
+                .execute
+                .as_deref()
+                .expect("chapter has an ability"),
+        )
+    }
+
+    /// CR 611.2a: a grant keeps the duration its own clause states, whether the
+    /// clause states it leading ("Until end of turn, …", Firja's Retribution II's
+    /// shape) or trailing, and a grant that states none lasts while the Saga is on
+    /// the battlefield.
     #[test]
-    fn explicit_duration_suffix_detector() {
-        assert!(chapter_has_explicit_duration_suffix(
-            "Dinosaurs you control gain trample until end of turn."
-        ));
-        assert!(chapter_has_explicit_duration_suffix(
-            "Target creature gains haste this turn."
-        ));
-        assert!(chapter_has_explicit_duration_suffix(
-            "It gains flying until your next turn"
-        ));
-        assert!(chapter_has_explicit_duration_suffix(
-            "Creatures you control get +1/+1 for as long as you control ~."
-        ));
-        assert!(!chapter_has_explicit_duration_suffix(
-            "This Saga gains \"{T}: Add {C}.\""
-        ));
-        assert!(!chapter_has_explicit_duration_suffix(
-            "Create a 1/1 green Saproling."
-        ));
+    fn chapter_grant_keeps_a_duration_stated_in_either_position() {
+        for (body, expected) in [
+            (
+                "Dinosaurs you control gain trample until end of turn.",
+                Duration::UntilEndOfTurn,
+            ),
+            (
+                "Until end of turn, creatures you control gain \"{T}: Add {C}.\"",
+                Duration::UntilEndOfTurn,
+            ),
+            (
+                "This Saga gains \"{T}: Add {C}.\"",
+                Duration::UntilHostLeavesPlay,
+            ),
+            (
+                "Creatures you control gain flying.",
+                Duration::UntilHostLeavesPlay,
+            ),
+        ] {
+            assert_eq!(one_chapter_grant_duration(body), Some(expected), "{body}");
+        }
+    }
+
+    /// CR 611.2a: a later duration-free grant is promoted on its own clause's
+    /// provenance, whatever comes before it: an instruction with a stated
+    /// duration, or one with none. A later grant with a stated duration keeps it.
+    #[test]
+    fn chapter_promotes_a_later_duration_free_grant() {
+        for (body, expected) in [
+            (
+                "Target creature gets +1/+1 until end of turn. This Saga gains \"{T}: Add {C}.\"",
+                Duration::UntilHostLeavesPlay,
+            ),
+            (
+                "Draw a card. This Saga gains \"{T}: Add {C}.\"",
+                Duration::UntilHostLeavesPlay,
+            ),
+            (
+                "Draw a card. This Saga gains \"{T}: Add {C}.\" until end of turn.",
+                Duration::UntilEndOfTurn,
+            ),
+        ] {
+            assert_eq!(one_chapter_grant_duration(body), Some(expected), "{body}");
+        }
+    }
+
+    /// The same, inside a modal chapter's mode chain.
+    #[test]
+    fn modal_mode_promotes_a_later_duration_free_grant() {
+        for bullet in [
+            "\u{2022} Target creature gets +1/+1 until end of turn. This Saga gains \"{T}: Add {C}.\"",
+            "\u{2022} Draw a card. This Saga gains \"{T}: Add {C}.\"",
+        ] {
+            let lines = vec![
+                "(As this Saga enters and after your draw step, add a lore counter.)",
+                "I \u{2014} Choose one \u{2014}",
+                bullet,
+                "\u{2022} You gain 2 life.",
+            ];
+            let (triggers, _, _) = saga_test_chapters(&lines, "Duration Saga");
+            let execute = triggers[0]
+                .execute
+                .as_deref()
+                .expect("chapter has an ability");
+            assert!(execute.modal.is_some(), "chapter must be modal");
+            assert_eq!(
+                chain_grant_duration(&execute.mode_abilities[0]),
+                Some(Duration::UntilHostLeavesPlay),
+                "{bullet}"
+            );
+        }
+    }
+
+    /// Firja's Retribution II through the full parser: "Until end of turn, Angels
+    /// you control gain …" keeps its stated end-of-turn duration.
+    #[test]
+    fn firjas_retribution_chapter_two_grant_lasts_until_end_of_turn() {
+        let oracle = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\n\
+            I \u{2014} Create a 4/4 white Angel Warrior creature token with flying and vigilance.\n\
+            II \u{2014} Until end of turn, Angels you control gain \"{T}: Destroy target creature with power less than this creature's power.\"\n\
+            III \u{2014} Angels you control gain double strike until end of turn.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            "Firja's Retribution",
+            &[],
+            &["Enchantment".to_string()],
+            &["Saga".to_string()],
+        );
+        let execute = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.saga_chapter == Some(2))
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("chapter II has an ability");
+        assert_eq!(
+            chain_grant_duration(execute),
+            Some(Duration::UntilEndOfTurn)
+        );
     }
 
     /// Fable of the Mirror-Breaker chapter III: exile then return transformed.
