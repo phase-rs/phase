@@ -7159,17 +7159,18 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
-        // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
-        // turn granted by the parent clause (the controller's next turn), so
-        // the controller's next end step. Suffix companion of the prefix arm
-        // in `strip_temporal_prefix`. Used by Final Fortune / Last Chance /
+        // CR 500.7 + CR 603.7a + CR 104.3e: anaphoric "that turn's end step" —
+        // the extra turn granted by the parent clause, which is added after the
+        // current turn, so the current turn's own end step must be skipped
+        // (`AfterCreationTurn`). Suffix companion of the prefix arm in
+        // `strip_temporal_prefix`. Used by Final Fortune / Last Chance /
         // Warrior's Oath / Chance for Glory.
         (
             " at the beginning of that turn's end step",
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
                 player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
+                gate: crate::types::ability::TurnGate::AfterCreationTurn,
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
@@ -7354,15 +7355,16 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
             // (Final Fortune, Last Chance, Warrior's Oath, Chance for Glory):
             // "Take an extra turn after this one. At the beginning of that
             // turn's end step, you lose the game." "That turn" is the just-
-            // granted extra turn — the controller's next turn — so this is the
-            // controller's next end step, identical to the "your next end step"
-            // arm above. PlayerId(0) is rewritten to ability.controller at
-            // resolve time.
+            // granted extra turn, which CR 500.7 adds after the current turn —
+            // so unlike "your next end step" (which may be this turn's), the
+            // current turn's end step is skipped via `AfterCreationTurn`, the
+            // same floor as the "end step on your next turn" arm above.
+            // PlayerId(0) is rewritten to ability.controller at resolve time.
             value(
                 DelayedTriggerCondition::AtNextPhaseForPlayer {
                     phase: Phase::End,
                     player: crate::types::player::PlayerId(0),
-                    gate: crate::types::ability::TurnGate::None,
+                    gate: crate::types::ability::TurnGate::AfterCreationTurn,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
                 },
                 tag("at the beginning of that turn's end step, "),
@@ -14026,16 +14028,16 @@ mod tests {
         );
     }
 
-    /// CR 603.7a + CR 104.3e: the anaphoric "at the beginning of that turn's end
-    /// step" (extra-turn-with-a-cost cards) is recognized by both temporal
-    /// recognizers, mapping to the controller's next end step — identical to the
-    /// existing "your next end step" arm.
+    /// CR 500.7 + CR 603.7a + CR 104.3e: the anaphoric "at the beginning of that
+    /// turn's end step" (extra-turn-with-a-cost cards) is recognized by both
+    /// temporal recognizers, mapping to the controller's next end step on a
+    /// LATER turn — the granted extra turn — so the gate skips the creation turn.
     #[test]
     fn that_turns_end_step_temporal_resolves_to_controller_next_end_step() {
         let expected = DelayedTriggerCondition::AtNextPhaseForPlayer {
             phase: Phase::End,
             player: crate::types::player::PlayerId(0),
-            gate: crate::types::ability::TurnGate::None,
+            gate: crate::types::ability::TurnGate::AfterCreationTurn,
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         };
 

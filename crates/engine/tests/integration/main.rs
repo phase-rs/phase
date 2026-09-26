@@ -702,6 +702,7 @@ mod issue_4050_adamaro_extremum_hand_size;
 mod issue_4124_second_little_pig;
 mod issue_4220_agatha_soul_cauldron;
 mod issue_4226_elenda_azor_attack_pay_x;
+mod issue_4231_final_fortune_loses_at_extra_turns_end_step;
 mod issue_4232_winota_enters_attacking;
 mod issue_4235_cloak_and_dagger_entwined;
 mod issue_4239_nissa_steward_x_loyalty;
