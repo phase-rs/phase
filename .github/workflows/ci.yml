@@ -1063,3 +1063,47 @@ jobs:
 
       - name: Run tests with coverage
         run: cd client && pnpm test -- --run --coverage
+
+  draft-match-wasm-proof:
+    name: Draft match proof (real WASM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+          rustflags: ""
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build both WASM engines
+        run: ./scripts/build-wasm.sh wasm-dev
+
+      - name: Require generated bindings
+        run: |
+          test -s client/src/wasm/draft_wasm.js
+          test -s client/src/wasm/draft_wasm_bg.wasm
+          test -s client/src/wasm/engine_wasm.js
+          test -s client/src/wasm/engine_wasm_bg.wasm
+
+      - name: Run isolated draft match proofs
+        run: pnpm exec vitest run --config vitest.integration.config.ts --pool=forks --isolate --coverage.enabled=false --reporter=verbose src/adapter/__tests__/setDraftMatchProof.integration.test.ts src/adapter/__tests__/cubeDraftMatchProof.integration.test.ts
+        working-directory: client
