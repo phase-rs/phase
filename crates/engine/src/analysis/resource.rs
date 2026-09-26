@@ -31986,10 +31986,13 @@ mod tests {
             (
                 "CreateDrawReplacement -> ChooseOneOf (transitive)",
                 Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(Effect::ChooseOneOf {
-                        chooser: PlayerFilter::Controller,
-                        branches: vec![hostile.clone()],
-                    }),
+                    replacement_effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChooseOneOf {
+                            chooser: PlayerFilter::Controller,
+                            branches: vec![hostile.clone()],
+                        },
+                    )),
                 },
             ),
             (

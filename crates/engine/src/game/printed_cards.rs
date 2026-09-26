@@ -4096,21 +4096,24 @@ mod tests {
         };
         face.replacements.push(repl_optional);
 
-        // CR 614.11: CreateDrawReplacement nests its substitute Effect; the
-        // walker must descend into it (Words of Worship/Wilding class).
+        // CR 614.11: CreateDrawReplacement nests its substitute definition;
+        // the walker must descend into it (Words cycle).
         let draw_repl = Effect::CreateDrawReplacement {
-            replacement_effect: Box::new(Effect::Conjure {
-                cards: vec![ConjureCard {
-                    source: ConjureSource::Named {
-                        name: "draw_replacement".to_string(),
-                    },
-                    count: QuantityExpr::Fixed { value: 1 },
-                }],
-                destination: Zone::Hand,
-                tapped: false,
-                library_position: None,
-                library_players: None,
-            }),
+            replacement_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Conjure {
+                    cards: vec![ConjureCard {
+                        source: ConjureSource::Named {
+                            name: "draw_replacement".to_string(),
+                        },
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    destination: Zone::Hand,
+                    tapped: false,
+                    library_position: None,
+                    library_players: None,
+                },
+            )),
         };
         walk_effect(&draw_repl, &mut names);
 

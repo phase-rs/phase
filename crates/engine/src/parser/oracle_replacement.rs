@@ -7641,21 +7641,22 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
 }
 
 /// CR 614.11 + CR 614.6 + CR 514.2: Parse a one-shot delayed DRAW replacement —
-/// "the next time you would draw a card this turn, [effect] instead" (Words of
-/// Worship: "you gain 5 life"; Words of Wilding: "create a 2/2 green Bear
-/// creature token"). Mirrors `parse_oneshot_damage_replacement` for the Draw
-/// event class, lowering to `Effect::CreateDrawReplacement { replacement_effect }`.
+/// "the next time you would draw a card this turn, [effect] instead" (the Words
+/// cycle: Worship "you gain 5 life"; Wilding "create a 2/2 green Bear creature
+/// token"; War "~ deals 2 damage to any target"; Wind "each player returns a
+/// permanent they control to its owner's hand"; Waste "each opponent discards a
+/// card"). Mirrors `parse_oneshot_damage_replacement` for the Draw event class,
+/// lowering to `Effect::CreateDrawReplacement { replacement_effect }`.
 ///
 /// The detector IS the parser: the branch is gated by the `tag("the next time ")`
 /// prefix combinator + a `peek` for "would draw"; it returns `None` on any
 /// mismatch so it never shadows other "the next time" effects.
 ///
-/// SCOPE: the substitute payload is parsed by the generic `parse_effect`, which
-/// does NOT honor a player-scoped subject ("each player", "each opponent", "that
-/// player"). Words of Wind ("each player returns a permanent...") and Words of
-/// Waste ("each opponent discards...") would mis-lower to a `Controller`-scoped
-/// effect, so those subject-scoped payloads are REJECTED here (return `None`) to
-/// stay an honest Unimplemented gap rather than a silently-wrong parse.
+/// The substitute payload is parsed by the full effect-chain parser
+/// (`parse_effect_chain`), NOT the single-clause `parse_effect`, so a
+/// player-scoped subject ("each player …", "each opponent …") lowers onto the
+/// payload definition's `player_scope` exactly as it does for a standalone
+/// sentence (Curfew, Liliana's Specter).
 pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect> {
     // CR 614.1a: "the next time ... would draw ... this turn ... instead".
     let (after_prefix, _) = preceded(
@@ -7683,31 +7684,41 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     }
     .trim();
 
-    let payload = crate::parser::oracle_effect::parse_effect(payload_text);
-    // Honest-gap guard 1: an Unimplemented payload is not a clean replacement.
-    if matches!(payload, Effect::Unimplemented { .. }) {
+    let payload = parse_effect_chain(payload_text, AbilityKind::Spell);
+    // Honest-gap guard: a payload with an Unimplemented anywhere in its chain
+    // is not a clean replacement — leave the whole line an honest gap.
+    if super::oracle::has_unimplemented(&payload) {
         return None;
     }
-    // Honest-gap guard 2: player-scoped subjects ("each player", "each
-    // opponent", "that player", "target player/opponent") are NOT honored by
-    // bare `parse_effect` (it would emit a Controller-scoped effect, dropping
-    // the scope). Reject so Words of Wind/Waste stay honest Unimplemented gaps
-    // rather than silently-wrong parses. This is a leaf reject-check on the
-    // already-split payload, not dispatch.
-    if payload_text.starts_with("each ") // allow-noncombinator: leaf reject-guard on split payload
-        || payload_text.starts_with("target player") // allow-noncombinator
-        || payload_text.starts_with("target opponent") // allow-noncombinator
-        || payload_text.starts_with("that player") // allow-noncombinator
-        || payload_text.starts_with("each opponent") // allow-noncombinator
-        || payload_text.starts_with("each player")
-    // allow-noncombinator
-    {
+    // Honest-gap guard: CR 115.1c + CR 602.2b — the creating ability announces
+    // exactly the substitute HEAD's single target slot (see
+    // `triggers::extract_target_filter_from_effect`). A multi-target head or a
+    // targeted later clause would be announced without its slots and resolve
+    // with no target, so leave such a payload an honest gap.
+    if !draw_replacement_payload_targets_fit_head_slot(&payload) {
         return None;
     }
 
     Some(Effect::CreateDrawReplacement {
         replacement_effect: Box::new(payload),
     })
+}
+
+/// CR 115.1c: whether every target a draw-replacement substitute names can be
+/// announced through the single slot its head surfaces — no multi-target head,
+/// and no targeted sub/else clause.
+fn draw_replacement_payload_targets_fit_head_slot(payload: &AbilityDefinition) -> bool {
+    fn chain_has_target(def: &AbilityDefinition) -> bool {
+        crate::game::triggers::extract_target_filter_from_effect(&def.effect).is_some()
+            || def.sub_ability.as_deref().is_some_and(chain_has_target)
+            || def.else_ability.as_deref().is_some_and(chain_has_target)
+    }
+    payload.multi_target.is_none()
+        && !payload.sub_ability.as_deref().is_some_and(chain_has_target)
+        && !payload
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_has_target)
 }
 
 fn parse_entering_copy_subject(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -26802,7 +26813,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDrawReplacement { replacement_effect } => {
                 assert!(
-                    matches!(*replacement_effect, Effect::GainLife { .. }),
+                    matches!(*replacement_effect.effect, Effect::GainLife { .. }),
                     "payload must be GainLife, got {replacement_effect:?}"
                 );
             }
@@ -26834,7 +26845,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDrawReplacement { replacement_effect } => {
                 assert!(
-                    matches!(*replacement_effect, Effect::Token { .. }),
+                    matches!(*replacement_effect.effect, Effect::Token { .. }),
                     "payload must be a Token, got {replacement_effect:?}"
                 );
             }
@@ -26843,25 +26854,69 @@ mod snapshot_tests {
     }
 
     #[test]
-    fn oneshot_draw_replacement_rejects_player_scoped_payload() {
-        // GUARD: Words of Wind ("each player returns a permanent...") and Words
-        // of Waste ("each opponent discards...") have player-scoped payloads
-        // that bare `parse_effect` mis-scopes — they must stay HONEST
-        // Unimplemented gaps (return None), NOT silently-wrong CreateDrawReplacement.
-        assert!(
-            parse_oneshot_draw_replacement(
-                "the next time you would draw a card this turn, each player returns a permanent they control to its owner's hand instead"
-            )
-            .is_none(),
-            "Words of Wind (each-player payload) must remain an honest gap"
+    fn oneshot_draw_replacement_carries_player_scoped_payload() {
+        // CR 614.6: Words of Wind ("each player returns a permanent...") and
+        // Words of Waste ("each opponent discards...") lower their subject onto
+        // the payload's `player_scope`, exactly like a standalone sentence.
+        let scope_of = |text: &str| match parse_oneshot_draw_replacement(text) {
+            Some(Effect::CreateDrawReplacement { replacement_effect }) => {
+                (replacement_effect.player_scope, *replacement_effect.effect)
+            }
+            other => panic!("expected CreateDrawReplacement for {text:?}, got {other:?}"),
+        };
+
+        let (wind_scope, wind_effect) = scope_of(
+            "the next time you would draw a card this turn, each player returns a permanent they control to its owner's hand instead",
         );
+        assert_eq!(wind_scope, Some(PlayerFilter::All));
         assert!(
-            parse_oneshot_draw_replacement(
-                "the next time you would draw a card this turn, each opponent discards a card instead"
-            )
-            .is_none(),
-            "Words of Waste (each-opponent payload) must remain an honest gap"
+            matches!(wind_effect, Effect::Bounce { .. }),
+            "Words of Wind payload must be a bounce, got {wind_effect:?}"
         );
+
+        let (waste_scope, waste_effect) = scope_of(
+            "the next time you would draw a card this turn, each opponent discards a card instead",
+        );
+        assert_eq!(waste_scope, Some(PlayerFilter::Opponent));
+        assert!(
+            matches!(waste_effect, Effect::Discard { .. }),
+            "Words of Waste payload must be a discard, got {waste_effect:?}"
+        );
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_rejects_targets_outside_head_slot() {
+        // Reach-guard: the same shape with an untargeted rider parses.
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, ~ deals 2 damage to any target and you gain 2 life instead",
+        )
+        .is_some());
+        // A targeted later clause has no announced slot — stays an honest gap.
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, you gain 2 life and ~ deals 2 damage to any target instead",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_war_payload_targets_any() {
+        // Words of War: "~ deals 2 damage to any target" keeps its any-target
+        // filter on the payload head (CR 115.4), chosen at activation.
+        match parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, ~ deals 2 damage to any target instead",
+        ) {
+            Some(Effect::CreateDrawReplacement { replacement_effect }) => assert!(
+                matches!(
+                    *replacement_effect.effect,
+                    Effect::DealDamage {
+                        target: TargetFilter::Any,
+                        ..
+                    }
+                ),
+                "payload must be DealDamage to any target, got {replacement_effect:?}"
+            ),
+            other => panic!("expected CreateDrawReplacement, got {other:?}"),
+        }
     }
 
     #[test]

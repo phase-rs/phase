@@ -1560,10 +1560,11 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::PreventDamage { .. } => {}
         Effect::CreateDamageReplacement { .. } => {}
         // Nested-definition boundary — intentionally NOT recursed. Both carry a
-        // nested substitute (`replacement_effect: Box<Effect>`) parsed by
-        // `parse_effect` (the calls in `oracle_replacement::parse_oneshot_draw_replacement`
-        // and `oracle_replacement::parse_planar_die_planeswalk_replacement`), which threads a bare
-        // `ParseContext::default()` (constructed in `oracle_effect::parse_effect`) — an index-less ctx.
+        // nested substitute parsed with a fresh, index-less context:
+        // `oracle_replacement::parse_oneshot_draw_replacement` via
+        // `parse_effect_chain` (a `Box<AbilityDefinition>`), and
+        // `oracle_replacement::parse_planar_die_planeswalk_replacement` via
+        // `parse_effect` (a `Box<Effect>`, `ParseContext::default()`).
         // `parse_has_this_ability` reads `ctx.current_{trigger,ability}_index`, both
         // `None` there, so it declines and no `RetainPrinted*FromSource` can be
         // produced past this boundary; the `=> {}` is correct, not a missed carrier.

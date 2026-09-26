@@ -7339,6 +7339,11 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
     }
     match effect {
         Effect::DealDamage { target, .. } => is_any_target_filter(target),
+        // CR 115.1c: a draw replacement's slot is its substitute head's slot
+        // (Words of War) — see `triggers::extract_target_filter_from_effect`.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            effect_slot_denotes_damage_any_target(&replacement_effect.effect, slot)
+        }
         // CR 609.7a + CR 614.9: only the role declared at THIS slot decides; a
         // declared source is never narrowed because a sibling recipient is `Any`.
         Effect::CreateDamageReplacement { .. } => match slot {

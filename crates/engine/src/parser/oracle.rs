@@ -8501,10 +8501,13 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
 /// `resolve_guards_in_ability`).
 fn resolve_guards_in_effect(effect: &mut Effect) {
     match effect {
-        // CR 614.11 / CR 614.1a: a one-shot draw or planeswalk replacement nests a
-        // substitute `Effect`, which may itself be a definition carrier.
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        // CR 614.11: a one-shot draw replacement nests a substitute definition.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            resolve_guards_in_ability(replacement_effect, None)
+        }
+        // CR 614.1a: a one-shot planeswalk replacement nests a substitute
+        // `Effect`, which may itself be a definition carrier.
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             resolve_guards_in_effect(replacement_effect)
         }
         Effect::Vote {
@@ -9320,9 +9323,12 @@ fn demote_lifetimes_in_replacement(replacement: &mut ReplacementDefinition) {
 fn demote_lifetimes_in_effect(effect: &mut Effect) {
     match effect {
         // --- nested effect, same shape ---
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             demote_lifetimes_in_effect(replacement_effect)
+        }
+        // --- nested ability definition ---
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            demote_lifetimes_in_ability(replacement_effect)
         }
         // --- nested ability definitions ---
         Effect::Vote {
@@ -10129,8 +10135,10 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
         Effect::AddTargetReplacement { replacement, .. } => {
             render_replacement_descriptions(replacement, card_name)
         }
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            render_ability_descriptions(replacement_effect, card_name)
+        }
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             render_effect_descriptions(replacement_effect, card_name)
         }
         // CR 611.2 + CR 111.1: a resolution-time grant onto a target, and a created
@@ -12420,6 +12428,9 @@ mod has_unimplemented_wrapper_recursion_tests {
                 effect: payload("delayed"),
                 uses_tracked_set: false,
             },
+            Effect::CreateDrawReplacement {
+                replacement_effect: payload("draw_replacement"),
+            },
             Effect::RollDie {
                 count: QuantityExpr::Fixed { value: 1 },
                 sides: 6,
@@ -12478,6 +12489,7 @@ mod has_unimplemented_wrapper_recursion_tests {
                 NestedDefinitionEdge::SeparateIntoPilesUnchosen,
                 NestedDefinitionEdge::RevealFromHandOnDecline,
                 NestedDefinitionEdge::CreateDelayedTriggerEffect,
+                NestedDefinitionEdge::CreateDrawReplacementEffect,
                 NestedDefinitionEdge::RollDieResult,
                 NestedDefinitionEdge::RollDieResult,
                 NestedDefinitionEdge::FlipCoinWin,

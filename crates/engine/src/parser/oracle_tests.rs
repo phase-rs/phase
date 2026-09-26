@@ -29478,9 +29478,9 @@ fn render_net_reaches_every_nested_description_carrier() {
     parsed
         .abilities
         .push(carrier(Effect::CreateDrawReplacement {
-            replacement_effect: Box::new(Effect::unimplemented(
-                "probe",
-                planted("create_draw_replacement"),
+            replacement_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("probe", planted("create_draw_replacement")),
             )),
         }));
     tags.push("create_draw_replacement");

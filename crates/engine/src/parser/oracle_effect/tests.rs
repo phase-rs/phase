@@ -66841,13 +66841,20 @@ fn assert_put_counter_rebound(effect: &Effect, gate_qty: &QuantityRef, label: &s
 fn counter_gate_rebind_reaches_create_draw_replacement() {
     let gate_qty = gate_qty_fixture();
     let mut effect = Effect::CreateDrawReplacement {
-        replacement_effect: Box::new(event_context_put_counter(TargetFilter::Any)),
+        replacement_effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        )),
     };
     rebind_event_context_amount_counts(&mut effect, &gate_qty);
     let Effect::CreateDrawReplacement { replacement_effect } = &effect else {
         unreachable!()
     };
-    assert_put_counter_rebound(replacement_effect, &gate_qty, "CreateDrawReplacement");
+    assert_put_counter_rebound(
+        &replacement_effect.effect,
+        &gate_qty,
+        "CreateDrawReplacement",
+    );
 }
 
 #[test]
