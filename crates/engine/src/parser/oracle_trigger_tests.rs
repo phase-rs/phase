@@ -20117,6 +20117,262 @@ fn trigger_transforms_into_self() {
     assert_eq!(def.valid_source, Some(TargetFilter::SelfRef));
 }
 
+// ── Issue #4359: `As … transforms into …` (CR 701.27e) ────────
+
+/// CR 701.27e + CR 114.2 + CR 114.4: Sephiroth, One-Winged Angel's Super Nova
+/// line, verbatim (including the "Super Nova — " ability-word prefix the
+/// classifier must strip before `has_trigger_prefix` sees the remainder).
+/// The base defect is a MISPARSED STATIC (`StaticDefinition{Continuous,
+/// GrantTrigger}`), not a missing trigger — so the zero-`StaticDefinition`
+/// assertion is the discriminator, not the trigger's mere existence.
+#[test]
+fn trigger_as_transforms_into_self_grants_emblem() {
+    let parsed = parse_oracle_text(
+        "Super Nova — As this creature transforms into Sephiroth, One-Winged Angel, you get an emblem with \"Whenever a creature dies, target opponent loses 1 life and you gain 1 life.\"",
+        "Sephiroth, One-Winged Angel",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.statics.is_empty(),
+        "base defect: the Super Nova line must not lower to a StaticDefinition, got {:?}",
+        parsed.statics
+    );
+    assert_eq!(parsed.triggers.len(), 1, "got {:?}", parsed.triggers);
+    let t = &parsed.triggers[0];
+    assert_eq!(t.mode, TriggerMode::Transformed);
+    assert_eq!(t.valid_source, Some(TargetFilter::SelfRef));
+
+    let execute = t.execute.as_deref().expect("Super Nova execute body");
+    match execute.effect.as_ref() {
+        Effect::CreateEmblem { statics, triggers } => {
+            assert!(statics.is_empty(), "got {statics:?}");
+            assert_eq!(triggers.len(), 1, "got {triggers:?}");
+            let granted = &triggers[0];
+            assert_eq!(granted.mode, TriggerMode::ChangesZone);
+            assert_eq!(granted.origin, Some(Zone::Battlefield));
+            assert_eq!(granted.destination, Some(Zone::Graveyard));
+            // CR 114.4: the granted trigger must function in the command zone.
+            assert_eq!(granted.trigger_zones, vec![Zone::Command]);
+        }
+        other => panic!("expected CreateEmblem, got {other:?}"),
+    }
+}
+
+/// CR 701.27e: Shinryu, Transcendent Rival — the `As … transforms into …`
+/// body lowers through the ordinary trigger-body path (`Effect::Choose`),
+/// not `Effect::Unimplemented`.
+#[test]
+fn trigger_as_transforms_into_self_choose_opponent() {
+    use crate::types::ability::ChoiceType;
+
+    let def = parse_trigger_line(
+        "As this creature transforms into Shinryu, choose an opponent.",
+        "Shinryu, Transcendent Rival",
+    );
+    assert_eq!(def.mode, TriggerMode::Transformed);
+    assert_eq!(def.valid_source, Some(TargetFilter::SelfRef));
+    let execute = def.execute.as_deref().expect("Shinryu execute body");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                ..
+            }
+        ),
+        "got {:?}",
+        execute.effect
+    );
+}
+
+/// CR 701.27e: Curse of Leeches — the `As … transforms into …` body degrades
+/// honestly (review N2): `parse_target` cannot classify "a player" today, so
+/// the target stays `TargetFilter::Any` with a visible `TargetFallback`
+/// diagnostic rather than a silently wrong filter or a swallowed clause.
+#[test]
+fn trigger_as_transforms_into_self_attach() {
+    let mut ctx = ParseContext::default();
+    let def = parse_trigger_line_with_index(
+        "As this permanent transforms into Curse of Leeches, attach it to a player.",
+        "Curse of Leeches",
+        None,
+        &mut ctx,
+    );
+    assert_eq!(def.mode, TriggerMode::Transformed);
+    assert_eq!(def.valid_source, Some(TargetFilter::SelfRef));
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("Curse of Leeches execute body");
+    match execute.effect.as_ref() {
+        Effect::Attach { target, .. } => {
+            assert_eq!(*target, TargetFilter::Any, "got {:?}", execute.effect);
+        }
+        other => panic!("expected Attach, got {other:?}"),
+    }
+    assert!(
+        ctx.diagnostics.iter().any(|d| matches!(
+            d,
+            OracleDiagnostic::TargetFallback { context, text, .. }
+                if context == "parse_target could not classify" && text == "a player"
+        )),
+        "expected a TargetFallback diagnostic for \"a player\", got {:?}",
+        ctx.diagnostics
+    );
+}
+
+/// CR 701.27e + CR 707.9a/b/d: Olag, Ludevic's Hubris — the test that binds
+/// Unit 1 (the `As … transforms into …` trigger head) and Unit 2 (the
+/// copy-exception body shapes) together. Base: the whole line is
+/// `Effect::Unimplemented`.
+#[test]
+fn trigger_as_transforms_into_self_become_copy() {
+    let def = parse_trigger_line(
+        "As this creature transforms into Olag, Ludevic's Hubris, it becomes a copy of a creature card exiled with it, except its name is Olag, Ludevic's Hubris, it's 4/4, and it's a legendary blue and black Zombie in addition to its other colors and types.",
+        "Olag, Ludevic's Hubris",
+    );
+    assert_eq!(def.mode, TriggerMode::Transformed);
+    assert_eq!(def.valid_source, Some(TargetFilter::SelfRef));
+    let execute = def.execute.as_deref().expect("Olag execute body");
+    assert_no_unimplemented(execute);
+    match execute.effect.as_ref() {
+        Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } => {
+            assert_eq!(
+                additional_modifications,
+                &vec![
+                    ContinuousModification::SetName {
+                        name: "Olag, Ludevic's Hubris".to_string()
+                    },
+                    ContinuousModification::SetPower { value: 4 },
+                    ContinuousModification::SetToughness { value: 4 },
+                    ContinuousModification::AddColor {
+                        color: ManaColor::Blue
+                    },
+                    ContinuousModification::AddColor {
+                        color: ManaColor::Black
+                    },
+                    ContinuousModification::AddSupertype {
+                        supertype: Supertype::Legendary
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Zombie".to_string()
+                    },
+                ]
+            );
+        }
+        other => panic!("expected BecomeCopy, got {other:?}"),
+    }
+}
+
+/// CR 614.1c: an `As [this permanent] enters …` replacement must NOT be
+/// claimed by the new trigger head — the `peek`'s `" transforms into "`
+/// element fails on `" enters,"`. Paired positive: Shinryu's line still
+/// parses as a `Transformed` trigger in the same test, so the negative
+/// cannot pass vacuously.
+#[test]
+fn as_enters_line_stays_a_replacement() {
+    let def = parse_trigger_line("As this creature enters, choose a color.", "Voice of All");
+    assert_ne!(
+        def.mode,
+        TriggerMode::Transformed,
+        "CR 614.1c replacement must not become a Transformed trigger"
+    );
+
+    let shinryu = parse_trigger_line(
+        "As this creature transforms into Shinryu, choose an opponent.",
+        "Shinryu, Transcendent Rival",
+    );
+    assert_eq!(shinryu.mode, TriggerMode::Transformed);
+}
+
+/// `As long as …` (a static) and `As an additional cost …` (a cost) must not
+/// be claimed as `Transformed` triggers — the `peek`'s self-reference token
+/// `alt` fails on `long ` / `an `. Paired positive as above.
+#[test]
+fn as_long_as_and_as_additional_cost_are_not_triggers() {
+    let as_long_as = parse_trigger_line(
+        "As long as you control a Forest, this creature has trample.",
+        "Test",
+    );
+    assert_ne!(as_long_as.mode, TriggerMode::Transformed);
+
+    let as_additional_cost = parse_trigger_line(
+        "As an additional cost to cast this spell, sacrifice a creature.",
+        "Test",
+    );
+    assert_ne!(as_additional_cost.mode, TriggerMode::Transformed);
+
+    let shinryu = parse_trigger_line(
+        "As this creature transforms into Shinryu, choose an opponent.",
+        "Shinryu, Transcendent Rival",
+    );
+    assert_eq!(shinryu.mode, TriggerMode::Transformed);
+}
+
+/// CR 603.1: the widened lexicon is a strict superset — the printed
+/// `When`/`Whenever … transforms into …` forms must stay byte-identical,
+/// including a NON-self-reference subject (Cult of the Waxing Moon). Both the
+/// self-reference and non-self-reference forms bind the transforming
+/// permanent's filter into `valid_source` (`SimpleEvent::Transforms`'s single
+/// arm), so the non-self case is pinned by its VALUE — a `Typed` filter for
+/// "a permanent you control", not `SelfRef` — not by a different field.
+#[test]
+fn when_transforms_into_forms_are_unchanged() {
+    let avacyn = parse_trigger_line(
+        "When this creature transforms into Avacyn, the Purifier, it deals 3 damage to each other creature.",
+        "Archangel Avacyn",
+    );
+    assert_eq!(avacyn.mode, TriggerMode::Transformed);
+    assert_eq!(avacyn.valid_source, Some(TargetFilter::SelfRef));
+
+    let cult = parse_trigger_line(
+        "Whenever a permanent you control transforms into a non-Human creature, Cult of the Waxing Moon deals 1 damage to any target.",
+        "Cult of the Waxing Moon",
+    );
+    assert_eq!(cult.mode, TriggerMode::Transformed);
+    assert!(
+        cult.valid_source.is_some(),
+        "non-self-reference subject must still populate valid_source"
+    );
+    assert_ne!(
+        cult.valid_source,
+        Some(TargetFilter::SelfRef),
+        "non-self-reference subject must not be folded into SelfRef"
+    );
+}
+
+/// CR 701.27e: an `As … transforms into …` body the effect parser cannot
+/// read still yields a `Transformed` trigger (the head classification is
+/// correct) whose body is honestly `Effect::Unimplemented` — coverage stays
+/// red rather than a false-green static. Paired positive: Shinryu's line
+/// parses fully in the same test.
+#[test]
+fn as_transforms_into_with_unreadable_body_stays_coverage_red() {
+    let def = parse_trigger_line(
+        "As this creature transforms into Testcard, this deliberately unparseable clause does not match any known effect grammar.",
+        "Testcard",
+    );
+    assert_eq!(def.mode, TriggerMode::Transformed);
+    let execute = def.execute.as_deref().expect("Testcard execute body");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+        "got {:?}",
+        execute.effect
+    );
+
+    let shinryu = parse_trigger_line(
+        "As this creature transforms into Shinryu, choose an opponent.",
+        "Shinryu, Transcendent Rival",
+    );
+    assert_eq!(shinryu.mode, TriggerMode::Transformed);
+    assert!(shinryu.execute.is_some());
+}
+
 // ── Work Item 5: Tap Opponent's Creature ──────────────────────
 
 #[test]

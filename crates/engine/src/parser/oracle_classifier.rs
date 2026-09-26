@@ -33,11 +33,18 @@ pub(crate) fn is_instead_replacement_line(text: &str) -> bool {
     })
 }
 
+/// CR 603.1: `When`/`Whenever`/`At` are the printed templating for triggered
+/// abilities. CR 701.27e adds one more head that is a triggered ability without
+/// using those words — `As ⟨this permanent⟩ transforms into ⟨name⟩, …` — and
+/// `parse_as_transforms_into_keyword` is narrow enough (it peeks the whole
+/// event head) that no CR 614.1c `As … enters …` replacement, `As long as …`
+/// static, or `As an additional cost …` line can reach this arm.
 pub(crate) fn has_trigger_prefix(lower: &str) -> bool {
     alt((
-        tag::<_, _, OracleError<'_>>("when "),
-        tag("whenever "),
-        tag("at "),
+        value((), tag::<_, _, OracleError<'_>>("when ")),
+        value((), tag("whenever ")),
+        value((), tag("at ")),
+        super::oracle_trigger::parse_as_transforms_into_keyword,
     ))
     .parse(lower)
     .is_ok()
