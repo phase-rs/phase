@@ -1127,6 +1127,78 @@ describe("draft store workspace authority", () => {
     localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
   });
 
+  it("refuses an empty durable player deck in a full session and validates the published deck on retry", async () => {
+    vi.useRealTimers();
+    const draftId = "full-empty-player";
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Stored"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    const emptyRun = { ...run, playerDeck: [] };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "custom-cube", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, emptyRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "saved session", mainDeck: ["Projected"], landCounts: {},
+      poolSortMode: "color", poolPanelOpen: true, workspace: null,
+    });
+    wasm.import_draft_session.mockReturnValue(view([card("projected", "Projected")]));
+    wasm.booster_pack_pool_for_game.mockReturnValue([]);
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+    });
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null, adapter: null });
+    expect(wasm.import_draft_session).not.toHaveBeenCalled();
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(emptyRun);
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    // A complete run without a stage can restore its historical Cube source.
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: {
+      playerDeck: ["Stored"], booster_pack_pool: [],
+    } });
+    expect(useDraftStore.getState().adapter).not.toBeNull();
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    const navigate = vi.fn();
+
+    await actualPersistence.saveDraftRun(draftId, emptyRun);
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    formatGate.evaluate.mockImplementation(async (request: unknown) => {
+      const deck = request as { main_deck: string[] };
+      return {
+        compatible: deck.main_deck[0] !== "Stored",
+        reasons: deck.main_deck[0] === "Stored" ? ["Stored deck is invalid"] : [],
+      };
+    });
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Stored deck is invalid");
+    expect(formatGate.evaluate).toHaveBeenCalledWith(expect.objectContaining({ main_deck: ["Stored"] }));
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+
+    formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, run: expect.objectContaining({ playerDeck: ["Stored"], activeMatch: expect.objectContaining({ draftId }) }),
+      payload: expect.objectContaining({ player: expect.objectContaining({ main_deck: ["Stored"] }), booster_pack_pool: [] }),
+    }));
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
   it("refuses a persisted stage owned by another draft on resume and launch", async () => {
     vi.useRealTimers();
     const draftId = "stage-owner";
@@ -2045,16 +2117,22 @@ describe("draft store workspace authority", () => {
       poolSortMode: "color", poolPanelOpen: true, workspace: null,
     });
     persistence.loadDraftRun.mockResolvedValueOnce({
-      format: "run", results: [], playerDeck: [], opponentDeck: ["Opponent"],
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"],
       usedBotSeats: [1], booster_pack_pool: durable,
     });
     const imported = view([card("picked")]);
     wasm.import_draft_session.mockReturnValue(imported);
     wasm.booster_pack_pool_for_game.mockReturnValue(projected);
-    await useDraftStore.getState().resumeDraft();
+    const outcome = await useDraftStore.getState().resumeDraft();
     expect(wasm.import_draft_session).toHaveBeenCalledWith("legacy session", 2);
-    expect(useDraftStore.getState().view).toEqual(imported);
-    expect(useDraftStore.getState().runState?.booster_pack_pool).toEqual(expected);
+    if (Array.isArray(expected)) {
+      expect(outcome).toEqual({ status: "resumed", draftId: "legacy" });
+      expect(useDraftStore.getState().view).toEqual(imported);
+      expect(useDraftStore.getState().runState?.booster_pack_pool).toEqual(expected);
+    } else {
+      expect(outcome).toEqual({ status: "unavailable", draftId: "legacy", reason: "Saved draft run is unavailable" });
+      expect(useDraftStore.getState().runState).toBeNull();
+    }
     expect(persistence.saveDraftRun).toHaveBeenCalledTimes(saves);
     if (saves) expect(persistence.saveDraftRun).toHaveBeenCalledWith("legacy", expect.objectContaining({ booster_pack_pool: [] }));
   });

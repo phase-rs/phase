@@ -932,7 +932,7 @@ function validPersistedStage(run: DraftRunState, draftId: string): boolean {
       && isCoherentUnresolvedDraftStage(run, draftId, run.activeMatch.gameId));
 }
 
-function validRun(run: DraftRunState, draftId: string, setCode: string): boolean {
+function validRunFields(run: DraftRunState, draftId: string): boolean {
   return (run.format === "single" || run.format === "bo3" || run.format === "run")
     && Array.isArray(run.results)
     && run.results.every((entry) => typeof entry?.gameId === "string"
@@ -944,8 +944,12 @@ function validRun(run: DraftRunState, draftId: string, setCode: string): boolean
     && Array.isArray(run.usedBotSeats)
     && run.usedBotSeats.length > 0
     && run.usedBotSeats.every((seat) => Number.isInteger(seat) && seat > 0)
-    && (setCode !== "custom-cube" || Array.isArray(run.booster_pack_pool))
     && validPersistedStage(run, draftId);
+}
+
+function validRun(run: DraftRunState, draftId: string, setCode: string): boolean {
+  return validRunFields(run, draftId)
+    && (setCode !== "custom-cube" || Array.isArray(run.booster_pack_pool));
 }
 
 /** Transport identity for a submitted, unresolved match. The run is the authority. */
@@ -1239,7 +1243,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       });
       return { status: "resumed", draftId: meta.id };
     };
-    if (run && !validPersistedStage(run, meta.id)) {
+    // A historical Cube run may acquire its source from the restored adapter,
+    // but its submitted decks and other durable fields must already be sound.
+    if (run && !validRunFields(run, meta.id)) {
       return unavailable("Saved draft run is unavailable");
     }
     let saved: Awaited<ReturnType<typeof loadQuickDraftSession>>;
@@ -1265,6 +1271,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const { view } = restored;
       if (run) {
         const upgraded = withBoosterPackPool(run, restored.boosterPackPool);
+        if (!validRun(upgraded, meta.id, meta.setCode)) {
+          return unavailable("Saved draft run is unavailable");
+        }
         if (upgraded !== run) {
           await saveDraftRun(meta.id, upgraded);
           if (lifecycle !== lifecycleGeneration) return { status: "none" };
@@ -1762,9 +1771,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         : await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
       if (!fresh()) return;
       const durableRun = withBoosterPackPool(savedRun, boosterPackPool);
-      if (!validPersistedStage(durableRun, state.draftId)
-        || (runOnly && (!validDifficulty(state.difficulty)
-          || !validRun(durableRun, state.draftId, state.selectedSet)))) {
+      if (!validRun(durableRun, state.draftId, state.selectedSet)
+        || (runOnly && !validDifficulty(state.difficulty))) {
         throw new Error("Saved draft run is unavailable");
       }
       const playerDeck = runOnly ? durableRun.playerDeck
@@ -1806,7 +1814,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const gameId = run.activeMatch!.gameId;
       const meta = makeMeta({ ...state, runState: run }, "playing", gameId);
       const payload = matchPayload(run);
-      if (durableRun.activeMatch || runOnly) {
+      if (durableRun.activeMatch || runOnly || !arraysEqual(run.playerDeck, playerDeck)) {
         const draftSetCodes = state.view?.draft_set_codes
           ?? (state.selectedSet === "custom-cube" ? [] : state.selectedSet.split("+"));
         await preflightMatchPayload(payload, draftSetCodes, selectedMatchType);
