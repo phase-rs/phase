@@ -49,6 +49,7 @@ import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
+import type { DraftRunState } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import {
@@ -293,6 +294,33 @@ type DeckListPayload = {
    *  deck bracket tier. */
   ai_difficulties: string[];
 };
+
+function hasExactKeys(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return required.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
+function sameStringArray(value: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(value) && value.length === expected.length
+    && value.every((entry, index) => typeof entry === "string" && entry === expected[index]);
+}
+
+/** The raw object is forwarded unchanged to the engine, so every key and value must match publication. */
+function matchesPublishedDraftPayload(value: unknown, run: DraftRunState): boolean {
+  if (!hasExactKeys(value, ["player", "opponent", "ai_decks"], ["booster_pack_pool"])) return false;
+  const matchesDeck = (deck: unknown, mainDeck: string[]) => hasExactKeys(deck, ["main_deck", "sideboard", "commander"])
+    && sameStringArray(deck.main_deck, mainDeck)
+    && sameStringArray(deck.sideboard, [])
+    && sameStringArray(deck.commander, []);
+  if (!matchesDeck(value.player, run.playerDeck) || !matchesDeck(value.opponent, run.opponentDeck)
+    || !Array.isArray(value.ai_decks) || value.ai_decks.length !== 0) return false;
+  const pool = run.booster_pack_pool;
+  if (pool === undefined) return !Object.prototype.hasOwnProperty.call(value, "booster_pack_pool");
+  if (pool === null) return value.booster_pack_pool === null;
+  return Array.isArray(pool) && sameStringArray(value.booster_pack_pool, pool);
+}
 
 function nativeAiSeatsFromDeckList(deckList: DeckListPayload): NativeAiSeat[] {
   return [deckList.opponent, ...deckList.ai_decks].map((deck, index) => ({
@@ -1465,9 +1493,30 @@ export function GameProvider({
       const reportDraftError = (error: unknown) => {
         if (!cancelled) onNoDeckRef.current?.(error instanceof Error ? error.message : String(error));
       };
+      const unavailableDraftStage = () => new Error(tRef.current("draft:run.resumeUnavailable"));
+      const loadExactDraftRun = async (): Promise<DraftRunState> => {
+        try {
+          const meta = await inspectActiveQuickDraftLifecycle("inspect");
+          if (!meta || meta.id !== draftId) throw unavailableDraftStage();
+          const run = await loadDraftRun(draftId!);
+          if (!run) throw unavailableDraftStage();
+          const { isCoherentUnresolvedDraftStage } = await import("../stores/draftStore");
+          if (!isCoherentUnresolvedDraftStage(run, draftId!, gameId)
+            || (meta.setCode === "custom-cube" && !Array.isArray(run.booster_pack_pool))) {
+            throw unavailableDraftStage();
+          }
+          return run;
+        } catch {
+          throw unavailableDraftStage();
+        }
+      };
       const startDraftDeck = async (raw: string) => {
         try {
           const deckList = JSON.parse(raw) as DeckListPayload;
+          if (soloDraft) {
+            const run = await loadExactDraftRun();
+            if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
+          }
           await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
           if (cancelled) return;
           controller = createGameLoopController({
@@ -1492,17 +1541,7 @@ export function GameProvider({
       };
       const startExactDraftStage = async () => {
         try {
-          const meta = await inspectActiveQuickDraftLifecycle("inspect");
-          if (!meta || meta.id !== draftId) throw new Error("This draft match is unavailable");
-          const run = await loadDraftRun(draftId!);
-          if (!run) throw new Error("This draft match is unavailable");
-          const { isCoherentUnresolvedDraftStage } = await import("../stores/draftStore");
-          if (!Array.isArray(run.results) || !Array.isArray(run.playerDeck)
-            || !Array.isArray(run.opponentDeck) || !Array.isArray(run.usedBotSeats)
-            || !isCoherentUnresolvedDraftStage(run, draftId!, gameId)
-            || (meta.setCode === "custom-cube" && !Array.isArray(run.booster_pack_pool))) {
-            throw new Error("This draft match is unavailable");
-          }
+          const run = await loadExactDraftRun();
           const deckList = {
             booster_pack_pool: run.booster_pack_pool,
             player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
