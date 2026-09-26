@@ -2667,3 +2667,79 @@ fn mana_dork_outvalues_a_bigger_body_when_trading() {
         keep_dork_reverted - keep_body_reverted
     );
 }
+
+const TREETOP_VILLAGE: &str = "This land enters tapped.\n{T}: Add {G}.\n{1}{G}: This land becomes a 3/3 green Ape creature with trample until end of turn. It's still a land. (It can deal excess combat damage to the player or planeswalker it's attacking.)";
+
+#[test]
+fn ai_animates_a_manland_once_per_turn_across_priority_windows() {
+    use engine::game::engine::{resolve_all_fast_forward, ResolveAllCallbackDecision};
+
+    for difficulty in [
+        AiDifficulty::Easy,
+        AiDifficulty::Medium,
+        AiDifficulty::VeryHard,
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+        }
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.turn_number = 3;
+            state.active_player = P0;
+            state.phase = Phase::PreCombatMain;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let ai_players: HashSet<PlayerId> = [P0].into_iter().collect();
+        let config = create_config(difficulty, Platform::Native);
+        let ai_configs = HashMap::from([(P0, config)]);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+        let mut animations = 0;
+        let mut rounds_with_actions = 0;
+        for _ in 0..8 {
+            let run = run_ai_actions_bounded(
+                runner.state_mut(),
+                &ai_players,
+                &ai_configs,
+                &mut rng,
+                &session,
+                16,
+            );
+            if !run.results.is_empty() {
+                rounds_with_actions += 1;
+            }
+            animations += run
+                .results
+                .iter()
+                .filter(|r| {
+                    matches!(r.action, GameAction::ActivateAbility { source_id, .. } if source_id == village)
+                })
+                .count();
+            let state = runner.state_mut();
+            resolve_all_fast_forward(state, P0, 0, |_, _| {
+                ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+            });
+            // Re-arm a fresh P0 priority window. `waiting_for` alone is not enough:
+            // later calls then fail `NotYourPriority` and take no action.
+            state.phase = Phase::PreCombatMain;
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.priority_pass_count = 0;
+            state.priority_passes.clear();
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        assert_eq!(
+            rounds_with_actions, 8,
+            "{difficulty:?}: reach guard — the AI acted in every priority window"
+        );
+        assert_eq!(animations, 1, "{difficulty:?}: animated {animations} times");
+    }
+}
