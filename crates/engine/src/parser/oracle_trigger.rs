@@ -7462,7 +7462,10 @@ fn try_extract_zone_change_object_filter_condition(
             trigger_zone_change,
             head_enters_battlefield,
         )
-    })?;
+    })
+    // CR 603.4: only an "if" immediately following the trigger condition
+    // is an intervening-if; trailing comparisons remain effect instructions.
+    .filter(|(before, _, _)| before.trim_start().is_empty())?;
     let next_char_is_boundary = rest
         .chars()
         .next()

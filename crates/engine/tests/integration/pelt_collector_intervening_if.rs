@@ -110,6 +110,41 @@ fn a_non_zone_head_does_not_get_an_entry_condition() {
     );
 }
 
+#[test]
+fn trailing_power_comparison_is_not_an_intervening_if() {
+    let leading = parse_oracle_text(
+        "Whenever another creature you control enters, if that creature's power is \
+         greater than this creature's, put a +1/+1 counter on this creature.",
+        "Comparison Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(leading.triggers.len(), 1);
+    assert!(matches!(
+        leading.triggers[0].condition,
+        Some(TriggerCondition::ZoneChangeObjectMatchesFilter { .. })
+    ));
+
+    let trailing = parse_oracle_text(
+        "Whenever another creature you control enters, put a +1/+1 counter on this \
+         creature if that creature's power is greater than this creature's.",
+        "Comparison Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(
+        trailing.triggers.len(),
+        1,
+        "reach guard: entry trigger parses"
+    );
+    assert!(
+        trailing.triggers[0].condition.is_none(),
+        "trailing comparison must remain an effect instruction"
+    );
+}
+
 fn enters(power: i32) -> u32 {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
