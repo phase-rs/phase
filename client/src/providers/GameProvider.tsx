@@ -49,6 +49,7 @@ import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
+import { clearGameStrict } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
@@ -1543,6 +1544,7 @@ export function GameProvider({
       const startExactDraftStage = async () => {
         try {
           const run = await loadExactDraftRun();
+          if (cancelled) return;
           const deckList = {
             booster_pack_pool: run.booster_pack_pool,
             player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
@@ -1571,19 +1573,79 @@ export function GameProvider({
           return;
         }
       }
-      if (draftDeckRaw !== null) {
-        await startDraftDeck(draftDeckRaw);
-        return;
-      }
       let savedState;
       try {
         savedState = await loadGame(gameId);
       } catch (error) {
+        if (cancelled) return;
         if (soloDraft) {
-          await startExactDraftStage();
+          if (draftDeckRaw !== null) await startDraftDeck(draftDeckRaw);
+          else await startExactDraftStage();
           return;
         }
         reportDraftError(error);
+        return;
+      }
+      if (cancelled) return;
+
+      if (soloDraft) {
+        if (!savedState) {
+          if (draftDeckRaw !== null) await startDraftDeck(draftDeckRaw);
+          else await startExactDraftStage();
+          return;
+        }
+        try {
+          await loadExactDraftRun();
+          if (cancelled) return;
+        } catch (error) {
+          reportDraftError(error);
+          return;
+        }
+        try {
+          await resumeGame(gameId, adapter, savedState);
+        } catch (error) {
+          if (cancelled) return;
+          console.warn("Failed to resume saved draft game, starting fresh:", error);
+          const wasAutoUpdate = consumeRecentAutoUpdateMarker();
+          const reason = wasAutoUpdate
+            ? tRef.current("gameProvider.resumeReset.appUpdated")
+            : tRef.current("gameProvider.resumeReset.restoreFailed", {
+                error: error instanceof Error ? error.message : String(error),
+              });
+          onResumeResetRef.current?.(reason);
+          try {
+            await clearGameStrict(gameId);
+          } catch (deleteError) {
+            reportDraftError(deleteError);
+            return;
+          }
+          if (cancelled) return;
+          if (draftDeckRaw !== null) await startDraftDeck(draftDeckRaw);
+          else await startExactDraftStage();
+          return;
+        }
+        if (cancelled) return;
+        try {
+          const resumedPlayerCount = persistedGameStateView(savedState).players.length;
+          controller = createGameLoopController({
+            mode: mode === "local" ? "local" : "ai", difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, resumedPlayerCount, difficulty),
+            playerCount: resumedPlayerCount,
+          });
+          controller.start();
+          if (cancelled) return;
+          audioManager.setContext("battlefield");
+        } catch (error) {
+          reportDraftError(error);
+          return;
+        }
+        if (draftDeckRaw !== null) {
+          try {
+            if (sessionStorage.getItem(draftDeckKey) === draftDeckRaw) sessionStorage.removeItem(draftDeckKey);
+          } catch (error) {
+            console.warn("Could not consume draft deck handoff:", error);
+          }
+        }
         return;
       }
 
@@ -1619,10 +1681,6 @@ export function GameProvider({
               });
           onResumeResetRef.current?.(reason);
           clearGame(gameId);
-          if (soloDraft) {
-            await startExactDraftStage();
-            return;
-          }
           const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
           const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
           const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
@@ -1688,11 +1746,6 @@ export function GameProvider({
       }
       if (draftDeckRaw !== null) {
         await startDraftDeck(draftDeckRaw);
-        return;
-      }
-
-      if (soloDraft) {
-        await startExactDraftStage();
         return;
       }
 

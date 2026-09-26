@@ -8,7 +8,7 @@ import type {
   TrustedGameStateEnvelope,
 } from "../../adapter/types";
 import { persistedGameStateView } from "../../adapter/types";
-import { GAME_KEY_PREFIX } from "../../constants/storage";
+import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../../constants/storage";
 import { buildGameState, buildPriorityWaitingFor } from "../../test/factories/gameStateFactory";
 
 vi.mock("idb-keyval", () => ({
@@ -20,6 +20,8 @@ vi.mock("idb-keyval", () => ({
 
 import { del as idbDel, get as idbGet, set as idbSet } from "idb-keyval";
 import {
+  clearGame,
+  clearGameStrict,
   loadGame,
   loadCheckpoints,
   loadP2PHostSession,
@@ -27,6 +29,7 @@ import {
   saveAuthoritativeGame,
   saveGame,
   saveResumableGameStrict,
+  saveActiveGame,
 } from "../gamePersistence";
 
 function fixtureState(): GameState {
@@ -74,6 +77,60 @@ function customCommandZoneMinimumRules(): CustomFormatRules {
 describe("game persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
+    vi.mocked(idbDel).mockResolvedValue(undefined);
+    vi.mocked(idbGet).mockReset();
+    vi.mocked(idbGet).mockResolvedValue(undefined);
+  });
+
+  it("deletes the three exact game records in order before clearing matching active metadata", async () => {
+    saveActiveGame({ id: "target", mode: "ai", difficulty: "Medium" });
+    const keys = [GAME_KEY_PREFIX + "target", GAME_CHECKPOINTS_PREFIX + "target", "phase-p2p-host:target"];
+    const releases: Array<() => void> = [];
+    let settled = false;
+    vi.mocked(idbGet).mockRejectedValueOnce(new Error("reads are unavailable"));
+    vi.mocked(idbDel).mockImplementation(() => new Promise((resolve) => { releases.push(() => resolve()); }));
+    const pending = clearGameStrict("target");
+    void pending.then(() => { settled = true; });
+    for (let index = 0; index < keys.length; index += 1) {
+      expect(idbDel).toHaveBeenCalledTimes(index + 1);
+      expect(idbDel).toHaveBeenNthCalledWith(index + 1, keys[index], expect.anything());
+      expect(localStorage.getItem(ACTIVE_GAME_KEY)).not.toBeNull();
+      expect(settled).toBe(false);
+      releases[index]();
+      await Promise.resolve();
+    }
+    await pending;
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).toBeNull();
+    const calls = vi.mocked(idbDel).mock.calls;
+    expect(calls[0][1]).toBe(calls[1][1]);
+    expect(calls[1][1]).toBe(calls[2][1]);
+    expect(calls.map(([key]) => key)).toEqual(keys);
+  });
+
+  it.each([0, 1, 2])("propagates deletion failure at game record index %i", async (failedIndex) => {
+    saveActiveGame({ id: "target", mode: "ai", difficulty: "Medium" });
+    const original = new Error(`delete ${failedIndex} failed`);
+    vi.mocked(idbDel).mockImplementation((_key) => {
+      if (vi.mocked(idbDel).mock.calls.length === failedIndex + 1) return Promise.reject(original);
+      return Promise.resolve();
+    });
+    await expect(clearGameStrict("target")).rejects.toBe(original);
+    expect(idbDel).toHaveBeenCalledTimes(failedIndex + 1);
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).not.toBeNull();
+    expect(vi.mocked(idbDel).mock.calls.every(([key]) => String(key).endsWith("target"))).toBe(true);
+  });
+
+  it("keeps other active metadata and preserves best-effort cleanup and failed-read behavior", async () => {
+    saveActiveGame({ id: "other", mode: "ai", difficulty: "Medium" });
+    await clearGameStrict("target");
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).toContain("other");
+    saveActiveGame({ id: "target", mode: "ai", difficulty: "Medium" });
+    vi.mocked(idbDel).mockRejectedValueOnce(new Error("IDB deletion failed"));
+    await expect(clearGame("target")).resolves.toBeUndefined();
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).toBeNull();
+    vi.mocked(idbGet).mockRejectedValueOnce(new Error("IDB read failed"));
+    await expect(loadGame("target")).resolves.toBeNull();
   });
 
   it("retains the engine-authored trusted envelope in IndexedDB", async () => {

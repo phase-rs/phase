@@ -300,6 +300,18 @@ export async function clearGame(gameId: string): Promise<void> {
   }
 }
 
+/** Remove every game-scoped record before reusing a game ID for a fresh start. */
+export async function clearGameStrict(gameId: string): Promise<void> {
+  const store = getGameStore();
+  await del(GAME_KEY_PREFIX + gameId, store);
+  await del(GAME_CHECKPOINTS_PREFIX + gameId, store);
+  await del(P2P_HOST_KEY_PREFIX + gameId, store);
+  const active = loadActiveGame();
+  if (active?.id === gameId) {
+    clearActiveGame();
+  }
+}
+
 // ── P2P Host Session (IndexedDB) ────────────────────────────────────────
 
 export async function saveP2PHostSession(

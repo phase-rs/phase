@@ -79,8 +79,8 @@ function subscribePickInteraction(listener: () => void): () => void {
 }
 
 function FormatPicker({
-  onLaunch, supportsBo3, pending, error,
-}: { onLaunch: () => void; supportsBo3: boolean; pending: boolean; error: string | null }) {
+  onLaunch, onEnd, supportsBo3, pending, error, endError,
+}: { onLaunch: () => void; onEnd: () => void; supportsBo3: boolean; pending: boolean; error: string | null; endError: boolean }) {
   const { t } = useTranslation("draft");
   const runFormat = useDraftStore((s) => s.runFormat);
   const setRunFormat = useDraftStore((s) => s.setRunFormat);
@@ -126,15 +126,26 @@ function FormatPicker({
         ))}
       </div>
 
-      <button
-        type="button"
-        onClick={onLaunch}
-        disabled={pending}
-        aria-busy={pending}
-        className={menuButtonClass({ tone: "emerald", size: "lg", disabled: pending })}
-      >
-        {t("formatPicker.startMatch")}{pending ? "…" : ""}
-      </button>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={onLaunch}
+          disabled={pending}
+          aria-busy={pending}
+          className={menuButtonClass({ tone: "emerald", size: "lg", disabled: pending })}
+        >
+          {t("formatPicker.startMatch")}{pending ? "…" : ""}
+        </button>
+        <button
+          type="button"
+          onClick={onEnd}
+          disabled={pending}
+          aria-busy={pending}
+          className={menuButtonClass({ tone: "neutral", size: "md", disabled: pending })}
+        >
+          {endError ? t("run.retryEndRun") : t("run.endRun")}
+        </button>
+      </div>
       {error && <p role="alert" className="text-sm text-red-200">{error}</p>}
     </div>
   );
@@ -892,9 +903,11 @@ export function DraftPage() {
         {phase === "launching" && (
           <FormatPicker
             onLaunch={handleLaunchMatch}
+            onEnd={handleEndRun}
             supportsBo3={draftView?.match_config.match_type === "Bo3"}
             pending={launchPending || endPending}
             error={endError ?? launchError}
+            endError={endError !== null}
           />
         )}
 

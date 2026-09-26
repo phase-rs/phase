@@ -47,6 +47,7 @@ const wasm = vi.hoisted(() => ({
   get_bot_deck: vi.fn(() => ({ main_deck: ["Opponent"], lands: {} })),
   booster_pack_pool_for_game: vi.fn(() => []),
   export_draft_session: vi.fn(() => "session"),
+  import_draft_session: vi.fn(),
 }));
 
 const persistence = vi.hoisted(() => ({
@@ -54,7 +55,7 @@ const persistence = vi.hoisted(() => ({
   drainQuickDraftPersistence: vi.fn(async () => undefined),
   inspectActiveQuickDraftLifecycle: vi.fn<() => Promise<unknown>>(async () => null),
   loadDraftRun: vi.fn<() => Promise<unknown>>(async () => null),
-  loadQuickDraftSession: vi.fn(async () => null),
+  loadQuickDraftSession: vi.fn<() => Promise<unknown>>(async () => null),
   persistQuickDraftSnapshot: vi.fn(async () => undefined),
   publishInitialDraftMatch: vi.fn(async () => undefined),
   publishStagedDraftMatch: vi.fn<() => Promise<void>>(async () => undefined),
@@ -595,6 +596,43 @@ describe("DraftPage local deckbuilding wiring", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Contract from Below requires ante");
     fireEvent.click(screen.getByRole("button", { name: "Next Match" }));
     await waitFor(() => expect(screen.queryByText("Contract from Below requires ante")).toBeNull());
+  });
+
+  it("offers End Run for a legacy submitted session without a durable run and retries cleanup", async () => {
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+      id: "legacy-run", setCode: "TST", difficulty: 2, kind: "Quick", phase: "launching",
+    });
+    persistence.loadDraftRun.mockResolvedValue(null);
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "saved Pairing session", mainDeck: ["Player"], landCounts: {},
+      poolSortMode: "name", poolPanelOpen: false, workspace: null,
+    });
+    wasm.import_draft_session.mockReturnValue(view({ status: "Pairing" }));
+    let rejectCleanup!: (error: Error) => void;
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(new Promise<undefined>((_resolve, reject) => {
+      rejectCleanup = reject;
+    }));
+    render(<MemoryRouter initialEntries={[{ pathname: "/draft/quick", search: "?resume=1",
+      state: { draftId: "legacy-run", draftStartError: "exact ante error" } }]}><Routes>
+      <Route path="/draft/quick" element={<DraftPage />} />
+      <Route path="/draft" element={<div data-testid="draft-home" />} />
+    </Routes></MemoryRouter>);
+    expect(await screen.findByRole("button", { name: "Start Match" })).toBeEnabled();
+    expect(wasm.import_draft_session).toHaveBeenCalledWith("saved Pairing session", 2);
+    expect(useDraftStore.getState().phase).toBe("launching");
+    expect(screen.getByRole("alert")).toHaveTextContent("exact ante error");
+    fireEvent.click(screen.getByRole("button", { name: "End Run" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Start Match/ })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "End Run" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "End Run" }));
+    expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledTimes(1);
+    await act(async () => { rejectCleanup(new Error("cleanup failed")); });
+    expect(await screen.findByRole("alert")).toHaveTextContent("cleanup failed");
+    expect(screen.queryByTestId("draft-home")).toBeNull();
+    expect(useDraftStore.getState().draftId).toBe("legacy-run");
+    fireEvent.click(screen.getByRole("button", { name: "Retry End Run" }));
+    expect(await screen.findByTestId("draft-home")).toBeInTheDocument();
+    expect(persistence.cleanupQuickDraftLifecycle.mock.calls).toEqual([["legacy-run"], ["legacy-run"]]);
   });
 
   it("offers Retry Resume and End Run after a run read rejects, then recovers the same ID", async () => {
