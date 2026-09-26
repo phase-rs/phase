@@ -26,9 +26,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
     CastingPermission, ChoiceType, Chooser, ContinuousModification, ControllerRef,
     CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigSource, Duration, Effect,
-    EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp, ForEachCategoryAction,
-    LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody, FaceDownProfile, FilterProp,
+    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
+    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     ThisWayCause, TypeFilter, TypedFilter,
 };
@@ -172,6 +172,37 @@ fn is_search_result_reveal_clause(lower: &str) -> bool {
         lower.trim().trim_end_matches('.'),
         "reveal that card" | "reveal those cards" | "reveal the card" | "reveal them" | "reveal it"
     )
+}
+
+/// CR 701.23a + CR 406.3: compose the optional continuation connector, the
+/// searched-card reference, and the concealment suffix. `all_consuming` is
+/// intentional: a later rider (for example, a counter instruction) belongs to
+/// a different parser and must not be silently swallowed by this continuation.
+fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
+    let input = lower.trim();
+    all_consuming(map(
+        (
+            opt(terminated(
+                alt((tag::<_, _, OracleError<'_>>("and then"), tag("then"))),
+                multispace1,
+            )),
+            tag("exile"),
+            multispace1,
+            alt((
+                tag::<_, _, OracleError<'_>>("those cards"),
+                tag("that card"),
+                tag("the card"),
+                tag("them"),
+                tag("it"),
+            )),
+            opt(tag(" face down")),
+            opt(tag(".")),
+        ),
+        |(_, _, _, _, face_down, _)| face_down.is_some(),
+    ))
+    .parse(input)
+    .ok()
+    .map(|(_, face_down)| face_down)
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
@@ -3812,6 +3843,11 @@ fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
 /// EFFECT-SHAPED, NEVER TEXT-SHAPED. It must never inspect `Unimplemented`'s `name`
 /// or `description`. A guard keyed on "play lands" would be a single-card carve-out;
 /// this one is keyed on the variant and admits every future card of the same class.
+/// ONE CLASS-WIDE EXCEPTION, keyed on a grammar and not on a card: a conjunct
+/// carrying an every-mana concession (`mana_spend_concession_is_single_kind` →
+/// `Some(false)`) keeps the verdict it had while that clause lowered to a static —
+/// understood — because after a cast grant the chunk loop's rider fold handles it;
+/// alone, the generic detector now reports the standalone concession gap.
 ///
 /// SCOPE OF THE PROBE — IT IS A LOWER BOUND, AND THAT IS DELIBERATE.
 /// `strip_leading_sequence_connector(..).trim()` reproduces the LOOP-HEAD
@@ -3821,11 +3857,14 @@ fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
 /// downstream (the `starting with you, ` strip) and reaches the generic detector only
 /// after a long `try_parse_*` cascade of special-case recognizers. So this guard asks
 /// "would the GENERIC detector understand this conjunct?", which is weaker than "would
-/// production understand it?". The error is one-directional and safe: the guard can
-/// over-decline a boundary a special-case recognizer would have handled, and can never
-/// wrongly accept one. Measured today that divergent set is EMPTY.
+/// production understand it?". The error is safe in practice: the guard can
+/// over-decline a boundary a special-case recognizer would have handled, and can
+/// wrongly accept one only through the concession exception, which does not check
+/// for a preceding grant (alone, such a conjunct still surfaces as the standalone
+/// gap). Measured today the exception answers exactly one conjunct, the one of
+/// You Find Some Prisoners, which follows a grant.
 ///
-/// Measured corpus reach: exactly ONE decline, on The Belligerent
+/// Measured corpus reach (re-measured with the exception): exactly ONE decline, on The Belligerent
 /// ("Until end of turn, you may look at the top card of your library any time, and
 /// you may play lands and cast spells from the top of your library") — whose
 /// recovered conjunct "and you may play lands" parses to a bare
@@ -3835,6 +3874,14 @@ fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
 /// and the 13-card deferred class together.
 fn recovered_conjunct_is_unparsed(text: &str, ctx: &ParseContext) -> bool {
     let t = super::lower::strip_leading_sequence_connector(text).trim();
+    // An every-mana concession ("and you may spend mana as though it were mana
+    // of any color to cast it", You Find Some Prisoners) is understood:
+    // after a cast grant the chunk loop folds it onto that grant. Alone the
+    // generic detector reports it as the standalone concession gap — a
+    // representation limit, not ignorance of the conjunct.
+    if super::mana_spend_concession_is_single_kind(&t.to_lowercase()) == Some(false) {
+        return false;
+    }
     matches!(
         super::parse_effect_clause(t, &mut ctx.clone()).effect,
         Effect::Unimplemented { .. }
@@ -5304,6 +5351,11 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::SearchResultClauseHandled => {}
+        ContinuationAst::ExileSearchResultFaceDown => {
+            if let Some(previous) = defs.last_mut() {
+                previous.face_down_in_exile = ExileConcealment::FaceDown;
+            }
+        }
         ContinuationAst::PutChoiceRemainderOnBottom => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -5781,6 +5833,7 @@ pub(super) fn apply_clause_continuation(
                 count,
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             };
             // CR 608.2c + CR 401.1: "look at the top card of each player's library,
             // then exile those cards" — the `ScopedPlayer` owner marker set by
@@ -5843,11 +5896,8 @@ pub(super) fn apply_clause_continuation(
                 }
                 _ => unreachable!(),
             }
-            // CR 608.2c: chain the conceal continuation onto the Dig. The
-            // `DigChoice` resolution binds the chosen (exiled) card onto this
-            // sub-ability's `ParentTarget`; `HideawayConceal` then flips it face
-            // down (CR 406.3) and links it to the source (CR 607.2a / CR 702.75a).
-            append_conceal_sub_ability(previous);
+            // CR 406.3 + CR 608.2c: the looking player, the ability's controller, keeps the look.
+            append_conceal_sub_ability(previous, PermissionGrantee::AbilityController);
             // CR 122.1: a "... face down with a <type> counter on it" rider (The
             // Dragon-Kami Reborn) places the counters on the CHOSEN dug card.
             // Append after the conceal so each `PutCounter { ParentTarget }`
@@ -5873,17 +5923,14 @@ pub(super) fn apply_clause_continuation(
     }
 }
 
-/// CR 702.75a + CR 608.2c: Append the Hideaway conceal continuation to the
-/// deepest point of `dig`'s sub-ability chain. Mirrors `database/hideaway.rs`:
-/// the chained `HideawayConceal { target: ParentTarget }` flips the just-exiled
-/// dug card face down (CR 406.3) and links it to the source. Appended at the
-/// deepest sub so it never clobbers an existing continuation (e.g. a trailing
-/// "put the rest on the bottom" patch lives on the Dig itself, not as a sub).
-fn append_conceal_sub_ability(dig: &mut AbilityDefinition) {
+/// CR 406.3 + CR 608.2c: append at the deepest sub a conceal that flips the just-exiled card
+/// face down and binds its look to `grantee`.
+fn append_conceal_sub_ability(dig: &mut AbilityDefinition, grantee: PermissionGrantee) {
     let conceal = Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::HideawayConceal {
             target: TargetFilter::ParentTarget,
+            grantee: Some(grantee),
         },
     ));
     let mut cursor = dig;
@@ -6068,6 +6115,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
         ContinuationAst::SearchResultClauseHandled => true,
+        ContinuationAst::ExileSearchResultFaceDown => true,
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
@@ -7459,6 +7507,19 @@ pub(super) fn parse_followup_continuation_ast(
     previous_effect: &Effect,
     ctx: &mut ParseContext,
 ) -> Option<ContinuationAst> {
+    parse_followup_continuation_ast_with_search_destination(text, previous_effect, ctx, false)
+}
+
+/// Variant used by the effect-chain assembler when the effective previous
+/// effect was produced by a structural `SearchDestination` continuation. The
+/// provenance is needed because multi-zone searches deliberately lower their
+/// move with `origin: None`.
+pub(super) fn parse_followup_continuation_ast_with_search_destination(
+    text: &str,
+    previous_effect: &Effect,
+    ctx: &mut ParseContext,
+    previous_is_search_destination_exile: bool,
+) -> Option<ContinuationAst> {
     let lower = text.to_lowercase();
     let face_down_profile_spec =
         parse_theyre_face_down_profile(&lower).or_else(|| parse_its_face_down_profile(&lower));
@@ -8158,22 +8219,22 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::SearchResultClauseHandled)
         }
         Effect::ChangeZone {
-            origin: Some(Zone::Library),
+            origin,
             destination: Zone::Exile,
             ..
-        } if matches!(
-            lower.trim(),
-            "exile it"
-                | "exile it face down"
-                | "exile that card"
-                | "exile that card face down"
-                | "exile the card"
-                | "exile the card face down"
-                | "exile them"
-                | "exile them face down"
-                | "exile those cards"
-                | "exile those cards face down"
-        ) =>
+        } if (matches!(origin, Some(Zone::Library))
+            || (origin.is_none() && previous_is_search_destination_exile))
+            && parse_exile_search_result_clause(&lower) == Some(true) =>
+        {
+            Some(ContinuationAst::ExileSearchResultFaceDown)
+        }
+        Effect::ChangeZone {
+            origin,
+            destination: Zone::Exile,
+            ..
+        } if (matches!(origin, Some(Zone::Library))
+            || (origin.is_none() && previous_is_search_destination_exile))
+            && parse_exile_search_result_clause(&lower) == Some(false) =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)
         }
@@ -9962,6 +10023,91 @@ mod tests {
         let result =
             parse_followup_continuation_ast("exile them", &previous, &mut ParseContext::default());
         assert_eq!(result, Some(ContinuationAst::SearchResultClauseHandled));
+    }
+
+    #[test]
+    fn search_exile_face_down_followup_uses_compositional_reference_grammar() {
+        let previous = Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        for phrase in [
+            "exile it face down",
+            "then exile it face down",
+            "exile that card face down",
+            "then exile that card face down",
+            "exile them face down",
+            "exile those cards face down",
+        ] {
+            assert_eq!(
+                parse_followup_continuation_ast(phrase, &previous, &mut ParseContext::default()),
+                Some(ContinuationAst::ExileSearchResultFaceDown),
+                "expected face-down search continuation for {phrase:?}"
+            );
+        }
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "exile it face down with a hatching counter on it",
+                &previous,
+                &mut ParseContext::default()
+            ),
+            None,
+            "a suffix-bearing clause must not be claimed by the plain face-down grammar"
+        );
+        assert_eq!(
+            parse_followup_continuation_ast("exile it", &previous, &mut ParseContext::default()),
+            Some(ContinuationAst::SearchResultClauseHandled)
+        );
+    }
+
+    #[test]
+    fn multi_zone_search_face_down_exile_preserves_concealment_intent() {
+        let def = super::super::parse_effect_chain(
+            "search your graveyard, hand, and/or library for a card, then exile it face down",
+            AbilityKind::Spell,
+        );
+        let mut node = Some(&def);
+        let mut saw_multi_zone_search = false;
+        let mut saw_originless_exile = false;
+        let mut saw_face_down_intent = false;
+        while let Some(current) = node {
+            if let Effect::SearchLibrary { source_zones, .. } = &*current.effect {
+                saw_multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
+            }
+            if let Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                ..
+            } = &*current.effect
+            {
+                saw_originless_exile = true;
+            }
+            saw_face_down_intent |= current.face_down_in_exile.is_face_down();
+            node = current.sub_ability.as_deref();
+        }
+        assert!(
+            saw_multi_zone_search,
+            "the parser must retain the searched non-library zones"
+        );
+        assert!(
+            saw_originless_exile,
+            "multi-zone SearchDestination must use origin=None"
+        );
+        assert!(
+            saw_face_down_intent,
+            "the face-down exile continuation must mark the generated move"
+        );
     }
 
     /// CR 701.23a + CR 701.18a (cluster 35 / Mana Severance): comma-split
@@ -11792,7 +11938,13 @@ mod tests {
             .as_ref()
             .expect("conceal sub-ability must be chained onto the Dig");
         assert!(
-            matches!(&*conceal.effect, Effect::HideawayConceal { .. }),
+            matches!(
+                &*conceal.effect,
+                Effect::HideawayConceal {
+                    target: TargetFilter::ParentTarget,
+                    grantee: Some(PermissionGrantee::AbilityController),
+                }
+            ),
             "first sub must be the conceal, got {:?}",
             conceal.effect
         );
@@ -14858,7 +15010,7 @@ mod leading_duration_guard_tests_7923 {
         for t in must_split {
             assert!(
                 !recovered_conjunct_is_unparsed(t, &ctx),
-                "{t:?} is understood by the generic detector and must still split"
+                "{t:?} is understood (generic detector, or the concession exception) and must still split"
             );
         }
     }

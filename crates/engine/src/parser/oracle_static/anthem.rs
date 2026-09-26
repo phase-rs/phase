@@ -481,10 +481,9 @@ pub(crate) fn parse_subject_additive_type_static(text: &str) -> Option<StaticDef
     if let Some((before_cond, after_cond)) = predicate_tp.split_around(" as long as ") {
         let modifications = parse_additive_type_clause_modifications(before_cond.original)?;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
-            });
+        let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+            unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+        });
         return Some(
             StaticDefinition::continuous()
                 .affected(affected)
@@ -668,10 +667,9 @@ pub(crate) fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
     let conditional = text.strip_prefix("As long as ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let (condition_text, remainder) = conditional.split_once(", ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
-    let condition =
-        parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
-            text: condition_text.to_string(),
-        });
+    let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
+        unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+    });
 
     let mut def = parse_static_line(remainder.trim())?;
     // CR 611.3a + CR 118.12a: When the inner static already carries a typed
@@ -1031,8 +1029,8 @@ pub(crate) fn parse_continuous_gets_has(
             // decision has ONE authority — `parse_affected_scoped_static_condition`
             // (shared.rs) — shared with the "as long as"/"unless"/"if" gate parsers.
             let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
-            let condition = typed.unwrap_or(StaticCondition::Unrecognized {
-                text: condition_text.to_string(),
+            let condition = typed.unwrap_or_else(|| {
+                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
             });
             def.condition = Some(condition);
             return Some(def);

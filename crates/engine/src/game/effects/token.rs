@@ -3798,6 +3798,7 @@ fn junk_ability() -> AbilityDefinition {
             count: QuantityExpr::Fixed { value: 1 },
             position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
         },
     )
     .sub_ability(AbilityDefinition::new(

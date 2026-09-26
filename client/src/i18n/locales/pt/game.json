@@ -2380,10 +2380,11 @@
     "reachSpills": "Pode reduzir mana genérico",
     "multiplier": "×{{count}}",
     "confirmOrder": "Confirmar Ordem",
-    "cancelCast": "Cancelar Conjuração",
+    "cancel": "Cancelar",
     "moveUp": "Mover para cima",
     "moveDown": "Mover para baixo",
-    "reductionFallback": "Redução {{number}}"
+    "reductionFallback": "Redução {{number}}",
+    "floor": "Não pode reduzir o custo abaixo de {{count}} de mana"
   },
   "unhandledWaitingFor": {
     "title": "Ação necessária, mas a interface está ausente",

@@ -2380,10 +2380,11 @@
     "reachSpills": "Może obniżyć manę ogólną",
     "multiplier": "×{{count}}",
     "confirmOrder": "Potwierdź kolejność",
-    "cancelCast": "Anuluj rzucanie",
+    "cancel": "Anuluj",
     "moveUp": "Przesuń w górę",
     "moveDown": "Przesuń w dół",
-    "reductionFallback": "Obniżka {{number}}"
+    "reductionFallback": "Obniżka {{number}}",
+    "floor": "Nie może obniżyć kosztu poniżej {{count}} many"
   },
   "unhandledWaitingFor": {
     "title": "Wymagana akcja, ale brakuje interfejsu",

@@ -214,7 +214,10 @@ struct CallResult {
     outbounds: Vec<OutboundDto>,
     /// `true` when the shared lobby state changed and the shell must re-snapshot
     /// it to DO storage. `false` for read-only frames (avoids a storage write on
-    /// every `Ping`/`SubscribeLobby`).
+    /// every `Ping`/`SubscribeLobby`) — except that any frame from a listing's
+    /// host is `true` when it advances that listing's liveness clock
+    /// (`Broker::host_liveness_refresh_due`), at most once per
+    /// `LIVENESS_REFRESH_SECS` per host.
     dirty: bool,
     /// Set when a frame was unknown/malformed; the shell logs it and drops the
     /// frame (no outbounds). `None` on success.
@@ -288,7 +291,14 @@ impl WasmBroker {
 
         let (outbounds, dirty, reject) = match parse_lobby_client_message(raw_frame) {
             ParsedFrame::Message(msg) => {
-                let dirty = mutates_lobby(&msg);
+                // A host's frame may advance its listing's liveness clock, and
+                // that write must reach DO storage, or a restore after eviction
+                // hands back the stale clock and reaps a live host. Evaluated
+                // before `handle`, which performs the refresh. The refresh is
+                // quantized, so this is at most one write per host per
+                // `LIVENESS_REFRESH_SECS`.
+                let dirty =
+                    mutates_lobby(&msg) || self.inner.host_liveness_refresh_due(&conn, &env);
                 (self.inner.handle(&mut conn, *msg, &env), dirty, None)
             }
             // A frame the parser couldn't accept — an unknown tag or a field
@@ -520,9 +530,12 @@ mod tests {
             LobbyClientMessage::CreateTournament {
                 name: "Friday Night".into(),
                 arity: MatchArity::HEAD_TO_HEAD,
-                scoring: ScoringPolicy::default(),
+                scoring: Some(ScoringPolicy::default()),
                 bracket: BracketShape::Swiss,
                 total_rounds: None,
+                plus_rounds: None,
+                format: None,
+                match_type: None,
             },
             LobbyClientMessage::JoinTournament {
                 code: "TOUR01".into(),
@@ -587,6 +600,94 @@ mod tests {
         assert!(!mutates_lobby(&LobbyClientMessage::SubscribeLobby));
         assert!(!mutates_lobby(&LobbyClientMessage::UnsubscribeLobby));
         assert!(!mutates_lobby(&LobbyClientMessage::Ping { timestamp: 1 }));
+    }
+
+    /// Drives one frame through the shim the way the DO does, returning the
+    /// post-call `ConnState` JSON (the WS attachment) and the `dirty` flag.
+    fn call(b: &mut WasmBroker, conn: &str, frame: &str, now_ms: f64) -> (String, bool) {
+        let result: serde_json::Value =
+            serde_json::from_str(&b.handle(conn, frame, now_ms)).expect("call result is JSON");
+        assert!(result.get("reject").is_none(), "frame accepted: {result}");
+        (
+            result["conn"].to_string(),
+            result["dirty"].as_bool().expect("dirty is a bool"),
+        )
+    }
+
+    /// The DO writes storage only on `dirty`, so a host's liveness refresh must
+    /// be `dirty` exactly when the clock advances — otherwise a restore after
+    /// eviction hands back the stale clock and reaps a live host.
+    #[test]
+    fn a_hosts_ping_is_dirty_only_when_its_liveness_clock_advances() {
+        const T0: f64 = 1_000_000.0;
+        let hello_frame = serde_json::to_string(&LobbyClientMessage::ClientHello {
+            client_version: "0.1.0".into(),
+            build_commit: "abc".into(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(lobby_broker::LOBBY_PROTOCOL_VERSION),
+        })
+        .expect("hello serializes");
+        let ping_frame = serde_json::to_string(&LobbyClientMessage::Ping { timestamp: 0 })
+            .expect("ping serializes");
+        // Built as JSON: `engine` (for `DeckData`) is not a direct dependency
+        // of this crate. A lobby-only broker rejects a create without a
+        // `host_peer_id`, so it must be set or no listing exists.
+        let create_frame = serde_json::json!({
+            "type": "CreateGameWithSettings",
+            "data": {
+                "deck": { "main_deck": [] },
+                "display_name": "Host",
+                "public": true,
+                "password": null,
+                "timer_seconds": null,
+                "host_peer_id": "peer-1",
+            },
+        })
+        .to_string();
+
+        let mut b = WasmBroker::new();
+        let (host, _) = call(&mut b, "{}", &hello_frame, T0);
+        let (host, created_dirty) = call(&mut b, &host, &create_frame, T0);
+        let host_conn: ConnState = serde_json::from_str(&host).expect("conn parses");
+        assert!(
+            host_conn.host_game.is_some(),
+            "reach guard: the create listed a game"
+        );
+        assert_eq!(b.active_games(), 1, "reach guard: one listing");
+        assert!(created_dirty);
+        // DO storage, written only after a `dirty` call — never read straight
+        // from the in-memory broker, which would hold the clock either way.
+        let mut persisted = b.snapshot();
+
+        let (host, dirty) = call(&mut b, &host, &ping_frame, T0 + 5_000.0);
+        assert!(!dirty, "inside the quantum the clock does not move");
+        let (host, dirty) = call(&mut b, &host, &ping_frame, T0 + 61_000.0);
+        assert!(dirty, "a full quantum later the ping advances the clock");
+        persisted = if dirty { b.snapshot() } else { persisted };
+        let (_host, dirty) = call(&mut b, &host, &ping_frame, T0 + 66_000.0);
+        assert!(!dirty, "the refresh restarted the quantum");
+
+        let (guest, _) = call(&mut b, "{}", &hello_frame, T0 + 200_000.0);
+        let (_guest, dirty) = call(&mut b, &guest, &ping_frame, T0 + 200_000.0);
+        assert!(
+            !dirty,
+            "a guest holds no listing, so its ping writes nothing"
+        );
+
+        let mut restored = WasmBroker::from_snapshot(&persisted);
+        assert_eq!(
+            restored.active_games(),
+            1,
+            "reach guard: the persisted snapshot restored rather than falling back to empty"
+        );
+        let reaped: serde_json::Value =
+            serde_json::from_str(&restored.reap_expired(300.0, T0 + 61_000.0 + 299_000.0))
+                .expect("outbounds are JSON");
+        assert!(
+            !reaped.to_string().contains("LobbyGameRemoved"),
+            "the persisted clock is the refreshed one, so the listing survives: {reaped}"
+        );
+        assert_eq!(restored.active_games(), 1);
     }
 
     fn raw_announcement() -> RawAnnouncement {

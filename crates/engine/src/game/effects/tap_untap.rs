@@ -34,7 +34,7 @@ use crate::types::zones::Zone;
 ///   as `grant_permission::resolve` binds it. Empty sets are not skipped: an
 ///   empty current set means the preceding effect affected nothing.
 /// - Any other filter → the ability's chosen targets (object refs only).
-fn tap_untap_target_ids(
+pub(super) fn tap_untap_target_ids(
     state: &GameState,
     ability: &ResolvedAbility,
     effect_target: &TargetFilter,
@@ -352,6 +352,7 @@ fn prompt_resolution_tap_untap_choice(
         enters_attacking: false,
         owner_library: false,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: tap/untap selection is not a face-down entry.
         face_down_profile: None,
         enter_with_counters: vec![],

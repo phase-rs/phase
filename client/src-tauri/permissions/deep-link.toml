@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-take-pending-deep-link"
+description = "Allows first-party desktop content to take the validated deep link the shell holds."
+commands.allow = ["take_pending_deep_link"]

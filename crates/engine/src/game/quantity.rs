@@ -806,6 +806,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        face_down_in_exile: _,
     } = definition;
 
     activation_mana_payment_restriction.is_none()
@@ -930,6 +931,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         // field: `parse_effect_chain` outside the pipeline leaves marks intact, and
         // no runtime path reaches such a tree. See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        face_down_in_exile: _,
     } = definition
     else {
         return false;
@@ -2305,7 +2307,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -5060,14 +5062,30 @@ fn resolve_ref(
                     .unwrap_or(0)
             }
         },
-        QuantityRef::TargetZoneCardCount { zone } => {
-            let target_player = targets.iter().find_map(|t| {
-                if let TargetRef::Player(pid) = t {
-                    Some(*pid)
-                } else {
-                    None
-                }
-            });
+        QuantityRef::TargetZoneCardCount {
+            zone,
+            scope: _,
+            binding: _,
+        } => {
+            // CR 601.2c: the count reads its OWN slot's choice — the
+            // player-target ordinal serving the separately announced quantity
+            // slot (shared with damage-recipient resolution via
+            // `quantity_slot_player_ordinal`, so both read the same slot
+            // identity). No separate slot (an anaphoric count sharing the
+            // primary slot, or no ability at hand) reads the first.
+            let ordinal =
+                crate::game::ability_utils::quantity_slot_player_ordinal(targets, ability)
+                    .unwrap_or(0);
+            let target_player = targets
+                .iter()
+                .filter_map(|t| {
+                    if let TargetRef::Player(pid) = t {
+                        Some(*pid)
+                    } else {
+                        None
+                    }
+                })
+                .nth(ordinal);
             if let Some(pid) = target_player {
                 state
                     .players

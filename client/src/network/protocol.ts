@@ -106,6 +106,31 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  62 — game_setup and state_update carry GameState, whose exile look links
+ *       now carry { grant, lookers, source_incarnation }, and DerivedViews
+ *       gains linked_exile_ids, which the board renders directly. Bumped in
+ *       lockstep with full-game protocol 80.
+ *  61 — game_setup and state_update carry GameState, whose pending
+ *       activations can now hold the CR 601.2f activated-ability cost election
+ *       (ReductionProvenance::AbilityCostRider / TransientEffect, the
+ *       activation_cost_snapshot carrier). Bumped in lockstep with full-game
+ *       protocol 79.
+ *  60 — game_setup and state_update carry GameState, whose ability
+ *       definitions and transient continuous effects can now hold the
+ *       event-deadline `Duration::UntilEvent`, and whose transient effects
+ *       carry duration_event_source. Both peers are browsers and neither
+ *       validates the shape, so a v59 peer would take the new duration with
+ *       no decode error; first contact rejects the skew instead. Bumped in
+ *       lockstep with full-game protocol 78.
+ *  59 — Prospective: no GameState shape change lands in this bump. Moved
+ *       ahead of new GameFormat variants — the same precedent as 32's CommanderDraft variant: the
+ *       break, when it lands, will be conditional on a new variant actually
+ *       being serialized in a game_setup/state_update payload, not
+ *       unconditional like FormatConfig.deck_size's 32 retype. First
+ *       contact stays exact-match on both roles (guest `hostVersion !==
+ *       WIRE_PROTOCOL_VERSION`, host `guestVersion !== WIRE_PROTOCOL_VERSION`),
+ *       so no older peer ever completes a pairing that could carry a v59
+ *       payload.
  *  57 — game_setup and state_update carry GameState, whose paid resolution
  *       cleanup, receipt, and delayed-install origin now carry a
  *       producer-issued offer owner. A v56 peer cannot preserve cross-offer
@@ -395,7 +420,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 58 as const;
+export const WIRE_PROTOCOL_VERSION = 62 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

@@ -633,7 +633,20 @@
     "tabs": {
       "set": "セット",
       "cube": "キューブ"
-    }
+    },
+    "lobbyUnavailable": "ロビーに接続できなかったため、この卓を掲載できませんでした。「$t(draft:podSetup.listInLobby)」をオフにして、ルームコードでホストしてください。",
+    "listingHostNameTooLong": "この卓をロビーに掲載するには、表示名を{{max}}文字以内にしてください。",
+    "listingRoomNameTooLong": "この卓をロビーに掲載するには、ルーム名を{{max}}文字以内にしてください。",
+    "listingCubeNameTooLong": "この卓をロビーに掲載するには、キューブ名を{{max}}文字以内にしてください。",
+    "listingPasswordTooLong": "この卓をロビーに掲載するには、もっと短いパスワードを使用してください。",
+    "listInLobby": "ロビーに掲載",
+    "listingSeatLimit": "ロビー掲載は最大{{max}}人までの卓に対応しています。",
+    "setPassword": "パスワードを設定",
+    "passwordPlaceholder": "卓のパスワード",
+    "roomName": "ルーム名",
+    "optional": "（任意）",
+    "roomNameHelp": "ロビーを閲覧するプレイヤーに表示されます。",
+    "roomNamePlaceholder": "例: 金曜夜のキューブ"
   },
   "podPhaseView": {
     "tournamentPairings": "大会の組み合わせ",

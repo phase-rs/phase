@@ -104,6 +104,10 @@ pub(crate) fn expiry_from_duration(duration: Option<&Duration>) -> ReplacementDu
         | Some(Duration::UntilSourceExilesAnotherCard)
         | Some(Duration::UntilOpponentBecomesMonarch)
         | Some(Duration::Permanent) => ReplacementDurationExpiry::Unsupported,
+        // CR 611.2a: the event deadline is ended by the spell-cast expiry in
+        // `casting_costs`, which ends transient continuous effects only; no
+        // replacement expiry stamp carries it, so this fails closed.
+        Some(Duration::UntilEvent { .. }) => ReplacementDurationExpiry::Unsupported,
     }
 }
 

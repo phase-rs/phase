@@ -2418,10 +2418,11 @@
     "reachSpills": "Can reduce generic mana",
     "multiplier": "×{{count}}",
     "confirmOrder": "Confirm Order",
-    "cancelCast": "Cancel Cast",
+    "cancel": "Cancel",
     "moveUp": "Move up",
     "moveDown": "Move down",
-    "reductionFallback": "Reduction {{number}}"
+    "reductionFallback": "Reduction {{number}}",
+    "floor": "Can't reduce the cost below {{count}} mana"
   },
   "unhandledWaitingFor": {
     "title": "Action required, but UI is missing",

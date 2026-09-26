@@ -552,6 +552,13 @@ pub enum ProposedEvent {
         /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<Box<FaceDownProfile>>,
+        /// Typed SearchLibrary intent. This is delivery metadata, not a
+        /// battlefield `FaceDownProfile`, and survives replacement pauses.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
+        )]
+        face_down_in_exile: crate::types::ability::ExileConcealment,
         /// CR 608.2c: whether this entry is the producer a following
         /// demonstrative anaphor binds to. Rides the event so a CR 616.1
         /// pause/resume delivers the same answer the effect asked for.
@@ -569,6 +576,14 @@ pub enum ProposedEvent {
         /// choices. Unrelated zone changes omit it from the wire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+        /// CR 608.2c: the player performing the instruction that moves this
+        /// object ("that player exiles that card" names the drawer; a
+        /// controller-worded instruction names the controller). Rides the
+        /// event through replacement and CR 616.1 pause/resume so delivery can
+        /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
+        /// `None` for moves no player performs (rules processes, raw movers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        performed_by: Option<PlayerId>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -945,9 +960,11 @@ impl ProposedEvent {
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: ChainReferentIntent::default(),
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: HashSet::new(),
         }
     }

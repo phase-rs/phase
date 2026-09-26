@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+use crate::channels::{PREVIEW_ORIGIN, RELEASE_ORIGIN};
 use crate::lan::{self, LanServerStatus, RunningLan};
 use crate::native_bridge::BridgeHandle;
 use crate::native_engine_contract::{
@@ -48,8 +49,6 @@ const RELEASE_RATCHET_FILE: &str = "native-engine-highest-release-version.json";
 const PREVIEW_RATCHET_FILE: &str = "native-engine-preview-generated-at.json";
 const MANIFEST_DATA_FILE: &str = "manifest-data.json";
 const SIGNED_MANIFEST_ENVELOPE_FILE: &str = "signed-manifest-envelope.json";
-const RELEASE_ORIGIN: &str = "https://phase-rs.dev";
-const PREVIEW_ORIGIN: &str = "https://preview.phase-rs.dev";
 const PROGRESS_EVENT: &str = "native-engine-progress";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(250);
@@ -1217,6 +1216,9 @@ fn resolved_artifact_from_envelope_with_key(
 /// minisign signature is retained alongside the executable so every launch
 /// still verifies what it is about to execute; a missing or invalid cache is
 /// simply replaced from the first-party artifact source.
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn provision_binary_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -1586,6 +1588,9 @@ fn plan_spawn_with_key(
     })
 }
 
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn apply_spawn_plan_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -1651,6 +1656,9 @@ where
     )
 }
 
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn provision_resolved_artifact_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -3041,14 +3049,16 @@ mod tests {
             .unwrap();
         let stdin = child.stdin.take();
         child.wait().unwrap();
-        let mut state = NativeEngineState::default();
-        state.lan = Some(RunningLan {
-            key: release_key("1.0.0"),
-            child,
-            stdin,
-            addresses: vec![],
-            advertisement: None,
-        });
+        let mut state = NativeEngineState {
+            lan: Some(RunningLan {
+                key: release_key("1.0.0"),
+                child,
+                stdin,
+                addresses: vec![],
+                advertisement: None,
+            }),
+            ..Default::default()
+        };
         clear_exited_lan(&mut state).unwrap();
         assert!(state.lan.is_none());
     }

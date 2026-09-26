@@ -131,7 +131,9 @@
       "feed": "Feed",
       "user": "Usuário",
       "precon": "Precon"
-    }
+    },
+    "brain": "Controlado por",
+    "brainEngine": "IA do motor"
   },
   "feedManager": {
     "title": "Gerenciar Feeds",

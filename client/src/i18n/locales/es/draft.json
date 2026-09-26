@@ -572,7 +572,20 @@
     "tabs": {
       "set": "Colección",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "No se pudo conectar con la sala para publicar este pod. Desactiva “$t(draft:podSetup.listInLobby)” para hospedar con un código de sala.",
+    "listingHostNameTooLong": "Para publicar este pod en la sala, usa un nombre visible de máximo {{max}} caracteres.",
+    "listingRoomNameTooLong": "Para publicar este pod en la sala, usa un nombre de sala de máximo {{max}} caracteres.",
+    "listingCubeNameTooLong": "Para publicar este pod en la sala, usa un nombre de Cube de máximo {{max}} caracteres.",
+    "listingPasswordTooLong": "Para publicar este pod en la sala, usa una contraseña más corta.",
+    "listInLobby": "Listar en la sala de espera",
+    "listingSeatLimit": "El listado de la sala admite pods de hasta {{max}} jugadores.",
+    "setPassword": "Establecer contraseña",
+    "passwordPlaceholder": "Contraseña del pod",
+    "roomName": "Nombre de la sala",
+    "optional": "(opcional)",
+    "roomNameHelp": "Se muestra a los jugadores que exploran la sala de espera.",
+    "roomNamePlaceholder": "p. ej. Cube del viernes por la noche"
   },
   "podPhaseView": {
     "tournamentPairings": "Emparejamientos del torneo",

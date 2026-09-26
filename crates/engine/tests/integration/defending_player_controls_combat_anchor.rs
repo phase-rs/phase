@@ -33,6 +33,7 @@
 //! no fixture for it and the block half stays unreached by any current card.
 
 use engine::game::combat::AttackTarget;
+use engine::game::combat::CombatRequirement;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::ChosenAttribute;
 use engine::types::card_type::{CoreType, Supertype};
@@ -479,9 +480,19 @@ fn sea_monster_attack_legality_follows_the_defending_players_board() {
              creature-level query must defer, not refuse); \
              (defender_island = {defender_island}); got {valid_attacker_ids:?}"
         );
+        // The assertion is about a MustAttack CONFOUND, so it tests for that rather
+        // than for badge absence. On the no-Island arm Sea Monster legitimately
+        // carries a `CantAttack` badge: the deferred prohibition leaves it eligible
+        // with an empty target set (asserted below), which is exactly the state
+        // #9265 added a badge for. Asserting `is_none()` here would pin the display
+        // gap this suite's own `sea_targets.is_empty()` documents.
         assert!(
-            attacker_constraints.get(&sea).is_none(),
-            "Sea Monster must carry no confounding MustAttack requirement"
+            !matches!(
+                attacker_constraints.get(&sea),
+                Some(CombatRequirement::MustAttack { .. })
+            ),
+            "Sea Monster must carry no confounding MustAttack requirement; got {:?}",
+            attacker_constraints.get(&sea)
         );
 
         // PRIMARY, per-pairing map: proves the per-pairing authority decided,
@@ -738,9 +749,19 @@ fn sea_monster_attack_legality_follows_planeswalker_defending_player() {
              planeswalker (the creature-level query must defer, not refuse); \
              (defender_island = {defender_island}); got {valid_attacker_ids:?}"
         );
+        // The assertion is about a MustAttack CONFOUND, so it tests for that rather
+        // than for badge absence. On the no-Island arm Sea Monster legitimately
+        // carries a `CantAttack` badge: the deferred prohibition leaves it eligible
+        // with an empty target set (asserted below), which is exactly the state
+        // #9265 added a badge for. Asserting `is_none()` here would pin the display
+        // gap this suite's own `sea_targets.is_empty()` documents.
         assert!(
-            attacker_constraints.get(&sea).is_none(),
-            "Sea Monster must carry no confounding MustAttack requirement"
+            !matches!(
+                attacker_constraints.get(&sea),
+                Some(CombatRequirement::MustAttack { .. })
+            ),
+            "Sea Monster must carry no confounding MustAttack requirement; got {:?}",
+            attacker_constraints.get(&sea)
         );
 
         // PRIMARY, per-pairing map: proves the per-pairing authority decided,
@@ -947,9 +968,19 @@ fn sea_monster_attack_legality_follows_battle_protector_defending_player() {
              battle (the creature-level query must defer, not refuse); \
              (defender_island = {defender_island}); got {valid_attacker_ids:?}"
         );
+        // The assertion is about a MustAttack CONFOUND, so it tests for that rather
+        // than for badge absence. On the no-Island arm Sea Monster legitimately
+        // carries a `CantAttack` badge: the deferred prohibition leaves it eligible
+        // with an empty target set (asserted below), which is exactly the state
+        // #9265 added a badge for. Asserting `is_none()` here would pin the display
+        // gap this suite's own `sea_targets.is_empty()` documents.
         assert!(
-            attacker_constraints.get(&sea).is_none(),
-            "Sea Monster must carry no confounding MustAttack requirement"
+            !matches!(
+                attacker_constraints.get(&sea),
+                Some(CombatRequirement::MustAttack { .. })
+            ),
+            "Sea Monster must carry no confounding MustAttack requirement; got {:?}",
+            attacker_constraints.get(&sea)
         );
 
         // PRIMARY, per-pairing map: proves the per-pairing authority decided,

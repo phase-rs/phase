@@ -14,6 +14,7 @@ import {
   type AiArchetypeFilter,
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
+import { isProfileUsable, useLlmStore } from "../../stores/llmStore";
 import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
@@ -32,6 +33,9 @@ interface Props {
   opponentCount?: number;
   onCandidateCountChange?: (count: number | null) => void;
 }
+
+/** Sentinel for "this seat is driven by the built-in engine AI". */
+const ENGINE_BRAIN = "__engine__";
 
 const ARCHETYPE_OPTIONS: AiArchetypeFilter[] = [
   "Any",
@@ -390,6 +394,8 @@ function AiSeatPanel({
       </label>
       )}
 
+      <AiBrainPicker index={index} />
+
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.difficulty")}</span>
         <div className="relative">
@@ -440,6 +446,52 @@ function AiSeatPanel({
       </button>
       {expanded && body}
     </div>
+  );
+}
+
+/**
+ * Choose what drives this seat: the built-in engine AI, or a configured LLM
+ * provider.
+ *
+ * Renders nothing at all when no usable LLM provider exists, which is the
+ * default state — a player who has not set one up never sees this control, and
+ * the seat is engine-driven exactly as before. Difficulty still applies either
+ * way: it shapes the LLM's persona and how much of the position it is shown.
+ */
+function AiBrainPicker({ index }: { index: number }) {
+  const { t } = useTranslation("menu");
+  const profiles = useLlmStore((s) => s.profiles);
+  const seatBindings = useLlmStore((s) => s.seatBindings);
+  const bindSeat = useLlmStore((s) => s.bindSeat);
+
+  const usable = useMemo(() => profiles.filter(isProfileUsable), [profiles]);
+  if (usable.length === 0) return null;
+
+  const bound = seatBindings[index];
+  const selected = usable.some((profile) => profile.id === bound) ? bound : ENGINE_BRAIN;
+  const items = [
+    { value: ENGINE_BRAIN, label: t("aiOpponent.brainEngine") },
+    ...usable.map((profile) => ({
+      value: profile.id,
+      label: profile.name.trim() || profile.model,
+    })),
+  ];
+
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs text-slate-400">{t("aiOpponent.brain")}</span>
+      <MenuSelect
+        ariaLabel={t("aiOpponent.brain")}
+        label={items.find((item) => item.value === selected)?.label ?? t("aiOpponent.brainEngine")}
+        selectedValue={selected}
+        items={items}
+        onSelect={(value) => bindSeat(index, value === ENGINE_BRAIN ? null : value)}
+        menuLayout={AI_MENU_LAYOUT}
+        fitContainer
+        wrapperClassName={AI_MENU_WRAPPER}
+        className={`${AI_MENU_CLASS} text-white`}
+      />
+    </label>
   );
 }
 

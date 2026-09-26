@@ -23,6 +23,6 @@
       "@wasm/draft": ["./src/wasm/draft_wasm"]
     }
   },
-  "include": ["src"],
+  "include": ["src", "storybook/preview.ts", "storybook/mocks"],
   "exclude": ["src/game/__tests__/wasmLegalActions.integration.test.ts"]
 }

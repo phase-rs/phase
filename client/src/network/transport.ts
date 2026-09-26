@@ -68,6 +68,10 @@ const peerJsFactory: PeerTransportFactory = {
 /** Current default; future backends can be selected behind this seam. */
 export const peerTransportFactory: PeerTransportFactory = peerJsFactory;
 
-export function createPeer(id?: string, options?: TransportPeerOptions): TransportPeer {
-  return peerTransportFactory.create(id, options);
+export function createPeer(
+  id?: string,
+  options?: TransportPeerOptions,
+  factory: PeerTransportFactory = peerTransportFactory,
+): TransportPeer {
+  return factory.create(id, options);
 }

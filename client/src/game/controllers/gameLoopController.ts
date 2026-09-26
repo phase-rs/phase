@@ -131,6 +131,10 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
         return {
           playerId,
           difficulty: config.aiSeats?.[i]?.difficulty ?? fallbackDifficulty,
+          // `i` is this seat's index in `preferencesStore.aiSeats`, which is the
+          // same index `llmStore.seatBindings` is keyed by. Passing it keeps one
+          // seat-numbering authority across both stores.
+          llmSeatIndex: i,
         };
       });
       opponentController = createAIController({ seats });

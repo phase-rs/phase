@@ -93,6 +93,7 @@ fn exile_and_grant_ability(count: i32) -> AbilityDefinition {
             count: QuantityExpr::Fixed { value: count },
             position: engine::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         },
     )
     .player_scope(PlayerFilter::All)

@@ -111,6 +111,17 @@ export interface RoomMarkerPoint {
  * payload and appears in `getFormatRegistry`. Split out from `GameFormat` so
  * registry-shaped lookups (`FORMAT_DEFAULTS`, per-format metadata) can say they
  * only cover built-ins.
+ *
+ * `format::tests::client_builtin_game_format_union_matches_the_engine`, in
+ * crates/engine/src/types/format.rs, reads this file with `include_str!` and
+ * asserts this union names exactly `GameFormat::iter()`. A CLIENT-side
+ * member added, removed or renamed reds that assertion at runtime, in Tilt's
+ * `test-engine` and in CI job `rust-test` step "Run tests" (mutation-tested:
+ * renaming a member here reds the assertion above by name). An ENGINE-side
+ * variant change instead reds the compiler first (`E0004` in this crate's
+ * exhaustive `match`es over `GameFormat`), which in CI fails the earlier
+ * `rust-test-build` job rather than `rust-test`'s "Run tests" step, which
+ * only extracts and executes an already-built archive.
  */
 export type BuiltInGameFormat =
   | "Standard"
@@ -135,7 +146,9 @@ export type BuiltInGameFormat =
   | "Planechase"
   | "Limited"
   | "Momir"
-  | "CommanderDraft";
+  | "CommanderDraft"
+  | "Freeform"
+  | "FreeformCommander";
 
 /**
  * Wire form of `GameFormat::Custom(CustomFormatId)`.
@@ -220,7 +233,8 @@ export type CommanderEligibilityRule =
   | "Standard"
   | "TinyLeaders"
   | "OathbreakerSignatureSpell"
-  | "BrawlColorIdentity";
+  | "BrawlColorIdentity"
+  | "FreeformAnyCastableCard";
 
 /**
  * Whether a custom format uses the command zone (CR 903) and, if so, its
@@ -398,6 +412,8 @@ export interface FormatMetadata {
   short_label: string;
   description: string;
   group: FormatGroup;
+  /** Engine-published key of this format's legality table; null when the card data records none. */
+  legality_key: string | null;
   default_config: FormatConfig;
 }
 
@@ -491,6 +507,7 @@ export interface JoinTargetInfo {
   filled_seats: number;
   reservation_token?: string | null;
   reservation_expires_at_ms?: number | null;
+  draft_metadata?: DraftLobbyMetadata | null;
 }
 
 // ── Match / Series ───────────────────────────────────────────────────────
@@ -2054,7 +2071,28 @@ export interface PendingCast {
   // skip_serializing_if = "Option::is_none")]` — absent when neither axis was
   // ever observable for this cast.
   cost_reduction_election?: CostReductionElection;
+  // CR 601.2f + CR 602.2b: an activation's cost-modifier carrier.
+  // `#[serde(default, skip_serializing_if = "Option::is_none")]` — absent for
+  // spells and for activations that have not reached their fold.
+  activation_cost_snapshot?: ActivationCostSnapshot;
 }
+
+/// CR 601.2f + CR 602.2b: every cost modifier that applied to one activation,
+/// captured once, and whether its total is locked. Engine-authored; the
+/// frontend renders from it and computes nothing.
+export interface ActivationCostSnapshot {
+  base_cost: SerializedAbilityCost;
+  raise_total?: number;
+  reductions?: CostReductionEntry[];
+  lock:
+    | { type: "Open"; data: { point?: ActivationCostLockPoint } }
+    | {
+        type: "Locked";
+        data: { point?: ActivationCostLockPoint; order?: ReductionProvenance[] };
+      };
+}
+
+export type ActivationCostLockPoint = "Announcement" | "XAnnounced";
 
 /// CR 601.2b + CR 601.2f: the caster's announced nonhybrid equivalents and the
 /// order their reductions are applied in, as one recorded election.
@@ -2073,7 +2111,11 @@ export type ReductionProvenance =
   | { type: "Defiler" }
   | { type: "PendingOneShot"; data: { index: number } }
   | { type: "Affinity" }
-  | { type: "Undaunted" };
+  | { type: "Undaunted" }
+  // CR 602.2b: the activating ability's own "costs {N} less" rider.
+  | { type: "AbilityCostRider" }
+  // CR 611.2: a duration-scoped continuous reduction (The Dining Car).
+  | { type: "TransientEffect"; data: { effect: number; ordinal: number } };
 
 /// CR 601.2f: one cost reduction, snapshotted at the lock seam. `amount` ×
 /// `multiplier` is the effective reduction — every dynamic count is already
@@ -2084,6 +2126,10 @@ export interface CostReductionEntry {
   reach?: CostReductionReach;
   provenance: ReductionProvenance;
   display_name: string;
+  // CR 601.2f: "can't reduce the mana in that cost to less than N mana".
+  // `#[serde(default, skip_serializing_if = "is_zero")]` — absent when
+  // unfloored, which every spell reduction is.
+  minimum_mana?: number;
 }
 
 /// CR 601.2b + CR 601.2f: one legal outcome — a representative election (the
@@ -2391,7 +2437,7 @@ export type WaitingFor =
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
-  | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
+  | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; activation_cost_snapshot?: ActivationCostSnapshot; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; origin?: string; gift_kind?: { type: string }; pending_cast: PendingCast } }
   | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
@@ -2451,10 +2497,10 @@ export type WaitingFor =
     }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey; same_card_may_trigger_choice_available?: boolean } }
+  | { type: "OptionalEffectChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey; same_card_may_trigger_choice_available?: boolean } }
   | { type: "ResolutionOptionalPaymentChoice"; data: { player: PlayerId; source_id: ObjectId; costs: Array<{ index: number; cost: SerializedAbilityCost }> } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
-  | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
+  | { type: "OpponentMayChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
@@ -3705,6 +3751,8 @@ export interface DerivedViews {
    * matters on the battlefield. Keyed by ObjectId-as-string.
    */
   battlefield_keyword_badges?: Record<string, Keyword[]>;
+  /** CR 400.7 + CR 607.2a: cards currently exiled with each battlefield permanent, keyed by ObjectId-as-string. */
+  linked_exile_ids?: Record<string, ObjectId[]>;
   /**
    * CR 509.1b: live, until-end-of-turn `CantBeBlocked` grants keyed by
    * recipient ObjectId-as-string. A null value means the grant remains live
@@ -3946,21 +3994,22 @@ export type DayNight = "Day" | "Night";
 
 /**
  * Mirrors engine `ExileLinkKind` (`crates/engine/src/types/game_state.rs`).
- * Unit variants serialize as bare strings; the two struct variants serialize
- * as a single-key object under serde's default external tagging. Only
- * `HideawayLookable` is currently read on the client (the exile-visibility
- * gate in `viewmodel/gameStateView.ts`) — the rest are kept so `exile_links`
- * round-trips the full wire shape rather than widening it to `unknown`.
+ * Unit variants serialize as bare strings; the struct variants serialize as a
+ * single-key object under serde's default external tagging. The client reads
+ * no kind; the union mirrors the wire so `exile_links` round-trips.
  */
 export type ExileLinkKind =
   | "TrackedBySource"
   | "Cipher"
   | "Haunt"
-  | "HideawayLookable"
+  | { HideawayLookable: { grant: LookGrant; lookers: PlayerId[]; source_incarnation: number } }
   | "CraftMaterial"
   | { UntilSourceLeaves: { return_zone: Zone } }
   | { UntilOpponentBecomesMonarch: { return_zone: Zone; controller: PlayerId } }
   | { ParadigmSource: { player: PlayerId } };
+
+/** Mirrors engine `LookGrant`: whom a face-down exile look link's live rule admits. */
+export type LookGrant = "SourceController" | { Player: { player: PlayerId } };
 
 export interface GameState {
   turn_number: number;
@@ -4619,6 +4668,14 @@ export interface ViewerSnapshot {
 }
 
 /**
+ * ViewerSnapshot paired with the engine-filtered events from the same
+ * transition. The legacy state-only snapshot remains unchanged.
+ */
+export interface ViewerTransitionSnapshot extends ViewerSnapshot {
+  events: GameEvent[];
+}
+
+/**
  * Engine-authored display summary for the one explicit automation run that
  * follows loading a persisted game. The state in `RestoredGameStateResult` is
  * authoritative; this bounded tail only explains that one transition.
@@ -4741,6 +4798,37 @@ export type AiCardSubsetResult =
   | { kind: "full" }
   | { kind: "subset"; json: string; count: number };
 
+/**
+ * Engine outcome for one LLM-driven decision.
+ *
+ * `proposal: null` with an `error` is the normal recoverable case — a missing
+ * key, a rate limit, a reply the engine could not bind to a legal option, or a
+ * decision that moved on while the request was in flight. Every one of them
+ * means "use the heuristic AI for this decision".
+ */
+export interface AiLlmProposalResult {
+  proposal: AiActionProposal | null;
+  /** The model's own one-line justification, for local diagnostics only. */
+  reasoning?: string | null;
+  error?: string;
+}
+
+/** Engine-built HTTP call for one LLM request. Executed verbatim. */
+export interface LlmHttpRequestSpec {
+  url: string;
+  method: string;
+  headers: { name: string; value: string }[];
+  body: string;
+}
+
+/** Engine output for one LLM decision request, or an engine-authored refusal. */
+export interface LlmDecisionRequestResult {
+  fingerprint?: string;
+  optionCount?: number;
+  request?: LlmHttpRequestSpec;
+  error?: string;
+}
+
 /** Result of submitting an opaque AI proposal to its issuing authority. */
 export type AiProposalSubmission =
   | { status: "applied"; result: SubmitResult }
@@ -4804,6 +4892,30 @@ export interface EngineAdapter {
   getAiTacticalActionProposal?(difficulty: string, playerId: number): Promise<AiActionProposal | null> | AiActionProposal | null;
   /** Applies a proposal only if its authority token and exact action remain current. */
   submitAiActionProposal?(proposal: AiActionProposal): Promise<AiProposalSubmission> | AiProposalSubmission;
+  /**
+   * Builds the engine-authored LLM request for this seat's current decision.
+   *
+   * Optional capability: an adapter that omits it simply has no LLM seats, and
+   * the AI controller uses the heuristic path. `historyJson` is the
+   * engine-authored game log the caller has accumulated, handed back for
+   * rendering.
+   */
+  buildLlmDecisionRequest?(
+    difficulty: string,
+    playerId: number,
+    endpointJson: string,
+    historyJson: string,
+  ): Promise<LlmDecisionRequestResult | null>;
+  /** Binds an LLM response to an engine-issued proposal, or reports why it could not. */
+  getAiActionProposalFromLlmResponse?(
+    playerId: number,
+    fingerprint: string,
+    provider: string,
+    status: number,
+    responseBody: string,
+  ): Promise<AiLlmProposalResult | null>;
+  /** The engine-owned LLM provider/model catalog for the settings UI. */
+  llmProviderCatalog?(): Promise<unknown>;
   restoreState(state: PersistedGameState): void | Promise<void>;
   /** Trusted local persistence snapshot, when this adapter owns the engine. */
   exportPersistenceState?(): Promise<string>;

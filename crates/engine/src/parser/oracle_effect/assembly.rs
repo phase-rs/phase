@@ -37,7 +37,6 @@ use super::conditions::ability_condition_to_static_condition;
 use super::lower::{
     append_remember_card_to_standalone_exiled_choice, apply_where_x_ability_expression,
     apply_where_x_to_latest_def, attach_alt_ability_cost_to_previous_play_from_exile,
-    attach_any_color_mana_rider_to_previous_play_from_exile,
     attach_cast_cost_modifier_to_previous_play_from_exile,
     attach_cast_cost_modifier_to_prior_cast_from_zone,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
@@ -53,8 +52,7 @@ use super::lower::{
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, is_exile_until_cast_bottom_cleanup,
-    is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup,
-    is_spend_mana_as_any_color_rider, is_stable_branch_amount,
+    is_land_enters_tapped_rider, is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
     nest_whenever_this_turn_token_cleanup_delayed_trigger,
     normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
@@ -73,7 +71,8 @@ use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
-    attach_perpetual_keyword_grants, attach_repeat_process_keywords, attach_same_is_true_keywords,
+    attach_mana_spend_permission_to_prior_cast_grant, attach_perpetual_keyword_grants,
+    attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
@@ -1086,7 +1085,6 @@ impl AssemblyEnv {
                 &*def.effect,
                 Effect::ChangeZone {
                     origin: Some(Zone::Library),
-                    destination: Zone::Hand,
                     ..
                 }
             ) && provenance.role == NodeRole::ContinuationProduct
@@ -2223,6 +2221,22 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     PriorModifier::ManaRetention(expiry) => {
                         attach_mana_retention_to_prior_mana(&mut defs, *expiry);
                     }
+                    PriorModifier::ManaSpendPermission(permission) => {
+                        // CR 609.4b: the rider was admitted only because the
+                        // clause it follows grants a cast without a concession
+                        // (`prior_clause_grants_a_cast_without_mana_spend_permission`),
+                        // so the stamp lands on that grant — the last def.
+                        let stamped = attach_mana_spend_permission_to_prior_cast_grant(
+                            &mut defs,
+                            *permission,
+                        );
+                        debug_assert!(
+                            stamped,
+                            "CR 609.4b: a mana rider admitted for the prior cast grant found \
+                             no grant to stamp on the last def: {:?}",
+                            defs.last()
+                        );
+                    }
                     PriorModifier::EntersTappedAttacking => {
                         // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier.
                         // U6-C2: LastEmitted + an EffectShape guard. A wrong-shaped prior
@@ -2586,18 +2600,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // Classify anything this handler detached; the mirror is asserted at the
             // next loop-top, or at the Phase-1/Phase-2 boundary for the last clause.
             env.arena.settle();
-            continue;
-        }
-
-        // CR 609.4b + CR 608.2c: Brainstealer/Daxos-class any-color mana
-        // riders may be split into their own sentence or comma sibling after a
-        // `PlayFromExile` grant. They scope the existing exile-play
-        // permission, so fold the rider into the prior grant instead of
-        // emitting a broad standalone `SpendManaAsAnyColor` effect.
-        if is_spend_mana_as_any_color_rider(clause_ir)
-            && attach_any_color_mana_rider_to_previous_play_from_exile(&mut defs)
-        {
-            prev_boundary = clause_ir.boundary;
             continue;
         }
 
@@ -4148,6 +4150,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // structure regardless of when `multi_target` was attached), so the presence
     // check is robustly correct.
     gate_other_revealed_card_on_multiplayer_reveal(&mut result);
+
+    // CR 608.2c + CR 611.2f: a lingering cast grant's "If you do" rider is
+    // followed in printed order during the grant's own resolution (CR 608.2c),
+    // before any spell exists to receive it; an effect that modifies a spell cast
+    // LATER applies only once that spell is put on the stack (CR 611.2f), which
+    // this grant cannot carry. Applied on the FINAL tree for the
+    // same reason as the gate above: only here are the grant and its rider both
+    // linked. See `refuse_cast_rider_on_lingering_grant`.
+    super::lower::refuse_cast_rider_on_lingering_grant(&mut result);
 
     // CR 608.2c + CR 107.1c: A trailing "repeat this process" directive sets a
     // chain-level loop predicate; apply it to the assembled root ability so the

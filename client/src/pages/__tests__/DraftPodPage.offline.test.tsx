@@ -54,7 +54,8 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => {
   };
 });
 
-vi.mock("../../stores/draftPodStore", () => ({
+vi.mock("../../stores/draftPodStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../stores/draftPodStore")>()),
   useDraftPodStore: <T,>(selector: (state: {
     config: { kind: "Premier"; tournamentFormat: "Swiss"; podSize: number; podPolicy: "Casual"; setCode: string; setName: string; packs: never[] };
     setConfig: () => void;
@@ -63,6 +64,9 @@ vi.mock("../../stores/draftPodStore", () => ({
     guestDisplayName: string;
     setGuestDisplayName: () => void;
     adoptSavedDisplayName: () => void;
+    listing: { isPublic: boolean; password: string; roomName: string };
+    setListing: () => void;
+    adoptRememberedListing: () => void;
     joinCode: string;
     setJoinCode: () => void;
     createPod: () => void;
@@ -93,6 +97,9 @@ vi.mock("../../stores/draftPodStore", () => ({
     // state in which the real action does nothing. This suite is about offline
     // admission, not seeding.
     adoptSavedDisplayName: vi.fn(),
+    listing: { isPublic: false, password: "", roomName: "" },
+    setListing: vi.fn(),
+    adoptRememberedListing: vi.fn(),
     joinCode: "",
     setJoinCode: vi.fn(),
     createPod: vi.fn(),

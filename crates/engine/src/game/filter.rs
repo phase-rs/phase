@@ -7174,13 +7174,14 @@ fn matches_filter_prop(
         // (e.g., the seed was just exiled by the preceding effect).
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
-        FilterProp::SameNameAsExiledBySource => state.exile_links.iter().any(|link| {
-            link.source_id == source.id
-                && state
+        FilterProp::SameNameAsExiledBySource => {
+            crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
+                state
                     .objects
                     .get(&link.exiled_id)
                     .is_some_and(|exiled| obj.name.eq_ignore_ascii_case(&exiled.name))
-        }),
+            })
+        }
         // CR 201.2 + CR 201.2a: Matches if `obj.name` equals the name of any
         // permanent on the battlefield (optionally narrowed by controller).
         // Name comparison is case-insensitive per `FilterProp::Named` /
@@ -7729,11 +7730,31 @@ fn matches_filter_prop(
         // haste-folding `has_summoning_sickness`).
         FilterProp::ControlledContinuouslySinceTurnBegan => !obj.summoning_sick,
         FilterProp::ZoneChangedThisTurn { from, to } => {
-            state.zone_changes_this_turn.iter().any(|record| {
-                record.object_id == object_id
-                    && from.is_none_or(|zone| record.from_zone == Some(zone))
-                    && to.is_none_or(|zone| record.to_zone == zone)
-            })
+            // CR 400.7: an object that changes zones becomes a NEW object. This
+            // engine models that by resetting per-zone state rather than by
+            // reminting the `ObjectId`, so `zone_changes_this_turn` accumulates
+            // every hop an object made this turn under one id.
+            //
+            // The phrase this predicate serves — "cards in your graveyard that
+            // were put there from <zone> this turn" — asks how the object came
+            // to be where it IS, so only its MOST RECENT move describes the
+            // current incarnation. Scanning every record instead conflates prior
+            // incarnations, and that is wrong in both directions: Faith's Reward
+            // ("return all permanent cards in your graveyard that were put there
+            // from the battlefield this turn") would return a card that reached
+            // the graveyard from the battlefield earlier in the turn but is now
+            // there from somewhere else (over-permissive, grants what the rules
+            // forbid), while the negated form (Banon, the Returners' Leader)
+            // would exclude that same card (under-permissive).
+            state
+                .zone_changes_this_turn
+                .iter()
+                .rev()
+                .find(|record| record.object_id == object_id)
+                .is_some_and(|record| {
+                    from.is_none_or(|zone| record.from_zone == Some(zone))
+                        && to.is_none_or(|zone| record.to_zone == zone)
+                })
         }
         // CR 508.1a: Creature was declared as an attacker this turn (board-wide,
         // any defender). CR 508.6 + CR 508.1b: when `defender` is `Some`, scope to
@@ -8127,13 +8148,14 @@ fn zone_change_record_matches_property(
         // target (parent target). Mirrors the live-object evaluator.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
-        FilterProp::SameNameAsExiledBySource => state.exile_links.iter().any(|link| {
-            link.source_id == source.id
-                && state
+        FilterProp::SameNameAsExiledBySource => {
+            crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
+                state
                     .objects
                     .get(&link.exiled_id)
                     .is_some_and(|exiled| record.name.eq_ignore_ascii_case(&exiled.name))
-        }),
+            })
+        }
 
         // -------- Group 3: combat snapshot state --------
         // CR 508.1k / CR 509.1g / CR 509.1h: Combat state as of the zone change.

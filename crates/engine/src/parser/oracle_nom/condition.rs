@@ -27,7 +27,7 @@ use crate::parser::oracle_target::{
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, CardTypeSetSource, CastManaObjectScope,
+    AbilityCondition, AggregateFunction, AttackedYouScope, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel,
     DamageGroupKey, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
@@ -7039,7 +7039,9 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
         // the "you attacked this turn" arms above (attacker-timeline "last turn",
         // not current-turn), so it is its own typed condition.
         value(
-            StaticCondition::AnyPlayerAttackedYouLastTurn,
+            StaticCondition::AnyPlayerAttackedYouLastTurn {
+                scope: AttackedYouScope::AnyPlayer,
+            },
             (
                 alt((tag("a player"), tag("an opponent"))),
                 tag(" attacked you during their last turn"),
@@ -7231,37 +7233,56 @@ fn player_action_this_turn_condition(
     make_quantity_ge(QuantityRef::PlayerActionsThisTurn { player, action }, 1)
 }
 
+/// The past-tense player-action verb vocabulary shared by
+/// `parse_player_action_this_turn_body`, without the " this turn" suffix.
+fn parse_player_action_past_tense(input: &str) -> OracleResult<'_, PlayerActionKind> {
+    alt((
+        value(PlayerActionKind::Surveil, tag("surveilled")),
+        value(PlayerActionKind::Scry, alt((tag("scried"), tag("scryed")))),
+        value(PlayerActionKind::CollectEvidence, tag("collected evidence")),
+        // CR 701.23a: "searched their/a library" (Archive Trap).
+        value(
+            PlayerActionKind::SearchedLibrary,
+            alt((tag("searched their library"), tag("searched a library"))),
+        ),
+    ))
+    .parse(input)
+}
+
 /// CR 603.4: The player-action history predicates, parameterized by WHOSE history
 /// is read. The subject dispatchers below bind `player`; the verb vocabulary is
 /// shared, so "an opponent searched their library this turn" and "you surveilled
 /// this turn" differ only on that scope — no duplicated verb list.
+///
+/// A list of one or more past-tense verbs joined by " or " ("you've scried or
+/// surveilled this turn"): a single verb returns its bare condition (keeping
+/// Darkblade Agent's shape unchanged); more than one returns
+/// `StaticCondition::Or` over the disjunction of those actions.
 fn parse_player_action_this_turn_body(
     input: &str,
     player: PlayerScope,
 ) -> OracleResult<'_, StaticCondition> {
-    alt((
-        value(
-            player_action_this_turn_condition(PlayerActionKind::Surveil, player.clone()),
-            tag("surveilled this turn"),
-        ),
-        value(
-            player_action_this_turn_condition(PlayerActionKind::Scry, player.clone()),
-            alt((tag("scried this turn"), tag("scryed this turn"))),
-        ),
-        value(
-            player_action_this_turn_condition(PlayerActionKind::CollectEvidence, player.clone()),
-            tag("collected evidence this turn"),
-        ),
-        // CR 701.23a: "searched their/a library this turn" (Archive Trap).
-        value(
-            player_action_this_turn_condition(PlayerActionKind::SearchedLibrary, player.clone()),
-            alt((
-                tag("searched their library this turn"),
-                tag("searched a library this turn"),
-            )),
-        ),
-    ))
-    .parse(input)
+    let (rest, kinds) = terminated(
+        nom::multi::separated_list1(tag(" or "), parse_player_action_past_tense),
+        tag(" this turn"),
+    )
+    .parse(input)?;
+
+    let mut conditions = kinds
+        .into_iter()
+        .map(|kind| player_action_this_turn_condition(kind, player.clone()));
+    let first = conditions
+        .next()
+        .expect("separated_list1 yields at least one element");
+    let condition = match conditions.next() {
+        None => first,
+        Some(second) => {
+            let mut all = vec![first, second];
+            all.extend(conditions);
+            StaticCondition::Or { conditions: all }
+        }
+    };
+    Ok((rest, condition))
 }
 
 /// Ordering is load-bearing: `preceded(alt(...))` does NOT backtrack into the
@@ -18782,6 +18803,108 @@ mod tests {
         );
     }
 
+    /// "you've scried or surveilled this turn" (Surveillance
+    /// Phantasm, Proctor of Potential, Desperate Futurescribe) parses as a
+    /// disjunction over the shared verb list.
+    #[test]
+    fn scried_or_surveilled_this_turn_parses_as_or() {
+        let (rest, c) = parse_inner_condition("you've scried or surveilled this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Or {
+                conditions: vec![
+                    StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerActionsThisTurn {
+                                player: PlayerScope::Controller,
+                                action: PlayerActionKind::Scry,
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    },
+                    StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerActionsThisTurn {
+                                player: PlayerScope::Controller,
+                                action: PlayerActionKind::Surveil,
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }
+        );
+    }
+
+    /// A single verb ("you've surveilled this turn", Darkblade
+    /// Agent) still returns the bare `QuantityComparison` shape, not a
+    /// one-element `Or` — this is `surveilled_this_turn_counts_controller_
+    /// player_actions` above, re-asserted here as the sibling of
+    /// `scried_or_surveilled_this_turn_parses_as_or`.
+    #[test]
+    fn single_verb_this_turn_stays_bare_quantity_comparison() {
+        let (rest, c) = parse_inner_condition("you've surveilled this turn").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(c, StaticCondition::QuantityComparison { .. }));
+    }
+
+    /// "an opponent searched their library or surveilled this turn"
+    /// — a building-block row (no printed card uses this combination) proving
+    /// the verb-list disjunction composes with the opponent-scoped subject
+    /// dispatcher, both arms sharing `PlayerScope::Opponent { aggregate: Max }`.
+    #[test]
+    fn opponent_searched_or_surveilled_this_turn_parses_as_or() {
+        let (rest, c) =
+            parse_inner_condition("an opponent searched their library or surveilled this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Or {
+                conditions: vec![
+                    StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerActionsThisTurn {
+                                player: PlayerScope::Opponent {
+                                    aggregate: AggregateFunction::Max,
+                                },
+                                action: PlayerActionKind::SearchedLibrary,
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    },
+                    StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerActionsThisTurn {
+                                player: PlayerScope::Opponent {
+                                    aggregate: AggregateFunction::Max,
+                                },
+                                action: PlayerActionKind::Surveil,
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }
+        );
+    }
+
+    /// "you've scried and surveilled this turn" is not a
+    /// verb-list separator this grammar accepts (measured vocabulary is
+    /// " or " only), so this must fail to parse entirely, not partially.
+    /// Reach-guard: `scried_or_surveilled_this_turn_parses_as_or` parses the
+    /// same verbs joined by " or " in the same test binary.
+    #[test]
+    fn scried_and_surveilled_this_turn_does_not_parse() {
+        assert!(parse_inner_condition("you've scried and surveilled this turn").is_err());
+        assert!(parse_inner_condition("you've scried or surveilled this turn").is_ok());
+    }
+
     /// Regression: the non-contracted "you have <action> this turn" surface
     /// form must parse for every player-action variant. Before the longest-
     /// prefix-first reorder of `parse_player_action_this_turn`, the bare
@@ -22846,21 +22969,33 @@ mod tests {
         ] {
             let (rest, c) = parse_inner_condition(text).unwrap();
             assert_eq!(rest, "", "must fully consume {text:?}");
-            assert_eq!(c, StaticCondition::AnyPlayerAttackedYouLastTurn, "{text}");
+            assert_eq!(
+                c,
+                StaticCondition::AnyPlayerAttackedYouLastTurn {
+                    scope: AttackedYouScope::AnyPlayer
+                },
+                "{text}"
+            );
         }
 
-        // Sibling non-shadow: the pre-existing "you attacked this turn" arm in the
-        // same `parse_combat_history_condition` combinator still lowers to the
-        // AttackedThisTurn count gate, never the new revenge gate.
+        // Sibling non-shadow: the pre-existing "you attacked this turn" arm in
+        // the same `parse_combat_history_condition` combinator still lowers to
+        // the AttackedThisTurn count gate, never the revenge gate — ON EITHER
+        // SCOPE. Written as a `{ .. }` non-match rather than `assert_ne!`
+        // against one scope, which a future anchored emission would pass.
         let (_, you) = parse_inner_condition("you attacked this turn").unwrap();
-        assert_ne!(you, StaticCondition::AnyPlayerAttackedYouLastTurn);
+        assert!(
+            !matches!(you, StaticCondition::AnyPlayerAttackedYouLastTurn { .. }),
+            "the 'you attacked this turn' arm must not lower to the revenge gate \
+             on any scope, got {you:?}"
+        );
 
         // Negative: the "this turn" (wrong window) sibling is not matched as the
         // "last turn" gate — no false positive on a near-miss phrase.
         assert!(
             !matches!(
                 parse_inner_condition("a player attacked you this turn"),
-                Ok((_, StaticCondition::AnyPlayerAttackedYouLastTurn))
+                Ok((_, StaticCondition::AnyPlayerAttackedYouLastTurn { .. }))
             ),
             "the this-turn near-miss must not lower to the last-turn revenge gate"
         );

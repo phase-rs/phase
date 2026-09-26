@@ -6,15 +6,15 @@ use crate::parser::oracle_effect::parse_effect_chain;
 use crate::parser::oracle_static::parse_static_line;
 use crate::types::ability::{
     AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
-    BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission, ChosenAttribute,
-    ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef, CostCategory, CountScope,
-    EffectScope, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
-    ManaSpendPermission, ManaSpendRestriction, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, RestrictionPlayerScope, SacrificeCost, SacrificeRequirement,
-    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    AttackedYouScope, BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
+    ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
+    CostCategory, CountScope, EffectScope, FilterProp, GameRestriction, KickerVariant,
+    ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalChoice,
+    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
+    ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, RestrictionPlayerScope,
+    SacrificeCost, SacrificeRequirement, SearchSelectionConstraint, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::{CoreType, Supertype};
@@ -3660,7 +3660,9 @@ fn avenge_cost_reduction_gated_on_attacked_you_last_turn() {
                 reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
             })
             .affected(TargetFilter::SelfRef)
-            .condition(StaticCondition::AnyPlayerAttackedYouLastTurn);
+            .condition(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                scope: AttackedYouScope::AnyPlayer,
+            });
             def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
             obj.static_definitions.push(def);
         }
@@ -3725,7 +3727,9 @@ fn attacked_you_last_turn_condition_is_existential_over_players() {
     use crate::game::layers::evaluate_condition_for_test;
     use crate::types::format::FormatConfig;
 
-    let cond = StaticCondition::AnyPlayerAttackedYouLastTurn;
+    let cond = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AnyPlayer,
+    };
     let you = PlayerId(0);
     let src = ObjectId(0); // unused by this nullary, source-agnostic condition
 
@@ -3754,6 +3758,614 @@ fn attacked_you_last_turn_condition_is_existential_over_players() {
         .attacked_defenders_last_turn
         .insert(PlayerId(2), [PlayerId(1)].into_iter().collect());
     assert!(!evaluate_condition_for_test(&state, &cond, you, src));
+}
+
+/// CR 508.6 + CR 508.1b + CR 508.1c: the ANCHORED scope of the revenge gate is
+/// asked about the player the creature is DECLARED to be attacking, not
+/// existentially over players. Phase 1 verification-matrix row 1.
+///
+/// Discriminating by construction: the DEFAULT scope is true in BOTH bindings on
+/// the same board, so the anchored `false` cell cannot be an empty ledger or an
+/// unreachable evaluator — and the anchored `true` cell is the reach-guard
+/// proving `evaluate_condition_with_context`'s designation-anchor entry reject
+/// does not fire on this scope. The board carries a SECOND ledger row (P2
+/// attacked P1) so that the anchored `false` for P2 is a wrong-DEFENDER false
+/// (CR 508.6) and not merely a missing row.
+#[test]
+fn attacked_player_scope_anchors_to_the_declared_attack_target() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+    use crate::types::format::FormatConfig;
+
+    let you = PlayerId(0);
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    // P1 attacked you during their last turn; P2 did not.
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    // CR 508.6: "a player has 'attacked [a player]' if the first player declared
+    // one or more creatures as attackers attacking the SECOND player" — the
+    // relation is two-place, so the DEFENDER argument of the history query is
+    // load-bearing. P2 is a live attacker last turn, but of P1, not of you, so
+    // the anchored `false` for P2 below is a WRONG-DEFENDER false rather than an
+    // absent-ledger-row one: a query that asked only "did P2 attack anybody?"
+    // would answer true here and the assertion would fail. The existential
+    // sibling buys the same half of CR 508.6 the same way — see
+    // `attacked_you_last_turn_condition_is_existential_over_players`'s
+    // "opponents attacked each other but not you" board, which this row mirrors
+    // into the anchored scope.
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(2), [PlayerId(1)].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9201),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let default = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AnyPlayer,
+    };
+    let bind = |target| ConditionContext::NONE.with_declared_attack(Some(target));
+    let eval =
+        |cond: &StaticCondition, ctx| evaluate_condition_with_context(&state, cond, you, src, ctx);
+
+    assert!(
+        eval(&anchored, bind(AttackTarget::Player(PlayerId(1)))),
+        "P1 attacked you last turn, so attacking P1 satisfies the anchored gate"
+    );
+    assert!(
+        !eval(&anchored, bind(AttackTarget::Player(PlayerId(2)))),
+        "P2 attacked P1 last turn, not you, so attacking P2 must NOT satisfy the \
+         anchored gate — the defender argument decides this cell, not the \
+         presence of a ledger row for P2"
+    );
+    assert!(
+        eval(&default, bind(AttackTarget::Player(PlayerId(1)))),
+        "the default scope is existential, so the binding is irrelevant to it"
+    );
+    assert!(
+        eval(&default, bind(AttackTarget::Player(PlayerId(2)))),
+        "the default scope is TRUE in both bindings on this board — the anchored \
+         false above is discrimination, not a dead ledger"
+    );
+}
+
+/// CR 508.1k + CR 506.4 + CR 611.3a: with no declaration under validation the
+/// anchored revenge gate answers from the LATCHED `AttackerInfo` of the
+/// attacking creature, keyed on its object id and read kind-preservingly; with
+/// no latch either it answers false. Phase 1 verification-matrix row 1b — the
+/// only coverage of the `None` branch and of
+/// `combat::attacked_player_for_attacker`. Arms (g)/(h)/(i) bind BOTH anchors at
+/// once and are the only coverage of the bound-vs-latched PRECEDENCE — (i) being
+/// the only arm anywhere that binds a NON-player target over a live latch, and so
+/// the only guard that row 2's kind-preservation falses are not merely falses
+/// from an empty latch. Arm (f2) is the only board anywhere that binds a
+/// RECIPIENT and a declaration at once, and so the only coverage of that pair's
+/// precedence (CR 508.1c).
+#[test]
+fn attacked_player_scope_falls_back_to_the_latched_attacker_record() {
+    use crate::game::combat::{self, AttackTarget, AttackerInfo, CombatState};
+    use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+    use crate::types::format::FormatConfig;
+
+    let you = PlayerId(0);
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9202),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+    let other = create_object(
+        &mut state,
+        CardId(9203),
+        you,
+        "Fellow Attacker".to_string(),
+        Zone::Battlefield,
+    );
+    // CR 508.5: the planeswalker is CONTROLLED by P1, which is what makes the
+    // kind-COLLAPSING counterfactual answer `Some(P1)` in arm (c) instead of
+    // passing vacuously as `None`.
+    let pw = create_object(
+        &mut state,
+        CardId(9204),
+        PlayerId(1),
+        "Decoy Planeswalker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&pw)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Planeswalker);
+    assert_eq!(
+        combat::defending_player_for_target(&state, AttackTarget::Planeswalker(pw)),
+        Some(PlayerId(1)),
+        "instrument check: the kind-collapsing sibling DOES resolve this \
+         planeswalker to P1, so arm (c)'s false is not vacuous"
+    );
+
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let latch = |info: AttackerInfo| CombatState {
+        attackers: vec![info],
+        ..Default::default()
+    };
+
+    // (a) A bound declaration is AUTHORITATIVE (CR 508.1c) and needs no latch.
+    state.combat = None;
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Player(PlayerId(1)))),
+        ),
+        "(a) the bound anchor answers on its own, with `state.combat` empty"
+    );
+
+    // (b) Unbound: the latched record answers (CR 508.1k). Reach-guard for
+    // (c), (d) and (e).
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        evaluate_condition_with_context(&state, &anchored, you, src, ConditionContext::NONE),
+        "(b) the latched attacker record answers when no declaration is bound"
+    );
+
+    // (c) Multi-authority hostile: the latched `defending_player` field, the
+    // planeswalker's controller and CR 508.5's collapse ALL say P1 — and the
+    // answer is still false, because a planeswalker is not a player (CR 506.3).
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Planeswalker(pw),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(&state, &anchored, you, src, ConditionContext::NONE),
+        "(c) a latched PLANESWALKER attack has no attacked player, even though \
+         three kind-collapsing authorities all resolve to P1"
+    );
+
+    // (d) Neither anchor bound ⇒ false.
+    state.combat = None;
+    assert!(
+        !evaluate_condition_with_context(&state, &anchored, you, src, ConditionContext::NONE),
+        "(d) no declaration and no combat ⇒ no attacked player ⇒ false"
+    );
+
+    // (e) Record selection: a DIFFERENT creature is in combat and `src` is not.
+    // A lookup that drops the `object_id` equality reads `other`'s target and
+    // wrongly answers true.
+    state.combat = Some(latch(AttackerInfo::new(
+        other,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(&state, &anchored, you, src, ConditionContext::NONE),
+        "(e) `src` is not in combat, so another attacker's record must not answer \
+         for it"
+    );
+
+    // (f) CR 611.3a: the creature whose latch answers is the RECIPIENT when one
+    // is bound, not the source. Same combat state as (e).
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::recipient(other),
+        ),
+        "(f) the bound recipient IS the attacking creature, so its latch answers"
+    );
+
+    // (f2) BOTH a recipient and a declaration bound at once — the only board
+    // anywhere that binds the two sources together, and the only one on which
+    // they DISAGREE. Same combat state as (e)/(f): `other`'s latch says P1, who
+    // did attack you. The bound declaration names P2, who did not.
+    //
+    // CR 508.1c: the declaration under validation is what the restriction is
+    // being checked against, so it outranks the recipient's latched
+    // `AttackerInfo`; the recipient only selects WHOSE latch would answer in the
+    // unbound case (f). A form that preferred the recipient's latch whenever a
+    // recipient is bound reads P1 here and wrongly answers true. Phase 2's
+    // `attacker_can_attack_target` is the consumer that binds both at once.
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::recipient(other)
+                .with_declared_attack(Some(AttackTarget::Player(PlayerId(2)))),
+        ),
+        "(f2) with a recipient AND a declaration bound and disagreeing, the \
+         DECLARED target (P2, who never attacked you) outranks the recipient's \
+         latch (P1, who did)"
+    );
+
+    // (g) and (h) BOTH anchors bound at once with the SOURCE as the attacking
+    // creature — arms that express PRECEDENCE. Arms (a)-(f) each leave at most
+    // one anchor bindable, so any of them passes under a latch-first reading
+    // too; only a board where the two anchors DISAGREE — (f2), (g), (h), (i) —
+    // makes the ordering the thing that decides the answer.
+    //
+    // CR 508.1c: the declaration under validation is what the restriction is
+    // being checked against, so a bound `declared_attack` is AUTHORITATIVE and
+    // outranks the latched `AttackerInfo` left over from an earlier declaration
+    // — it does not fall through to the latch.
+
+    // (g) Latch says P2 (who never attacked you); the bound declaration says P1
+    // (who did). Bound-first ⇒ P1 ⇒ true. A latch-first reading answers P2 ⇒ false.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(2)),
+        PlayerId(2),
+    )));
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Player(PlayerId(1)))),
+        ),
+        "(g) with both anchors bound and disagreeing, the DECLARED target (P1, \
+         who attacked you) outranks the latched one (P2, who did not)"
+    );
+
+    // (h) The converse, so neither direction of the inversion survives: latch
+    // says P1 (who attacked you), declaration says P2 (who did not).
+    // Bound-first ⇒ P2 ⇒ false. A latch-first reading answers P1 ⇒ true.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Player(PlayerId(2)))),
+        ),
+        "(h) the stale latch (P1) must NOT rescue a declaration against P2, who \
+         never attacked you"
+    );
+
+    // (i) Precedence when the bound anchor yields NO attacked player. The
+    // sibling kind-preservation test (row 2,
+    // `attacked_player_scope_is_kind_preserving_on_the_bound_anchor`) never
+    // assigns `state.combat` on either of its boards, so every `false` it
+    // asserts is equally explained by an EMPTY latch; it cannot tell
+    // kind-preservation apart from a fallback that is merely dead. This arm
+    // supplies the missing discrimination: the latch is LIVE and says P1, who
+    // really did attack you.
+    //
+    // CR 508.1c: the declaration under validation is the authority, and CR
+    // 506.3: a planeswalker is not a player — so a bound planeswalker target
+    // yields no attacked player and the answer is false OUTRIGHT, without
+    // consulting the latch. A bound-first reading that FALLS THROUGH on `None`
+    // reads the latch, finds P1, and wrongly answers true.
+    state.combat = Some(latch(AttackerInfo::new(
+        src,
+        AttackTarget::Player(PlayerId(1)),
+        PlayerId(1),
+    )));
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            ConditionContext::NONE.with_declared_attack(Some(AttackTarget::Planeswalker(pw))),
+        ),
+        "(i) a bound PLANESWALKER target attacks no player (CR 506.3) and must \
+         not fall through to the live latch (P1, who did attack you)"
+    );
+}
+
+/// CR 508.6 + CR 109.5: the anchored scope keeps the existential scope's subject
+/// exclusion — YOU attacking YOURSELF last turn does not satisfy "players who
+/// attacked you". Phase 1 verification-matrix row 1c. The guard is what keeps
+/// the anchored reading a strict REFINEMENT of the existential one.
+#[test]
+fn attacked_player_scope_excludes_the_controller() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+    use crate::types::format::FormatConfig;
+
+    let you = PlayerId(0);
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(you, [you].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9205),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let default = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AnyPlayer,
+    };
+    let bind = |target| ConditionContext::NONE.with_declared_attack(Some(target));
+
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Player(you)),
+        ),
+        "the controller is excluded from CR 508.6's subject on the anchored scope"
+    );
+    // Sibling symmetry: the default scope agrees on the exclusion (`p.id !=
+    // controller`) on the very same board.
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &default,
+            you,
+            src,
+            bind(AttackTarget::Player(you))
+        ),
+        "the default scope excludes the controller too — the two scopes agree"
+    );
+
+    // Paired positive control, SAME board: with a real opponent attack seeded,
+    // the ledger is readable and the evaluator live, so the falses above are the
+    // exclusion guard rather than an empty ledger.
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Player(PlayerId(1))),
+        ),
+        "P1 did attack you, so the anchored gate fires for P1 on this same board"
+    );
+}
+
+/// CR 506.3 + CR 310.9d: the anchored scope is KIND-PRESERVING on the BOUND
+/// path — a planeswalker or battle attack target has no attacked PLAYER and
+/// answers false, deliberately NOT taking CR 508.5's collapse to the
+/// planeswalker's controller or the battle's protector. Phase 1
+/// verification-matrix row 2; each non-player arm carries its own player-target
+/// positive control on its own board.
+#[test]
+fn attacked_player_scope_is_kind_preserving_on_the_bound_anchor() {
+    use crate::game::combat::{self, AttackTarget};
+    use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+    use crate::types::format::FormatConfig;
+
+    let you = PlayerId(0);
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let bind = |target| ConditionContext::NONE.with_declared_attack(Some(target));
+
+    // --- Planeswalker arm, own board.
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9206),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+    let pw = create_object(
+        &mut state,
+        CardId(9207),
+        PlayerId(1),
+        "Decoy Planeswalker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&pw)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Planeswalker);
+    assert_eq!(
+        combat::defending_player_for_target(&state, AttackTarget::Planeswalker(pw)),
+        Some(PlayerId(1)),
+        "instrument check: the kind-COLLAPSING sibling resolves this planeswalker \
+         to P1, so the false below is a real discrimination"
+    );
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Planeswalker(pw)),
+        ),
+        "attacking a planeswalker attacks no PLAYER (CR 506.3)"
+    );
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Player(PlayerId(1))),
+        ),
+        "paired positive control on the SAME board: P1 as a player target ⇒ true"
+    );
+
+    // --- Battle arm, own board. `GameObject::protector()` needs BOTH
+    // `CoreType::Battle` AND a `ChosenAttribute::Player`; without both the
+    // kind-collapsing counterfactual also answers `None` and this arm would
+    // pass vacuously.
+    let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+    state
+        .attacked_defenders_last_turn
+        .insert(PlayerId(1), [you].into_iter().collect());
+    let src = create_object(
+        &mut state,
+        CardId(9208),
+        you,
+        "Anchored Sentinel".to_string(),
+        Zone::Battlefield,
+    );
+    let battle = create_object(
+        &mut state,
+        CardId(9209),
+        PlayerId(2),
+        "Decoy Siege".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&battle).unwrap();
+        obj.card_types.core_types.push(CoreType::Battle);
+        obj.chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+    }
+    assert_eq!(
+        combat::defending_player_for_target(&state, AttackTarget::Battle(battle)),
+        Some(PlayerId(1)),
+        "instrument check: the battle really does have a protector (P1), so the \
+         kind-collapsing counterfactual is LIVE on this board"
+    );
+    assert!(
+        !evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Battle(battle)),
+        ),
+        "attacking a battle attacks no PLAYER (CR 506.3); its protector is CR \
+         508.5's collapse and is deliberately not taken"
+    );
+    assert!(
+        evaluate_condition_with_context(
+            &state,
+            &anchored,
+            you,
+            src,
+            bind(AttackTarget::Player(PlayerId(1))),
+        ),
+        "paired positive control on the SAME board: P1 as a player target ⇒ true"
+    );
+}
+
+/// CR 508.1c + CR 508.1k: `needs_defending_player_anchor` answers by FIELD
+/// INSPECTION — "can this leaf be answered at creature level?" — not by variant
+/// identity. Phase 1 verification-matrix row 3: a
+/// `matches!(leaf, AnyPlayerAttackedYouLastTurn { .. })` implementation reports
+/// the DEFAULT scope too and fails the first assertion.
+#[test]
+fn needs_defending_player_anchor_inspects_the_scope_field() {
+    let default = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AnyPlayer,
+    };
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+
+    assert!(
+        !default.needs_defending_player_anchor(),
+        "the existential scope is answerable at creature level"
+    );
+    assert!(
+        anchored.needs_defending_player_anchor(),
+        "the anchored scope needs the attack target as a player"
+    );
+    // Sibling positive control — the predicate answers true for SOMETHING here,
+    // so the first assertion's false is not a dead predicate.
+    assert!(StaticCondition::DefendingPlayerControls {
+        filter: TargetFilter::Any
+    }
+    .needs_defending_player_anchor());
+    // Sibling negative control.
+    assert!(!StaticCondition::DuringYourTurn.needs_defending_player_anchor());
+
+    // Nesting: the `any_leaf` delegation is intact through the boolean
+    // combinators.
+    assert!(StaticCondition::Not {
+        condition: Box::new(anchored.clone())
+    }
+    .needs_defending_player_anchor());
+    assert!(!StaticCondition::And {
+        conditions: vec![StaticCondition::DuringYourTurn, default.clone()]
+    }
+    .needs_defending_player_anchor());
+}
+
+/// C1.1: the legacy `{"type":"AnyPlayerAttackedYouLastTurn"}` encoding still
+/// deserializes to the DEFAULT scope and re-serializes BYTE-IDENTICALLY, so no
+/// committed or cached card-data artifact's encoding moves. Phase 1
+/// verification-matrix row 4 — bought by an actual round-trip, not by inspecting
+/// the derive.
+#[test]
+fn any_player_attacked_you_last_turn_legacy_tag_round_trips() {
+    const LEGACY: &str = r#"{"type":"AnyPlayerAttackedYouLastTurn"}"#;
+
+    let decoded: StaticCondition = serde_json::from_str(LEGACY).expect("legacy tag must decode");
+    assert_eq!(
+        decoded,
+        StaticCondition::AnyPlayerAttackedYouLastTurn {
+            scope: AttackedYouScope::AnyPlayer
+        },
+        "the legacy tag keeps its pre-parameterization meaning"
+    );
+    let reencoded = serde_json::to_string(&decoded).unwrap();
+    assert_eq!(
+        reencoded, LEGACY,
+        "the default scope must re-serialize byte-identically to the legacy tag"
+    );
+
+    // Paired positive control in the same test: the anchored scope round-trips
+    // to itself, proving the round-trip machinery is live and that the brevity
+    // above is the `skip_serializing_if`, not a broken serializer.
+    let anchored = StaticCondition::AnyPlayerAttackedYouLastTurn {
+        scope: AttackedYouScope::AttackedPlayer,
+    };
+    let anchored_json = serde_json::to_string(&anchored).unwrap();
+    assert_eq!(
+        serde_json::from_str::<StaticCondition>(&anchored_json).unwrap(),
+        anchored
+    );
+    assert_ne!(
+        anchored_json, reencoded,
+        "the anchored scope must not be silently erased on the wire"
+    );
 }
 
 #[test]
@@ -27577,6 +28189,7 @@ fn set_triggered_ability_mode_choice(state: &mut GameState, player: PlayerId, so
         is_activated: false,
         ability_index: None,
         ability_cost: None,
+        activation_cost_snapshot: None,
         unavailable_modes: vec![],
     };
 }
@@ -34964,12 +35577,12 @@ fn phyrexian_submit_rejects_stale_paylife_under_insufficient_life() {
     // will reject PayLife. This path is exercised through the dispatcher, not directly.
     // Here we assert the shape is correct by re-computing shards.
     let spell_meta = build_spell_meta(&state, PlayerId(0), spell);
-    let any_color =
-        crate::game::static_abilities::player_can_spend_as_any_color(&state, PlayerId(0));
+    let mana_spend_permission =
+        crate::game::static_abilities::player_board_wide_mana_spend_permission(&state, PlayerId(0));
     let permissions = crate::game::static_abilities::build_cost_permission_context(
         &state,
         PlayerId(0),
-        any_color,
+        mana_spend_permission,
     );
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let current_shards = crate::game::mana_payment::compute_phyrexian_shards(
@@ -40458,8 +41071,11 @@ mod loyalty_gate {
         affected: TargetFilter,
         condition: Option<StaticCondition>,
     ) {
-        let mut def = StaticDefinition::new(StaticMode::ActivateAsInstant { cost_category })
-            .affected(affected);
+        let mut def = StaticDefinition::new(StaticMode::ActivateAsInstant {
+            cost_category,
+            keyword: None,
+        })
+        .affected(affected);
         if let Some(condition) = condition {
             def = def.condition(condition);
         }
@@ -40915,6 +41531,7 @@ mod loyalty_gate {
             obj.static_definitions.push(
                 StaticDefinition::new(StaticMode::ActivateAsInstant {
                     cost_category: CostCategory::PaysLoyalty,
+                    keyword: None,
                 })
                 .affected(TargetFilter::SelfRef)
                 .condition(StaticCondition::SourceEnteredThisTurn),
@@ -41053,6 +41670,226 @@ mod loyalty_gate {
         assert!(
             crate::game::perf_counters::snapshot().restriction_static_exact_scans > 0,
             "matching mode presence must fall through to the exact permission scan"
+        );
+    }
+
+    /// Build an equip ability tagged `AbilityTag::Equip`, so tag-keyed statics
+    /// (Leonin Shikari's class) can match it regardless of its cost shape.
+    /// `cost` is parameterized so the mana- and non-mana-cost cases share one
+    /// builder (CR 702.6a defines Equip by its activated-ability form, not by
+    /// what it costs).
+    fn make_equip_ability(cost: AbilityCost) -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(cost);
+        def.ability_tag = Some(AbilityTag::Equip);
+        def.activation_restrictions
+            .push(ActivationRestriction::AsSorcery);
+        def
+    }
+
+    /// CR 602.5e + CR 702.6a: Leonin Shikari's class — a tag-keyed
+    /// `ActivateAsInstant` static must grant instant-speed timing to an equip
+    /// ability with a plain mana cost, the common case (Equipment's own equip
+    /// ability).
+    #[test]
+    fn shikari_static_allows_mana_cost_equip_ability_at_instant_timing() {
+        let mut state = setup_game_at_main_phase();
+        let equipment_id = CardId(state.next_object_id);
+        let equipment = create_object(
+            &mut state,
+            equipment_id,
+            PlayerId(0),
+            "Test Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.abilities = Arc::new(vec![make_equip_ability(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+            })]);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ActivateAsInstant {
+                    cost_category: CostCategory::ManaOnly,
+                    keyword: Some(AbilityTag::Equip),
+                })
+                .affected(TargetFilter::Typed(TypedFilter::permanent())),
+            );
+        }
+        set_opponent_combat_priority(&mut state);
+        // Affordability is a separate legality axis from timing (CR 118.3);
+        // fund the {2} generic cost so a failure here can only be the timing
+        // permission under test, not a missing-mana false negative.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), equipment, 0),
+            "CR 702.6a: a tag-keyed ActivateAsInstant static must allow a mana-cost equip ability at instant timing"
+        );
+    }
+
+    /// CR 602.5e + CR 702.6a: The tagged-class permission must not be gated on
+    /// `CostCategory` — an equip ability with a NON-mana cost (e.g. paying
+    /// life) still carries `AbilityTag::Equip` and must still gain the
+    /// permission, even though the static's placeholder `cost_category` field
+    /// is `ManaOnly`.
+    #[test]
+    fn shikari_static_allows_non_mana_cost_equip_ability_at_instant_timing() {
+        let mut state = setup_game_at_main_phase();
+        let equipment_id = CardId(state.next_object_id);
+        let equipment = create_object(
+            &mut state,
+            equipment_id,
+            PlayerId(0),
+            "Costly Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.abilities = Arc::new(vec![make_equip_ability(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            })]);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ActivateAsInstant {
+                    cost_category: CostCategory::ManaOnly,
+                    keyword: Some(AbilityTag::Equip),
+                })
+                .affected(TargetFilter::Typed(TypedFilter::permanent())),
+            );
+        }
+        set_opponent_combat_priority(&mut state);
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), equipment, 0),
+            "CR 702.6a: tag-keyed permission must not depend on the ability's cost category"
+        );
+    }
+
+    /// CR 602.5e + CR 702.6a: The permission must also reach a RUNTIME-GRANTED
+    /// Equip ability (e.g. from an effect that grants "equip {2}"), not just a
+    /// printed one stored in `obj.abilities`. Production activation legality
+    /// resolves the effective ability through `activation_ability_definition`,
+    /// which appends synthesized abilities (`runtime_granted_equip_abilities`)
+    /// past the end of the stored list; reading `obj.abilities` directly (as
+    /// the timing-permission check previously did) would silently miss any
+    /// ability index past that list and always deny the permission to a
+    /// granted Equip.
+    #[test]
+    fn shikari_static_allows_runtime_granted_equip_ability_at_instant_timing() {
+        let mut state = setup_game_at_main_phase();
+        let equipment_id = CardId(state.next_object_id);
+        let equipment = create_object(
+            &mut state,
+            equipment_id,
+            PlayerId(0),
+            "Granted-Equip Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            // No printed abilities and no base Equip keyword — this Equip
+            // exists ONLY as a live (granted) keyword, so it can be found
+            // only through the runtime-synthesis path, not `obj.abilities`.
+            assert!(obj.abilities.is_empty());
+            obj.keywords.push(Keyword::Equip(ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            }));
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ActivateAsInstant {
+                    cost_category: CostCategory::ManaOnly,
+                    keyword: Some(AbilityTag::Equip),
+                })
+                .affected(TargetFilter::Typed(TypedFilter::permanent())),
+            );
+        }
+        // Equip's real effect (Attach to target creature you control) needs a
+        // legal target on the battlefield or activation is illegal for a
+        // reason unrelated to timing.
+        let creature_id = CardId(state.next_object_id);
+        let creature = create_object(
+            &mut state,
+            creature_id,
+            PlayerId(0),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        set_opponent_combat_priority(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        // Ability index 0 resolves past the (empty) printed list into the
+        // runtime-granted equip ability — see `activation_ability_definition`.
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), equipment, 0),
+            "CR 702.6a: Shikari's permission must reach a runtime-granted equip ability, not just a printed one"
+        );
+    }
+
+    /// CR 602.5e + CR 702.6a: A mana-cost ability that is NOT tagged Equip
+    /// (e.g. a plain mana ability sharing `CostCategory::ManaOnly`) must stay
+    /// denied under Shikari's static — the tag match, not the cost category,
+    /// is what scopes the permission to equip abilities specifically.
+    #[test]
+    fn shikari_static_does_not_leak_to_untagged_mana_ability() {
+        let mut state = setup_game_at_main_phase();
+        let permanent_id = CardId(state.next_object_id);
+        let permanent = create_object(
+            &mut state,
+            permanent_id,
+            PlayerId(0),
+            "Untagged Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&permanent).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+            });
+            def.activation_restrictions
+                .push(ActivationRestriction::AsSorcery);
+            obj.abilities = Arc::new(vec![def]);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ActivateAsInstant {
+                    cost_category: CostCategory::ManaOnly,
+                    keyword: Some(AbilityTag::Equip),
+                })
+                .affected(TargetFilter::Typed(TypedFilter::permanent())),
+            );
+        }
+        set_opponent_combat_priority(&mut state);
+
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), permanent, 0),
+            "an untagged mana-cost ability must not gain instant timing from an equip-tagged permission"
         );
     }
 
@@ -45556,6 +46393,7 @@ fn add_exile_cast_permission_source_with(
         grants_flash: false,
         extra_cost: None,
         enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
     })
     .affected(affected);
     let obj = state.objects.get_mut(&source).unwrap();
@@ -45866,6 +46704,7 @@ fn an_additional_rider_static_still_authorizes_disguise() {
                 mode: crate::types::statics::CastCostMode::Additional,
             }),
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         })
         .affected(TargetFilter::Any);
         state
@@ -46510,6 +47349,7 @@ fn an_elected_object_grant_does_not_inherit_an_overlapping_static_extra_cost() {
                 mode: CastCostMode::Additional,
             }),
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         })
         .affected(TargetFilter::Any);
         state
@@ -46793,6 +47633,7 @@ fn add_exile_cast_permission_source_with_extra_cost(
         grants_flash: false,
         extra_cost,
         enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
     })
     .affected(TargetFilter::Any);
     state
@@ -48092,6 +48933,7 @@ fn add_exile_cast_source_with_spend_permission(
         grants_flash: true,
         extra_cost: None,
         enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
     })
     .affected(TargetFilter::Any);
     state
@@ -48133,6 +48975,7 @@ fn add_valgavoth_exile_cast_source(state: &mut GameState, player: PlayerId) -> O
             mode: crate::types::statics::CastCostMode::Alternative,
         }),
         enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
     })
     .affected(TargetFilter::Any);
     state
@@ -48224,9 +49067,10 @@ fn exile_static_any_color_casts_off_color_for_authorized_controller_only() {
         !spell_objects_available_to_cast(&state, PlayerId(1)).contains(&spell),
         "the card owner must not inherit the source controller's static permission"
     );
-    assert!(exile_static_permission_grants_any_color(
-        &state, player, spell, source
-    ));
+    assert_eq!(
+        exile_static_mana_spend_permission(&state, player, spell, source),
+        Some(ManaSpendPermission::AnyColor)
+    );
 
     let mut runner = crate::game::scenario::GameRunner::from_state(state);
     let outcome = runner.cast(spell).resolve();
@@ -48303,6 +49147,7 @@ fn add_vizier_filtered_any_type_source(state: &mut GameState, player: PlayerId) 
     let def = StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
         spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
         activation_source_filter: None,
+        concession: crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
     })
     .affected(TargetFilter::Controller);
     state
@@ -48345,8 +49190,8 @@ fn add_single_blue_spell(
 /// form, the noncreature assertion below flips (a sorcery would also become
 /// payable). If the static is removed entirely, the creature assertion flips
 /// (the {U} cost becomes unpayable from a red-only pool). The seam under test
-/// is `player_can_spend_as_any_color_for_spell_object` →
-/// `player_can_spend_as_any_color_for_optional_spell` →
+/// is `player_mana_spend_permission_for_spell_object` →
+/// `player_mana_spend_permission_for_optional_spell` →
 /// `can_pay_cost_after_auto_tap`.
 #[test]
 fn vizier_filtered_static_grants_any_type_mana_for_creature_spells() {
@@ -48377,10 +49222,11 @@ fn vizier_filtered_static_grants_any_type_mana_for_creature_spells() {
     add_mana(&mut state, player, ManaType::Red, 2);
 
     // POSITIVE: a creature spell matches the filter, so off-color mana pays.
-    assert!(
-        crate::game::static_abilities::player_can_spend_as_any_color_for_spell_object(
+    assert_eq!(
+        crate::game::static_abilities::player_mana_spend_permission_for_spell_object(
             &state, player, creature
         ),
+        Some(ManaSpendPermission::AnyTypeOrColor),
         "the filtered static must grant any-type-mana spend for a creature spell"
     );
     assert!(
@@ -48396,10 +49242,11 @@ fn vizier_filtered_static_grants_any_type_mana_for_creature_spells() {
     // NEGATIVE: a noncreature spell does NOT match the filter — off-color mana
     // must NOT help. This is what distinguishes the filtered static from the
     // unfiltered board-wide form.
-    assert!(
-        !crate::game::static_abilities::player_can_spend_as_any_color_for_spell_object(
+    assert_eq!(
+        crate::game::static_abilities::player_mana_spend_permission_for_spell_object(
             &state, player, sorcery
         ),
+        None,
         "the filtered static must NOT grant any-type-mana spend for a noncreature spell"
     );
     assert!(
@@ -52739,7 +53586,7 @@ mod plot_from_library {
 /// must (a) forward the concession onto the granted `ExileWithAltCost`
 /// (`grant_lingering_permissions`) at the spell's PRINTED cost, and (b) let the
 /// grantee pay an off-color cost from a red-only pool
-/// (`player_can_spend_as_any_color_for_optional_spell`). Drives the production
+/// (`player_mana_spend_permission_for_optional_spell`). Drives the production
 /// grant resolver (`cast_from_zone::resolve`) and the production payability
 /// gate (`can_pay_cost_after_auto_tap`), then a full cast through `apply`.
 ///
@@ -53839,7 +54686,7 @@ fn graveyard_paid_cast_accept_off_color_pays_via_any_type_concession() {
     );
     // The concession is scoped to THIS spell via the granted permission.
     assert!(
-        player_can_spend_as_any_color_for_optional_spell(&state, PlayerId(0), Some(spell)),
+        player_mana_spend_permission_for_optional_spell(&state, PlayerId(0), Some(spell)).is_some(),
         "the any-type concession must be in force for the granted spell (CR 609.4b)"
     );
 
@@ -55341,7 +56188,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
 
     assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
     assert!(
-        !player_can_spend_as_any_color_for_optional_spell(&state, PlayerId(0), Some(spell)),
+        player_mana_spend_permission_for_optional_spell(&state, PlayerId(0), Some(spell)).is_none(),
         "the later sibling's AnyColor concession must not bind to the elected slot"
     );
     assert!(
@@ -58547,6 +59394,444 @@ mod unreadable_additional_cost_is_refused_not_free {
             ),
             "an unpayable optional cost must be skipped, not offered — got {:?}",
             runner.state().waiting_for
+        );
+    }
+}
+
+/// CR 601.2f + CR 602.2b: the activation fold's default order is the MINIMUM over
+/// every order the caster could elect — the proof `fold_activation_cost` states,
+/// checked exhaustively as a building block over generic-only reductions with
+/// mixed floors, colored and colorless symbol counts, and raises.
+#[test]
+fn activation_fold_default_order_is_the_minimum_over_every_order() {
+    fn entry(index: u8, amount: u32, minimum_mana: u32) -> CostReductionEntry {
+        CostReductionEntry {
+            amount: ManaCost::generic(amount),
+            multiplier: 1,
+            reach: CostReductionReach::SpillsToGeneric,
+            provenance: ReductionProvenance::Static {
+                source: ObjectId(900),
+                ordinal: index,
+            },
+            display_name: format!("reducer {index}"),
+            minimum_mana,
+        }
+    }
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let mut out = Vec::new();
+        for rest in permutations(n - 1) {
+            for slot in 0..=rest.len() {
+                let mut order = rest.clone();
+                order.insert(slot, n - 1);
+                out.push(order);
+            }
+        }
+        out
+    }
+    fn total_mana(cost: &AbilityCost) -> u32 {
+        match cost {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, shards },
+            } => *generic + shards.len() as u32,
+            _ => unreachable!("the fixture only builds bare mana costs"),
+        }
+    }
+
+    let shapes: [&[(u32, u32)]; 5] = [
+        &[(2, 1), (2, 0)],
+        &[(1, 0), (3, 1)],
+        &[(2, 2), (2, 0), (1, 1)],
+        &[(3, 1), (1, 2), (2, 0)],
+        &[(1, 1), (1, 1), (2, 0)],
+    ];
+    let mut observable = 0;
+    for generic in 0..=6u32 {
+        for shards in [Vec::new(), vec![ManaCostShard::Red]] {
+            for raise_total in [0u32, 2] {
+                for shape in shapes {
+                    let base = AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: shards.clone(),
+                            generic,
+                        },
+                    };
+                    let reductions: Vec<CostReductionEntry> = shape
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(amount, floor))| entry(i as u8, amount, floor))
+                        .collect();
+                    let default =
+                        total_mana(&fold_activation_cost(&base, raise_total, &reductions, None));
+                    let totals: Vec<u32> = permutations(reductions.len())
+                        .into_iter()
+                        .map(|order| {
+                            let order: Vec<ReductionProvenance> =
+                                order.iter().map(|&i| reductions[i].provenance).collect();
+                            total_mana(&fold_activation_cost(
+                                &base,
+                                raise_total,
+                                &reductions,
+                                Some(&order),
+                            ))
+                        })
+                        .collect();
+                    let minimum = *totals.iter().min().unwrap();
+                    assert_eq!(
+                        default, minimum,
+                        "default must be the cheapest order: base {generic}+{shards:?}, \
+                         raise {raise_total}, reductions {shape:?}, orders gave {totals:?}"
+                    );
+                    if totals.iter().any(|&t| t != minimum) {
+                        observable += 1;
+                    }
+                }
+            }
+        }
+    }
+    // Reach guard: the sweep must contain boards where the order is observable,
+    // or "default == minimum" would hold vacuously.
+    assert!(
+        observable > 0,
+        "the sweep must include order-observable boards"
+    );
+}
+
+/// CR 601.2f: "plus all additional costs and cost increases, and minus all cost
+/// reductions" — every raise is applied BEFORE any reduction, so a floored
+/// reduction sees the raised total. `{1}` + a `{2}` raise + a `-2` reduction that
+/// can't go below one mana locks `{1}`; reducing first would lock `{3}`, a total
+/// no legal order produces.
+#[test]
+fn activation_fold_applies_raises_before_reductions() {
+    let base = AbilityCost::Mana {
+        cost: ManaCost::generic(1),
+    };
+    let floored = CostReductionEntry {
+        amount: ManaCost::generic(2),
+        multiplier: 1,
+        reach: CostReductionReach::SpillsToGeneric,
+        provenance: ReductionProvenance::Static {
+            source: ObjectId(901),
+            ordinal: 0,
+        },
+        display_name: "Training Grounds".to_string(),
+        minimum_mana: 1,
+    };
+    assert_eq!(
+        fold_activation_cost(&base, 2, &[floored], None),
+        AbilityCost::Mana {
+            cost: ManaCost::generic(1)
+        }
+    );
+}
+
+/// CR 601.2f: both reachable-totals methods are EXACT — each finds precisely the
+/// set of generic amounts some order of the reducers leaves, with a witness
+/// order that really produces each one. Checked against a brute-force walk of
+/// every permutation over a deterministic sweep: the closed form on boards whose
+/// effective floors are all 0 or 1, the canonical search on every board.
+#[test]
+fn activation_reachable_totals_match_every_permutation() {
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let mut out = Vec::new();
+        for rest in permutations(n - 1) {
+            for slot in 0..=rest.len() {
+                let mut order = rest.clone();
+                order.insert(slot, n - 1);
+                out.push(order);
+            }
+        }
+        out
+    }
+    fn run(x: u32, steps: &[(u32, u32)], order: &[usize]) -> u32 {
+        order.iter().fold(x, |g, &i| {
+            let (amount, floor) = steps[i];
+            activation_generic_step(g, amount, floor)
+        })
+    }
+    fn check(x: u32, steps: &[(u32, u32)], found: &[(u32, Vec<usize>)], brute: &BTreeSet<u32>) {
+        let totals: BTreeSet<u32> = found.iter().map(|(total, _)| *total).collect();
+        assert_eq!(&totals, brute, "generic {x}, steps {steps:?}");
+        for (total, witness) in found {
+            let mut sorted = witness.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..steps.len()).collect::<Vec<_>>());
+            assert_eq!(run(x, steps, witness), *total);
+        }
+    }
+
+    // A small deterministic generator (no RNG dependency in the engine crate).
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    };
+    let (mut zero_one_boards, mut multi_total_boards) = (0, 0);
+    for board in 0..800 {
+        let n = 1 + next(6) as usize; // 1..=6 reducers
+        let x = next(13) as u32;
+        // Half the boards keep every floor in {0, 1}; the rest reach 3.
+        let floor_bound = if board % 2 == 0 { 2 } else { 4 };
+        let steps: Vec<(u32, u32)> = (0..n)
+            .map(|_| (1 + next(4) as u32, next(floor_bound) as u32))
+            .collect();
+        let brute: BTreeSet<u32> = permutations(n)
+            .iter()
+            .map(|order| run(x, &steps, order))
+            .collect();
+        check(
+            x,
+            &steps,
+            &activation_totals_canonical_search(x, &steps),
+            &brute,
+        );
+        if activation_totals_route(&steps) == ActivationTotalsMethod::ZeroOneFloors {
+            check(
+                x,
+                &steps,
+                &activation_totals_zero_one_floors(x, &steps),
+                &brute,
+            );
+            zero_one_boards += 1;
+        }
+        if brute.len() > 1 {
+            multi_total_boards += 1;
+        }
+    }
+    // Reach guards: both methods were exercised, on boards where order matters.
+    assert!(zero_one_boards > 0);
+    assert!(multi_total_boards > 0);
+}
+
+/// CR 601.2f: the route keys on the COMPUTED effective floor of each reducer. A
+/// printed "can't reduce below two mana" floor is effective floor 1 against a
+/// cost with one coloured symbol (closed form), but effective floor 2 against a
+/// generic-only cost (canonical search) — and there both methods' boards agree
+/// with brute force (the sweep above). A floor-{0,1} board past the old
+/// sixteen-reducer bound still takes the closed form.
+#[test]
+fn activation_totals_route_on_the_computed_effective_floor() {
+    let floored_two = CostReductionEntry {
+        amount: ManaCost::generic(2),
+        multiplier: 1,
+        reach: CostReductionReach::SpillsToGeneric,
+        provenance: ReductionProvenance::Static {
+            source: ObjectId(960),
+            ordinal: 0,
+        },
+        display_name: "floor two".to_string(),
+        minimum_mana: 2,
+    };
+    let red_three = AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 3,
+        },
+    };
+    let three = AbilityCost::Mana {
+        cost: ManaCost::generic(3),
+    };
+    let floor_on = |cost: &AbilityCost| activation_effective_floor(cost, &floored_two);
+    assert_eq!(floor_on(&red_three), 1);
+    assert_eq!(floor_on(&three), 2);
+    assert_eq!(
+        activation_totals_route(&[(2, floor_on(&red_three)), (2, 0)]),
+        ActivationTotalsMethod::ZeroOneFloors
+    );
+    assert_eq!(
+        activation_totals_route(&[(2, floor_on(&three)), (2, 0)]),
+        ActivationTotalsMethod::CanonicalSearch
+    );
+    let seventeen: Vec<(u32, u32)> = (0..17).map(|i| (1 + i % 2, i % 2)).collect();
+    assert_eq!(
+        activation_totals_route(&seventeen),
+        ActivationTotalsMethod::ZeroOneFloors
+    );
+}
+
+/// CR 601.2f: reduction amounts can be enormous — a dynamic count saturates at
+/// `u32::MAX` — and the closed form only COMPARES their sums with the generic
+/// mana, so it must neither overflow nor wrap. `{5}` with a saturated floor-1
+/// reduction and a floor-0 −2 still reaches exactly `{0}` (floor-1 first) and
+/// `{1}` (floor-0 first); two saturated reductions of one floor sum past
+/// `u32::MAX` and still leave only `{0}`.
+#[test]
+fn activation_totals_survive_saturated_reduction_amounts() {
+    let totals = |steps: &[(u32, u32)]| -> Vec<u32> {
+        activation_totals_zero_one_floors(5, steps)
+            .into_iter()
+            .map(|(total, _)| total)
+            .collect()
+    };
+    assert_eq!(totals(&[(2, 0), (u32::MAX, 1)]), vec![0, 1]);
+    assert_eq!(
+        totals(&[(u32::MAX, 1), (u32::MAX, 1), (u32::MAX, 0)]),
+        vec![0]
+    );
+    assert_eq!(totals(&[(u32::MAX, 0), (u32::MAX, 0), (1, 1)]), vec![0]);
+    // The canonical search takes the same amounts without overflow.
+    let canonical: Vec<u32> =
+        activation_totals_canonical_search(5, &[(u32::MAX, 2), (u32::MAX, 2), (2, 0)])
+            .into_iter()
+            .map(|(total, _)| total)
+            .collect();
+    assert_eq!(canonical, vec![0, 2]);
+
+    // End to end through the analyzer: a saturated floor-1 and a floor-0 −2 on
+    // `{5}` is a real election between `{0}` and `{1}`.
+    let entry = |amount: u32, minimum_mana: u32, ordinal: u8| CostReductionEntry {
+        amount: ManaCost::generic(amount),
+        multiplier: 1,
+        reach: CostReductionReach::SpillsToGeneric,
+        provenance: ReductionProvenance::Static {
+            source: ObjectId(970),
+            ordinal,
+        },
+        display_name: format!("reducer {ordinal}"),
+        minimum_mana,
+    };
+    let snapshot = ActivationCostSnapshot {
+        base_cost: AbilityCost::Mana {
+            cost: ManaCost::generic(5),
+        },
+        raise_total: 0,
+        reductions: vec![entry(u32::MAX, 1, 0), entry(2, 0, 1)],
+        lock: crate::types::casting_costs::ActivationCostLock::Open {
+            point: Default::default(),
+        },
+    };
+    let outcomes = analyze_activation_cost_election(&snapshot).expect("two totals");
+    let offered: Vec<u32> = outcomes
+        .iter()
+        .map(|o| o.locked_cost.mana_value())
+        .collect();
+    assert_eq!(offered, vec![0, 1]);
+}
+
+/// CR 601.2b + CR 601.2f: the X lock acts on an `XAnnounced` carrier ONLY. A
+/// carrier whose open lock names any other point passes through the X
+/// announcement neither folded nor locked, its concrete `{X}` leg left in
+/// `pending.cost` for the later point to price (`Announcement` stands in for a
+/// later point here: it is the only other variant). The `XAnnounced` control
+/// folds and locks on the same pending activation.
+#[test]
+fn the_x_lock_passes_through_a_carrier_deferred_to_another_point() {
+    use crate::types::casting_costs::{ActivationCostLock, ActivationCostLockPoint};
+    let x_leg = ManaCost::Cost {
+        shards: vec![ManaCostShard::X],
+        generic: 3,
+    };
+    let pending_with = |point: ActivationCostLockPoint| {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_910),
+            PlayerId(0),
+            "X Activator".to_string(),
+            Zone::Battlefield,
+        );
+        let snapshot = ActivationCostSnapshot {
+            base_cost: AbilityCost::Mana {
+                cost: x_leg.clone(),
+            },
+            raise_total: 0,
+            reductions: vec![CostReductionEntry {
+                amount: ManaCost::generic(2),
+                multiplier: 1,
+                reach: CostReductionReach::SpillsToGeneric,
+                provenance: ReductionProvenance::Static {
+                    source: ObjectId(971),
+                    ordinal: 0,
+                },
+                display_name: "reducer".to_string(),
+                minimum_mana: 0,
+            }],
+            lock: ActivationCostLock::Open { point },
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.set_chosen_x_recursive(2);
+        let mut cost = x_leg.clone();
+        cost.concretize_x(2);
+        state.pending_cast = Some(Box::new(PendingCast::for_activation(
+            source,
+            ability,
+            cost,
+            0,
+            Some(Box::new(snapshot)),
+        )));
+        state
+    };
+
+    let mut state = pending_with(ActivationCostLockPoint::Announcement);
+    let before = state.pending_cast.clone();
+    assert!(
+        deferred_activation_mana_for_x(before.as_deref().unwrap(), 2).is_none(),
+        "only an XAnnounced carrier prices the X cap"
+    );
+    assert_eq!(
+        lock_activation_cost_at_x(&mut state, PlayerId(0), None).unwrap(),
+        None
+    );
+    assert_eq!(state.pending_cast, before, "neither folded nor locked");
+    assert_eq!(state.pending_cast.as_ref().unwrap().cost.mana_value(), 5);
+
+    let mut state = pending_with(ActivationCostLockPoint::XAnnounced);
+    assert_eq!(
+        deferred_activation_mana_for_x(state.pending_cast.as_deref().unwrap(), 2)
+            .map(|cost| cost.mana_value()),
+        Some(3)
+    );
+    assert_eq!(
+        lock_activation_cost_at_x(&mut state, PlayerId(0), None).unwrap(),
+        None
+    );
+    let pending = state.pending_cast.as_deref().unwrap();
+    assert_eq!(pending.cost.mana_value(), 3, "folded against X=2");
+    assert!(matches!(
+        pending.activation_cost_snapshot.as_ref().unwrap().lock,
+        ActivationCostLock::Locked {
+            point: ActivationCostLockPoint::XAnnounced,
+            order: None,
+        }
+    ));
+}
+
+/// Every open lock point round-trips, tagged with its point.
+#[test]
+fn an_open_lock_round_trips_its_point() {
+    use crate::types::casting_costs::{ActivationCostLock, ActivationCostLockPoint};
+    assert_eq!(
+        serde_json::to_string(&ActivationCostLock::Open {
+            point: ActivationCostLockPoint::XAnnounced
+        })
+        .unwrap(),
+        r#"{"type":"Open","data":{"point":"XAnnounced"}}"#
+    );
+    for point in [
+        ActivationCostLockPoint::Announcement,
+        ActivationCostLockPoint::XAnnounced,
+    ] {
+        let lock = ActivationCostLock::Open { point };
+        let json = serde_json::to_string(&lock).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ActivationCostLock>(&json).unwrap(),
+            lock
         );
     }
 }

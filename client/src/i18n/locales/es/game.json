@@ -2380,10 +2380,11 @@
     "reachSpills": "Puede reducir maná genérico",
     "multiplier": "×{{count}}",
     "confirmOrder": "Confirmar orden",
-    "cancelCast": "Cancelar el lanzamiento",
+    "cancel": "Cancelar",
     "moveUp": "Subir",
     "moveDown": "Bajar",
-    "reductionFallback": "Reducción {{number}}"
+    "reductionFallback": "Reducción {{number}}",
+    "floor": "No puede reducir el coste por debajo de {{count}} de maná"
   },
   "unhandledWaitingFor": {
     "title": "Se requiere una acción, pero falta la interfaz",

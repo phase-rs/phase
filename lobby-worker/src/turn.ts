@@ -15,6 +15,8 @@ export interface TurnEnv {
   TURN_TTL_SECONDS?: string;
   /** Comma-separated origin allowlist, or "*" (default) to allow any. */
   ALLOWED_ORIGINS?: string;
+  /** Per-IP throttle for the credential-mint endpoint. */
+  TURN_LIMIT?: RateLimit;
 }
 
 function corsHeaders(request: Request, env: TurnEnv): Record<string, string> {
@@ -55,6 +57,36 @@ function clientContext(request: Request): {
   return { colo, country, asn, customIdentifier: `${country}-AS${asn}` };
 }
 
+async function checkTurnRateLimit(
+  request: Request,
+  env: TurnEnv,
+  cors: Record<string, string>,
+): Promise<Response | null> {
+  // A deployment without the binding must not mint unthrottled credentials.
+  if (!env.TURN_LIMIT) {
+    console.error({ event: "turn_rate_limit_missing" });
+    return Response.json(
+      { error: "TURN rate limiter unavailable" },
+      { status: 503, headers: cors },
+    );
+  }
+
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  try {
+    const result = await env.TURN_LIMIT.limit({ key: `turn:${ip}` });
+    if (result.success) return null;
+    return Response.json({ error: "rate_limited" }, { status: 429, headers: cors });
+  } catch {
+    // A configured limiter failure must not fall through to an unbounded paid
+    // TURN API call. Fail closed while preserving the endpoint's CORS headers.
+    console.error({ event: "turn_rate_limit_failed" });
+    return Response.json(
+      { error: "TURN rate limiter unavailable" },
+      { status: 503, headers: cors },
+    );
+  }
+}
+
 export async function handleTurnCredentials(
   request: Request,
   env: TurnEnv,
@@ -78,6 +110,9 @@ export async function handleTurnCredentials(
       { status: 503, headers: cors },
     );
   }
+
+  const rateLimitRefusal = await checkTurnRateLimit(request, env, cors);
+  if (rateLimitRefusal) return rateLimitRefusal;
 
   const ttl = Number(env.TURN_TTL_SECONDS ?? "86400");
   const ctx = clientContext(request);

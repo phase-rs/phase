@@ -15,14 +15,14 @@ use crate::game::filter::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
-    CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
-    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
+    CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
+    ContinuousModification, ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
     DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
     ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption, StaticCondition,
     StaticDefinition, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypedFilter, UnloweredGuard, VoteSubject,
+    TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card::DraftEffect;
@@ -33,11 +33,11 @@ use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::prevention::has_each_time_event_relative_prevention;
 use super::oracle_nom::primitives::{
@@ -113,7 +113,7 @@ use super::oracle_replacement::{
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
     parse_bidirectional_damage_prevention, parse_oneshot_damage_replacement,
     parse_replacement_line, parse_replacement_line_ir, parse_whenever_you_cast_enters_with_outcome,
-    CastEntersWithOutcome,
+    parse_windowed_graveyard_redirect_install, CastEntersWithOutcome,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -2232,6 +2232,268 @@ fn retarget_creature_type_choice_dig_filters_in_ability_in_place(
     }
 }
 
+// --- CR 116.2a + CR 611.2c: deliver a coordinated graveyard play/cast grant ---
+
+/// CR 116.2a + CR 601.2a + CR 611.2c: "Until end of turn, you may play lands
+/// **and** cast spells from your graveyard" (Yawgmoth's Will, Gaea's Will, Magus
+/// of the Will) is ONE permission naming two actions.
+///
+/// **The parse gap.** `"cast "` starts a bare-`and` clause, so the sequence
+/// splitter separates the halves. The CAST half keeps the zone clause and lowers
+/// to `Effect::CastFromZone`; the LAND half is left as the bare fragment
+/// `"play lands"`, which the cast-effect guard refuses -- correctly, in
+/// isolation, because a zone-less "play lands" is not a grant.
+///
+/// **The delivery gap, which is the bigger one.** `Effect::CastFromZone` is not a
+/// channel any land-permission consumer reads. MEASURED: resolving the real
+/// Oracle text left `casting::graveyard_lands_playable_by_permission` returning
+/// `[]`, because `cast_from_zone::resolve` derives its batch from
+/// `ability.live_object_targets()` and `build_resolved_from_def` supplies
+/// `Vec::new()`. The channel the runtime actually consults is
+/// `StaticMode::GraveyardCastPermission`, read by
+/// `casting::graveyard_permission_sources`.
+///
+/// So this pass replaces BOTH halves with one `Effect::GenericEffect` that
+/// installs that permission for the stated window.
+///
+/// **Why one grant for both halves, bound to the player.** CR 611.2c: a
+/// resolution-created continuous effect that does not modify characteristics
+/// "modifies the rules of the game, so it can affect objects that weren't
+/// affected when that continuous effect began." Playing a land is a special
+/// action (CR 116.2a), not a characteristic, so this is that kind -- and it MUST
+/// be, for this card: the second sentence of Yawgmoth's Will ("If a card would be
+/// put into your graveyard from anywhere this turn, exile that card instead")
+/// only makes sense if the permission covers cards that arrive in the graveyard
+/// AFTER it resolved. A per-object stamp would miss every card milled, discarded
+/// or cast later in the turn.
+///
+/// The `affected` filter therefore stays class-wide and is re-evaluated live by
+/// the consumer, and the grant is bound to the GRANTEE rather than the source --
+/// Magus of the Will exiles itself as an activation cost, so a
+/// source-presence-bound grant would never exist.
+/// CR 116.2a: the bare land-play fragment the cast-effect guard leaves behind when
+/// the sequence splitter separates a coordinated "play lands and cast spells from
+/// `<zone>`" sentence.
+///
+/// Composed from nom axes rather than matched as a literal sentence, so the
+/// recognizer covers the PHRASE CLASS and not one spelling: an optional
+/// permission head ("you may "), the verb, and the land noun in either number.
+/// `all_consuming` keeps it boundary-safe — a longer sentence that merely STARTS
+/// with these words is not this fragment and must stay refused, which is what
+/// preserves strict failure for forms outside the implemented class.
+fn parse_refused_land_play_fragment(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(value(
+        (),
+        (
+            opt(tag("you may ")),
+            tag("play "),
+            alt((tag("lands"), tag("land"))),
+        ),
+    ))
+    .parse(input)
+}
+
+fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefinition) {
+    // The land half is what the cast-effect guard refused, so it arrives as an
+    // `Unimplemented` carrying the bare land-play phrase.
+    let head_is_refused_land_play = matches!(
+        &*def.effect,
+        Effect::Unimplemented { description, .. }
+            if description
+                .as_deref()
+                .is_some_and(|d| {
+                    // The fragment's case is not guaranteed, and the combinator
+                    // matches lowercase tags: normalize once here rather than
+                    // spelling every arm twice.
+                    nom_parse_lower(&d.to_lowercase(), parse_refused_land_play_fragment)
+                        .is_some()
+                })
+    );
+
+    if head_is_refused_land_play {
+        let recovered = def
+            .sub_ability
+            .as_deref()
+            .and_then(|sub| match &*sub.effect {
+                Effect::CastFromZone {
+                    target, duration, ..
+                } => duration
+                    .as_ref()
+                    // CR 611.2a: "If no duration is stated, it lasts until the end
+                    // of the game." A sibling that lowered WITHOUT a window did not
+                    // capture whatever the card printed, so copying that absence
+                    // would synthesize a PERMANENT permission -- strictly worse
+                    // than leaving the fragment refused. MEASURED: Shaman's Trance
+                    // prints "this turn" but its cast sibling carries
+                    // `duration: None`, and its filter is independently unfaithful
+                    // (`controller: You` against "other players' graveyards"), so
+                    // it declines here.
+                    .and_then(|window| {
+                        coordinated_graveyard_permission(target)
+                            .map(|permission| (window.clone(), permission))
+                    })
+                    .map(|(window, permission)| Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(TargetFilter::Controller)
+                            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                                definition: Box::new(permission),
+                            }])],
+                        // CR 611.2a: one stated window scopes both halves;
+                        // `layers::prune_end_of_turn_effects` ends it at cleanup
+                        // (CR 514.2).
+                        duration: Some(window),
+                        target: Some(TargetFilter::Controller),
+                        end_cost: None,
+                    }),
+                _ => None,
+            });
+
+        if let Some(effect) = recovered {
+            // Both halves are now carried by the single permission, so the cast
+            // sibling must not ALSO lower to its own `CastFromZone` -- that would
+            // leave two grants for one printed sentence.
+            //
+            // SPLICE, do not truncate. The cast node is removed and its OWN tail is
+            // reattached, because that tail can carry an INDEPENDENT printed clause.
+            //
+            // MEASURED on Magus of the Will, whose activated ability puts the whole
+            // card on one line: its cast sibling owns the following sentence's
+            // lowered replacement ("If a card would be put into your graveyard from
+            // anywhere this turn, exile that card instead") as its own
+            // `sub_ability`. Dropping the chain wholesale discarded that clause and
+            // raised two `swallowed-clause` warnings, while Yawgmoth's Will — which
+            // prints the same sentence on a SEPARATE line, so it lowers to a second
+            // top-level ability — was unaffected. The one-line arrival shape is the
+            // one that loses text, which is exactly the case a chain-truncating
+            // rewrite hides.
+            *def.effect = effect;
+            def.sub_ability = def
+                .sub_ability
+                .take()
+                .and_then(|cast_node| cast_node.sub_ability);
+            // CR 608.2d + CR 116.2a: the printed "you MAY play lands" is the
+            // permission being granted, NOT a choice the resolving spell offers.
+            //
+            // CR 608.2d scopes resolution-time optionality to choices a player
+            // "announces while applying the effect". This sorcery offers none: it
+            // unconditionally creates a continuous effect, and the "may" is
+            // exercised LATER, each time the player chooses to take the special
+            // action of playing a land (CR 116.2a) or to cast from the graveyard
+            // (CR 601.2a) while the window is open.
+            //
+            // The flag arrives here from the refused `"play lands"` head, whose
+            // upstream "you may ..." parse legitimately set it for a one-shot
+            // reading. Carrying it onto the recovered grant would make the engine
+            // prompt "do you want to do this?" as the spell resolves and, on a
+            // decline, install NO permission at all.
+            //
+            // MEASURED, and this is exactly how the whole delivery looked broken:
+            // `upfront_optional_gate` (`effects/mod.rs`) fired on `optional`,
+            // installed `WaitingFor::OptionalEffectChoice`, and returned BEFORE the
+            // effect dispatch — so the spell resolved to the graveyard with zero
+            // transient effects and `graveyard_lands_playable_by_permission`
+            // returned `[]`, while no error surfaced anywhere.
+            //
+            // All four CR 608.2d optionality fields are cleared together: leaving
+            // `optional_player` / `optional_for` set would re-route the same prompt
+            // to a different player rather than removing it.
+            def.optional = false;
+            def.optional_player = None;
+            def.optional_for = None;
+            def.optional_targeting = false;
+        }
+    }
+
+    if let Some(sub) = def.sub_ability.as_mut() {
+        deliver_coordinated_graveyard_permission_in_ability(sub);
+    }
+}
+
+/// CR 116.2a + CR 601.2a: build the two-part permission from the cast half of the
+/// sentence -- the land axis and the card axis under ONE grant, because the
+/// printed sentence is one permission naming two actions.
+///
+/// Returns `None` for any shape this pass does not model, so an unrecognized cast
+/// sibling leaves the refused fragment refused rather than inventing a grant.
+fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<StaticDefinition> {
+    let TargetFilter::Typed(typed) = cast_target else {
+        return None;
+    };
+    // A class-wide "cast spells from <zone>" lowers to the bare `Card` type axis.
+    // Anything narrower is a specific grant, not the sibling of a "play lands":
+    // permitting creature cards licenses nothing about playing LANDS from that
+    // zone (CR 115.1 -- a targeted permission names objects chosen on
+    // announcement and is not class-wide).
+    if typed.type_filters != vec![TypeFilter::Card] {
+        return None;
+    }
+    // CR 116.2a: the recovered half is a permission to PLAY A LAND, which without
+    // a zone anchor reads as "play lands from anywhere". Require the sibling to
+    // name the zone rather than copying an empty property list.
+    //
+    // FAILS CLOSED on any zone but the graveyard: this grant is delivered through
+    // `casting::graveyard_permission_sources`, which is graveyard-only. A
+    // Hand-anchored sibling (Sen Triplets, "that player's hand") has no consumer
+    // here, and its filter lowers with `controller: None` so it cannot express
+    // whose hand is meant even in principle -- emitting it would trade an honest
+    // unsupported gap for a grant the runtime ignores.
+    let graveyard_anchored = typed.properties.iter().any(|p| {
+        matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+                ..
+            }
+        )
+    });
+    if !graveyard_anchored {
+        return None;
+    }
+
+    let mut land = typed.clone();
+    land.type_filters = vec![TypeFilter::Land];
+
+    Some(
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            // CR 116.2a + CR 601.2a: `Play` is the WIDER mode --
+            // `graveyard_permission_play_mode_matches` admits a `Play` grant for a
+            // `Cast` query but not the reverse -- so one grant serves the land
+            // half (a special action) and the spell half (casting), which is what
+            // the single printed permission says.
+            play_mode: CardPlayMode::Play,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+        })
+        // CR 611.2c: class-wide and re-evaluated live, so cards that reach the
+        // graveyard later this turn are covered.
+        .affected(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(land),
+                TargetFilter::Typed(typed.clone()),
+            ],
+        })
+        // CR 113.6: the grant is consulted while its source sits in the graveyard
+        // (a resolved sorcery), so an empty `active_zones` -- which defaults to
+        // battlefield-only -- would make it invisible.
+        .active_zones(vec![Zone::Graveyard]),
+    )
+}
+
+/// CR 116.2a + CR 611.2c: entry point for
+/// [`deliver_coordinated_graveyard_permission_in_ability`].
+fn deliver_coordinated_graveyard_permission(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        deliver_coordinated_graveyard_permission_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            deliver_coordinated_graveyard_permission_in_ability(execute);
+        }
+    }
+}
+
 /// Retarget both filters on a spell-cast trigger atomically. An incomplete
 /// union walk rejects the relation application instead of retaining a partially
 /// rewritten trigger.
@@ -3749,6 +4011,10 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         &static_ids,
     );
     reconcile_host_bound_phase_outs(&mut result);
+    // CR 116.2a + CR 611.2c: deliver the coordinated "play lands and cast spells
+    // from your graveyard" grant through the permission channel the runtime
+    // actually reads.
+    deliver_coordinated_graveyard_permission(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
@@ -4972,9 +5238,15 @@ fn parse_normalized_oracle_ir(
             //    parses cannot perturb that, because `lower_ability_ir` takes no
             //    `ParseContext` and nothing under `oracle_effect/` carries
             //    interior mutability.
-            // 3. The predicate is invariant under the envelope:
-            //    `has_unimplemented` reads only `effect` and `sub_ability`, both
-            //    CR 608.2 resolution-tree fields, and the shell stamps neither.
+            // 3. The predicate is invariant under the envelope: `has_unimplemented`
+            //    reads `effect`, `sub_ability`, `else_ability`, and the nested
+            //    definitions carried inside the wrapper effects it enumerates
+            //    (`CreateDelayedTrigger`, `RollDie` results, the coin-flip
+            //    branches) — every one of them a CR 608.2 resolution-tree field.
+            //    The shell stamps NONE of them: it writes cost, cost_reduction,
+            //    activation restrictions and the other CR 602.1 envelope fields
+            //    only. So the pre-shell and post-shell lowerings still agree on
+            //    this predicate.
             //
             // Cost: one extra lowering per LEVEL-block activated line (two or
             // three rather than one or two). It is intrinsic, not laziness — the
@@ -7121,6 +7393,32 @@ fn parse_normalized_oracle_ir(
                 if level_consumed.contains(&next_i)
                     || preparsed_consumed.contains(&next_i)
                     || spacecraft_consumed.contains(&next_i)
+                    // CR 706.3b: a results-table row belongs to its paragraph's
+                    // die roll, never to the spell-resolution continuation. Stop
+                    // the loop AT the first row so the attach pass below starts
+                    // on row 1 and collects the whole table in one call; a loop
+                    // that swallows row 1 leaves the collector's cursor past it
+                    // and silently drops that row from the table.
+                    //
+                    // The parser IS the detector: this calls the SAME
+                    // `all_consuming` row grammar function
+                    // `parse_die_result_branches_ir` calls, so the loop and the
+                    // collector cannot disagree about what a ROW is.
+                    //
+                    // Bound of that claim, stated exactly: the collector applies
+                    // `strip_reminder_text` to the line before parsing it and
+                    // this guard does not, so the two can still disagree about a
+                    // row whose prefix is preceded by reminder text. No printed
+                    // card has one. What is shared is the row grammar itself, not
+                    // the whole pre-processing pipeline.
+                    //
+                    // The RAW line is passed, not a prepared one — the grammar
+                    // does its own `trim()`, and preparing a table row would
+                    // rewrite the very text being classified.
+                    || crate::parser::oracle_effect::imperative::try_parse_die_result_line(
+                        lines[next_i],
+                    )
+                    .is_some()
                     || parse_oracle_block(&lines, next_i).is_some()
                 {
                     break;
@@ -8139,6 +8437,21 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
              clause_text,
          }| {
             (reading == GuardReading::Event && !guard_owner(&def.effect, parent)).then(|| {
+                // Before gapping, attempt the whole-body graveyard-redirect
+                // authority (`parse_windowed_graveyard_redirect_install`): a
+                // chain-position "If <subject> would be put into <graveyard>
+                // ..., exile it instead" sentence (Magus of the Will's one-line
+                // activated body) never reaches the line-level replacement
+                // dispatcher, so without this attempt it gaps here while the
+                // identical sentence on its own line lowers. The authority's
+                // own mandatory grammar is the single recognition gate —
+                // anything outside the class still gaps below. (Sibling attempt
+                // serves the legacy `parse_effect_chain` path at
+                // `oracle_effect::lower_clause_ast`; a clause resolved there
+                // carries no mark here, so the populations are disjoint.)
+                if let Some(effect) = parse_windowed_graveyard_redirect_install(&clause_text) {
+                    return effect;
+                }
                 // CR 614.1a: nothing on the assembled tree consumes the body in the dropped
                 // guard's stead, so the whole "if <guard>, <body>" clause is recorded as one
                 // honest gap. The EVENT reading is the replacement reading, so the kind is
@@ -11589,15 +11902,44 @@ pub(super) fn lower_unsupported_node(
     def
 }
 
-/// Check if an AbilityDefinition (or its sub_ability chain) contains Unimplemented effects.
+/// Check if an `AbilityDefinition` contains `Unimplemented` effects anywhere the
+/// continuation gate can observe — its own effect, the definitions nested
+/// inside that effect, its `sub_ability` chain, or its `else_ability` branch.
+///
+/// CR 706.3b + coverage honesty: a parse failure nested inside a wrapper effect
+/// must be visible here. Reporting a chain clean because the failure hid under a
+/// delayed trigger or a die-result branch is a coverage-honesty defect — the
+/// card silently claims support it does not have. The measured live instance is
+/// Lae'zel's Acrobatics, whose swallowed `1—9` row lowered to
+/// `CreateDelayedTrigger { effect: Unimplemented { name: "1—9" } }`.
+///
+/// The `sub_ability` recursion is an `||` disjunct, NOT an early `return`: the
+/// previous body returned the sub-chain's verdict outright and therefore never
+/// consulted `else_ability` (or anything else) when a `sub_ability` was present
+/// and clean.
+///
+/// The nested-definition step delegates to [`Effect::for_each_nested_definition`]
+/// (`types/ability.rs`), the single authority for which effects carry a direct
+/// executable payload. It replaces a bounded enumeration that wildcarded
+/// `ChooseOneOf`, `SeparateIntoPiles`, `RevealFromHand` and `Vote` to `false`:
+/// a failure under any of those four was invisible to this gate, so a chain
+/// carrying one was reported clean. Because the visitor's match is exhaustive
+/// and wildcard-free, a newly added definition-carrying `Effect` variant is now
+/// a compile error there rather than a silent miss here.
 pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
     if matches!(*def.effect, Effect::Unimplemented { .. }) {
         return true;
     }
-    if let Some(ref sub) = def.sub_ability {
-        return has_unimplemented(sub);
-    }
-    false
+    // `||` rather than `|=`: once a nested failure is found the remaining
+    // payloads are not re-descended, which keeps this the same short-circuiting
+    // walk the `.any()`/`||` chain it replaced was.
+    let mut nested_has_unimplemented = false;
+    def.effect.for_each_nested_definition(&mut |_, nested| {
+        nested_has_unimplemented = nested_has_unimplemented || has_unimplemented(nested);
+    });
+    nested_has_unimplemented
+        || def.sub_ability.as_deref().is_some_and(has_unimplemented)
+        || def.else_ability.as_deref().is_some_and(has_unimplemented)
 }
 
 /// Parse an activated-ability effect chain with self-reference fallback.
@@ -11714,3 +12056,658 @@ mod tests;
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]
 mod pipeline_snapshot_tests;
+
+/// Row 1.J — the continuation gate's failure-recursion helper must see a parse
+/// failure nested inside a WRAPPER EFFECT, not only inside a `sub_ability` chain.
+///
+/// Every test here fails against the pre-change body, which was:
+/// ```ignore
+/// if matches!(*def.effect, Effect::Unimplemented { .. }) { return true; }
+/// if let Some(ref sub) = def.sub_ability { return has_unimplemented(sub); }
+/// false
+/// ```
+/// — it examined no wrapper payload at all, and its `sub_ability` arm was an
+/// early `return` that suppressed every later field.
+#[cfg(test)]
+mod has_unimplemented_wrapper_recursion_tests {
+    use super::has_unimplemented;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, DieResultBranch,
+        Effect, NestedDefinitionEdge, PileSource, PlayerFilter, PlayerScope, QuantityExpr,
+        TargetFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+    };
+    use crate::types::phase::Phase;
+
+    fn clean() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+        )
+    }
+
+    fn failure() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("test-gap", "an unparsed fragment"),
+        )
+    }
+
+    /// PAIRED POSITIVE REACH-GUARD (C1.4). Without this, a helper that returned
+    /// `true` unconditionally would pass every other test in this module.
+    #[test]
+    fn a_definition_with_no_failure_anywhere_still_reports_clean() {
+        let mut def = clean().sub_ability(clean());
+        def.else_ability = Some(Box::new(clean()));
+        let mut wrapped = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(clean()),
+                uses_tracked_set: true,
+            },
+        );
+        wrapped.else_ability = Some(Box::new(clean()));
+        assert!(!has_unimplemented(&def));
+        assert!(!has_unimplemented(&wrapped));
+    }
+
+    /// The MEASURED LIVE INSTANCE: Lae'zel's Acrobatics' swallowed `1—9` row
+    /// lowered to `CreateDelayedTrigger { effect: Unimplemented { .. } }`, and
+    /// the gate reported the whole chain clean.
+    #[test]
+    fn sees_a_failure_under_a_delayed_trigger() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(failure()),
+                uses_tracked_set: true,
+            },
+        );
+        assert!(
+            has_unimplemented(&def),
+            "a failure under CreateDelayedTrigger.effect must be visible to the \
+             continuation gate — this is the Lae'zel's Acrobatics instance"
+        );
+    }
+
+    /// CR 706.3a: a restored results-table row whose body could not be parsed
+    /// must keep the card honestly red rather than silently accepted.
+    #[test]
+    fn sees_a_failure_under_a_die_result_branch() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![
+                    DieResultBranch {
+                        min: 1,
+                        max: 9,
+                        effect: Box::new(clean()),
+                    },
+                    DieResultBranch {
+                        min: 10,
+                        max: 20,
+                        effect: Box::new(failure()),
+                    },
+                ],
+                modifier: None,
+            },
+        );
+        assert!(
+            has_unimplemented(&def),
+            "a failure in ANY results-table branch must be visible"
+        );
+    }
+
+    /// CR 705.1: the coin-flip branch shapes. Covered as one sibling cluster —
+    /// splitting it would leave the gate blind on a neighbouring variant.
+    #[test]
+    fn sees_a_failure_under_either_coin_flip_branch() {
+        let win_bad = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(failure())),
+                lose_effect: Some(Box::new(clean())),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let lose_bad = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: Some(Box::new(clean())),
+                lose_effect: Some(Box::new(failure())),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let until_lose_bad = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoinUntilLose {
+                win_effect: Box::new(failure()),
+            },
+        );
+        assert!(has_unimplemented(&win_bad), "win_effect branch");
+        assert!(has_unimplemented(&lose_bad), "lose_effect branch");
+        assert!(has_unimplemented(&until_lose_bad), "FlipCoinUntilLose");
+    }
+
+    /// The SECOND half of the C1.4 gap, and the easy one to miss: the old body
+    /// `return`ed the `sub_ability` verdict, so a CLEAN sub-chain masked a dirty
+    /// `else_ability` entirely.
+    #[test]
+    fn a_clean_sub_ability_no_longer_masks_a_dirty_else_branch() {
+        let mut def = clean().sub_ability(clean());
+        def.else_ability = Some(Box::new(failure()));
+        assert!(
+            has_unimplemented(&def),
+            "a clean sub_ability must not short-circuit the else_ability check"
+        );
+    }
+
+    /// SIBLING: the pre-existing `sub_ability` path is not regressed by the
+    /// conversion from an early `return` to an `||` chain.
+    #[test]
+    fn still_sees_a_failure_under_a_plain_sub_ability() {
+        assert!(has_unimplemented(&clean().sub_ability(failure())));
+        assert!(has_unimplemented(
+            &clean().sub_ability(clean().sub_ability(failure()))
+        ));
+        assert!(has_unimplemented(&failure()));
+    }
+
+    /// The bound that DEFERRED(phase 4) was holding is GONE, and its absence is
+    /// asserted rather than merely commented.
+    ///
+    /// These four wrapper shapes — `ChooseOneOf`, `SeparateIntoPiles`,
+    /// `RevealFromHand` and `Vote` — were wildcarded to `false` by the bounded
+    /// enumeration this replaced, so a parse failure under any of them was
+    /// invisible to the continuation gate and the chain was reported clean.
+    /// This is the assertion the superseded
+    /// `the_deferred_wrapper_shapes_are_still_invisible_as_documented` said
+    /// "is expected to flip and must be updated deliberately".
+    #[test]
+    fn the_previously_invisible_wrapper_shapes_are_now_seen() {
+        let choose_one_of = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![failure()],
+            },
+        );
+        assert!(has_unimplemented(&choose_one_of), "ChooseOneOf branch");
+
+        let separate_chosen = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(failure()),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: None,
+            },
+        );
+        assert!(
+            has_unimplemented(&separate_chosen),
+            "SeparateIntoPiles chosen pile"
+        );
+
+        let separate_unchosen = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(clean()),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: Some(Box::new(failure())),
+            },
+        );
+        assert!(
+            has_unimplemented(&separate_unchosen),
+            "SeparateIntoPiles unchosen pile"
+        );
+
+        let reveal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(Box::new(failure())),
+            },
+        );
+        assert!(has_unimplemented(&reveal), "RevealFromHand on_decline");
+
+        let vote_per_choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Vote {
+                choices: vec!["choice one".into()],
+                per_choice_effect: vec![Box::new(failure())],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Named,
+                visibility: VoteVisibility::Open,
+            },
+        );
+        assert!(has_unimplemented(&vote_per_choice), "Vote per-choice");
+
+        let vote_object_outcome = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Vote {
+                choices: vec![],
+                per_choice_effect: vec![],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Objects {
+                    candidate_filter: TargetFilter::Any,
+                    outcome_template: Box::new(failure()),
+                },
+                visibility: VoteVisibility::Open,
+            },
+        );
+        assert!(
+            has_unimplemented(&vote_object_outcome),
+            "Vote object outcome template"
+        );
+    }
+
+    /// PAIRED NEGATIVE for the four newly-visible shapes: the gate got wider,
+    /// not indiscriminate. A clean payload under each wrapper still reports
+    /// clean, so `the_previously_invisible_wrapper_shapes_are_now_seen` is
+    /// measuring the nested failure rather than the wrapper's mere presence.
+    #[test]
+    fn the_newly_visible_wrapper_shapes_still_report_clean_when_their_payload_is() {
+        let choose_one_of = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![clean(), clean()],
+            },
+        );
+        assert!(!has_unimplemented(&choose_one_of), "ChooseOneOf branch");
+
+        let separate = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(clean()),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: Some(Box::new(clean())),
+            },
+        );
+        assert!(!has_unimplemented(&separate), "SeparateIntoPiles");
+
+        let reveal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(Box::new(clean())),
+            },
+        );
+        assert!(!has_unimplemented(&reveal), "RevealFromHand on_decline");
+
+        let vote = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Vote {
+                choices: vec!["choice one".into()],
+                per_choice_effect: vec![Box::new(clean())],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Objects {
+                    candidate_filter: TargetFilter::Any,
+                    outcome_template: Box::new(clean()),
+                },
+                visibility: VoteVisibility::Open,
+            },
+        );
+        assert!(!has_unimplemented(&vote), "Vote");
+    }
+
+    /// EDGE-SET GUARD. Pins the exact sequence
+    /// [`Effect::for_each_nested_definition`] emits, so the visitor cannot
+    /// silently drift from the consumers that depend on its completeness —
+    /// including `game/coverage.rs`, whose `DirectEffectPayloadEdge` traversal
+    /// covers this same payload set.
+    ///
+    /// A DROPPED edge here is the exact defect this whole change exists to
+    /// remove: it makes a nested parse failure invisible again, and the card
+    /// silently reclaims support it does not have. The visitor's match is
+    /// wildcard-free so a NEW definition-carrying variant is a compile error;
+    /// this test covers the other direction, an edge quietly stopping being
+    /// emitted for a variant that still carries a payload.
+    #[test]
+    fn the_nested_definition_edge_set_is_pinned() {
+        let payload = |name: &str| {
+            Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented(name, format!("unsupported {name}")),
+            ))
+        };
+        let effects = vec![
+            Effect::Vote {
+                choices: vec!["one".into(), "two".into()],
+                per_choice_effect: vec![payload("vote_one"), payload("vote_two")],
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Objects {
+                    candidate_filter: TargetFilter::Any,
+                    outcome_template: payload("vote_outcome"),
+                },
+                visibility: VoteVisibility::Open,
+            },
+            Effect::SeparateIntoPiles {
+                partition_subject: VoterScope::EachOpponent,
+                object_filter: TargetFilter::Any,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: payload("chosen"),
+                pile_source: PileSource::Battlefield,
+                unchosen_pile_effect: Some(payload("unchosen")),
+            },
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(payload("decline")),
+            },
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: payload("delayed"),
+                uses_tracked_set: false,
+            },
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 6,
+                results: vec![
+                    DieResultBranch {
+                        min: 1,
+                        max: 3,
+                        effect: payload("row_low"),
+                    },
+                    DieResultBranch {
+                        min: 4,
+                        max: 6,
+                        effect: payload("row_high"),
+                    },
+                ],
+                modifier: None,
+            },
+            Effect::FlipCoin {
+                win_effect: Some(payload("flip_win")),
+                lose_effect: Some(payload("flip_lose")),
+                flipper: TargetFilter::Controller,
+            },
+            Effect::FlipCoins {
+                count: QuantityExpr::Fixed { value: 2 },
+                win_effect: Some(payload("flips_win")),
+                lose_effect: Some(payload("flips_lose")),
+                flipper: TargetFilter::Controller,
+            },
+            Effect::FlipCoinUntilLose {
+                win_effect: payload("until_lose_win"),
+            },
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![*payload("branch_one"), *payload("branch_two")],
+            },
+        ];
+
+        let mut edges = Vec::new();
+        for effect in &effects {
+            effect.for_each_nested_definition(&mut |edge, definition| {
+                assert!(
+                    matches!(*definition.effect, Effect::Unimplemented { .. }),
+                    "every payload in this matrix is an unimplemented leaf"
+                );
+                edges.push(edge);
+            });
+        }
+
+        assert_eq!(
+            edges,
+            vec![
+                NestedDefinitionEdge::VotePerChoice,
+                NestedDefinitionEdge::VotePerChoice,
+                NestedDefinitionEdge::VoteObjectOutcome,
+                NestedDefinitionEdge::SeparateIntoPilesChosen,
+                NestedDefinitionEdge::SeparateIntoPilesUnchosen,
+                NestedDefinitionEdge::RevealFromHandOnDecline,
+                NestedDefinitionEdge::CreateDelayedTriggerEffect,
+                NestedDefinitionEdge::RollDieResult,
+                NestedDefinitionEdge::RollDieResult,
+                NestedDefinitionEdge::FlipCoinWin,
+                NestedDefinitionEdge::FlipCoinLose,
+                NestedDefinitionEdge::FlipCoinsWin,
+                NestedDefinitionEdge::FlipCoinsLose,
+                NestedDefinitionEdge::FlipCoinUntilLoseWin,
+                NestedDefinitionEdge::ChooseOneOfBranch,
+                NestedDefinitionEdge::ChooseOneOfBranch,
+            ]
+        );
+
+        // Every effect in the matrix reaches the gate through the visitor.
+        for effect in &effects {
+            let def = AbilityDefinition::new(AbilityKind::Spell, effect.clone());
+            assert!(has_unimplemented(&def));
+        }
+    }
+
+    /// CONTROL for the edge-set guard: a carrier whose optional payloads are all
+    /// absent emits nothing and reports clean, so the pinned sequence above is
+    /// driven by the payloads present rather than by the carrier variants.
+    #[test]
+    fn a_carrier_with_no_payload_emits_no_edge() {
+        let empty = Effect::FlipCoin {
+            win_effect: None,
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        };
+        let mut edges = Vec::new();
+        empty.for_each_nested_definition(&mut |edge, _| edges.push(edge));
+        assert!(edges.is_empty());
+        assert!(!has_unimplemented(&AbilityDefinition::new(
+            AbilityKind::Spell,
+            empty
+        )));
+    }
+}
+
+/// Row 1.B' / claim C1.3 — the ATTACH-PREDICATE SEAM, measured directly.
+///
+/// Finding P3: the exported `results` vector is written by the attach pass, so a
+/// post-attach export CANNOT decide whether the pre-attach predicate fired. This
+/// module therefore calls the predicate on the IR the production path hands it,
+/// rather than inferring the verdict from card-data.
+///
+/// With the continuation guard in place, the spell-resolution loop breaks AT the
+/// first results-table row, so the `effect_line` the attach site at `oracle.rs`
+/// sees is exactly the card's HEADER LINE — which is what each fixture below
+/// reconstructs.
+///
+/// VERDICT THIS PINS: the guard restores the predicate's own precondition for
+/// every in-scope spell card, so `oracle_ir/effect_chain.rs` and
+/// `oracle_special.rs` are NOT widened by this phase (row 1.B' branch (iii)).
+/// If a future change made a header line lower with a partially-populated
+/// `results`, the predicate would silently return `false`, NO table would attach,
+/// and these assertions are what fail.
+#[cfg(test)]
+mod die_table_attach_seam_tests {
+    use crate::parser::oracle_effect::parse_ability_ir_standalone;
+    use crate::types::ability::{AbilityKind, Effect};
+
+    /// Every in-scope SPELL card's header line, exactly as the continuation loop
+    /// hands it to the attach site once the guard has stopped at row 1.
+    const SPELL_HEADERS: [(&str, &str); 3] = [
+        (
+            "Lae'zel's Acrobatics",
+            "Exile all nontoken creatures you control, then roll a d20.",
+        ),
+        (
+            "Overwhelming Encounter",
+            "Creatures you control gain vigilance and trample until end of turn. Roll a d20.",
+        ),
+        (
+            "Farideh's Fireball",
+            "Farideh's Fireball deals 5 damage to target creature or planeswalker. Roll a d20.",
+        ),
+    ];
+
+    /// (iii) The node reaching the writer carries NO partial `results`, so the
+    /// `results.is_empty()` precondition holds and the predicate fires.
+    #[test]
+    fn the_attach_predicate_fires_on_every_in_scope_spell_header() {
+        for (card, header) in SPELL_HEADERS {
+            let ir = parse_ability_ir_standalone(header, AbilityKind::Spell);
+            let roll_results: Vec<usize> = ir
+                .body
+                .clauses
+                .iter()
+                .filter_map(|clause| match &clause.parsed.effect {
+                    Effect::RollDie { results, .. } => Some(results.len()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                roll_results,
+                vec![0],
+                "{card}: the header line must lower to exactly one RollDie \
+                 carrying an EMPTY results vector — a partial table here is the \
+                 row 1.B' trigger that would require widening the predicate"
+            );
+            assert!(
+                ir.has_result_table_roll_die(),
+                "{card}: the attach predicate must fire, or no table attaches \
+                 and the printed rows are lost"
+            );
+        }
+    }
+
+    /// SIBLING / HOSTILE (row 1.B' branch (ii)'s guard, asserted even though the
+    /// widening did NOT fire): a roll node whose table is ALREADY attached must
+    /// still be REFUSED, so the predicate never becomes an unconditional accept.
+    ///
+    /// FIRST PRODUCTION BRANCH REACHED: `results.is_empty()` inside
+    /// `has_result_table_roll_die`, evaluating to `false`.
+    #[test]
+    fn the_attach_predicate_refuses_a_roll_whose_table_is_already_attached() {
+        use crate::types::ability::{AbilityDefinition, DieResultBranch, TargetFilter};
+
+        let mut ir = parse_ability_ir_standalone(
+            "Exile all nontoken creatures you control, then roll a d20.",
+            AbilityKind::Spell,
+        );
+        // PAIRED POSITIVE REACH-GUARD: with an empty table the node IS claimable,
+        // so the refusal below is selective rather than inert.
+        assert!(
+            ir.has_result_table_roll_die(),
+            "reach-guard: a roll with no attached table must be claimable"
+        );
+
+        // Populate the table, exactly as the writer would have.
+        for clause in &mut ir.body.clauses {
+            if let Effect::RollDie { results, .. } = &mut clause.parsed.effect {
+                results.push(DieResultBranch {
+                    min: 1,
+                    max: 20,
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Shuffle {
+                            target: TargetFilter::Controller,
+                        },
+                    )),
+                });
+            }
+        }
+        assert!(
+            !ir.has_result_table_roll_die(),
+            "a roll whose table is ALREADY attached must still be refused — \
+             otherwise the predicate is an unconditional accept and a second \
+             table could be stapled onto the same roll"
+        );
+    }
+
+    /// Druid of the Emerald Grove is a TRIGGER, so it reaches the P-D path whose
+    /// predicate (`has_terminal_roll_die`) carries NO emptiness requirement. Its
+    /// rows were never lost to the predicate — they were lost because the row
+    /// GRAMMAR declined the "9 or less" wording. Pinning that keeps the two
+    /// fixes separately attributable.
+    #[test]
+    fn the_druid_row_loss_is_attributable_to_the_row_grammar_not_the_predicate() {
+        use crate::parser::oracle_effect::imperative::try_parse_die_result_line;
+        assert!(
+            try_parse_die_result_line("9 or less | Put those cards into your hand, then shuffle.")
+                .is_some(),
+            "the row grammar — not the attach predicate — is what fixes Druid"
+        );
+    }
+}
+
+/// Row 1.D — a results-table row whose body genuinely cannot be parsed must
+/// surface an HONEST failure marker rather than vanishing, and it must do so on
+/// the PRODUCTION path.
+///
+/// The `has_unimplemented` tests elsewhere in this file hand-build a `RollDie`
+/// AST, which proves the gate can SEE such a marker but not that the row
+/// collector ever PRODUCES one. This module drives the real collector
+/// (`parse_die_result_branches_ir` → `parse_ability_ir_standalone`), so the
+/// marker path is actually exercised end to end.
+#[cfg(test)]
+mod die_result_row_failure_marker_tests {
+    use super::has_unimplemented;
+    use crate::parser::oracle_effect::lower_ability_ir;
+    use crate::parser::oracle_special::parse_die_result_branches_ir;
+    use crate::types::ability::{AbilityKind, Effect};
+
+    /// A synthetic two-row table: row 1 is ordinary, row 2's body is prose no
+    /// effect parser claims. Both rows must survive — one as a real effect, one
+    /// as an honest marker.
+    const LINES: [&str; 2] = [
+        "1—9 | Draw a card.",
+        "10—20 | Zyzzyx the ineffable quorbulates prismatically.",
+    ];
+
+    #[test]
+    fn an_unparseable_row_body_surfaces_a_marker_instead_of_vanishing() {
+        let (branches, next_line) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell);
+        // A row that VANISHES is worse than a row that fails: the table would
+        // silently shrink and the printed instruction would be unrecoverable.
+        assert_eq!(branches.len(), 2, "both printed rows must be collected");
+        assert_eq!(next_line, 2, "the collector must consume both rows");
+        assert_eq!((branches[0].min, branches[0].max), (1, 9));
+        assert_eq!((branches[1].min, branches[1].max), (10, 20));
+
+        let unparseable = lower_ability_ir(&branches[1].effect);
+        assert!(
+            matches!(unparseable.effect.as_ref(), Effect::Unimplemented { .. }),
+            "the unparseable row body must lower to an honest failure marker, \
+             got {:?}",
+            unparseable.effect
+        );
+        // The marker must be visible to the continuation gate, or the card would
+        // still advertise support it does not have.
+        assert!(
+            has_unimplemented(&unparseable),
+            "the marker must be observable by the acceptance gate"
+        );
+    }
+
+    /// PAIRED POSITIVE REACH-GUARD: the parseable row IN THE SAME TABLE attaches
+    /// a real effect. Without it, a collector that marked every row would pass
+    /// the assertion above while being completely inert.
+    #[test]
+    fn the_sibling_row_in_the_same_table_still_carries_a_real_effect() {
+        let (branches, _) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell);
+        let parseable = lower_ability_ir(&branches[0].effect);
+        assert!(
+            matches!(parseable.effect.as_ref(), Effect::Draw { .. }),
+            "the ordinary row must still lower to its real effect, got {:?}",
+            parseable.effect
+        );
+        assert!(!has_unimplemented(&parseable));
+    }
+}

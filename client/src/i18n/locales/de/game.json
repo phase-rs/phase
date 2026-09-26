@@ -2380,10 +2380,11 @@
     "reachSpills": "Kann generisches Mana reduzieren",
     "multiplier": "×{{count}}",
     "confirmOrder": "Reihenfolge bestätigen",
-    "cancelCast": "Zaubern abbrechen",
+    "cancel": "Abbrechen",
     "moveUp": "Nach oben verschieben",
     "moveDown": "Nach unten verschieben",
-    "reductionFallback": "Reduzierung {{number}}"
+    "reductionFallback": "Reduzierung {{number}}",
+    "floor": "Kann die Kosten nicht unter {{count}} Mana senken"
   },
   "unhandledWaitingFor": {
     "title": "Aktion erforderlich, aber UI fehlt",

@@ -15735,6 +15735,7 @@ mod tests {
                 "OptionalEffectChoice (CR 603.5 + CR 608.2d)",
                 WaitingFor::OptionalEffectChoice {
                     player: PlayerId(0),
+                    decision_subject_id: None,
                     source_id: on_board[0],
                     description: None,
                     may_trigger_key: None,

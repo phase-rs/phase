@@ -1100,6 +1100,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "is_false")]
     pub foretold: bool,
 
+    /// CR 406.6 + CR 607.2b + CR 608.2c: The player who performed the exile
+    /// that put this card into exile — the instruction's acting player, which
+    /// is not necessarily the card's owner. Read by "cards *they* exiled with
+    /// ~" permissions (`ExileCastGrantee::EachPlayerOwnExiles`). `None` when
+    /// the card is not in exile or its exile was not attributed; cleared when
+    /// the card leaves exile (CR 400.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exiled_by: Option<PlayerId>,
+
     /// Choices made as this permanent entered (e.g., "choose a color").
     /// Persists for the object's lifetime on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1523,6 +1532,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         casting_options: _,
         casting_permissions: _,
         foretold: _,
+        exiled_by: _,
         chosen_attributes: _,
         goaded_by: _,
         detained_by: _,
@@ -2079,10 +2089,11 @@ impl GameObject {
                         // and an effect) reach here. A quoted body that instead
                         // reads as a STATIC (CR 113.3d) but was misclassified by
                         // `classify_quoted_inner`'s spell/activated fallback --
-                        // Agent of Raffine's "You may spend mana as though it
-                        // were mana of any color to cast this spell.", a
-                        // `GenericEffect`-wrapped static smuggled in as a
-                        // costless spell-kind body -- never reaches this arm:
+                        // a `GenericEffect`-wrapped static smuggled in as a
+                        // costless spell-kind body (Agent of Raffine's "You may
+                        // spend mana as though it were mana of any color to cast
+                        // this spell." used to be one; it is now the standalone
+                        // concession gap) -- never reaches this arm:
                         // `PerpetualGrantModification::try_from`
                         // (`types/ability.rs`) rejects that shape upstream,
                         // since this installer has no step that would extract
@@ -2691,6 +2702,7 @@ impl GameObject {
             casting_options: Vec::new(),
             casting_permissions: Vec::new(),
             foretold: false,
+            exiled_by: None,
             chosen_attributes: Vec::new(),
             goaded_by: std::collections::HashSet::new(),
             detained_by: std::collections::HashSet::new(),

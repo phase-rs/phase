@@ -280,6 +280,7 @@ pub(crate) fn handle_select_modes(
             .unwrap_or(controller);
         pending_sel.activation_cost = pending.activation_cost;
         pending_sel.activation_ability_index = pending.activation_ability_index;
+        pending_sel.activation_cost_snapshot = pending.activation_cost_snapshot;
         pending_sel.pending_loyalty_activation_player = pending.pending_loyalty_activation_player;
         pending_sel.activation_residual = pending.activation_residual;
         pending_sel.activation_target_selection = pending.activation_target_selection;

@@ -1042,7 +1042,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::HideawayConceal { target } => {
+        Effect::HideawayConceal { target, grantee: _ } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
@@ -1298,6 +1298,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             count,
             position: _,
             face_down: _,
+            actor: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
@@ -2342,7 +2343,13 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        QuantityRef::TargetZoneCardCount { zone: _ } => Axes::NONE,
+        // `binding` selects which announced choice the count reads; it reads
+        // no game state itself, so the axis verdict is unchanged.
+        QuantityRef::TargetZoneCardCount {
+            zone: _,
+            scope: _,
+            binding: _,
+        } => Axes::NONE,
         QuantityRef::Devotion { .. } => Axes {
             event: false,
             sibling: true,
@@ -4150,6 +4157,9 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes {
         Duration::WhileHostOnBattlefield => Axes::NONE,
         Duration::UntilSourceExilesAnotherCard => Axes::NONE,
         Duration::UntilOpponentBecomesMonarch => Axes::NONE,
+        // CR 611.2a: the event is a trigger description, scanned as the
+        // `WhenNextEvent` delayed-trigger payload is.
+        Duration::UntilEvent { event } => scan_trigger_definition(event, mode),
         Duration::UntilNextStepOf { player, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_scope(player));
@@ -4261,7 +4271,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         },
         // CR 508.6: turn-history projection over the cleanup-time attack snapshot;
         // mirrors `SpellCastWithVariantThisTurn` (projected, not event/sibling).
-        StaticCondition::AnyPlayerAttackedYouLastTurn => Axes {
+        StaticCondition::AnyPlayerAttackedYouLastTurn { .. } => Axes {
             event: false,
             sibling: false,
             projected: true,
@@ -5078,6 +5088,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         // and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        face_down_in_exile: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);

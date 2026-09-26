@@ -10,16 +10,17 @@
 //! - **linking it to the source** in the persistent `exile_links` pool
 //!   (CR 607.2a / CR 406.6) so the card's companion "you may play the exiled
 //!   card …" ability (`TargetFilter::ExiledBySource`) can later play it, and so
-//!   `visibility.rs` grants the source's controller the CR 702.75a
-//!   "may look at this card in the exile zone" permission.
+//!   `visibility.rs` lets the link's live rule and its CR 406.3 latch of every
+//!   player once admitted look at the card.
 //!
 //! This is a continuation step, never announced as a targeted effect: its target
 //! is `TargetFilter::ParentTarget`, inherited from the `Dig` continuation.
 
+use crate::game::effects::grant_permission;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, LookGrant};
 use crate::types::zones::Zone;
 
 /// CR 702.75a: Conceal the just-exiled card — turn it face down and link it to
@@ -29,7 +30,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let Effect::HideawayConceal { target } = &ability.effect else {
+    let Effect::HideawayConceal { target, grantee } = &ability.effect else {
         return Err(EffectError::MissingParam("HideawayConceal".to_string()));
     };
 
@@ -43,17 +44,20 @@ pub fn resolve(
             Some(obj) if obj.zone == Zone::Exile => obj.face_down = true,
             _ => continue,
         }
-        // CR 607.2a + CR 406.6 + CR 702.75a: link the exiled card to the source
-        // with the look-permission kind. Like a plain tracked link it stays
-        // discoverable by the kind-agnostic `ExiledBySource` companion ability,
-        // but additionally grants the source's controller the "may look at this
-        // card in the exile zone" permission keyed in `visibility.rs` — without
-        // exposing other face-down `TrackedBySource` exiles (Bomat Courier, etc.).
-        crate::game::exile_links::push_with_kind(
+        // CR 406.3 + CR 608.2c: the conceal's controller was instructed to look,
+        // and with no grantee the source's controller may too (CR 702.75a).
+        let grant = match grantee {
+            Some(grantee) => LookGrant::Player {
+                player: grant_permission::resolve_grantee(state, ability, *grantee, obj_id),
+            },
+            None => LookGrant::SourceController,
+        };
+        crate::game::exile_links::push_look_link(
             state,
             obj_id,
             ability.source_id,
-            crate::types::game_state::ExileLinkKind::HideawayLookable,
+            grant,
+            ability.controller,
         );
     }
 

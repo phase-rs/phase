@@ -1,5 +1,20 @@
 import type * as DraftWasm from "@wasm/draft";
 import type { MatchConfig } from "./types";
+import type {
+  LlmDraftOutcome,
+  LlmDraftPickRequest,
+} from "../services/llm/types";
+
+/** One seat's LLM reply, handed back to the engine to resolve into a pick. */
+export interface LlmDraftResponsePayload {
+  seat: number;
+  fingerprint: string;
+  provider: string;
+  /** HTTP status, so the engine can refuse a non-2xx reply whatever its body
+   *  looks like. */
+  status: number;
+  body: string;
+}
 
 // ── Types (mirror Rust serde output from draft-core) ────────────────────
 
@@ -902,6 +917,40 @@ export class DraftEngineOperationLease {
 
   submitPick(cardInstanceId: string): DraftPlayerView {
     return this.wasm.submit_pick(cardInstanceId) as DraftPlayerView;
+  }
+
+  /**
+   * Engine-authored LLM pick requests for this pod's eligible bot seats.
+   *
+   * Takes no seat list: which seats an LLM may draft for is decided by the
+   * draft engine from its own roster, so the display layer never names one.
+   * Read-only — no pick is applied and no session state changes.
+   */
+  buildLlmDraftPickRequests(
+    endpointJson: string,
+    setNames: Record<string, string>,
+  ): LlmDraftPickRequest[] {
+    return this.wasm.buildLlmDraftPickRequests(
+      endpointJson,
+      JSON.stringify(setNames),
+    ) as LlmDraftPickRequest[];
+  }
+
+  /**
+   * Apply the human's pick, resolving each LLM seat's pick from its response.
+   *
+   * Per-seat fallback is the engine's: a response it cannot decode, or one
+   * whose pack has moved on, leaves that seat to the heuristic bot in the same
+   * pass. The pick always completes.
+   */
+  submitPickWithLlmBotPicks(
+    cardInstanceId: string,
+    responses: LlmDraftResponsePayload[],
+  ): { view: DraftPlayerView; llmOutcomes: LlmDraftOutcome[] } {
+    return this.wasm.submitPickWithLlmBotPicks(
+      cardInstanceId,
+      JSON.stringify(responses),
+    ) as { view: DraftPlayerView; llmOutcomes: LlmDraftOutcome[] };
   }
 
   submitPickWithDraftEffect(

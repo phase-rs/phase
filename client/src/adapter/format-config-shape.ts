@@ -99,7 +99,8 @@ function isCommandZoneMode(value: unknown): value is CommandZoneMode {
     && (enabled.eligibility_rule === "Standard"
       || enabled.eligibility_rule === "TinyLeaders"
       || enabled.eligibility_rule === "OathbreakerSignatureSpell"
-      || enabled.eligibility_rule === "BrawlColorIdentity")
+      || enabled.eligibility_rule === "BrawlColorIdentity"
+      || enabled.eligibility_rule === "FreeformAnyCastableCard")
   );
 }
 

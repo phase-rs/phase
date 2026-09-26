@@ -32,7 +32,9 @@ use engine::types::ability::{
     Effect, ManaContribution, ManaProduction, SacrificeCost, StaticDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::casting_costs::{CostReductionEntry, CostReductionOutcome, ReductionProvenance};
+use engine::types::casting_costs::{
+    CostReductionElection, CostReductionEntry, CostReductionOutcome, ReductionProvenance,
+};
 use engine::types::game_state::{CastPaymentMode, PendingCast, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -766,6 +768,7 @@ fn the_new_wire_shapes_round_trip_and_old_pending_casts_still_parse() {
             ordinal: 1,
         },
         display_name: "Morophon, the Boundless".to_string(),
+        minimum_mana: 0,
     };
     let encoded = serde_json::to_string(&entry).expect("an entry must serialize");
     let decoded: CostReductionEntry =
@@ -777,6 +780,11 @@ fn the_new_wire_shapes_round_trip_and_old_pending_casts_still_parse() {
         ReductionProvenance::Affinity,
         ReductionProvenance::Undaunted,
         ReductionProvenance::PendingOneShot { index: 3 },
+        ReductionProvenance::AbilityCostRider,
+        ReductionProvenance::TransientEffect {
+            effect: 41,
+            ordinal: 2,
+        },
     ] {
         let encoded = serde_json::to_string(&provenance).expect("provenance serializes");
         let decoded: ReductionProvenance =
@@ -825,6 +833,93 @@ fn the_new_wire_shapes_round_trip_and_old_pending_casts_still_parse() {
         parsed.cost_reduction_election.is_none(),
         "the additive field must default to absent"
     );
+}
+
+/// The four spell-side cost-election shapes, frozen as protocol v78 wrote them.
+/// Captured at upstream `9168c9f87`, before the activation election existed, so
+/// that adding an activation-only field (a reduction floor) can be proven NOT
+/// to change a single byte of any spell's frames. Byte equality, not a
+/// round-trip: a round-trip would pass even if every spell frame grew a key.
+const FROZEN_V78_ENTRIES: &str = r#"[{"amount":{"type":"Cost","shards":["White"],"generic":0},"multiplier":1,"reach":"ColoredManaOnly","provenance":{"type":"Static","data":{"source":7,"ordinal":0}},"display_name":"Morophon, the Boundless"},{"amount":{"type":"Cost","shards":["White"],"generic":1},"multiplier":2,"provenance":{"type":"Defiler"},"display_name":"Defiler of Faith"}]"#;
+const FROZEN_V78_OUTCOME: &str = r#"{"order":[1,0],"hybrid_announcement":["Green"],"locked_cost":{"type":"Cost","shards":["Green"],"generic":0}}"#;
+const FROZEN_V78_ELECTION: &str =
+    r#"{"order":[{"type":"Defiler"},{"type":"Static","data":{"source":7,"ordinal":0}}]}"#;
+
+#[test]
+fn spell_cost_election_frames_are_byte_identical_to_v78() {
+    let entries = vec![
+        CostReductionEntry {
+            amount: white(),
+            multiplier: 1,
+            reach: CostReductionReach::ColoredManaOnly,
+            provenance: ReductionProvenance::Static {
+                source: ObjectId(7),
+                ordinal: 0,
+            },
+            display_name: "Morophon, the Boundless".to_string(),
+            minimum_mana: 0,
+        },
+        CostReductionEntry {
+            amount: one_white(),
+            multiplier: 2,
+            reach: CostReductionReach::SpillsToGeneric,
+            provenance: ReductionProvenance::Defiler,
+            display_name: "Defiler of Faith".to_string(),
+            minimum_mana: 0,
+        },
+    ];
+    let outcome = CostReductionOutcome {
+        order: vec![1, 0],
+        hybrid_announcement: vec![ManaCostShard::Green],
+        locked_cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        },
+    };
+    let election = CostReductionElection {
+        order: vec![
+            ReductionProvenance::Defiler,
+            ReductionProvenance::Static {
+                source: ObjectId(7),
+                ordinal: 0,
+            },
+        ],
+        hybrid_announcement: vec![],
+    };
+
+    assert_eq!(serde_json::to_string(&entries).unwrap(), FROZEN_V78_ENTRIES);
+    assert_eq!(serde_json::to_string(&outcome).unwrap(), FROZEN_V78_OUTCOME);
+    assert_eq!(
+        serde_json::to_string(&election).unwrap(),
+        FROZEN_V78_ELECTION
+    );
+
+    let parsed: Vec<CostReductionEntry> = serde_json::from_str(FROZEN_V78_ENTRIES).unwrap();
+    assert_eq!(parsed, entries);
+    let parsed: CostReductionOutcome = serde_json::from_str(FROZEN_V78_OUTCOME).unwrap();
+    assert_eq!(parsed, outcome);
+    let parsed: CostReductionElection = serde_json::from_str(FROZEN_V78_ELECTION).unwrap();
+    assert_eq!(parsed, election);
+
+    // The floor is carried only when it binds, and survives the trip.
+    let floored = CostReductionEntry {
+        amount: ManaCost::generic(2),
+        multiplier: 1,
+        reach: CostReductionReach::SpillsToGeneric,
+        provenance: ReductionProvenance::Static {
+            source: ObjectId(9),
+            ordinal: 0,
+        },
+        display_name: "Training Grounds".to_string(),
+        minimum_mana: 1,
+    };
+    let encoded = serde_json::to_string(&floored).unwrap();
+    assert!(
+        encoded.contains(r#""minimum_mana":1"#),
+        "a binding floor must be on the wire, got {encoded}"
+    );
+    let decoded: CostReductionEntry = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, floored);
 }
 
 /// The prompt carries only public information — the spell is already announced

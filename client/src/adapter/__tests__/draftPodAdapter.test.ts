@@ -10,12 +10,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DraftPodHostAdapter } from "../draftPodHostAdapter";
-import type { DraftPodHostEvent } from "../draftPodHostAdapter";
+import type { DraftPodHostConfig, DraftPodHostEvent, DraftPodListing } from "../draftPodHostAdapter";
 import { DraftPodGuestAdapter } from "../draftPodGuestAdapter";
 import type { DraftPodGuestEvent } from "../draftPodGuestAdapter";
 import type { DraftPlayerView } from "../draft-adapter";
 import { loadDraftHostSession } from "../../services/draftPersistence";
 import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
+import type { BrokerClient } from "../../services/brokerClient";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -890,6 +891,271 @@ describe("DraftPodHostAdapter", () => {
     const preUnsub = extraEvents.length;
     hostEventHandler({ type: "roundComplete" });
     expect(extraEvents.length).toBe(preUnsub);
+  });
+
+  // ── Lobby listing ────────────────────────────────────────────────────
+
+  describe("lobby listing", () => {
+    function makeBroker(overrides: Partial<BrokerClient> = {}): BrokerClient {
+      return {
+        serverInfo: {} as never,
+        registerHost: vi.fn(async () => ({ gameCode: "GAME01", playerToken: "tok" })),
+        updateMetadata: vi.fn(),
+        unregister: vi.fn(async () => {}),
+        close: vi.fn(),
+        ...overrides,
+      };
+    }
+
+    function listingRequest(): DraftPodListing["request"] {
+      return {
+        displayName: "Host",
+        public: true,
+        password: null,
+        timerSeconds: null,
+        playerCount: 6,
+        matchConfig: { match_type: "Bo1" },
+        formatConfig: null,
+        roomName: null,
+        draftMetadata: { setCode: "TST", draftKind: "Premier" },
+      };
+    }
+
+    function listingCfg(
+      broker: BrokerClient,
+      request: DraftPodListing["request"] = listingRequest(),
+    ): DraftPodHostConfig {
+      return {
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 6,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        listing: { broker, request },
+      };
+    }
+
+    it("registers the pod under its host peer id", async () => {
+      const broker = makeBroker();
+      const request = listingRequest();
+
+      await adapter.initialize(listingCfg(broker, request));
+
+      expect(broker.registerHost).toHaveBeenCalledTimes(1);
+      expect(broker.registerHost).toHaveBeenCalledWith({
+        ...request,
+        hostPeerId: mockHostResult().peerId,
+      });
+      const { P2PDraftHost } = await import("../p2p-draft-host");
+      expect(P2PDraftHost).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the listing's occupancy in step with the pod", async () => {
+      const broker = makeBroker();
+      await adapter.initialize(listingCfg(broker));
+      const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+
+      hostEventHandler({ type: "lobbyUpdate", seats: [], joined: 3, total: 6 });
+      hostEventHandler({ type: "lobbyUpdate", seats: [], joined: 2, total: 6 });
+
+      expect(events.filter((e) => e.type === "lobbyUpdate")).toHaveLength(2);
+      expect(vi.mocked(broker.updateMetadata)).toHaveBeenNthCalledWith(1, "GAME01", 3, 6);
+      expect(vi.mocked(broker.updateMetadata)).toHaveBeenLastCalledWith("GAME01", 2, 6);
+    });
+
+    it("forwards the occupancy the host publishes while it starts accepting guests", async () => {
+      const broker = makeBroker();
+      mockHostInitialize.mockImplementationOnce(async () => {
+        const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+        hostEventHandler({ type: "lobbyUpdate", seats: [], joined: 1, total: 6 });
+      });
+
+      await adapter.initialize(listingCfg(broker));
+
+      expect(vi.mocked(broker.updateMetadata)).toHaveBeenCalledWith("GAME01", 1, 6);
+    });
+
+    it("withdraws the listing when the draft starts and sends nothing to it afterwards", async () => {
+      const broker = makeBroker();
+      await adapter.initialize(listingCfg(broker));
+      const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+
+      hostEventHandler({ type: "draftStarted", view: mockView("Drafting") });
+
+      expect(adapter.status).toBe("drafting");
+      expect(broker.unregister).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).toHaveBeenCalledWith("GAME01");
+      expect(broker.close).toHaveBeenCalledTimes(1);
+      const unregisterOrder = vi.mocked(broker.unregister).mock.invocationCallOrder[0];
+      const closeOrder = vi.mocked(broker.close).mock.invocationCallOrder[0];
+      expect(unregisterOrder).toBeLessThan(closeOrder);
+
+      const updateCallsBefore = vi.mocked(broker.updateMetadata).mock.calls.length;
+      hostEventHandler({ type: "lobbyUpdate", seats: [], joined: 4, total: 6 });
+      expect(broker.updateMetadata).toHaveBeenCalledTimes(updateCallsBefore);
+
+      await adapter.dispose();
+      expect(broker.unregister).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["without preserving the session", {} as { preserveSession?: boolean }],
+      ["while preserving the session", { preserveSession: true }],
+    ])("withdraws the listing when the pod is disposed, %s", async (_label, options) => {
+      const broker = makeBroker();
+      await adapter.initialize(listingCfg(broker));
+
+      await adapter.dispose(options);
+
+      expect(broker.unregister).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).toHaveBeenCalledWith("GAME01");
+      expect(broker.close).toHaveBeenCalledTimes(1);
+      const unregisterOrder = vi.mocked(broker.unregister).mock.invocationCallOrder[0];
+      const closeOrder = vi.mocked(broker.close).mock.invocationCallOrder[0];
+      expect(unregisterOrder).toBeLessThan(closeOrder);
+    });
+
+    it("withdraws a listing whose pod then fails to start", async () => {
+      const broker = makeBroker();
+      mockHostInitialize.mockRejectedValueOnce(new Error("draft host failed to start"));
+
+      await expect(adapter.initialize(listingCfg(broker))).rejects.toThrow(
+        "draft host failed to start",
+      );
+
+      expect(broker.registerHost).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).toHaveBeenCalledWith("GAME01");
+      expect(broker.close).toHaveBeenCalledTimes(1);
+    });
+
+    it("withdraws a registration that completes after setup is cancelled", async () => {
+      let resolveRegister!: (result: { gameCode: string; playerToken: string }) => void;
+      const broker = makeBroker({
+        registerHost: vi.fn(
+          () => new Promise<{ gameCode: string; playerToken: string }>((resolve) => { resolveRegister = resolve; }),
+        ),
+      });
+      const controller = new AbortController();
+
+      const init = adapter.initialize({ ...listingCfg(broker), signal: controller.signal });
+      const initSettled = expect(init).rejects.toThrow("initialization aborted");
+      await Promise.resolve();
+      await Promise.resolve();
+      controller.abort();
+      resolveRegister({ gameCode: "GAME01", playerToken: "tok" });
+      await initSettled;
+
+      expect(broker.unregister).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).toHaveBeenCalledWith("GAME01");
+      expect(broker.close).toHaveBeenCalledTimes(1);
+      const { P2PDraftHost } = await import("../p2p-draft-host");
+      expect(P2PDraftHost).not.toHaveBeenCalled();
+    });
+
+    it("fails setup when the lobby refuses the listing", async () => {
+      const broker = makeBroker({
+        registerHost: vi.fn(async () => {
+          throw new Error("Room name too long");
+        }),
+      });
+
+      await expect(adapter.initialize(listingCfg(broker))).rejects.toThrow(
+        "Room name too long",
+      );
+
+      expect(adapter.status).toBe("error");
+      expect(events).toContainEqual({ type: "error", message: "Room name too long" });
+      const { P2PDraftHost } = await import("../p2p-draft-host");
+      expect(P2PDraftHost).not.toHaveBeenCalled();
+      expect(broker.close).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).not.toHaveBeenCalled();
+    });
+
+    it("relays occupancy to listeners when no listing is configured", async () => {
+      await adapter.initialize({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 6,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+
+      hostEventHandler({ type: "lobbyUpdate", seats: [], joined: 2, total: 6 });
+      expect(events).toContainEqual({ type: "lobbyUpdate", seats: [], joined: 2, total: 6 });
+
+      hostEventHandler({ type: "draftStarted", view: mockView("Drafting") });
+      await expect(adapter.dispose()).resolves.toBeUndefined();
+    });
+
+    it("closes the lobby connection when the pod's peer cannot be created", async () => {
+      const { hostRoom } = await import("../../network/connection");
+      (hostRoom as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("signaling down"));
+      const broker = makeBroker();
+
+      await expect(adapter.initialize(listingCfg(broker))).rejects.toThrow("signaling down");
+
+      expect(broker.registerHost).not.toHaveBeenCalled();
+      expect(broker.close).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).not.toHaveBeenCalled();
+    });
+
+    it("withdraws the listing even when tearing down the pod fails", async () => {
+      const broker = makeBroker();
+      await adapter.initialize(listingCfg(broker));
+      mockHostTerminateDraft.mockRejectedValueOnce(new Error("idb down"));
+
+      await expect(adapter.dispose()).rejects.toThrow("idb down");
+
+      expect(broker.unregister).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).toHaveBeenCalledWith("GAME01");
+      expect(broker.close).toHaveBeenCalledTimes(1);
+    });
+
+    it("closes the lobby connection when the pod is disposed while its peer is being created", async () => {
+      const { hostRoom } = await import("../../network/connection");
+      let resolveHostRoom!: (r: ReturnType<typeof mockHostResult>) => void;
+      (hostRoom as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () => new Promise<ReturnType<typeof mockHostResult>>((resolve) => { resolveHostRoom = resolve; }),
+      );
+      const broker = makeBroker();
+
+      const init = adapter.initialize(listingCfg(broker));
+      const initSettled = expect(init).rejects.toThrow("initialization aborted");
+      await Promise.resolve();
+      const disposing = adapter.dispose();
+      resolveHostRoom(mockHostResult());
+      await initSettled;
+      await disposing;
+
+      expect(broker.registerHost).not.toHaveBeenCalled();
+      expect(broker.close).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).not.toHaveBeenCalled();
+    });
+
+    it("sends nothing to its listing once disposal begins", async () => {
+      const broker = makeBroker();
+      let reentrantDispose: Promise<void> | undefined;
+      const unsub = adapter.onEvent((e) => {
+        if (e.type === "statusChanged" && e.status === "lobby") {
+          reentrantDispose = adapter.dispose();
+          const hostEventHandler = mockHostOnEvent.mock.calls[0][0];
+          hostEventHandler({ type: "lobbyUpdate", seats: [], joined: 4, total: 6 });
+        }
+      });
+
+      await adapter.initialize(listingCfg(broker));
+      unsub();
+      await reentrantDispose;
+
+      expect(broker.updateMetadata).not.toHaveBeenCalled();
+      expect(broker.unregister).toHaveBeenCalledTimes(1);
+      expect(broker.unregister).toHaveBeenCalledWith("GAME01");
+      expect(broker.close).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

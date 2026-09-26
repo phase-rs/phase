@@ -23654,6 +23654,7 @@ fn crumbling_sanctuary_parses_as_replacement_without_swallowed_clause() {
             },
             position: crate::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
         }
     ));
 }
@@ -30548,6 +30549,55 @@ fn printed_subject_of_a_choosing_sentence_becomes_the_target_chooser() {
     let _ = ControllerRef::Opponent;
 }
 
+/// CR 116.2a: the land-play fragment recognizer is a BUILDING BLOCK, so it is
+/// tested across its input range rather than on one card's spelling.
+///
+/// The recognizer decides whether the coordinated-permission delivery pass fires
+/// at all, so both directions matter: a form it wrongly rejects silently drops a
+/// card back to unsupported, and a form it wrongly accepts synthesizes a
+/// graveyard permission for a sentence that never granted one.
+#[test]
+fn refused_land_play_fragment_covers_the_phrase_class_and_stays_boundary_safe() {
+    use super::parse_refused_land_play_fragment;
+
+    // ACCEPTED: the axes this pass models — optional permission head, either
+    // number of the land noun.
+    for accepted in [
+        "play lands",
+        "play land",
+        "you may play lands",
+        "you may play land",
+    ] {
+        assert!(
+            parse_refused_land_play_fragment(accepted).is_ok(),
+            "{accepted:?} is in the modelled phrase class and must be recognized"
+        );
+    }
+
+    // REJECTED, and each for a reason worth keeping.
+    for rejected in [
+        // BOUNDARY: `all_consuming` is what stops a longer sentence that merely
+        // STARTS with the phrase from being treated as the bare refused fragment.
+        // Without it, "play lands from your hand" would wrongly deliver a
+        // GRAVEYARD permission.
+        "play lands from your hand",
+        "play lands and cast spells from your graveyard",
+        // WORD BOUNDARY: "landfall" starts with "land" but is a different word.
+        // This is the case a naive `starts_with` would accept.
+        "play landfall",
+        // A different verb is a different action (CR 601.2a casting vs CR 116.2a
+        // playing a land), so it must not reach the land-half recovery.
+        "cast lands",
+        // Trailing text after the noun is likewise not the bare fragment.
+        "play lands twice",
+        "",
+    ] {
+        assert!(
+            parse_refused_land_play_fragment(rejected).is_err(),
+            "{rejected:?} is outside the modelled class and must stay refused"
+        );
+    }
+}
 /// CR 118.12 + CR 118.12a: an "unless [a player] pays [cost]" modifier riding a clause that
 /// becomes a `ChooseOneOf` BRANCH must survive the branch lift.
 /// `oracle_effect::ability_definition_from_clause` used to copy `ParsedEffectClause`'s fields

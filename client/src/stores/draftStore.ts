@@ -13,6 +13,14 @@ import {
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
 import {
+  cancelLlmDraftRun,
+  collectLlmDraftResponses,
+  recordLlmDraftSubmission,
+  reportLlmDraftOutcomes,
+  resetLlmDraftBreaker,
+} from "../services/llm/draftLlm";
+import { draftProfile, useLlmStore } from "./llmStore";
+import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   migrateLegacyWorkspace,
   normalizeVirtualBasicCount,
@@ -224,10 +232,24 @@ function beginLifecycle(): number {
   exclusiveToken = null;
   invalidateWorkspaceDependents();
   cancelScheduledPersistence();
-  useDraftStore.setState({
+  // Abandoning or replacing a draft must take its LLM work with it. Without
+  // this, a provider call started for the old draft runs to its full timeout
+  // holding a socket, and its reply lands against a pod that no longer exists.
+  cancelLlmDraftRun();
+  // The failure breaker is scoped to a draft, not to the tab. A provider that
+  // was down during one draft must get a fresh chance in the next, or three
+  // transient failures would silently disable it for the rest of the session.
+  resetLlmDraftBreaker();
+  useDraftStore.setState((state) => ({
     ...initialState,
+    // Bot difficulty is the player's setup choice, not per-draft state. The
+    // setup screen stays mounted while a start loads (the card database fetch
+    // for Sealed/Hard+ can take seconds), so resetting it here would show the
+    // selector snap back to Medium even though the chosen value was already
+    // captured and forwarded to the engine.
+    difficulty: state.difficulty,
     interactionGeneration: lifecycleGeneration,
-  });
+  }));
   return lifecycleGeneration;
 }
 
@@ -726,13 +748,45 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     useDraftStore.setState({ pendingPickIntent: null, pickInteractionLocked: false });
   };
   try {
+    // LLM drafters are opt-in twice over: a profile must be configured AND
+    // drafting must be switched on for it. Anything else — including a pod with
+    // no bot seats — takes the ordinary engine-bot path.
+    //
+    // Collected BEFORE the submitting lease is taken. `collectLlmDraftResponses`
+    // builds its requests under a lease of its own and then performs the
+    // provider I/O with none held, so the singleton draft engine queue is never
+    // blocked across a network round trip. Each reply carries the pack
+    // fingerprint it was built from and the engine re-validates it against the
+    // live pack below, so a pack that moved on during the gap is refused per
+    // seat rather than mis-picked.
+    const llmProfile = request.kind === "pick" ? draftProfile(useLlmStore.getState()) : undefined;
+    const llmResponses = llmProfile
+      ? await collectLlmDraftResponses(llmProfile, isFresh)
+      : [];
+    if (!isFresh()) {
+      // The pick was superseded while the provider was answering. Cut the round
+      // loose rather than letting it run to its timeout holding sockets open.
+      cancelLlmDraftRun();
+      return { status: "ignored", reason: "stale" };
+    }
+
     const nextView = await withDraftEngineOperation((lease) => {
       if (!isFresh()) {
         throw new Error("Stale draft pick request");
       }
       switch (request.kind) {
-        case "pick":
+        case "pick": {
+          if (llmResponses.length > 0 && llmProfile) {
+            const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
+            reportLlmDraftOutcomes(outcome.llmOutcomes);
+            // The breaker counts the ENGINE's verdict, not the fact that bytes
+            // arrived: a round of 401s or undecodable replies must count as a
+            // failure, or a broken provider would reset the breaker forever.
+            recordLlmDraftSubmission(llmProfile.id, outcome.llmOutcomes);
+            return outcome.view;
+          }
           return lease.submitPick(request.instanceId);
+        }
         case "draft-effect": {
           const adapterInstanceIds = [...request.instanceIds];
           return lease.submitPickWithDraftEffect(request.effectCardInstanceId, adapterInstanceIds);

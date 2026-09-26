@@ -2103,6 +2103,25 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             crate::parser::oracle_effect::rewrite_player_quantity_refs_to_source_chosen(ability);
         }
     }
+    // Sword of War and Peace class (issue #9280 follow-up): damage-done
+    // triggers scope "that player" to the event player (`TriggeringPlayer`
+    // via `relative_player_scope_for_condition`), so an anaphoric zone count
+    // in an event-anchored effect ("their hand") needs no announced choice.
+    // Without this, the `TargetPlayer`-scoped count surfaces an any-player
+    // companion slot; with more than one legal player the trigger stalls at
+    // target selection and the event-bound damage never resolves. Gated to
+    // damage modes because only there is `scoped_player` bound to the count's
+    // referent (the damaged player) at resolution.
+    if modifiers.relative_player_scope == Some(ControllerRef::TriggeringPlayer)
+        && matches!(
+            def.mode,
+            TriggerMode::DamageDone | TriggerMode::DamageDoneOnce
+        )
+    {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_event_anchored_zone_counts_to_scoped(ability);
+        }
+    }
     if let Some(ability) = execute.as_deref_mut() {
         rewrite_each_other_player_scope_for_any_caster_spell_triggers(
             &def,
@@ -5968,13 +5987,21 @@ pub(crate) fn static_condition_to_trigger_condition(
         // predicate; no intervening-if (`TriggerCondition`) equivalent — lowering
         // returns `None`.
         | StaticCondition::TopOfLibraryMatches { .. }
-        // CR 508.6: the existential "a player attacked you during their last turn"
-        // gate is a self-spell cost-reduction / continuous-static predicate
-        // (Avenge). No card uses this existential form as an intervening-if today
-        // (O-Kagachi's source-referential "that player" form is a distinct
-        // variant), so there is no `TriggerCondition` equivalent — lowering
-        // returns `None`.
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        // CR 508.6 + CR 604.1: the "attacked you during their last turn" gate has
+        // no `TriggerCondition` equivalent, on EITHER scope, and lowering returns
+        // `None` for two DIFFERENT reasons.
+        //
+        // Default (`AnyPlayer`) scope: it is a self-spell cost-reduction /
+        // continuous-static predicate (Avenge); the intervening-if vocabulary has
+        // no existential turn-history member to lower onto.
+        //
+        // Anchored (`AttackedPlayer`) scope: an intervening-if is checked at
+        // trigger time and again on resolution (CR 603.4), and NEITHER checkpoint
+        // carries an attack anchor — `TriggerCondition` has no `declared_attack`
+        // and no per-attacker binding. Lowering it would produce a condition that
+        // is unanswerable rather than merely absent, so `None` is the honest
+        // lowering and NOT an approximation that silently drops the anchor.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.

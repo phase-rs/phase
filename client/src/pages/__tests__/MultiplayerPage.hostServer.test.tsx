@@ -103,6 +103,7 @@ import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer"
 import { MultiplayerPage } from "../MultiplayerPage";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../adapter/ws-adapter";
+import multiplayerEn from "../../i18n/locales/en/multiplayer.json";
 
 /** The browsing anchor. */
 const URL_A = "wss://anchor.example/ws";
@@ -123,7 +124,10 @@ function renderPage(entry = "/multiplayer") {
 
 /** Submit host-setup exactly as the real form does: the settings payload plus
  * the server this submit chose (`null` in P2P — see `HostSetup`'s prop doc). */
-async function submitHostSetup(serverUrl: string | null): Promise<void> {
+async function submitHostSetup(
+  serverUrl: string | null,
+  overrides: Record<string, unknown> = {},
+): Promise<void> {
   await act(async () => {
     await (harness.hostSetup!.onHost as (
       settings: unknown,
@@ -143,6 +147,7 @@ async function submitHostSetup(serverUrl: string | null): Promise<void> {
         startWhenFull: false,
         ranked: false,
         roomName: "Test room",
+        ...overrides,
       },
       serverUrl,
     );
@@ -312,6 +317,45 @@ describe("MultiplayerPage host server", () => {
     await submitHostSetup(null);
     expect(screen.getByText(URL_A)).toBeInTheDocument();
     expect(ensureSubscriptionSocket).toHaveBeenCalledExactlyOnceWith(URL_A);
+    expect(startP2PHostingSession).not.toHaveBeenCalled();
+  });
+
+  it("registers a Discord P2P host on the official broker, not a custom anchor", async () => {
+    useMultiplayerStore.setState({ connectionMode: "p2p" });
+    ensureSubscriptionSocket.mockImplementation(async () => ({ serverInfo: { mode: "LobbyOnly" } }));
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(null, { requestedCode: "AB12CD" });
+    expect(ensureSubscriptionSocket).toHaveBeenCalledExactlyOnceWith(OFFICIAL_MULTIPLAYER_SERVER_URL);
+    expect(startP2PHostingSession).toHaveBeenCalledWith(
+      expect.objectContaining({ requestedCode: "AB12CD" }),
+      expect.anything(),
+      { brokerUrl: OFFICIAL_MULTIPLAYER_SERVER_URL, roomName: "Test room" },
+    );
+  });
+
+  it("hosts a Discord dedicated-server game on its seeded server, never the broker", async () => {
+    const SEED = "wss://seed.example/ws";
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(SEED, { requestedCode: "AB12CD" });
+    await waitFor(() => expect(startHosting).toHaveBeenCalled());
+    expect(startHosting).toHaveBeenCalledWith(
+      expect.objectContaining({ requestedCode: "AB12CD" }), expect.anything(), SEED,
+    );
+    expect(ensureSubscriptionSocket).not.toHaveBeenCalledWith(OFFICIAL_MULTIPLAYER_SERVER_URL);
+    expect(startP2PHostingSession).not.toHaveBeenCalled();
+  });
+
+  it("offers a Discord host no unlisted fallback when the official broker is down", async () => {
+    useMultiplayerStore.setState({ connectionMode: "p2p" });
+    ensureSubscriptionSocket.mockResolvedValue(null);
+    renderPage("/multiplayer?view=host-setup");
+    await submitHostSetup(null, { requestedCode: "AB12CD" });
+    // Reach guard: the probe ran against the official broker.
+    expect(ensureSubscriptionSocket).toHaveBeenCalledWith(OFFICIAL_MULTIPLAYER_SERVER_URL);
+    expect(useMultiplayerStore.getState().toasts.get("generic")?.message).toBe(
+      multiplayerEn.page.botLinkBrokerUnreachable,
+    );
+    expect(screen.queryByRole("button", { name: "Continue without lobby" })).not.toBeInTheDocument();
     expect(startP2PHostingSession).not.toHaveBeenCalled();
   });
 

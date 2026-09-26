@@ -189,6 +189,7 @@ pub(crate) fn put_face_up_exile_into(
         conditional_enter_with_counters: vec![],
         duration: None,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
         library_placement: None,

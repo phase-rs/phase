@@ -5,6 +5,7 @@
   },
   "tabs": {
     "gameplay": "ゲームプレイ",
+    "ai": "AI対戦相手",
     "experimental": "実験的",
     "visual": "表示",
     "combat": "ペース",
@@ -478,6 +479,48 @@
       "oldest": "最古の印刷版",
       "preferBorderless": "ボーダーレスを優先",
       "preferExtended": "拡張アートを優先"
+    }
+  },
+  "llm": {
+    "title": "LLM対戦相手",
+    "intro": "任意の機能です。PhaseにLLMプロバイダーを設定すると、AIの席やドラフト・ポッドのボットを、内蔵エンジンAIの代わりにそのモデルに任せられます。プロバイダーを有効にして席に割り当てるまで、この機能は使われません。対戦中に問題が起きた場合はエンジンAIに切り替わります。",
+    "empty": "プロバイダーが設定されていません。すべての席で内蔵エンジンAIが動作します。",
+    "addProvider": "プロバイダーを追加",
+    "unnamed": "名前のないプロバイダー",
+    "name": "名前",
+    "namePlaceholder": "プロバイダーの名前（例：Claude）",
+    "enable": "このプロバイダーを有効にする",
+    "remove": "このプロバイダーを削除",
+    "provider": "プロバイダー",
+    "model": "モデル",
+    "modelId": "モデルID",
+    "customModel": "カスタム…",
+    "modelPlaceholder": "モデルID（例：gpt-5、claude-sonnet-5）",
+    "endpoint": "エンドポイント",
+    "endpointPlaceholder": "https://your-server/v1",
+    "apiKey": "APIキー",
+    "apiKeyPlaceholder": "APIキーを貼り付け",
+    "apiKeyOptional": "ローカルサーバーでは任意",
+    "apiKeyStorage": "APIキーは、このブラウザーのセッション中のみメモリに保持されます。ディスクには保存されず、バックアップのエクスポートやクラウド同期にも含まれないため、再読み込み後は再入力が必要です。また、サーバーがlocalhostで動作している場合を除き、APIキーを使うにはhttps://のエンドポイントが必要です。",
+    "apiKeyGet": "キーを取得",
+    "test": "接続をテスト",
+    "testing": "テスト中…",
+    "testOk": "接続しました。",
+    "draftToggle": {
+      "label": "ドラフトのボットに使用",
+      "hint": "ドラフト・ポッドのボットが、フォーマットのセット情報を参照してモデルでピックします。",
+      "profile": "ドラフト用プロバイダー"
+    },
+    "testHint": "実際に1件のリクエストを送信し、対戦中と同じ方法で応答を確認します。",
+    "errors": {
+      "engineUnavailable": "エンジンを読み込めませんでした。",
+      "requestNotBuilt": "このプロバイダーの設定が完了していません。",
+      "undecodable": "エンドポイントから応答がありましたが、ゲームで使用できる内容ではありません。",
+      "emptyBody": "エンドポイントから空の応答が返されました。",
+      "cancelled": "テストがキャンセルされました。",
+      "timedOut": "エンドポイントから時間内に応答がありませんでした。",
+      "unreachable": "エンドポイントに接続できませんでした。URLと、プロバイダーがブラウザーからのリクエストを許可しているかを確認してください。",
+      "oversized": "エンドポイントから、チャット応答としては大きすぎるデータが返されました。"
     }
   }
 }
