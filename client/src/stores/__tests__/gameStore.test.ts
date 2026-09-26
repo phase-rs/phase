@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ActionRejection, EngineAdapter, GameEvent, GameState } from "../../adapter/types";
 import { actionRejectionError } from "../../adapter/types";
+import { saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../../services/gamePersistence";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import {
@@ -16,6 +17,12 @@ import {
   isAuthorityRemote,
   useGameStore,
 } from "../gameStore";
+
+vi.mock("../../services/gamePersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/gamePersistence")>(),
+  saveAuthoritativeGame: vi.fn().mockResolvedValue(undefined),
+  saveAuthoritativeGameStrict: vi.fn().mockResolvedValue(undefined),
+}));
 
 describe("game mode classification", () => {
   // The two questions the old `isMultiplayerMode` answered with one bit:
@@ -81,6 +88,9 @@ describe("game mode classification", () => {
 
 describe("gameStore", () => {
   beforeEach(() => {
+    vi.mocked(saveAuthoritativeGame).mockClear();
+    vi.mocked(saveAuthoritativeGameStrict).mockReset();
+    vi.mocked(saveAuthoritativeGameStrict).mockResolvedValue(undefined);
     act(() => {
       useGameStore.setState({
         gameState: null,
@@ -113,6 +123,46 @@ describe("gameStore", () => {
     expect(store.gameState).toEqual(state);
     expect(store.waitingFor).toEqual(state.waiting_for);
     expect(adapter.initialize).toHaveBeenCalled();
+  });
+
+  it("commits a strict initial game only after persistence settles and detaches on failure", async () => {
+    const state = buildGameState();
+    const adapter = buildEngineAdapterMock(state);
+    let settleWrite!: (error?: Error) => void;
+    vi.mocked(saveAuthoritativeGameStrict).mockImplementation(() => new Promise((resolve, reject) => {
+      settleWrite = (error) => error ? reject(error) : resolve();
+    }));
+    let settled = false;
+    const pending = useGameStore.getState().initGame("strict", adapter, undefined, undefined, undefined, undefined, undefined, "strict");
+    void pending.then(() => { settled = true; });
+    await vi.waitFor(() => expect(saveAuthoritativeGameStrict).toHaveBeenCalledOnce());
+    expect(saveAuthoritativeGameStrict).toHaveBeenCalledWith("strict", adapter, state);
+    expect(useGameStore.getState().gameState).toBeNull();
+    expect(settled).toBe(false);
+    expect(saveAuthoritativeGame).not.toHaveBeenCalled();
+    settleWrite();
+    await act(async () => { await pending; });
+    expect(useGameStore.getState().gameState).toEqual(state);
+    expect(settled).toBe(true);
+
+    act(() => useGameStore.setState({ gameState: null, adapter: null }));
+    const original = new Error("IndexedDB initial write failed");
+    const failed = useGameStore.getState().initGame("failed", adapter, undefined, undefined, undefined, undefined, undefined, "strict");
+    await vi.waitFor(() => expect(saveAuthoritativeGameStrict).toHaveBeenCalledTimes(2));
+    settleWrite(original);
+    await expect(failed).rejects.toBe(original);
+    expect(useGameStore.getState().gameState).toBeNull();
+    expect(useGameStore.getState().adapter).toBeNull();
+    expect(saveAuthoritativeGame).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary initial games on the best-effort save path", async () => {
+    const state = buildGameState();
+    const adapter = buildEngineAdapterMock(state);
+    await act(async () => { await useGameStore.getState().initGame("ordinary", adapter); });
+    expect(useGameStore.getState().gameState).toEqual(state);
+    expect(saveAuthoritativeGame).toHaveBeenCalledWith("ordinary", adapter, state);
+    expect(saveAuthoritativeGameStrict).not.toHaveBeenCalled();
   });
 
   it("binds the adapter before initializeGame can publish an initial remote snapshot", async () => {

@@ -1519,7 +1519,7 @@ export function GameProvider({
             if (cancelled) return;
             if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
           }
-          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
           if (cancelled) return;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai", difficulty,
@@ -1551,7 +1551,7 @@ export function GameProvider({
             opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
             ai_decks: [],
           };
-          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
           if (cancelled) return;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai", difficulty,
@@ -1565,14 +1565,7 @@ export function GameProvider({
         }
       };
       let draftDeckRaw: string | null = null;
-      if (soloDraft) {
-        try {
-          draftDeckRaw = sessionStorage.getItem(draftDeckKey);
-        } catch (error) {
-          reportDraftError(error);
-          return;
-        }
-      }
+      let draftDeckReadSucceeded = false;
       let savedState;
       try {
         savedState = await (soloDraft ? loadGameStrict(gameId) : loadGame(gameId));
@@ -1582,6 +1575,19 @@ export function GameProvider({
         return;
       }
       if (cancelled) return;
+
+      if (soloDraft) {
+        try {
+          draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+          draftDeckReadSucceeded = true;
+        } catch (error) {
+          if (!savedState) {
+            reportDraftError(error);
+            return;
+          }
+          console.warn("Could not read draft deck handoff during saved-game restore:", error);
+        }
+      }
 
       if (soloDraft) {
         if (!savedState) {
@@ -1615,6 +1621,14 @@ export function GameProvider({
             return;
           }
           if (cancelled) return;
+          if (!draftDeckReadSucceeded) {
+            try {
+              draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+            } catch (readError) {
+              reportDraftError(readError);
+              return;
+            }
+          }
           if (draftDeckRaw !== null) await startDraftDeck(draftDeckRaw);
           else await startExactDraftStage();
           return;

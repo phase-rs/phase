@@ -469,6 +469,63 @@ describe("GameProvider native AI routing", () => {
     expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
   });
 
+  it("waits for initial durability before starting and consuming a raw draft handoff", async () => {
+    const key = "phase:draft-deck:durable-raw";
+    seedSoloRun("run", "durable-raw");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    let finish!: () => void;
+    gameStoreState.initGame.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<GameProvider gameId="durable-raw" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame.mock.calls[0][7]).toBe("strict");
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+    finish();
+    await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+  });
+
+  it("reports initial write failure, keeps raw handoff, and retries the same game", async () => {
+    const key = "phase:draft-deck:write-retry";
+    seedSoloRun("run", "write-retry");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    const reason = "IndexedDB initial write failed";
+    gameStoreState.initGame.mockRejectedValueOnce(new Error(reason));
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="write-retry" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(reason));
+    expect(gameStoreState.initGame.mock.calls[0][7]).toBe("strict");
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+    first.unmount();
+    render(<GameProvider gameId="write-retry" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
+    expect(gameStoreState.initGame).toHaveBeenCalledTimes(2);
+    expect(gameStoreState.initGame.mock.calls[1][7]).toBe("strict");
+  });
+
+  it("waits for strict durability in the run-only fallback and retries a failed write", async () => {
+    seedSoloRun("run", "stage-write");
+    let rejectWrite!: (error: Error) => void;
+    gameStoreState.initGame.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectWrite = reject; }));
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="stage-write" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame.mock.calls[0][7]).toBe("strict");
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    rejectWrite(new Error("IndexedDB stage write failed"));
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith("IndexedDB stage write failed"));
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    first.unmount();
+    render(<GameProvider gameId="stage-write" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(createGameLoopController).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame).toHaveBeenCalledTimes(2);
+    expect(gameStoreState.initGame.mock.calls[1][7]).toBe("strict");
+  });
+
   it("does not replay a retained raw handoff after End Run removes its authority", async () => {
     const key = "phase:draft-deck:ended-game";
     const raw = JSON.stringify(publishedPayload());
@@ -653,6 +710,25 @@ describe("GameProvider native AI routing", () => {
     }
   });
 
+  it("keeps replacement handoff bytes written while a saved solo game restores", async () => {
+    seedSoloRun("run", "saved-replaced");
+    const key = "phase:draft-deck:saved-replaced";
+    const oldRaw = JSON.stringify(publishedPayload(["Old"]));
+    const replacement = JSON.stringify(publishedPayload(["Replacement"]));
+    sessionStorage.setItem(key, oldRaw);
+    loadGameStrict.mockResolvedValueOnce({ players: [{}, {}] } as never);
+    let finishRestore!: () => void;
+    gameStoreState.resumeGame.mockImplementationOnce(() => new Promise<void>((resolve) => { finishRestore = resolve; }));
+    render(<GameProvider gameId="saved-replaced" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledOnce());
+    expect(sessionStorage.getItem(key)).toBe(oldRaw);
+    sessionStorage.setItem(key, replacement);
+    finishRestore();
+    await waitFor(() => expect(createGameLoopController).toHaveBeenCalledOnce());
+    expect(sessionStorage.getItem(key)).toBe(replacement);
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
   it("does not restore after a deferred solo saved load resolves post-unmount", async () => {
     seedSoloRun("run", "delayed");
     let resolveLoad!: (state: never) => void;
@@ -823,6 +899,32 @@ describe("GameProvider native AI routing", () => {
     await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith("session read failed"));
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
     read.mockRestore();
+  });
+
+  it("restores a saved solo draft when reading its optional handoff throws", async () => {
+    seedSoloRun("run", "saved-unreadable");
+    const savedState = { players: [{}, {}], turn: 12 } as never;
+    loadGameStrict.mockResolvedValueOnce(savedState);
+    const key = "phase:draft-deck:saved-unreadable";
+    const originalGetItem = sessionStorage.getItem.bind(sessionStorage);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation((item) => {
+      if (item === key) throw new Error("session read failed");
+      return originalGetItem(item);
+    });
+    const onNoDeck = vi.fn();
+    try {
+      render(<GameProvider gameId="saved-unreadable" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledWith("saved-unreadable", expect.anything(), savedState));
+      await waitFor(() => expect(createGameLoopController).toHaveBeenCalledOnce());
+      expect(vi.mocked(createGameLoopController).mock.results[0]?.value.start).toHaveBeenCalled();
+      expect(loadGameStrict).toHaveBeenCalledWith("saved-unreadable");
+      expect(read).toHaveBeenCalledWith(key);
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(clearGameStrict).not.toHaveBeenCalled();
+      expect(onNoDeck).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
   });
 
   it("retains a handoff when controller start throws", async () => {

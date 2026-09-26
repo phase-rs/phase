@@ -269,11 +269,24 @@ export async function saveAuthoritativeGame(
   adapter: EngineAdapter,
   fallbackState: GameState,
 ): Promise<void> {
+  await saveGame(gameId, await authoritativePersistenceState(adapter, fallbackState));
+}
+
+/** Commit the engine-authored initial snapshot before a fresh game can start. */
+export async function saveAuthoritativeGameStrict(
+  gameId: string,
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<void> {
+  await saveResumableGameStrict(gameId, await authoritativePersistenceState(adapter, fallbackState));
+}
+
+async function authoritativePersistenceState(
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<PersistedGameState> {
   const trustedJson = await adapter.exportPersistenceState?.();
-  await saveGame(
-    gameId,
-    trustedJson ? JSON.parse(trustedJson) as PersistedGameState : fallbackState,
-  );
+  return trustedJson ? JSON.parse(trustedJson) as PersistedGameState : fallbackState;
 }
 
 export async function loadGame(gameId: string): Promise<PersistedGameState | null> {

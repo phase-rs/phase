@@ -28,6 +28,7 @@ import {
   loadP2PHostSession,
   migratePersistedGameState,
   saveAuthoritativeGame,
+  saveAuthoritativeGameStrict,
   saveGame,
   saveResumableGameStrict,
   saveActiveGame,
@@ -82,6 +83,8 @@ describe("game persistence", () => {
     vi.mocked(idbDel).mockResolvedValue(undefined);
     vi.mocked(idbGet).mockReset();
     vi.mocked(idbGet).mockResolvedValue(undefined);
+    vi.mocked(idbSet).mockReset();
+    vi.mocked(idbSet).mockResolvedValue(undefined);
   });
 
   it("deletes the three exact game records in order before clearing matching active metadata", async () => {
@@ -209,6 +212,45 @@ describe("game persistence", () => {
     const restored = await loadGame("trusted-local");
     expect(restored).toEqual(envelope);
     expect(persistedGameStateView(restored!)).toEqual(state);
+  });
+
+  it("waits for the trusted initial envelope write and propagates its failure", async () => {
+    const state = fixtureState();
+    const envelope: TrustedGameStateEnvelope = {
+      state,
+      precast_shortcut_runtime: { opaque: true },
+    };
+    const adapter = {
+      exportPersistenceState: vi.fn().mockResolvedValue(JSON.stringify(envelope)),
+    } as unknown as EngineAdapter;
+    let settleWrite!: (error?: Error) => void;
+    vi.mocked(idbSet).mockImplementation(() => new Promise((resolve, reject) => {
+      settleWrite = (error) => error ? reject(error) : resolve();
+    }));
+    let settled = false;
+    const pending = saveAuthoritativeGameStrict("initial", adapter, state);
+    void pending.finally(() => { settled = true; }).catch(() => {});
+    await vi.waitFor(() => expect(idbSet).toHaveBeenCalledOnce());
+    expect(idbSet).toHaveBeenCalledWith(GAME_KEY_PREFIX + "initial", envelope, expect.anything());
+    expect(settled).toBe(false);
+    settleWrite();
+    await expect(pending).resolves.toBeUndefined();
+    expect(settled).toBe(true);
+
+    const original = new Error("IndexedDB initial write failed");
+    const failed = saveAuthoritativeGameStrict("failed", adapter, state);
+    await vi.waitFor(() => expect(idbSet).toHaveBeenCalledTimes(2));
+    settleWrite(original);
+    await expect(failed).rejects.toBe(original);
+
+    vi.mocked(idbSet).mockRejectedValueOnce(original);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(saveAuthoritativeGame("ordinary", adapter, state)).resolves.toBeUndefined();
+      expect(warning).toHaveBeenCalledWith("[saveGame] IndexedDB write failed:", original);
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("migrates a legacy bare deck size before resume deserialization", async () => {
