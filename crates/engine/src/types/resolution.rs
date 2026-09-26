@@ -406,6 +406,36 @@ pub struct AbilityContinuationFrame {
     pub choose_zone_trigger_context: Option<ResolvingTriggerContext>,
 }
 
+impl AbilityContinuationFrame {
+    /// CR 608.2c + CR 400.7: Hand a COMPLETED `forward_result` producer's moved
+    /// objects to this parked continuation — but only when this continuation is
+    /// the one awaiting them.
+    ///
+    /// The forwarded-result contract distinguishes `None` (no producer ran at
+    /// all) from `Some([])` (a producer ran to completion and moved nothing).
+    /// Every completed producer must publish, including one that moved nothing:
+    /// a declined `up_to` selection, or a member whose delivery was prevented or
+    /// remained. Left at `None`, `parent_chain_referents` skips its
+    /// forwarded-result tier and falls through to the chain's DECLARED targets,
+    /// so a following "that creature" rider — and the delayed trigger that
+    /// snapshots it — names an object the producer never moved (issue #6902).
+    ///
+    /// Taking the marker is what scopes this. Only
+    /// `mark_continuation_awaits_forwarded_result` sets it, and consuming it
+    /// stops a later non-forwarding zone choice in the same resolution from
+    /// overwriting what was published. An unmarked frame belongs to a
+    /// non-forwarding producer and is left untouched, so a declared target is
+    /// never overridden.
+    pub fn publish_forwarded_producer_result(
+        &mut self,
+        delivered: crate::types::ability::ForwardedResultContext,
+    ) {
+        if self.pending.awaiting_forwarded_result.take().is_some() {
+            self.pending.chain.context.forwarded_result_context = Some(Box::new(delivered));
+        }
+    }
+}
+
 /// The per-category zone-choice owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerCategoryZoneChoiceFrame {
@@ -3042,6 +3072,50 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 608.2c + CR 614.12a: Returns the continuation parked immediately
+    /// beneath an active `ChangeZone` iteration frame.
+    ///
+    /// A `forward_result` producer whose selected member re-paused mid-entry (an
+    /// as-enters copy choice, an Aura host choice) resumes while its iteration
+    /// frame still owns the stack top, so `active_ability_continuation` — which
+    /// is strictly top-of-stack — cannot see the parked continuation at all. The
+    /// moved object is known only at the paused member-delivery completion, and
+    /// that is the one instant at which the continuation, the marker's owner and
+    /// the delivered object are all reachable.
+    ///
+    /// Measured shape at that seam: `[AbilityContinuation, ChangeZone]`. This is
+    /// a fixed two-frame adjacency, never a stack search — binding a continuation
+    /// found at arbitrary depth would risk handing one producer's result to an
+    /// unrelated sibling. Any other shape yields `None` and the caller binds
+    /// nothing.
+    pub fn continuation_beneath_active_change_zone(&self) -> Option<&AbilityContinuationFrame> {
+        match (self.last(), self.active_predecessor()) {
+            (
+                Some(ResolutionFrame::ChangeZone(_)),
+                Some(ResolutionFrame::AbilityContinuation(continuation)),
+            ) => Some(continuation),
+            _ => None,
+        }
+    }
+
+    /// Mutable companion of [`Self::continuation_beneath_active_change_zone`];
+    /// see it for the structural invariant this preserves.
+    pub fn continuation_beneath_active_change_zone_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        // Check the exact pair through the immutable half first, so the shape
+        // rule lives in one place; only then reborrow the same slot mutably.
+        self.continuation_beneath_active_change_zone()?;
+        let top = self.frames.top()?;
+        let continuation = self.frames.below(top)?;
+        match self.frames.get_mut(continuation) {
+            Some(ResolutionFrame::AbilityContinuation(continuation)) => Some(continuation),
+            Some(_) | None => {
+                unreachable!("checked continuation-beneath-ChangeZone must retain its frame kind")
+            }
+        }
+    }
+
     /// Consumes exactly the active general post-replacement frame.
     pub fn take_active_post_replacement(
         &mut self,
@@ -5617,6 +5691,7 @@ mod tests {
             .expect("empty logical group still needs its pre-delivery latch");
         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
             pending: Some(PendingChangeZoneIteration {
+                forwarded_members: Vec::new(),
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),

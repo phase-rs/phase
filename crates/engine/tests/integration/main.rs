@@ -1501,6 +1501,7 @@ mod issue_4945_zada_hedron_grinder;
 mod issue_4948_samwise_gamgee_sacrifice_target_order;
 mod issue_5263_chaos_warp;
 mod issue_6367_thassas_oracle;
+mod issue_6902_sneak_attack_two_activations_both_sacrificed;
 mod issue_7467_manifest_dread_tracked_set;
 mod issue_7552_role_token_image_ref;
 mod issue_7591_room_copy_doors;

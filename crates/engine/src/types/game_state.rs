@@ -2576,6 +2576,19 @@ pub struct PendingContinuation {
     /// placeholder `chain` is never resolved when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) player_scope_queue_end: bool,
+    /// CR 608.2c: which `forward_result` producer this parked continuation is
+    /// waiting on, keyed by the producer's exact incarnation.
+    ///
+    /// `SpellContext.forwarded_result_context` cannot carry this: `Some([])`
+    /// there already means "a completed producer that moved no objects", so a
+    /// pending marker written into it is indistinguishable from a finished
+    /// empty result. Consumers keyed on `is_some()` then read a pending marker
+    /// as a completed one, and a later NON-forwarding zone choice in the same
+    /// resolution overwrites an already-correct forwarded result. Ownership
+    /// lives here instead, so only the frame that is actually awaiting a result
+    /// is ever filled, and exactly once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaiting_forwarded_result: Option<ObjectIncarnationRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2616,6 +2629,7 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
             player_scope_queue_end: false,
+            awaiting_forwarded_result: None,
         }
     }
 
@@ -2638,6 +2652,7 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_linked_exile: state.resolving_player_scope_linked_exile.clone(),
             player_scope_queue_end: false,
+            awaiting_forwarded_result: None,
         }
     }
 }
@@ -3981,6 +3996,16 @@ impl PendingZoneChangeDelivery {
 /// to the live `resolve` path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingChangeZoneIteration {
+    /// CR 608.2c: every object this `forward_result` producer has delivered so
+    /// far across this one selection, accumulated over each re-pause.
+    ///
+    /// A selection can re-pause once per member (an as-enters copy choice, a
+    /// CR 303.4f Aura host choice), and the awaiting marker is consumed exactly
+    /// once. Publishing at the first re-pause would therefore forward only the
+    /// first member and drop the rest; the batch is published from here when the
+    /// iteration terminally completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwarded_members: Vec<ObjectId>,
     pub logical_zone_change_group: LogicalZoneChangeGroup,
     /// The chosen member that is currently completing outside the ordinary
     /// `remaining` loop. Required even when the tail is empty.
@@ -22608,6 +22633,18 @@ impl GameState {
         self.resolution_stack.active_ability_continuation_mut()
     }
 
+    /// Mutably accesses the continuation parked immediately beneath an active
+    /// `ChangeZone` iteration frame. Distinct from
+    /// `active_ability_continuation_frame_mut`, which is strictly top-of-stack
+    /// and therefore blind while an iteration frame owns the top — see
+    /// `ResolutionStack::continuation_beneath_active_change_zone`.
+    pub fn continuation_beneath_active_change_zone_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        self.resolution_stack
+            .continuation_beneath_active_change_zone_mut()
+    }
+
     /// Park a new continuation as the active inner frame.
     pub fn push_ability_continuation(&mut self, frame: AbilityContinuationFrame) {
         self.resolution_stack.push_ability_continuation(frame);
@@ -37874,6 +37911,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
         let original = PendingChangeZoneIteration {
+            forwarded_members: Vec::new(),
             logical_zone_change_group,
             paused_current: None,
             remaining: vec![],

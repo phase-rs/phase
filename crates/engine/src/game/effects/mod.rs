@@ -885,6 +885,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             attachment_remainder: _,
             player_scope_linked_exile,
             player_scope_queue_end,
+            awaiting_forwarded_result: _,
         } = cont;
         debug_assert!(
             attachment_choice.is_none(),
@@ -1594,6 +1595,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enters_modified_if,
             enter_attached_to,
             effect_kind,
+            mut forwarded_members,
         } = pending;
         // CR 608.2c: the object that paused this iteration on a replacement
         // choice was delivered out-of-band by the replacement resume, not by
@@ -1611,12 +1613,95 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
             }
-            logical_zone_change_group
-                .record_delivery_completion(
-                    paused_current.member.object_id,
-                    paused_current.terminal_completion_after_resume(),
+            // CR 608.2c + CR 603.10: settlement and forwarding ask DIFFERENT
+            // questions about the same delivery, and collapsing them into one
+            // verdict is itself a bug:
+            //
+            //   * the logical group asks "did this incarnation move AT ALL?" — a
+            //     CR 614.6 redirect to exile IS a move, and recording it as
+            //     `Remained` would drop the departure bookkeeping settlement owes
+            //     a permanent that left the battlefield;
+            //   * the producer asks "did it arrive where I SAID?" — a redirect did
+            //     not, so "that creature" has no referent and nothing is forwarded.
+            //
+            // MEASURED on the redirect fixture: `events=1 sidecar=Some(Moved)
+            // live_zone=Exile arrived=false`. `append_delivery_events` stamps
+            // `Moved` for ANY `ZoneChanged` on the incarnation, so the sidecar is
+            // correct for settlement and wrong for forwarding. Deriving one from
+            // the other forwarded a member that never reached the destination.
+            let arrived_at_destination = paused_current.delivery_events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(from),
+                        to,
+                        ..
+                    } if *object_id == paused_current.member.object_id
+                        && *from != destination
+                        && *to == destination
                 )
+            });
+            let has_delivery_evidence = !paused_current.delivery_events.is_empty()
+                || paused_current.terminal_completion.is_some();
+            let completion = if arrived_at_destination || !has_delivery_evidence {
+                // MEASURED on the copy-choice route: the paused record carries no
+                // sidecar AND no delivery events, so every classifier that INFERS
+                // from it — `terminal_completion_after_resume()` included, which
+                // returns `Remained` for an empty slice — reports "did not move"
+                // for a member that really did enter the battlefield. Absence of
+                // evidence is not evidence of no move.
+                crate::types::game_state::ZoneMoveCompletion::Moved
+            } else {
+                paused_current.terminal_completion_after_resume()
+            };
+            logical_zone_change_group
+                .record_delivery_completion(paused_current.member.object_id, completion)
                 .expect("resumed ChangeZone member records its exact terminal outcome");
+            // CR 608.2c + CR 614.12a: the paused member's delivery is complete
+            // here, and this is the ONE instant at which the moved object, the
+            // parked continuation and the marker's owner are all reachable at
+            // once. A `forward_result` producer whose selected member re-paused
+            // mid-entry (an as-enters copy choice, an Aura host choice) is
+            // delivered out-of-band by the replacement resume, so it never
+            // reaches the moved-object path further down this drain; without
+            // binding here its chained "that creature" rider resolves against an
+            // empty referent and the delayed trigger is built with no target
+            // (#6902).
+            //
+            // The continuation sits directly BENEATH this iteration frame, so the
+            // top-of-stack accessor cannot see it — hence the fixed two-frame
+            // adjacency rather than `active_ability_continuation_frame_mut`.
+            {
+                // CR 400.7 + CR 608.2c: a producer forwards only what arrived at the
+                // destination it NAMED. This deliberately is not the settlement
+                // completion decided above, and the difference is load-bearing: a
+                // CR 614.6 redirect is `Moved` for settlement — the object really
+                // did leave — yet forwards nothing, because nothing was put where
+                // the producer said it would go, so "that creature" has no referent.
+                // MEASURED: reusing the settlement completion here handed the exiled
+                // card to the delayed rider.
+                //
+                // With no evidence at all the member forwards. MEASURED on the
+                // copy-choice route (`events=0 sidecar=None`): that delivery is
+                // recorded out of band, so every classifier that INFERS from the
+                // paused record reports "did not move" for a member that really did
+                // enter the battlefield, and gating on such an inference silently
+                // un-fixes #6902. Absence of evidence is not evidence of no move.
+                let moved_member = [paused_current.member.object_id];
+                let moved: &[_] = if arrived_at_destination || !has_delivery_evidence {
+                    &moved_member
+                } else {
+                    &[]
+                };
+                // CR 608.2c: ACCUMULATE, don't publish. The awaiting marker is
+                // consumed by the first publish, and a multi-card selection can
+                // re-pause once per member (`remaining` is the untouched tail), so
+                // publishing here would hand the continuation only the first member
+                // to complete and silently drop every later one. The whole batch is
+                // published when the iteration terminally completes.
+                forwarded_members.extend_from_slice(moved);
+            }
             if matches!(
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
@@ -1746,6 +1831,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.replace_active_change_zone_iteration(
                         crate::types::game_state::PendingChangeZoneIteration {
+                            // CR 608.2c: carry the batch forward — a further
+                            // re-pause must not reset what earlier members delivered.
+                            forwarded_members,
                             logical_zone_change_group,
                             paused_current: anticipated_pause.map(|mut boundary| {
                                 boundary.append_delivery_events(&events[delivery_start..]);
@@ -1810,6 +1898,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.replace_active_change_zone_iteration_after_child(
                         crate::types::game_state::PendingChangeZoneIteration {
+                            // CR 608.2c: carry the batch forward — a further
+                            // re-pause must not reset what earlier members delivered.
+                            forwarded_members,
                             logical_zone_change_group,
                             paused_current,
                             remaining: remaining[i + 1..].to_vec(),
@@ -1870,6 +1961,20 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             &logical_zone_change_group,
             events,
         );
+        // CR 608.2c + CR 400.7: the selection is terminally complete and the
+        // ChangeZone frame is STILL top-of-stack, so the continuation parked
+        // beneath it is reachable here — and only here. Publish the accumulated
+        // batch exactly once, which is what the single-consume marker allows.
+        // After the take below, the adjacency accessor no longer resolves.
+        {
+            let delivered = crate::types::ability::ForwardedResultContext::from_object_ids(
+                state,
+                &forwarded_members,
+            );
+            if let Some(frame) = state.continuation_beneath_active_change_zone_mut() {
+                frame.publish_forwarded_producer_result(delivered);
+            }
+        }
         // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
         // the whole ChangeZone entry event is complete, so clear the pre-entry
         // Devour snapshot. NOT cleared on the `paused` break above (a further
@@ -2177,6 +2282,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             attachment_remainder,
             player_scope_linked_exile,
             player_scope_queue_end,
+            awaiting_forwarded_result,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.push_ability_continuation(AbilityContinuationFrame {
@@ -2193,6 +2299,7 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
                 attachment_remainder,
                 player_scope_linked_exile,
                 player_scope_queue_end,
+                awaiting_forwarded_result,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -13399,6 +13506,180 @@ fn stamp_discovered_referent_onto_continuation(state: &mut GameState) {
     }
 }
 
+/// CR 608.2c + CR 400.7: A `forward_result` producer that pauses for its choice
+/// (the `EffectZoneChoice` of "put a creature card from your hand onto the
+/// battlefield" when more than one card qualifies) has not moved anything yet,
+/// so the synchronous forwarding in `resolve_chain_body` cannot run. Mark the
+/// just-parked continuation head as awaiting that producer's result; the
+/// choice's completion replaces the marker with exactly the objects the
+/// selection moved (the `EffectZoneChoice` arm of `handle_resolution_choice`).
+///
+/// Marked ONLY when the pause is that zone-move `EffectZoneChoice`, the one
+/// completion that replaces the marker. Other resolution choices hand their
+/// result to the continuation another way — `SearchChoice` writes the found card
+/// into the continuation's `targets` — and `parent_chain_referents` reads a
+/// forwarded result FIRST, so an unreplaced marker there would shadow that
+/// injected target. Chains whose producer does not forward are left untouched.
+#[cfg(test)]
+mod forwarded_marker_ownership_tests {
+    use crate::types::ability::{
+        Effect, ForwardedResultContext, QuantityExpr, ResolvedAbility, TargetFilter,
+    };
+    use crate::types::game_state::{GameState, PendingContinuation};
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn park(state: &mut GameState, source: crate::types::identifiers::ObjectId) {
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, state);
+        state.park_ability_continuation(pending);
+    }
+
+    /// CR 608.2c: the completion fills ONLY a frame that is awaiting a result,
+    /// and consumes the marker, so a later NON-forwarding zone choice in the
+    /// same resolution cannot overwrite an already-correct forwarded result.
+    ///
+    /// Revert-proof: with the completion keyed on
+    /// `forwarded_result_context.is_some()` instead of the owned marker, the
+    /// second (unmarked) completion below overwrites `moved` with `stale`.
+    #[test]
+    fn a_non_forwarding_completion_cannot_overwrite_a_filled_forwarded_result() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Producer".to_string(),
+            Zone::Battlefield,
+        );
+        let moved = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Moved Object".to_string(),
+            Zone::Battlefield,
+        );
+        let stale = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Unrelated Object".to_string(),
+            Zone::Battlefield,
+        );
+        park(&mut state, source);
+
+        // The producer pauses: ownership is recorded on the frame, and the
+        // serialized context keeps its documented `None` meaning.
+        let owner = ObjectIncarnationRef::of(source, 0);
+        {
+            let frame = state
+                .active_ability_continuation_frame_mut()
+                .expect("parked continuation");
+            frame.pending.awaiting_forwarded_result = Some(owner);
+            assert!(
+                frame
+                    .pending
+                    .chain
+                    .context
+                    .forwarded_result_context
+                    .is_none(),
+                "reach-guard: pending must NOT be encoded as Some([]) in the context"
+            );
+        }
+
+        // Completion #1 — this producer's result. Fills, and consumes the marker.
+        let first = ForwardedResultContext::from_object_ids(&state, &[moved]);
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            if frame.pending.awaiting_forwarded_result.take().is_some() {
+                frame.pending.chain.context.forwarded_result_context = Some(Box::new(first));
+            }
+        }
+        let filled = state
+            .active_ability_continuation()
+            .and_then(|c| c.chain.context.forwarded_result_context.clone())
+            .expect("reach-guard: the awaiting frame must have been filled");
+        assert_eq!(
+            filled.targets.len(),
+            1,
+            "reach-guard: the forwarded result names the moved object"
+        );
+
+        // Completion #2 — a later NON-forwarding zone choice in the same
+        // resolution. The frame is no longer awaiting, so it must be left alone.
+        let second = ForwardedResultContext::from_object_ids(&state, &[stale]);
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            if frame.pending.awaiting_forwarded_result.take().is_some() {
+                frame.pending.chain.context.forwarded_result_context = Some(Box::new(second));
+            }
+        }
+
+        let after = state
+            .active_ability_continuation()
+            .and_then(|c| c.chain.context.forwarded_result_context.clone())
+            .expect("the forwarded result must survive the unrelated completion");
+        assert_eq!(
+            after.targets, filled.targets,
+            "a non-forwarding completion must not overwrite the producer's result"
+        );
+    }
+
+    /// The marker is consumed exactly once: a second completion for the SAME
+    /// frame finds nothing awaiting.
+    #[test]
+    fn the_awaiting_marker_is_consumed_exactly_once() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Producer".to_string(),
+            Zone::Battlefield,
+        );
+        park(&mut state, source);
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.awaiting_forwarded_result = Some(ObjectIncarnationRef::of(source, 0));
+        }
+        let first = state
+            .active_ability_continuation_frame_mut()
+            .and_then(|f| f.pending.awaiting_forwarded_result.take());
+        let second = state
+            .active_ability_continuation_frame_mut()
+            .and_then(|f| f.pending.awaiting_forwarded_result.take());
+        assert!(first.is_some(), "reach-guard: the marker was recorded");
+        assert!(second.is_none(), "the marker must be consumed exactly once");
+    }
+}
+
+fn mark_continuation_awaits_forwarded_result(state: &mut GameState, ability: &ResolvedAbility) {
+    if !ability.forward_result
+        || !matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::ChangeZone | EffectKind::BounceAll,
+                ..
+            }
+        )
+    {
+        return;
+    }
+    let owner = crate::types::identifiers::ObjectIncarnationRef::of(
+        ability.source_id,
+        ability.source_incarnation.unwrap_or_default(),
+    );
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame.pending.awaiting_forwarded_result = Some(owner);
+    }
+}
+
 pub fn resolve_ability_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -16708,6 +16989,7 @@ fn resolve_chain_body(
                 // token count) resolve against the discovered card, not an absent
                 // referent. No-op for every non-Discover pause.
                 stamp_discovered_referent_onto_continuation(state);
+                mark_continuation_awaits_forwarded_result(state, ability);
                 return Ok(());
             }
 
@@ -17039,6 +17321,7 @@ fn resolve_chain_body(
             // CR 701.57c + CR 608.2h: an unconditional Discover follow-up stashed
             // here still binds the hit card as its referent (no-op otherwise).
             stamp_discovered_referent_onto_continuation(state);
+            mark_continuation_awaits_forwarded_result(state, ability);
             return Ok(());
         }
 
