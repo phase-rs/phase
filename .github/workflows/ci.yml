@@ -1063,3 +1063,49 @@ jobs:
 
       - name: Run tests with coverage
         run: cd client && pnpm test -- --run --coverage
+
+  draft-match-wasm-proof:
+    name: Draft match proof (real WASM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          target: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+          rustflags: ""
+
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: wasm-bindgen-cli@0.2.121
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 9
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build both WASM engines
+        run: ./scripts/build-wasm.sh wasm-dev
+
+      - name: Require generated bindings
+        run: |
+          test -s client/src/wasm/draft_wasm.js
+          test -s client/src/wasm/draft_wasm_bg.wasm
+          test -s client/src/wasm/engine_wasm.js
+          test -s client/src/wasm/engine_wasm_bg.wasm
+
+      - name: Run isolated draft match proofs
+        run: pnpm exec vitest run --config vitest.integration.config.ts --pool=forks --isolate --coverage.enabled=false --reporter=verbose src/adapter/__tests__/setDraftMatchProof.integration.test.ts src/adapter/__tests__/cubeDraftMatchProof.integration.test.ts
+        working-directory: client
