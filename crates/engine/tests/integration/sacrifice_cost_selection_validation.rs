@@ -827,10 +827,19 @@ fn original_x_mana_activation_guard_remains_refused() {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         runner.act(GameAction::ChooseX { value: 1 })
     }));
-    assert!(
-        outcome.is_err(),
-        "the original XMana guard remains refused until phase12b0"
-    );
+    match outcome {
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied());
+            assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"));
+        }
+        Ok(Err(EngineError::ActionNotAllowed(message))) => {
+            assert_eq!(message, "non-self sacrifice/exile cost unhandled");
+        }
+        Ok(other) => panic!("unsupported X sacrifice suffix unexpectedly proceeded: {other:?}"),
+    }
 }
 
 #[test]
