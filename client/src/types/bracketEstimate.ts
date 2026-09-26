@@ -53,6 +53,10 @@ export interface BracketCoverage {
   confidence: EstimateConfidence;
 }
 
+export type DeclarationVerdict =
+  | { kind: "at_or_above_floor" }
+  | { kind: "below_floor"; floor: CommanderBracketTier; raised_by: BracketAxis[] };
+
 export interface BracketEstimate {
   tier: CommanderBracketTier;
   axes: BracketAxisReadings;
@@ -60,6 +64,8 @@ export interface BracketEstimate {
   checks: BracketCheck[];
   coverage: BracketCoverage;
   data_version: string;
+  /** Engine verdict on the player's declaration; `null` when none was sent. */
+  declaration: DeclarationVerdict | null;
 }
 
 // Mirrors the sections `estimate_bracket` counts, plus `sideboard`, which the
@@ -72,12 +78,29 @@ export interface BracketDeckRequest {
   signature_spell: string[];
 }
 
+export interface BracketEstimateRequest {
+  deck: BracketDeckRequest;
+  /** `null` = undeclared. Never omit the field — see the Rust doc comment on
+   * `BracketEstimateRequest::declared_tier`. */
+  declared_tier: CommanderBracketTier | null;
+}
+
 export const BRACKET_TIER_NUMERIC: Record<CommanderBracketTier, 1 | 2 | 3 | 4 | 5> = {
   exhibition: 1,
   core: 2,
   upgraded: 3,
   optimized: 4,
   cedh: 5,
+};
+
+/** Inverse of `BRACKET_TIER_NUMERIC`. Pure representation mapping between the
+ * picker's numeric form and the engine's tier enum — no derivation. */
+export const BRACKET_TIER_BY_NUMERIC: Record<1 | 2 | 3 | 4 | 5, CommanderBracketTier> = {
+  1: "exhibition",
+  2: "core",
+  3: "upgraded",
+  4: "optimized",
+  5: "cedh",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -143,6 +166,12 @@ function isCoverage(value: unknown): value is BracketCoverage {
   );
 }
 
+function isDeclarationVerdict(value: unknown): value is DeclarationVerdict {
+  if (!isRecord(value)) return false;
+  if (value.kind === "at_or_above_floor") return true;
+  return value.kind === "below_floor" && isTier(value.floor) && isStringArray(value.raised_by);
+}
+
 export function isBracketEstimate(value: unknown): value is BracketEstimate {
   if (!isRecord(value) || !isTier(value.tier)) return false;
   if (typeof value.data_version !== "string") return false;
@@ -150,6 +179,9 @@ export function isBracketEstimate(value: unknown): value is BracketEstimate {
     hasReadingByAxis(value.axes) &&
     Array.isArray(value.checks) &&
     value.checks.every(isBracketCheck) &&
-    isCoverage(value.coverage)
+    isCoverage(value.coverage) &&
+    (value.declaration === undefined ||
+      value.declaration === null ||
+      isDeclarationVerdict(value.declaration))
   );
 }

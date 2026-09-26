@@ -58,7 +58,7 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest } from "../types/bracketEstimate";
+import type { BracketEstimateRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ type EngineRequest =
   | { type: "takeLastPanic"; id: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "projectSeatView"; id: number; stateJson: string }
-  | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest }
+  | { type: "estimateBracketForDeck"; id: number; request: BracketEstimateRequest }
   | { type: "hasReplayRecording"; id: number }
   | { type: "exportReplayLog"; id: number }
   | { type: "loadReplayForPlayback"; id: number; replayJson: string }
@@ -640,9 +640,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "estimateBracketForDeck": {
         // Pure, stateless — does not require an active game state. Returns
-        // null when the deck has no commander or the card database is not
-        // loaded yet (engine returns Option::None in those cases).
-        const estimate = estimate_bracket_for_deck(msg.deck);
+        // null only when the deck has no commander; the caller has already
+        // ensured that the card database is loaded.
+        const estimate = estimate_bracket_for_deck(msg.request);
         result(msg.id, estimate ?? null);
         break;
       }

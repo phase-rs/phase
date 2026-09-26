@@ -254,11 +254,11 @@
     "clearOverride": "Wyczyść nadpisanie grafiki"
   },
   "bracket": {
-    "unavailable": "Szacowanie poziomu nie jest dostępne w tej wersji.",
+    "unavailable": "Szacowanie poziomu wymaga danych kart, które nie zostały jeszcze wczytane.",
     "addCommander": "Dodaj dowódcę, aby zobaczyć szacowany poziom.",
     "estimated": "Szacowany: B{{tier}} {{label}}",
     "manual": "Ręczny: B{{tier}} {{label}}",
-    "mismatch": " ⚠ niezgodność",
+    "belowFloor": " ⚠ poniżej minimum B{{tier}}",
     "hideBreakdown": "Ukryj szczegóły",
     "showBreakdown": "Pokaż szczegóły",
     "hideBreakdownButton": "▲ Ukryj szczegóły",

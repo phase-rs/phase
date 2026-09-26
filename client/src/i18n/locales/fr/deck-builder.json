@@ -254,11 +254,11 @@
     "clearOverride": "Effacer le remplacement d'illustration"
   },
   "bracket": {
-    "unavailable": "L'estimation du palier n'est pas disponible dans cette version.",
+    "unavailable": "L'estimation du palier nécessite des données de cartes qui ne sont pas encore chargées.",
     "addCommander": "Ajoutez un commandant pour voir l'estimation de votre palier.",
     "estimated": "Estimé : B{{tier}} {{label}}",
     "manual": "Manuel : B{{tier}} {{label}}",
-    "mismatch": " ⚠ incohérence",
+    "belowFloor": " ⚠ sous le minimum B{{tier}}",
     "hideBreakdown": "Masquer le détail",
     "showBreakdown": "Afficher le détail",
     "hideBreakdownButton": "▲ Masquer le détail",

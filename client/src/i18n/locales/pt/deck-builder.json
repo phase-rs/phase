@@ -254,11 +254,11 @@
     "clearOverride": "Limpar Substituição de Arte"
   },
   "bracket": {
-    "unavailable": "A estimativa de bracket não está disponível nesta build.",
+    "unavailable": "A estimativa de bracket precisa de dados de cartas que ainda não foram carregados.",
     "addCommander": "Adicione um comandante para ver sua estimativa de bracket.",
     "estimated": "Estimado: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ divergência",
+    "belowFloor": " ⚠ abaixo do mínimo B{{tier}}",
     "hideBreakdown": "Ocultar detalhamento",
     "showBreakdown": "Mostrar detalhamento",
     "hideBreakdownButton": "▲ Ocultar detalhamento",

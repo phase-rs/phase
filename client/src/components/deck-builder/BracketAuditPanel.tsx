@@ -13,14 +13,15 @@ import {
 
 interface Props {
   estimate: BracketEstimate | null;
+  /** Player-selected bracket shown as display-only metadata. */
   manualBracket: CommanderBracket | null;
   onCardClick: (cardName: string) => void;
   /**
    * "not-commander" hides the panel; "no-commander" renders the
-   * "add a commander" placeholder; "unsupported" renders the
-   * adapter-doesn't-support-bracket-estimation placeholder.
+   * "add a commander" placeholder; "card-data-unavailable" renders the
+   * card-data loading failure placeholder.
    */
-  emptyReason?: "not-commander" | "no-commander" | "unsupported";
+  emptyReason?: "not-commander" | "no-commander" | "card-data-unavailable";
 }
 
 const AXIS_I18N_KEY: Record<BracketAxis, string> = {
@@ -35,7 +36,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
   const [expanded, setExpanded] = useState(false);
 
   if (emptyReason === "not-commander") return null;
-  if (emptyReason === "unsupported") {
+  if (emptyReason === "card-data-unavailable") {
     return (
       <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs text-slate-400">
         {t("bracket.unavailable")}
@@ -52,7 +53,12 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
 
   const tierNum = BRACKET_TIER_NUMERIC[estimate.tier];
   const tierLabel = BRACKET_LABEL[tierNum];
-  const mismatch = manualBracket !== null && manualBracket !== tierNum;
+  // The engine owns the comparison. The panel never re-derives it: brackets are
+  // a pregame-conversation tool, the declaration governs above the floor, and a
+  // declaration ABOVE the estimate (a cEDH deck over an Optimized floor) is the
+  // system working. See `DeclarationVerdict` in game/bracket_estimate.rs.
+  const belowFloor =
+    estimate.declaration?.kind === "below_floor" ? estimate.declaration : null;
 
   return (
     <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2">
@@ -65,13 +71,14 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
         {manualBracket !== null && (
           <span
             className={
-              mismatch
+              belowFloor !== null
                 ? "rounded-full border border-amber-300/60 bg-amber-500/20 px-2.5 py-1 text-xs font-medium text-amber-100"
                 : "rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-xs font-medium text-slate-400"
             }
           >
             {t("bracket.manual", { tier: manualBracket, label: BRACKET_LABEL[manualBracket] })}
-            {mismatch && t("bracket.mismatch")}
+            {belowFloor &&
+              t("bracket.belowFloor", { tier: BRACKET_TIER_NUMERIC[belowFloor.floor] })}
           </span>
         )}
         <button

@@ -254,11 +254,11 @@
     "clearOverride": "Borrar anulación de ilustración"
   },
   "bracket": {
-    "unavailable": "La estimación de nivel no está disponible en esta versión.",
+    "unavailable": "La estimación de nivel necesita datos de cartas que aún no se han cargado.",
     "addCommander": "Añade un comandante para ver tu estimación de nivel.",
     "estimated": "Estimado: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ discrepancia",
+    "belowFloor": " ⚠ por debajo del mínimo de B{{tier}}",
     "hideBreakdown": "Ocultar desglose",
     "showBreakdown": "Mostrar desglose",
     "hideBreakdownButton": "▲ Ocultar desglose",

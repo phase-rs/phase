@@ -254,11 +254,11 @@
     "clearOverride": "Clear Art Override"
   },
   "bracket": {
-    "unavailable": "Bracket estimation isn't available in this build.",
+    "unavailable": "Bracket estimation needs card data, which hasn't loaded yet.",
     "addCommander": "Add a commander to see your bracket estimate.",
     "estimated": "Estimated: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ mismatch",
+    "belowFloor": " ⚠ below B{{tier}} floor",
     "hideBreakdown": "Hide breakdown",
     "showBreakdown": "Show breakdown",
     "hideBreakdownButton": "▲ Hide breakdown",

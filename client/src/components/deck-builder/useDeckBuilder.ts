@@ -25,9 +25,8 @@ import { hasSearchCriteria } from "./searchFilters";
 import type { GroupMode } from "./deckGrouping";
 import type { DeckSizeRule, GameFormat } from "../../adapter/types";
 import { DECK_CONSTRUCTION_FORMATS, formatMetadata } from "../../data/formatRegistry";
-import type { CommanderBracket } from "../../types/bracket";
+import { BRACKET_TIER_BY_NUMERIC, type CommanderBracket } from "../../types/bracket";
 import { getPreconBracket } from "../../data/preconBrackets";
-import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { projectSignatureSpellForFormat } from "../../services/savedDeckProjection";
 import {
@@ -234,20 +233,24 @@ export function useDeckBuilder({
     };
   }, [deck.main, format, isCommander]);
 
-  const { estimate, unsupported: bracketUnsupported } = useBracketEstimate({
+  const { estimate, outcome: bracketOutcome } = useBracketEstimate({
     deck,
     commanders,
     format,
-    adapter: getSharedAdapter(),
+    declaredTier: bracket === null ? null : BRACKET_TIER_BY_NUMERIC[bracket],
   });
 
-  const auditEmptyReason: "not-commander" | "no-commander" | "unsupported" | undefined =
+  const auditEmptyReason:
+    | "not-commander"
+    | "no-commander"
+    | "card-data-unavailable"
+    | undefined =
     !isCommander
       ? "not-commander"
       : commanders.length === 0
         ? "no-commander"
-        : bracketUnsupported
-          ? "unsupported"
+        : bracketOutcome?.kind === "card-data-unavailable"
+          ? "card-data-unavailable"
           : undefined;
 
   const handleScrollToCard = useCallback((cardName: string) => {

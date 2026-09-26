@@ -83,6 +83,7 @@ const estimate: BracketEstimate = {
     confidence: "partial",
   },
   data_version: "2025-09-24-wotc",
+  declaration: null,
 };
 
 describe("BracketAuditPanel", () => {
@@ -92,14 +93,38 @@ describe("BracketAuditPanel", () => {
     expect(screen.getByText(/Upgraded/i)).toBeInTheDocument();
   });
 
-  it("hides the mismatch chip when manual matches estimate", () => {
-    render(<BracketAuditPanel estimate={estimate} manualBracket={3} onCardClick={() => {}} />);
-    expect(screen.queryByText(/mismatch/i)).not.toBeInTheDocument();
+  it("shows no warning for a cEDH declaration at or above the floor", () => {
+    render(
+      <BracketAuditPanel
+        estimate={{ ...estimate, declaration: { kind: "at_or_above_floor" } }}
+        manualBracket={5}
+        onCardClick={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/below B/i)).not.toBeInTheDocument();
   });
 
-  it("shows the mismatch chip when manual differs from estimate", () => {
+  it("shows the engine-provided floor when the declaration is below it", () => {
+    render(
+      <BracketAuditPanel
+        estimate={{
+          ...estimate,
+          declaration: {
+            kind: "below_floor",
+            floor: "optimized",
+            raised_by: ["mass_land_denial"],
+          },
+        }}
+        manualBracket={2}
+        onCardClick={() => {}}
+      />,
+    );
+    expect(screen.getByText(/below B4 floor/i)).toBeInTheDocument();
+  });
+
+  it("does not infer a warning when the engine provides no declaration verdict", () => {
     render(<BracketAuditPanel estimate={estimate} manualBracket={2} onCardClick={() => {}} />);
-    expect(screen.getByText(/mismatch/i)).toBeInTheDocument();
+    expect(screen.queryByText(/below B/i)).not.toBeInTheDocument();
   });
 
   it("expands to show per-axis breakdown", () => {

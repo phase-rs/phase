@@ -23,7 +23,6 @@ import type {
   InteractionSubmission,
 } from "./generated/interaction";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, nextSnapshotSeq } from "./types";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -1370,14 +1369,6 @@ export class WebSocketAdapter implements EngineAdapter {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,
       "Undo not supported in multiplayer",
-      false,
-    );
-  }
-
-  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    throw new AdapterError(
-      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-      "Bracket estimation is a local feature; not available in WebSocket sessions.",
       false,
     );
   }
