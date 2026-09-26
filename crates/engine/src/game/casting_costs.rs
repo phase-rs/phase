@@ -6978,6 +6978,15 @@ pub(super) fn begin_required_cost_before_targets(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let mut ability = ability;
+    record_graveyard_rider_authority(
+        state,
+        player,
+        object_id,
+        casting_variant,
+        origin_zone,
+        &mut ability,
+    )?;
     let mut pending = PendingCast::new(object_id, card_id, ability, cost);
     pending.base_cost = base_cost;
     pending.casting_variant = casting_variant;
@@ -6990,6 +6999,52 @@ pub(super) fn begin_required_cost_before_targets(
     pending.additional_cost_flow = Some(AdditionalCost::Required(required_cost));
     pending.additional_cost_source = cost_source;
     finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 601.2a + CR 118.9a: a card cast from the graveyard for its OWN alternative
+/// cost (Blitz, Bestow) records that rider in `casting_variant`, so the
+/// permission that admitted it is elected here — once, as costs begin and
+/// before any mana ability can change the board — and carried on the ability's
+/// context. The extra-cost lookup and `finalize_cast` read this record instead
+/// of re-electing, so a permission source that leaves during payment
+/// (sacrificed for mana) can't hand the cast to a different permission. The
+/// ability survives every `PendingCast` rebuild, which is why the record lives
+/// on its context (as `alt_cost_grant_source` does).
+///
+/// The single election site, called by every continuation that starts paying a
+/// cast's costs: `check_additional_cost_or_pay_with_distribute` and
+/// `begin_required_cost_before_targets` (which pays an X-bearing required cost
+/// before targets and so never reaches the former). `finalize_cast` refuses a
+/// rider cast with no record, so a continuation that skipped this would refuse
+/// a legal cast. `prepare_spell_cast` already refused a rider cast with no usable
+/// permission; failing closed here keeps that true on every path.
+fn record_graveyard_rider_authority(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+    origin_zone: Zone,
+    ability: &mut ResolvedAbility,
+) -> Result<(), EngineError> {
+    if origin_zone != Zone::Graveyard
+        || !casting_variant.is_independent_alternative_cost_rider()
+        || ability.context.graveyard_permission_authority.is_some()
+    {
+        return Ok(());
+    }
+    let authority = super::casting::graveyard_rider_permission_authority(
+        state,
+        player,
+        object_id,
+        casting_variant,
+    )
+    .ok_or_else(|| {
+        EngineError::ActionNotAllowed(
+            "No graveyard permission admits this alternative-cost cast".to_string(),
+        )
+    })?;
+    ability.context.graveyard_permission_authority = Some(authority);
+    Ok(())
 }
 
 fn combined_imposed_additional_cast_cost(
@@ -7008,11 +7063,17 @@ fn combined_imposed_additional_cast_cost(
     // Dissident's additional remove-counters). The `Alternative` shape
     // (Valgavoth) is handled separately in the alt-cost block — it zeroes the
     // mana cost — and must NOT be folded in here.
+    //
+    // CR 601.2a: a graveyard rider cast reads the rider of the permission it
+    // committed to (`SpellContext::graveyard_permission_authority`).
     imposed_costs.extend(cast_permission_additional_extra_cost(
         state,
         player,
         object_id,
-        casting_variant,
+        ability
+            .context
+            .graveyard_permission_authority
+            .unwrap_or(casting_variant),
         casting_permission_index,
     ));
     match imposed_costs.len() {
@@ -7037,9 +7098,15 @@ fn cast_permission_additional_extra_cost(
     casting_permission_index: Option<CastingPermissionIndex>,
 ) -> Option<AbilityCost> {
     let extra = match state.objects.get(&object_id).map(|obj| obj.zone) {
-        Some(Zone::Graveyard) => {
-            super::casting::graveyard_static_permission_extra_cost(state, player, object_id)
-        }
+        // CR 601.2a: read from the permission this cast commits to, the same
+        // election `finalize_cast` spends, so the rider charged here is the
+        // rider of the permission actually used.
+        Some(Zone::Graveyard) => super::casting::graveyard_static_permission_extra_cost(
+            state,
+            player,
+            object_id,
+            casting_variant,
+        ),
         // CR 601.2a: Bind to the source this cast commits to so the additional
         // rider is read from the elected permission, never a second active
         // permission for the same exiled spell. A non-`ExilePermission` exile
@@ -7057,6 +7124,38 @@ fn cast_permission_additional_extra_cost(
         _ => None,
     }?;
     matches!(extra.mode, crate::types::statics::CastCostMode::Additional).then_some(extra.cost)
+}
+
+/// CR 601.2f + CR 601.2h: the required non-mana costs a cast commits to besides
+/// its alternative cost's own residual: the object's required additional cost
+/// merged with every imposed cost, exactly as payment merges them into the
+/// pending cast's required flow. The alternative-cost offer reads this, so it
+/// prices the same required set the Defiler payment prompt later sees.
+pub(super) fn committed_required_cast_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &ResolvedAbility,
+    casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<AbilityCost> {
+    let object_required = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.clone())
+        .filter(|cost| matches!(cost, AdditionalCost::Required(_)));
+    let imposed = combined_imposed_additional_cast_cost(
+        state,
+        player,
+        object_id,
+        ability,
+        casting_variant,
+        casting_permission_index,
+    );
+    match merge_required_additional_cost(object_required, imposed) {
+        Some(AdditionalCost::Required(cost)) => Some(cost),
+        _ => None,
+    }
 }
 
 fn merge_required_additional_cost(
@@ -7180,6 +7279,16 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         );
     }
     let cost = &target_adjusted_cost;
+
+    let mut ability = ability;
+    record_graveyard_rider_authority(
+        state,
+        player,
+        object_id,
+        casting_variant,
+        origin_zone,
+        &mut ability,
+    )?;
 
     let flash_additional =
         flash_timing_non_mana_additional_cost(state, player, object_id, cast_timing_permission);
@@ -7712,96 +7821,31 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         );
     }
 
-    // CR 702.34a + CR 118.8: Flashback with a non-mana additional cost (Battle
-    // Screech's "tap three white creatures") or a compound cost (Deep Analysis's
-    // "{1}{U}, Pay 3 life") routes the residual non-mana sub-cost through
-    // `pay_additional_cost`. The mana sub-cost (if any) was already extracted
-    // into `cost` upstream by `split_flashback_cost_components` and is paid via
-    // the normal mana-payment flow inside `pay_additional_cost`'s fall-through.
-    if casting_variant == CastingVariant::Flashback {
-        let flashback_cost = super::keywords::effective_flashback_cost(state, object_id);
-        let (_mana, residual) =
-            super::casting::split_flashback_cost_components(flashback_cost.as_ref());
-        if let Some(non_mana_cost) = residual {
-            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
-            pending.base_cost = base_cost.clone();
-            pending.casting_variant = casting_variant;
-            pending.casting_permission_index = casting_permission_index;
-            pending.cast_timing_permission = cast_timing_permission;
-            pending.distribute = distribute;
-            pending.origin_zone = origin_zone;
-            pending.payment_mode = payment_mode;
-            pending.additional_cost_flow =
-                imposed_required_cost.clone().map(AdditionalCost::Required);
-            return pay_additional_cost(state, player, non_mana_cost, pending, events);
-        }
-    }
-
-    // CR 702.74a + CR 118.9 + CR 601.2h: Evoke twin of the flashback branch
-    // above. Non-mana evoke (Solitude — "Exile a white card from your hand.")
-    // and any future compound mana+non-mana evoke route the residual non-mana
-    // sub-cost through `pay_additional_cost` so it is paid alongside the
-    // (potentially zero) mana sub-cost.
-    if casting_variant == CastingVariant::Evoke {
-        // CR 601.2h: non-mana evoke residual from effective keywords (granted
-        // evoke).
-        // CR 702.102b: GUARDED — this arm requires `casting_variant == Evoke`,
-        // which Fuse never equals, so a fused split cast never reaches this read
-        // (and Evoke is a creature keyword never value-key-granted to a split card).
-        let evoke_split = super::casting::effective_spell_keywords(state, player, object_id)
-            .iter()
-            .find_map(|k| match k {
-                crate::types::keywords::Keyword::Evoke(ec) => {
-                    Some(super::casting::split_evoke_cost_components(ec))
-                }
-                _ => None,
-            });
-        if let Some((_mana, Some(non_mana_cost))) = evoke_split {
-            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
-            pending.base_cost = base_cost.clone();
-            pending.casting_variant = casting_variant;
-            pending.casting_permission_index = casting_permission_index;
-            pending.cast_timing_permission = cast_timing_permission;
-            pending.distribute = distribute;
-            pending.origin_zone = origin_zone;
-            pending.payment_mode = payment_mode;
-            pending.additional_cost_flow =
-                imposed_required_cost.clone().map(AdditionalCost::Required);
-            return pay_additional_cost(state, player, non_mana_cost, pending, events);
-        }
-    }
-
-    // CR 702.103a + CR 118.9 + CR 601.2h: Bestow twin of the Evoke branch above.
-    // A compound bestow cost ("Bestow—{R}, Collect evidence 6." on Detective's
-    // Phoenix) routes its residual non-mana sub-cost (Collect evidence) through
-    // `pay_additional_cost`; the mana sub-cost ({R}) was already substituted as
-    // the spell's mana cost in `prepare_spell_cast` and is paid through the
-    // normal mana-payment flow inside `pay_additional_cost`'s fall-through.
-    if casting_variant == CastingVariant::Bestow {
-        // CR 702.102b: GUARDED — this arm requires `casting_variant == Bestow`,
-        // which Fuse never equals, so a fused split cast never reaches this read
-        // (and Bestow is an Aura keyword never value-key-granted to a split card).
-        let bestow_split = super::casting::effective_spell_keywords(state, player, object_id)
-            .iter()
-            .find_map(|k| match k {
-                crate::types::keywords::Keyword::Bestow(bc) => {
-                    Some(super::casting::split_bestow_cost_components(bc))
-                }
-                _ => None,
-            });
-        if let Some((_mana, Some(non_mana_cost))) = bestow_split {
-            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
-            pending.base_cost = base_cost.clone();
-            pending.casting_variant = casting_variant;
-            pending.casting_permission_index = casting_permission_index;
-            pending.cast_timing_permission = cast_timing_permission;
-            pending.distribute = distribute;
-            pending.origin_zone = origin_zone;
-            pending.payment_mode = payment_mode;
-            pending.additional_cost_flow =
-                imposed_required_cost.clone().map(AdditionalCost::Required);
-            return pay_additional_cost(state, player, non_mana_cost, pending, events);
-        }
+    // CR 118.9 + CR 601.2h: a card's own compound alternative cost routes its
+    // non-mana residual through `pay_alternative_cost_residual` (see
+    // `alternative_cost_residual` for which costs have one). The mana sub-cost,
+    // if any, was already substituted as the spell's mana cost upstream and is
+    // paid through the normal mana-payment flow.
+    if let Some(non_mana_cost) =
+        alternative_cost_residual(state, player, object_id, casting_variant)
+    {
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.base_cost = base_cost.clone();
+        pending.casting_variant = casting_variant;
+        pending.casting_permission_index = casting_permission_index;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        pending.payment_mode = payment_mode;
+        pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
+        return pay_alternative_cost_residual(
+            state,
+            player,
+            object_id,
+            non_mana_cost,
+            pending,
+            events,
+        );
     }
 
     // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
@@ -7983,6 +8027,154 @@ fn find_defiler_static(
 /// CR 601.2b: Find the first applicable Defiler cost reduction for a spell being cast.
 /// `Some` if a controlled Defiler permanent has `DefilerCostReduction` matching one of
 /// the spell's colors, the spell is a permanent spell, and the life is payable.
+/// CR 601.2b + CR 601.2h + CR 118.9d: pay the non-mana residual of a card's own
+/// compound alternative cost (Flashback's "Pay 3 life", Evoke's "Exile a white
+/// card", Bestow's "Collect evidence 6", Blitz's "Discard a card").
+///
+/// A Defiler's optional "As an additional cost to cast [color] permanent spells,
+/// you may pay 2 life" is announced with the spell's other costs (CR 601.2b),
+/// and CR 118.9d applies cost reductions to the alternative cost being paid,
+/// so a matching Defiler is offered FIRST. The residual is stashed on the
+/// pending cast and paid when `handle_defiler_payment` resumes it through
+/// `finish_pending_cost_or_cast` (CR 601.2h lets costs be paid in any order).
+/// With no matching Defiler, the residual is paid now, as before.
+fn pay_alternative_cost_residual(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    residual: AbilityCost,
+    mut pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 601.2h + CR 119.4: a Defiler's 2 life is paid alongside the residual's
+    // own life payment (Tenacious Underdog's "Pay 2 life") and any imposed
+    // required cost's, and partial payments aren't allowed. Offer the Defiler
+    // only when the combined life stays payable, so accepting it can't make the
+    // rest of the total unpayable. The offer side reads the same sum.
+    let imposed = match &pending.additional_cost_flow {
+        Some(AdditionalCost::Required(imposed)) => Some(imposed),
+        _ => None,
+    };
+    let committed_life =
+        committed_life_besides_defiler(state, player, object_id, Some(&residual), imposed);
+    if let Some(defiler) = defiler_reduction_alongside(state, player, object_id, committed_life) {
+        pending.deferred_required_additional_cost = Some(residual);
+        return Ok(WaitingFor::DefilerPayment {
+            player,
+            life_cost: defiler.life_cost,
+            mana_reduction: defiler.mana_reduction,
+            reach: defiler.reach,
+            pending_cast: Box::new(pending),
+        });
+    }
+    pay_additional_cost(state, player, residual, pending, events)
+}
+
+/// CR 119.4: the life a cost pays, summed across a composite ("{2}{B}{B}, Pay
+/// 2 life" contributes 2). Amounts resolve against the current state exactly as
+/// `AbilityCost::is_payable` resolves them.
+fn cost_life_payment(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    cost: &AbilityCost,
+) -> u32 {
+    match cost {
+        AbilityCost::PayLife { amount } => {
+            super::quantity::resolve_quantity(state, amount, player, source).max(0) as u32
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .map(|cost| cost_life_payment(state, player, source, cost))
+            .sum(),
+        _ => 0,
+    }
+}
+
+/// CR 601.2h + CR 119.4: the life a cast's committed total pays besides a
+/// Defiler's: the alternative cost's own residual plus any imposed required
+/// cost. The single sum that both the alternative-cost offer and the Defiler
+/// payment prompt judge a Defiler against.
+pub(crate) fn committed_life_besides_defiler(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    residual: Option<&AbilityCost>,
+    imposed: Option<&AbilityCost>,
+) -> u32 {
+    [residual, imposed]
+        .into_iter()
+        .flatten()
+        .map(|cost| cost_life_payment(state, player, object_id, cost))
+        .sum()
+}
+
+/// CR 601.2h + CR 119.4: the matching Defiler reduction a cast can take when its
+/// total already pays `committed_life`. Partial payments aren't allowed, so the
+/// Defiler's life and the committed life must be payable together.
+fn defiler_reduction_alongside(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    committed_life: u32,
+) -> Option<DefilerReduction> {
+    find_defiler_reduction(state, caster, spell_id).filter(|defiler| {
+        super::life_costs::can_pay_life_cast_or_activation_cost(
+            state,
+            caster,
+            defiler.life_cost + committed_life,
+        )
+    })
+}
+
+/// CR 118.9 + CR 601.2h: the non-mana residual of a card's OWN compound
+/// alternative cost, when the cast is paying that cost; `None` otherwise.
+///
+/// - CR 702.34a + CR 118.8: Flashback with a non-mana or compound cost (Battle
+///   Screech's "tap three white creatures", Deep Analysis's "{1}{U}, Pay 3 life").
+/// - CR 702.74a: Evoke with a non-mana cost (Solitude's "Exile a white card from
+///   your hand").
+/// - CR 702.103a: a compound bestow cost (Detective's Phoenix's "{R}, Collect
+///   evidence 6").
+/// - CR 702.152a: a compound blitz cost (Sabin, Master Monk's "Discard a card",
+///   Tenacious Underdog's "Pay 2 life").
+///
+/// CR 702.102b: each arm requires its own casting variant, which Fuse never
+/// equals, so a fused split cast never reaches these reads.
+pub(super) fn alternative_cost_residual(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Option<AbilityCost> {
+    use crate::types::keywords::Keyword;
+    let keyword_residual = |split: fn(&Keyword) -> Option<Option<AbilityCost>>| {
+        super::casting::effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(split)
+            .flatten()
+    };
+    match casting_variant {
+        CastingVariant::Flashback => {
+            let flashback_cost = super::keywords::effective_flashback_cost(state, object_id);
+            super::casting::split_flashback_cost_components(flashback_cost.as_ref()).1
+        }
+        CastingVariant::Evoke => keyword_residual(|keyword| match keyword {
+            Keyword::Evoke(cost) => Some(super::casting::split_evoke_cost_components(cost).1),
+            _ => None,
+        }),
+        CastingVariant::Bestow => keyword_residual(|keyword| match keyword {
+            Keyword::Bestow(cost) => Some(super::casting::split_bestow_cost_components(cost).1),
+            _ => None,
+        }),
+        CastingVariant::Blitz => keyword_residual(|keyword| match keyword {
+            Keyword::Blitz(cost) => Some(super::casting::split_blitz_cost_components(cost).1),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 fn find_defiler_reduction(
     state: &GameState,
     caster: PlayerId,
@@ -8038,7 +8230,20 @@ pub(crate) fn defiler_reduced_cost(
     spell_id: ObjectId,
     cost: &ManaCost,
 ) -> Option<ManaCost> {
-    let reduction = find_defiler_reduction(state, caster, spell_id)?;
+    defiler_reduced_cost_alongside(state, caster, spell_id, cost, 0)
+}
+
+/// CR 601.2f + CR 601.2h + CR 119.4: `defiler_reduced_cost` for a cast whose
+/// total already pays `committed_life` (see `committed_life_besides_defiler`),
+/// the same eligibility the Defiler payment prompt applies.
+pub(crate) fn defiler_reduced_cost_alongside(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    cost: &ManaCost,
+    committed_life: u32,
+) -> Option<ManaCost> {
+    let reduction = defiler_reduction_alongside(state, caster, spell_id, committed_life)?;
     let mut reduced = cost.clone();
     apply_defiler_mana_reduction(&mut reduced, &reduction.mana_reduction, reduction.reach);
     Some(reduced)
@@ -8114,6 +8319,12 @@ pub(crate) fn handle_defiler_payment(
                 return Ok(state.waiting_for.clone());
             }
             PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
+                // CR 601.2h: a compound alternative cost's non-mana residual is
+                // stashed on the pending cast (`pay_alternative_cost_residual`);
+                // resume through the pending so it is still paid.
+                if pending.deferred_required_additional_cost.is_some() {
+                    return finish_pending_cost_or_cast(state, player, pending, events);
+                }
                 // Proceed with the original cost; no reduction.
                 let base_cost = pending.base_cost.clone();
                 let lock = CostLockInput::from_pending(&pending);
@@ -8145,6 +8356,28 @@ pub(crate) fn handle_defiler_payment(
     // directly affect the total cost") is applied AFTER every reduction, so a
     // {W} permanent spell reduced to {0} by an accepted Defiler floors up to
     // {3}, where the old post-floor subtraction produced {2}.
+    //
+    // CR 601.2h + CR 118.9d: when a compound alternative cost's non-mana
+    // residual is stashed on the pending cast (`pay_alternative_cost_residual`),
+    // record the accepted reduction on the pending and resume through
+    // `finish_pending_cost_or_cast`, which pays the residual and then locks the
+    // total from the pending — as the paused-life branch above does.
+    // `pay_and_push_with_lock` would rebuild the pending from scratch and drop it.
+    if pending.deferred_required_additional_cost.is_some() {
+        let mut pending = pending;
+        if pay {
+            pending
+                .accepted_cost_reductions
+                .push(accepted_defiler_reduction_entry(
+                    state,
+                    player,
+                    pending.object_id,
+                    mana_reduction,
+                    reach,
+                ));
+        }
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
     let lock = CostLockInput {
         accepted: if pay {
             let mut accepted = pending.accepted_cost_reductions.clone();
@@ -11008,6 +11241,11 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // None`, but their alternative cost was still applied and must consume the
     // slot). Recorded on the context at the alt-vs-printed accept / timing branch.
     let alt_cost_grant_source = ability.context.alt_cost_grant_source;
+    // CR 601.2a: the graveyard permission this rider cast committed to as its
+    // costs began (see `check_additional_cost_or_pay_with_distribute`). Captured
+    // here for the same reason as `alt_cost_grant_source`: the placeholder
+    // branch below may drop the ability.
+    let recorded_graveyard_authority = ability.context.graveyard_permission_authority;
     let is_placeholder = matches!(
         ability.effect,
         crate::types::ability::Effect::Unimplemented { .. }
@@ -11106,6 +11344,30 @@ fn finalize_cast_with_phyrexian_choices_inner(
         super::casting::top_of_library_selected_permission(state, player, object_id)
     } else {
         None
+    };
+    // CR 601.2a + CR 118.9a: A card cast from the graveyard for its OWN
+    // alternative cost (Blitz, Bestow) carries that rider in `casting_variant`,
+    // so the graveyard permission that admitted the cast is not recorded there.
+    // It was elected once as costs began and recorded on the ability's context;
+    // spend THAT permission, so a frequency-limited one (Muldrotha, Lurrus)
+    // still spends its slot and its "enters with a counter" rider still applies,
+    // even if the board changed during payment. Re-electing here would hand the
+    // cast to another permission when the recorded one's source left mid-payment.
+    // A rider cast with no record is refused rather than finalized unattributed
+    // (the action boundary rolls the whole cast back). Every other graveyard
+    // cast already names its authority in `casting_variant`, either as
+    // `GraveyardPermission` or as a keyword route that is its own authority
+    // (flashback, escape, …), so it is left alone.
+    let permission_authority = if source_zone == Zone::Graveyard
+        && casting_variant.is_independent_alternative_cost_rider()
+    {
+        recorded_graveyard_authority.ok_or_else(|| {
+            EngineError::ActionNotAllowed(
+                "No graveyard permission was recorded for this alternative-cost cast".to_string(),
+            )
+        })?
+    } else {
+        casting_variant
     };
     // CR 601.2a + CR 611.2a: Capture the tracked-set group of a
     // single-use `PlayFromExile` grant authorizing this cast BEFORE the object
@@ -11218,8 +11480,11 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // Samurai) is carried on the static's `enters_with_counter` field. The
     // authorizing source is embedded in `casting_variant`; register the pending
     // ETB counter on the same object so it enters carrying the counter.
-    let static_perm_etb_counter =
-        super::casting::selected_static_permission_enters_with_counter(state, &casting_variant);
+    let static_perm_etb_counter = super::casting::selected_static_permission_enters_with_counter(
+        state,
+        player,
+        &permission_authority,
+    );
     if let Some(counter_type) = static_perm_etb_counter {
         state
             .pending_etb_counters
@@ -11379,7 +11644,11 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // same source/slot before the first resolves. Only frequency-bounded
     // variants (`OncePerTurn`, `OncePerTurnPerPermanentType`) need tracking;
     // `Unlimited` permissions (Conduit of Worlds, Omniscience) skip.
-    match casting_variant {
+    //
+    // Matched on `permission_authority`, not `casting_variant`: for a graveyard
+    // cast made for the card's own alternative cost (Blitz), the permission that
+    // admitted it is recorded there instead (see its capture above).
+    match permission_authority {
         CastingVariant::GraveyardPermission {
             source,
             frequency: crate::types::statics::CastFrequency::OncePerTurn,
@@ -15501,6 +15770,110 @@ mod tests {
     use rand::RngCore;
 
     use super::*;
+
+    /// CR 601.2a + CR 118.9a: `begin_required_cost_before_targets` starts paying
+    /// a cast's costs without passing through
+    /// `check_additional_cost_or_pay_with_distribute`, so it must record the
+    /// graveyard rider authority itself; otherwise `finalize_cast` refuses the
+    /// legal cast for want of a record.
+    ///
+    /// Unit-level on purpose: no printed Blitz or Bestow card has an X-bearing
+    /// required additional cost that sets its target count, so no card can drive
+    /// `continue_with_prepared` into this branch today. The test calls the branch
+    /// directly with a required cost that pauses on a prompt, and inspects the
+    /// parked pending cast.
+    #[test]
+    fn required_cost_before_targets_records_the_graveyard_rider_authority() {
+        use crate::game::scenario::P0;
+        use crate::types::ability::CardPlayMode;
+        use crate::types::game_state::{CastPaymentMode, CostResume};
+        use crate::types::keywords::{BlitzCost, Keyword};
+        use crate::types::statics::CastFrequency;
+
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let muldrotha = scenario
+            .add_creature(P0, "Muldrotha, the Gravetide", 6, 6)
+            .with_static_definition(
+                crate::types::ability::StaticDefinition::new(
+                    crate::types::statics::StaticMode::GraveyardCastPermission {
+                        frequency: CastFrequency::OncePerTurnPerPermanentType,
+                        play_mode: CardPlayMode::Cast,
+                        graveyard_destination_replacement: None,
+                        extra_cost: None,
+                        enters_with_counter: None,
+                        required_cast_keyword: None,
+                    },
+                )
+                .affected(crate::types::ability::TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::new(
+                        crate::types::ability::TypeFilter::Permanent,
+                    ),
+                )),
+            )
+            .id();
+        let blitzer = scenario
+            .add_creature_to_graveyard(P0, "Blitz Test Creature", 2, 2)
+            .with_keyword(Keyword::Blitz(BlitzCost::Mana(
+                crate::types::mana::ManaCost::generic(1),
+            )))
+            .id();
+        scenario.add_card_to_hand(P0, "Filler Card");
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&blitzer].card_id;
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Unimplemented {
+                name: "Permanent".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            blitzer,
+            P0,
+        );
+        let mut events = Vec::new();
+        let waiting = begin_required_cost_before_targets(
+            runner.state_mut(),
+            P0,
+            blitzer,
+            card_id,
+            ability,
+            crate::types::mana::ManaCost::generic(1),
+            None,
+            crate::types::ability::AbilityCost::Discard {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: Default::default(),
+                self_scope: Default::default(),
+            },
+            SpellCostSource::Other,
+            CastingVariant::Blitz,
+            None,
+            None,
+            None,
+            Zone::Graveyard,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("the required cost must be offered");
+
+        let spell = match waiting {
+            WaitingFor::PayCost {
+                resume: CostResume::Spell { spell } | CostResume::SpellCost { spell, .. },
+                ..
+            } => spell,
+            other => panic!("expected the discard prompt with the parked cast, got {other:?}"),
+        };
+        assert_eq!(
+            spell.ability.context.graveyard_permission_authority,
+            Some(CastingVariant::GraveyardPermission {
+                source: muldrotha,
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                slot_type: Some(crate::types::card_type::CoreType::Creature),
+                graveyard_destination_replacement: None,
+            }),
+            "the pre-target path must record the elected graveyard permission"
+        );
+    }
     use crate::game::engine::apply_as_current;
     use crate::game::engine_resolution_choices::handle_resolution_choice;
     use crate::game::scenario::GameScenario;

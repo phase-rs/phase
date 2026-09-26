@@ -247,7 +247,14 @@ pub(crate) fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDef
 ///     Replicate functions end-to-end with no engine change.
 fn parse_granted_self_cost_keyword(keyword_str: &str) -> Option<Keyword> {
     [
-        ("blitz", Keyword::Blitz as fn(ManaCost) -> Keyword),
+        // CR 702.152a: Blitz's cost enum (`BlitzCost`) admits a non-mana residual
+        // (Sabin/Underdog), but a *granted* self-referential blitz is always pure
+        // mana ("equal to its mana cost"), so the grant binds `BlitzCost::Mana`.
+        (
+            "blitz",
+            (|c| Keyword::Blitz(crate::types::keywords::BlitzCost::Mana(c)))
+                as fn(ManaCost) -> Keyword,
+        ),
         ("replicate", Keyword::Replicate as fn(ManaCost) -> Keyword),
     ]
     .into_iter()

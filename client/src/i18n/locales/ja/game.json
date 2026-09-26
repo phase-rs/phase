@@ -1974,6 +1974,8 @@
     "additionalExile": "+ カード1枚を追放",
     "additionalSacrifice": "+ パーマネント1つを生け贄に捧げる",
     "additionalPayLife": "+ ライフを支払う",
+    "additionalPayLifeAmount": "+ {{amount}}点のライフを支払う",
+    "additionalCollectEvidence": "+ 証拠収集{{amount}}",
     "additionalDiscard": "+ カード1枚を捨てる",
     "additionalTapCreatures": "+ クリーチャーをタップ",
     "additionalGeneric": "+ {{type}}"
@@ -2101,6 +2103,7 @@
     "variantForetell": "予顕から唱える",
     "variantOverload": "超過で唱える",
     "variantBestow": "授与で唱える",
+    "variantBlitz": "奇襲で唱える",
     "variantFreerunning": "Freerunningで唱える",
     "variantFuse": "融合で唱える",
     "variantMutate": "変容で唱える",

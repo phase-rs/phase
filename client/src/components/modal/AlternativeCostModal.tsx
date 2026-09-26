@@ -14,6 +14,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { assertNever } from "../../utils/assertNever.ts";
 import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
+import { describeAdditionalCost } from "./describeAdditionalCost.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
 type AlternativeCastChoice = Extract<
@@ -240,33 +241,6 @@ function describeAdditionalCostDescription(
   switch (description.type) {
     case "EmergeSacrifice":
       return describeEmergeSacrificeQuality(description.quality, t);
-  }
-}
-
-/**
- * CR 702.74a + CR 601.2h: Compact display copy for the non-mana portion of
- * an alternative cost (e.g., Solitude's Evoke "Exile a white card from your
- * hand."). Mirrors the engine's typed `AbilityCost` taxonomy 1:1 by the
- * discriminant `type` field — the FE does not interpret game state, it just
- * renders the engine-provided variant.
- */
-function describeAdditionalCost(
-  cost: SerializedAbilityCost,
-  t: TFunction<"game">,
-): string {
-  switch (cost.type) {
-    case "Exile":
-      return t("alternativeCost.additionalExile");
-    case "Sacrifice":
-      return t("alternativeCost.additionalSacrifice");
-    case "PayLife":
-      return t("alternativeCost.additionalPayLife");
-    case "Discard":
-      return t("alternativeCost.additionalDiscard");
-    case "TapCreatures":
-      return t("alternativeCost.additionalTapCreatures");
-    default:
-      return t("alternativeCost.additionalGeneric", { type: cost.type });
   }
 }
 

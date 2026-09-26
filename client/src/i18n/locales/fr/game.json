@@ -1931,6 +1931,8 @@
     "additionalExile": "+ Exiler une carte",
     "additionalSacrifice": "+ Sacrifier un permanent",
     "additionalPayLife": "+ Payer des points de vie",
+    "additionalPayLifeAmount": "+ Payer {{amount}} points de vie",
+    "additionalCollectEvidence": "+ Rassembler des preuves {{amount}}",
     "additionalDiscard": "+ Se défausser d'une carte",
     "additionalTapCreatures": "+ Engager des créatures",
     "additionalGeneric": "+ {{type}}"
@@ -2058,6 +2060,7 @@
     "variantForetell": "Lancer depuis la Prédiction",
     "variantOverload": "Lancer avec Surcharge",
     "variantBestow": "Lancer avec Don",
+    "variantBlitz": "Lancer avec Blitz",
     "variantFreerunning": "Lancer avec Freerunning",
     "variantFuse": "Lancer avec Fusion",
     "variantMutate": "Lancer avec Mutate",

@@ -1931,6 +1931,8 @@
     "additionalExile": "+ Eine Karte ins Exil schicken",
     "additionalSacrifice": "+ Eine bleibende Karte opfern",
     "additionalPayLife": "+ Leben bezahlen",
+    "additionalPayLifeAmount": "+ {{amount}} Leben bezahlen",
+    "additionalCollectEvidence": "+ Beweise sammeln {{amount}}",
     "additionalDiscard": "+ Eine Karte abwerfen",
     "additionalTapCreatures": "+ Kreaturen tappen",
     "additionalGeneric": "+ {{type}}"
@@ -2058,6 +2060,7 @@
     "variantForetell": "Aus Vorhersagen wirken",
     "variantOverload": "Mit Überladen wirken",
     "variantBestow": "Mit Verleihen wirken",
+    "variantBlitz": "Mit Blitz wirken",
     "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
     "variantMutate": "Mit Mutate wirken",

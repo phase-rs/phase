@@ -950,6 +950,36 @@ fn parse_bestow_cost(cost_text: &str) -> Option<crate::types::keywords::BestowCo
     }
 }
 
+/// CR 702.152a + CR 118.9: Parse a blitz cost following the em-dash separator.
+/// The Streets of New Capenna cycle prints a pure mana cost ("Blitz {1}{R}" on
+/// Caldaia Guardian), which arrives via MTGJSON's keywords array (the `FromStr`
+/// path). The em-dash form carries a compound cost — "Blitz—{2}{R}{R}, Discard a
+/// card." (Sabin, Master Monk) and "Blitz—{2}{B}{B}, Pay 2 life." (Tenacious
+/// Underdog) — where the mana sub-cost is paid normally (CR 601.2g) and the
+/// residual non-mana sub-cost is paid via `pay_additional_cost` (CR 601.2h).
+/// Mirrors `parse_bestow_cost` / `parse_flashback_cost`: delegates to
+/// `parse_oracle_cost` so comma-separated parts compose into
+/// `AbilityCost::Composite`, and wraps the result in `BlitzCost::Mana` when it's
+/// a pure mana cost or `BlitzCost::NonMana` otherwise (the runtime split via
+/// `split_blitz_cost_components` extracts the mana sub-cost for normal payment).
+fn parse_blitz_cost(cost_text: &str) -> Option<crate::types::keywords::BlitzCost> {
+    use crate::types::keywords::BlitzCost;
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    match super::oracle_cost::parse_oracle_cost(clean) {
+        AbilityCost::Mana { cost: mana_cost } => Some(BlitzCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(BlitzCost::NonMana(other)),
+    }
+}
+
 /// CR 702.30a: Parse an echo cost following the em-dash separator
 /// (e.g., "echo—discard a card" on Rakdos Headliner / Deepcavern Imp).
 /// Mirrors `parse_evoke_cost`: delegates to `parse_oracle_cost` so
@@ -1567,6 +1597,20 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("bestow\u{2014}").parse(text) {
         if let Some(bestow_cost) = parse_bestow_cost(rest) {
             return Some((Keyword::Bestow(bestow_cost), ""));
+        }
+    }
+
+    // CR 702.152a + CR 118.9: Blitz with em-dash cost — compound mana + non-mana
+    // ("Blitz—{2}{R}{R}, Discard a card." on Sabin, Master Monk; "Blitz—{2}{B}{B},
+    // Pay 2 life." on Tenacious Underdog). Pure-mana blitz ("Blitz {1}{R}" on the
+    // SNC cycle) arrives via MTGJSON's keywords array (FromStr path).
+    // `parse_blitz_cost` delegates to `parse_oracle_cost`, which composes
+    // comma-separated parts into `AbilityCost::Composite` so the runtime split
+    // (`split_blitz_cost_components` in casting.rs) routes the mana sub-cost
+    // through the mana-payment flow and the residual through `pay_additional_cost`.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("blitz\u{2014}").parse(text) {
+        if let Some(blitz_cost) = parse_blitz_cost(rest) {
+            return Some((Keyword::Blitz(blitz_cost), ""));
         }
     }
 
@@ -5060,6 +5104,95 @@ mod tests {
         assert_eq!(costs.len(), 2);
         assert!(matches!(&costs[0], AbilityCost::Mana { .. }));
         assert!(matches!(&costs[1], AbilityCost::Discard { .. }));
+    }
+
+    /// CR 702.152a: Sabin, Master Monk — "Blitz—{2}{R}{R}, Discard a card."
+    /// The em-dash blitz form is a compound alternative cost (CR 118.9): the
+    /// mana sub-cost is paid as the spell's total cost and the discard is an
+    /// additional cost (CR 601.2h). Before this branch existed the whole line
+    /// fell through to `Effect::Unimplemented`, so the card had NO blitz at all.
+    #[test]
+    fn parse_granted_keyword_fragment_blitz_em_dash_discard() {
+        use crate::types::keywords::BlitzCost;
+        use crate::types::mana::ManaCostShard;
+
+        let kw = parse_granted_keyword_fragment("blitz\u{2014}{2}{r}{r}, discard a card").unwrap();
+        let Keyword::Blitz(BlitzCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected Blitz NonMana(Composite), got {kw:?}");
+        };
+        assert_eq!(costs.len(), 2, "mana + discard");
+        let AbilityCost::Mana { cost: mana } = &costs[0] else {
+            panic!("expected Mana sub-cost, got {:?}", costs[0]);
+        };
+        assert_eq!(
+            mana,
+            &ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            }
+        );
+        assert!(
+            matches!(&costs[1], AbilityCost::Discard { .. }),
+            "discard suffix must survive, got {:?}",
+            costs[1]
+        );
+    }
+
+    /// CR 702.152a: Tenacious Underdog — "Blitz—{2}{B}{B}, Pay 2 life." The
+    /// second (and only other) member of the em-dash blitz class, proving the
+    /// branch handles the whole class and not just Sabin's discard shape. This
+    /// card carried NO `Unimplemented` marker before the fix — it was a silent
+    /// misprice that charged the printed cost.
+    #[test]
+    fn parse_granted_keyword_fragment_blitz_em_dash_pay_life() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::keywords::BlitzCost;
+        use crate::types::mana::ManaCostShard;
+
+        let kw = parse_granted_keyword_fragment("blitz\u{2014}{2}{b}{b}, pay 2 life").unwrap();
+        let Keyword::Blitz(BlitzCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected Blitz NonMana(Composite), got {kw:?}");
+        };
+        assert_eq!(costs.len(), 2, "mana + pay-life");
+        let AbilityCost::Mana { cost: mana } = &costs[0] else {
+            panic!("expected Mana sub-cost, got {:?}", costs[0]);
+        };
+        assert_eq!(
+            mana,
+            &ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            }
+        );
+        assert_eq!(
+            costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        );
+    }
+
+    /// CR 702.152a anti-widening control: the 14 space-form `Blitz {cost}` cards
+    /// (Caldaia Guardian, Jaxis, Mayhem Patrol, ...) already worked via the
+    /// `FromStr` direct-parse branch and must KEEP producing `BlitzCost::Mana`.
+    /// If the new em-dash branch ever swallowed the space form, this flips —
+    /// which is what stops the fix widening silently across those 14 cards.
+    #[test]
+    fn parse_granted_keyword_fragment_blitz_simple_mana_unchanged() {
+        use crate::types::keywords::BlitzCost;
+        use crate::types::mana::ManaCostShard;
+
+        let kw = parse_granted_keyword_fragment("blitz {2}{g}").unwrap();
+        let Keyword::Blitz(BlitzCost::Mana(mana)) = kw else {
+            panic!("expected BlitzCost::Mana, got {kw:?}");
+        };
+        assert_eq!(
+            mana,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green],
+            }
+        );
     }
 
     /// Regression: pure-mana embalm/eternalize still dispatch through the direct

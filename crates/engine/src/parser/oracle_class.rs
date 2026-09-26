@@ -1,4 +1,6 @@
-use super::oracle_ir::doc::{OracleNodeIr, PrintedTriggerIndex, UnsupportedAbilityIr};
+use super::oracle_ir::doc::{
+    OracleNodeIr, PrintedTriggerIndex, UnsupportedAbilityCategory, UnsupportedAbilityIr,
+};
 use crate::parser::oracle_nom::error::OracleError;
 use nom::bytes::complete::tag;
 use nom::Parser;
@@ -30,7 +32,7 @@ use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_replacement::parse_replacement_line;
 use super::oracle_special::normalize_self_refs_for_static;
-use super::oracle_static::parse_static_line;
+use super::oracle_static::{is_graveyard_cast_permission_lead, parse_static_line};
 use super::oracle_trigger::parse_trigger_lines_at_index;
 use super::oracle_util::{strip_reminder_text, TextPair};
 
@@ -264,6 +266,26 @@ pub(crate) fn parse_class_oracle_text(
                     ));
                     continue;
                 }
+            }
+
+            // CR 601.2a + CR 118.9b: a cast-from-graveyard permission line the
+            // permission parser declined (Ninja Teen's "using their sneak
+            // abilities") is a strict gap, as in the main dispatch: falling
+            // through to the effect fallback would read it as a one-shot cast
+            // effect and drop both the method requirement and the level gate.
+            if is_graveyard_cast_permission_lead(&lower) {
+                items.push((
+                    line_index,
+                    OracleNodeIr::Unsupported {
+                        unsupported: UnsupportedAbilityIr::new(
+                            UnsupportedAbilityCategory::StaticStructure,
+                            format!("Static pattern matched but line failed static parser: {line}"),
+                            line,
+                        ),
+                        min_x_value: 0,
+                    },
+                ));
+                continue;
             }
 
             // Replacement patterns

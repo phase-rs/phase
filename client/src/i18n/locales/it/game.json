@@ -1931,6 +1931,8 @@
     "additionalExile": "+ Esilia una carta",
     "additionalSacrifice": "+ Sacrifica un permanente",
     "additionalPayLife": "+ Paga punti vita",
+    "additionalPayLifeAmount": "+ Paga {{amount}} punti vita",
+    "additionalCollectEvidence": "+ Raccogli prove {{amount}}",
     "additionalDiscard": "+ Scarta una carta",
     "additionalTapCreatures": "+ TAPpa creature",
     "additionalGeneric": "+ {{type}}"
@@ -2058,6 +2060,7 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantBlitz": "Lancia con Blitz",
     "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
     "variantMutate": "Lancia con Mutate",

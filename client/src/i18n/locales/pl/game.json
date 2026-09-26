@@ -1931,6 +1931,8 @@
     "additionalExile": "+ Wygnaj kartę",
     "additionalSacrifice": "+ Poświęć trwałego",
     "additionalPayLife": "+ Zapłać życie",
+    "additionalPayLifeAmount": "+ Zapłać {{amount}} życia",
+    "additionalCollectEvidence": "+ Zbierz dowody {{amount}}",
     "additionalDiscard": "+ Odrzuć kartę",
     "additionalTapCreatures": "+ Obróć stwory",
     "additionalGeneric": "+ {{type}}"
@@ -2058,6 +2060,7 @@
     "variantForetell": "Rzuć z Foretell",
     "variantOverload": "Rzuć z Overload",
     "variantBestow": "Rzuć z Bestow",
+    "variantBlitz": "Rzuć z Blitz",
     "variantFreerunning": "Rzuć z Freerunning",
     "variantFuse": "Rzuć z Fuse",
     "variantMutate": "Rzuć z Mutate",

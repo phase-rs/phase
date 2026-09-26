@@ -166,6 +166,8 @@ pub fn resolve(
                 // CR 707.10: a copy of a spell isn't cast, so it must never
                 // consume a once-per-turn CastWithAlternativeCost grant's slot.
                 a.context.alt_cost_grant_source = None;
+                // CR 707.10: nor spend a graveyard permission.
+                a.context.graveyard_permission_authority = None;
                 a.context.additional_cost_payment_count = 0;
                 a.context.kickers_paid.clear();
             }

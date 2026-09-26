@@ -7115,3 +7115,122 @@ mod deck_list_seat_validation_tests {
         );
     }
 }
+
+/// CR 118.9b: a graveyard permission's required casting method survives the P2P
+/// host's own resume path, not only the persisted-state decoder. Tenacious
+/// Underdog's "using its blitz ability" permission, with its printed {1}{B}
+/// affordable and its blitz not: the host exports the trusted envelope, a fresh
+/// engine resumes it through `resume_multiplayer_host_state`, and the resumed
+/// host still carries `required_cast_keyword == Some(Blitz)` and still refuses
+/// the printed cast, exactly as a host that was never interrupted.
+#[cfg(test)]
+mod graveyard_cast_method_host_resume_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    use engine::types::statics::StaticMode;
+
+    const UNDERDOG: &str = "Blitz\u{2014}{2}{B}{B}, Pay 2 life. (If you cast this spell for its blitz cost, it gains haste and \"When this creature dies, draw a card.\" Sacrifice it at the beginning of the next end step.)\nYou may cast this card from your graveyard using its blitz ability.";
+
+    fn underdog_with_only_the_printed_cost_affordable() -> (GameState, ObjectId) {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            UNDERDOG,
+            "Tenacious Underdog",
+            &[],
+            &["Creature".into()],
+            &["Human".into(), "Warrior".into()],
+        );
+        let blitz = parsed
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::Blitz(_)))
+            .expect("blitz parses")
+            .clone();
+        let rider = parsed.statics.first().expect("the rider parses").clone();
+        let mut s = GameScenario::new_n_player(2, 42);
+        s.at_phase(Phase::PreCombatMain);
+        let dog = s
+            .add_creature_to_graveyard(P0, "Tenacious Underdog", 3, 2)
+            .with_static_definition(rider)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Black],
+            })
+            .with_keyword(blitz)
+            .id();
+        s.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut state = s.build().state().clone();
+        state.players[0].life = 1;
+        (state, dog)
+    }
+
+    fn attempt_printed_cast(state: &mut GameState, dog: ObjectId) -> serde_json::Value {
+        let required = state.objects[&dog]
+            .static_definitions
+            .as_slice()
+            .iter()
+            .find_map(|def| match def.mode {
+                StaticMode::GraveyardCastPermission {
+                    required_cast_keyword,
+                    ..
+                } => Some(format!("{required_cast_keyword:?}")),
+                _ => None,
+            });
+        let card_id = state.objects[&dog].card_id;
+        let cast = engine::game::engine::apply_as_current(
+            state,
+            GameAction::CastSpell {
+                object_id: dog,
+                card_id,
+                targets: vec![],
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        );
+        serde_json::json!({
+            "required": required,
+            "cast_accepted": cast.is_ok(),
+            "zone": format!("{:?}", state.objects[&dog].zone),
+            "pool": state.players[0].mana_pool.total(),
+            "life": state.players[0].life,
+        })
+    }
+
+    #[test]
+    fn a_blitz_only_permission_resumed_by_the_p2p_host_still_refuses_the_printed_cast() {
+        let (paused, dog) = underdog_with_only_the_printed_cost_affordable();
+
+        let mut uninterrupted = paused.clone();
+        let expected = attempt_printed_cast(&mut uninterrupted, dog);
+        assert_eq!(
+            expected["required"], "Some(Blitz)",
+            "reach guard: {expected}"
+        );
+        assert_eq!(expected["cast_accepted"], false, "{expected}");
+        assert_eq!(expected["zone"], "Graveyard", "{expected}");
+
+        let mut exported = paused.clone();
+        exported.capture_rng_word_pos();
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(exported))
+            .expect("the host exports its state");
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        resume_multiplayer_host_state_inner(&json).expect("the P2P host resumes");
+        let resumed =
+            with_state_mut(|state| attempt_printed_cast(state, dog)).expect("a live game");
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        assert_eq!(
+            resumed, expected,
+            "the resumed host keeps the method and refuses the printed cast"
+        );
+    }
+}

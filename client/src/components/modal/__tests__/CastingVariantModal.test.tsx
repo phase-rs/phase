@@ -113,4 +113,106 @@ describe("CastingVariantModal", () => {
 
     expect(screen.queryByRole("heading", { name: "Choose Cast" })).not.toBeInTheDocument();
   });
+
+  // CR 601.2f-h: a menu option that pays an alternative cost with a non-mana
+  // part (Tenacious Underdog's Blitz: "{2}{B}{B}, Pay 2 life") shows that part,
+  // exactly as the engine provides it; an option without one shows none.
+  it("renders the engine-provided non-mana part of an option's cost", () => {
+    const underdog = gameObjectFactory
+      .creature()
+      .inGraveyard()
+      .withId(42)
+      .named("Tenacious Underdog")
+      .withCost(["Black"])
+      .build();
+    const waitingFor: WaitingFor = {
+      type: "CastingVariantChoice",
+      data: {
+        player: 0,
+        object_id: underdog.id,
+        card_id: underdog.card_id,
+        options: [
+          {
+            variant: { type: "Escape" },
+            face: "Current",
+            mana_cost: { type: "Cost", shards: ["Black"], generic: 1 },
+          },
+          {
+            variant: { type: "Blitz" },
+            face: "Current",
+            mana_cost: { type: "Cost", shards: ["Black", "Black"], generic: 2 },
+            additional_cost: { type: "PayLife", amount: { type: "Fixed", value: 2 } },
+          },
+        ],
+      },
+    };
+    setGameStoreForTest({
+      gameState: gameStateFactory
+        .withPlayers(0, 1)
+        .withObjects(underdog)
+        .waitingFor(waitingFor)
+        .build(),
+      legalActions: [
+        { type: "ChooseCastingVariant", data: { index: 0 } },
+        { type: "ChooseCastingVariant", data: { index: 1 } },
+      ],
+    });
+
+    render(<CastingVariantModal />);
+
+    const blitz = screen.getByRole("button", { name: /Cast with Blitz/ });
+    expect(blitz).toHaveTextContent("+ Pay 2 life");
+    const escape = screen.getByRole("button", { name: /Escape/ });
+    expect(escape).not.toHaveTextContent("Pay");
+  });
+
+  // CR 702.103a + CR 601.2h: Detective's Phoenix's Bestow option shows its
+  // "Collect evidence 6" with the engine-provided threshold.
+  it("renders the engine-provided collect-evidence threshold of a bestow option", () => {
+    const phoenix = gameObjectFactory
+      .creature()
+      .inGraveyard()
+      .withId(43)
+      .named("Detective's Phoenix")
+      .withCost(["Red"], 2)
+      .build();
+    const waitingFor: WaitingFor = {
+      type: "CastingVariantChoice",
+      data: {
+        player: 0,
+        object_id: phoenix.id,
+        card_id: phoenix.card_id,
+        options: [
+          {
+            variant: { type: "Escape" },
+            face: "Current",
+            mana_cost: { type: "Cost", shards: ["Red"], generic: 2 },
+          },
+          {
+            variant: { type: "Bestow" },
+            face: "Current",
+            mana_cost: { type: "Cost", shards: ["Red"], generic: 0 },
+            additional_cost: { type: "CollectEvidence", amount: 6 },
+          },
+        ],
+      },
+    };
+    setGameStoreForTest({
+      gameState: gameStateFactory
+        .withPlayers(0, 1)
+        .withObjects(phoenix)
+        .waitingFor(waitingFor)
+        .build(),
+      legalActions: [
+        { type: "ChooseCastingVariant", data: { index: 0 } },
+        { type: "ChooseCastingVariant", data: { index: 1 } },
+      ],
+    });
+
+    render(<CastingVariantModal />);
+
+    expect(screen.getByRole("button", { name: /Cast with Bestow/ })).toHaveTextContent(
+      "+ Collect evidence 6",
+    );
+  });
 });

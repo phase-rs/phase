@@ -116,6 +116,25 @@ pub enum BestowCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.152a + CR 118.9: Blitz cost — the alternative cost paid to cast the
+/// card with blitz. The Streets of New Capenna cycle uses a pure mana cost
+/// ("Blitz {1}{R}" on Caldaia Guardian), delivered via MTGJSON's keywords array.
+/// Later printings introduced compound blitz costs with a non-mana rider
+/// ("Blitz—{2}{B}{B}, Pay 2 life." on Tenacious Underdog; "Blitz—{2}{R}{R},
+/// Discard a card." on Sabin, Master Monk), where the residual non-mana sub-cost
+/// is paid alongside the mana sub-cost. Mirrors `BestowCost`/`EvokeCost`/
+/// `FlashbackCost` so the non-mana portion composes through the existing
+/// `AbilityCost` / `pay_additional_cost` pipeline.
+/// `split_blitz_cost_components` (casting.rs) separates the mana sub-cost (paid
+/// via the normal mana flow, CR 601.2g) from the residual non-mana sub-cost
+/// (paid via `pay_additional_cost`, CR 601.2h).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum BlitzCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// CR 702.119a-b: Emerge's mana cost and the permanent quality required for
 /// its sacrifice cost. Ordinary emerge sacrifices a creature; "emerge from
 /// [quality]" uses the printed permanent filter instead.
@@ -818,7 +837,7 @@ pub enum Keyword {
     Mutate(ManaCost),
     Disturb(ManaCost),
     Disguise(DisguiseCost),
-    Blitz(ManaCost),
+    Blitz(BlitzCost),
     Overload(ManaCost),
     Spectacle(ManaCost),
     Surge(ManaCost),
@@ -2733,7 +2752,7 @@ impl FromStr for Keyword {
                 "mutate" => return Ok(Keyword::Mutate(parse_keyword_mana_cost(p))),
                 "disturb" => return Ok(Keyword::Disturb(parse_keyword_mana_cost(p))),
                 "disguise" => return Ok(Keyword::Disguise(parse_keyword_mana_cost(p).into())),
-                "blitz" => return Ok(Keyword::Blitz(parse_keyword_mana_cost(p))),
+                "blitz" => return Ok(Keyword::Blitz(BlitzCost::Mana(parse_keyword_mana_cost(p)))),
                 "overload" => return Ok(Keyword::Overload(parse_keyword_mana_cost(p))),
                 // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
                 "more than meets the eye" => {
@@ -3613,7 +3632,15 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             serde_json::from_value::<DisguiseCost>(data.clone())
                 .or_else(|_| mana(data).map(DisguiseCost::Mana))?,
         )),
-        "Blitz" => Ok(Keyword::Blitz(mana(data)?)),
+        "Blitz" => {
+            // Accept both the legacy bare ManaCost format and the new tagged
+            // BlitzCost format (Mana / NonMana) — mirrors Flashback/Bestow.
+            if let Ok(blitz_cost) = serde_json::from_value::<BlitzCost>(data.clone()) {
+                Ok(Keyword::Blitz(blitz_cost))
+            } else {
+                Ok(Keyword::Blitz(BlitzCost::Mana(mana(data)?)))
+            }
+        }
         "Overload" => Ok(Keyword::Overload(mana(data)?)),
         // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
         "MoreThanMeetsTheEye" => Ok(Keyword::MoreThanMeetsTheEye(mana(data)?)),
@@ -5662,7 +5689,7 @@ mod tests {
                     condition: None,
                 }),
             }),
-            Keyword::Blitz(mc("{2}{R}")),
+            Keyword::Blitz(BlitzCost::NonMana(pay_life_cost())),
             Keyword::Overload(mc("{2}{R}")),
             Keyword::Spectacle(mc("{2}{R}")),
             Keyword::Surge(mc("{2}{R}")),

@@ -12,8 +12,8 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
-    BestowCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost, GiftKind,
-    Keyword, KeywordKind, ProtectionTarget,
+    BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
+    GiftKind, Keyword, KeywordKind, ProtectionTarget,
 };
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -505,7 +505,9 @@ pub(crate) fn resolve_self_cost_spell_keyword(
     keyword: &Keyword,
 ) -> Keyword {
     match keyword {
-        Keyword::Blitz(cost) => Keyword::Blitz(resolve_keyword_mana_cost(state, object_id, cost)),
+        Keyword::Blitz(BlitzCost::Mana(cost)) => Keyword::Blitz(BlitzCost::Mana(
+            resolve_keyword_mana_cost(state, object_id, cost),
+        )),
         Keyword::Spectacle(cost) => {
             Keyword::Spectacle(resolve_keyword_mana_cost(state, object_id, cost))
         }

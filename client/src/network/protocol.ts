@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  63 ? game_setup and state_update carry GameState, whose graveyard cast
+ *       permissions can now require a casting method (required_cast_keyword),
+ *       and casting-menu options carry the non-mana part of their cost
+ *       (additional_cost). Bumped in lockstep with full-game protocol 81.
  *  62 — game_setup and state_update carry GameState, whose exile look links
  *       now carry { grant, lookers, source_incarnation }, and DerivedViews
  *       gains linked_exile_ids, which the board renders directly. Bumped in
@@ -420,7 +424,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 62 as const;
+export const WIRE_PROTOCOL_VERSION = 63 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

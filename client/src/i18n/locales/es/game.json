@@ -1931,6 +1931,8 @@
     "additionalExile": "+ Exiliar una carta",
     "additionalSacrifice": "+ Sacrificar un permanente",
     "additionalPayLife": "+ Pagar vidas",
+    "additionalPayLifeAmount": "+ Pagar {{amount}} vidas",
+    "additionalCollectEvidence": "+ Reunir pruebas {{amount}}",
     "additionalDiscard": "+ Descartar una carta",
     "additionalTapCreatures": "+ Girar criaturas",
     "additionalGeneric": "+ {{type}}"
@@ -2058,6 +2060,7 @@
     "variantForetell": "Lanzar desde Predecir",
     "variantOverload": "Lanzar con Sobrecargar",
     "variantBestow": "Lanzar con Otorgar",
+    "variantBlitz": "Lanzar con Blitz",
     "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
     "variantMutate": "Lanzar con Mutate",

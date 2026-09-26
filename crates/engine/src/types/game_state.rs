@@ -9469,6 +9469,11 @@ pub struct CastingVariantChoiceOption {
     /// serde default: old paused menus cannot safely select a face by index.
     pub face: CastingVariantFace,
     pub mana_cost: ManaCost,
+    /// CR 601.2f-h: the non-mana part of an alternative cost this option pays
+    /// ("Discard a card" for a Blitz option), shown beside its mana cost.
+    /// `None` when the option pays mana only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_cost: Option<crate::types::ability::AbilityCost>,
 }
 
 /// CR 118.3 + CR 601.2b + CR 605.3b: Identifies the specific action to take
@@ -17206,6 +17211,58 @@ pub enum CastingVariant {
 impl CastingVariant {
     pub fn is_normal(&self) -> bool {
         *self == CastingVariant::Normal
+    }
+
+    /// CR 118.9b: the keyword that names this casting method, matched against
+    /// a permission that requires one ("You may cast this card from your
+    /// graveyard using its blitz ability."). `None` when no keyword names the
+    /// method: the printed cost and the permission routes, and the keyword
+    /// methods `KeywordKind` has no discriminant for. A permission that requires
+    /// a method admits a cast only when this is `Some` of that keyword.
+    pub fn cast_keyword(self) -> Option<crate::types::keywords::KeywordKind> {
+        use crate::types::keywords::KeywordKind;
+        match self {
+            CastingVariant::Warp => Some(KeywordKind::Warp),
+            CastingVariant::Escape => Some(KeywordKind::Escape),
+            CastingVariant::Retrace => Some(KeywordKind::Retrace),
+            CastingVariant::Harmonize => Some(KeywordKind::Harmonize),
+            CastingVariant::Mayhem => Some(KeywordKind::Mayhem),
+            CastingVariant::Flashback => Some(KeywordKind::Flashback),
+            CastingVariant::Aftermath => Some(KeywordKind::Aftermath),
+            CastingVariant::Disturb => Some(KeywordKind::Disturb),
+            CastingVariant::Sneak { .. } => Some(KeywordKind::Sneak),
+            CastingVariant::Miracle => Some(KeywordKind::Miracle),
+            CastingVariant::Madness => Some(KeywordKind::Madness),
+            CastingVariant::Dash => Some(KeywordKind::Dash),
+            CastingVariant::Blitz => Some(KeywordKind::Blitz),
+            CastingVariant::Suspend => Some(KeywordKind::Suspend),
+            CastingVariant::Plot => Some(KeywordKind::Plot),
+            CastingVariant::Foretell => Some(KeywordKind::Foretell),
+            CastingVariant::Bestow => Some(KeywordKind::Bestow),
+            CastingVariant::Awaken => Some(KeywordKind::Awaken),
+            CastingVariant::Cleave => Some(KeywordKind::Cleave),
+            CastingVariant::MoreThanMeetsTheEye => Some(KeywordKind::MoreThanMeetsTheEye),
+            CastingVariant::Mutate => Some(KeywordKind::Mutate),
+            CastingVariant::Freerunning => Some(KeywordKind::Freerunning),
+            CastingVariant::JumpStart => Some(KeywordKind::JumpStart),
+            CastingVariant::Fuse => Some(KeywordKind::Fuse),
+            CastingVariant::Normal
+            | CastingVariant::Adventure
+            | CastingVariant::Omen
+            | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::HandPermission { .. }
+            | CastingVariant::ExilePermission { .. }
+            | CastingVariant::WebSlinging { .. }
+            | CastingVariant::Evoke
+            | CastingVariant::Emerge
+            | CastingVariant::Spectacle
+            | CastingVariant::Overload
+            | CastingVariant::Impending
+            | CastingVariant::Prototype
+            | CastingVariant::Prowl
+            | CastingVariant::Surge
+            | CastingVariant::FaceDown => None,
+        }
     }
 
     /// CR 601.2a: The `ObjectId` of the `StaticMode::ExileCastPermission` source

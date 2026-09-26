@@ -1969,6 +1969,8 @@
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
+    "additionalPayLifeAmount": "+ Pay {{amount}} life",
+    "additionalCollectEvidence": "+ Collect evidence {{amount}}",
     "additionalDiscard": "+ Discard a card",
     "additionalTapCreatures": "+ Tap creatures",
     "additionalGeneric": "+ {{type}}"
@@ -2096,6 +2098,7 @@
     "variantForetell": "Cast from Foretell",
     "variantOverload": "Cast with Overload",
     "variantBestow": "Cast with Bestow",
+    "variantBlitz": "Cast with Blitz",
     "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
     "variantMutate": "Cast with Mutate",

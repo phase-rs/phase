@@ -2220,32 +2220,6 @@ pub(crate) fn parse_alt_cost_rider(input: &str) -> OracleResult<'_, KeywordKind>
     .parse(input)
 }
 
-/// Inject a `HasKeywordKind` property into a `TargetFilter`. If the filter is already
-/// `Typed`, push into its `properties`. Otherwise wrap with `And` over a new typed
-/// filter carrying only the keyword constraint.
-pub(crate) fn inject_keyword_kind_filter_prop(
-    filter: TargetFilter,
-    kind: KeywordKind,
-) -> TargetFilter {
-    match filter {
-        TargetFilter::Typed(mut tf) => {
-            tf.properties
-                .push(FilterProp::HasKeywordKind { value: kind });
-            TargetFilter::Typed(tf)
-        }
-        other => TargetFilter::And {
-            filters: vec![
-                other,
-                TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![],
-                    controller: None,
-                    properties: vec![FilterProp::HasKeywordKind { value: kind }],
-                }),
-            ],
-        },
-    }
-}
-
 /// CR 601.2f: Classification of a cost-modifier subject against the
 /// "the <ordinal> <qualifier> spell <timing> costs …" template.
 ///

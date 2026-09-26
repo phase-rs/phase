@@ -1524,6 +1524,15 @@ pub enum StaticMode {
         /// `Effect::CastFromZone.enters_with_counter`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_with_counter: Option<super::counter::CounterType>,
+        /// CR 118.9b: "An effect that allows you to cast a spell may require a
+        /// certain alternative cost to be paid." The casting method this
+        /// permission restricts the cast to ("You may cast this card from your
+        /// graveyard using its blitz ability.": Sabin, Master Monk; Tenacious
+        /// Underdog; Detective's Phoenix with bestow). `None` (default) leaves
+        /// the method open, including the printed cost. Separate from
+        /// `StaticDefinition.affected`, which only selects cards.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required_cast_keyword: Option<super::keywords::KeywordKind>,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -2932,6 +2941,7 @@ impl Hash for StaticMode {
                 play_mode,
                 graveyard_destination_replacement,
                 extra_cost,
+                required_cast_keyword,
                 // `CounterType` derives Hash but is collision-safe to skip: the
                 // enters-with rider never distinguishes two otherwise-equal
                 // permissions in the interned set (mirrors `extra_cost` below).
@@ -2940,6 +2950,7 @@ impl Hash for StaticMode {
                 frequency.hash(state);
                 play_mode.hash(state);
                 graveyard_destination_replacement.hash(state);
+                required_cast_keyword.hash(state);
                 // `AbilityCost` (inside `CastExtraCost`) lacks `Hash` — hash the
                 // mode marker only (mirrors the `alt_cost` treatment) so the
                 // alternative/additional shapes don't collide.
@@ -3839,6 +3850,7 @@ impl FromStr for StaticMode {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
@@ -3858,6 +3870,7 @@ impl FromStr for StaticMode {
                         // to None.
                         extra_cost: None,
                         enters_with_counter: None,
+                        required_cast_keyword: None,
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
@@ -3866,6 +3879,7 @@ impl FromStr for StaticMode {
                         graveyard_destination_replacement: None,
                         extra_cost: None,
                         enters_with_counter: None,
+                        required_cast_keyword: None,
                     }
                 }
             }
@@ -4958,6 +4972,7 @@ mod tests {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -4965,6 +4980,7 @@ mod tests {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
             },
             // CR 601.2f: Festival of Embers — graveyard cast with an additional
             // pay-life cost. NOTE: `extra_cost`-bearing variants are NOT in this
@@ -5157,6 +5173,7 @@ mod tests {
                     mode: CastCostMode::Additional,
                 }),
                 enters_with_counter: None,
+                required_cast_keyword: None,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,

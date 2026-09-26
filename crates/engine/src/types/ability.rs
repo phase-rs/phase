@@ -27773,6 +27773,15 @@ pub struct SpellContext {
     /// `Unlimited` grants (nothing to consume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_cost_grant_source: Option<ObjectId>,
+    /// CR 601.2a + CR 118.9a: For a card cast from the graveyard for its OWN
+    /// alternative cost (Blitz, Bestow), the `GraveyardPermission` that admitted
+    /// the cast, elected once as costs begin. `casting_variant` records the
+    /// rider, so this is where the admitting permission lives. Read by the
+    /// extra-cost lookup and by `finalize_cast`, so the permission whose rider was
+    /// charged is the one spent even if the board changes during payment (a
+    /// permission source sacrificed for mana). `None` for every other cast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graveyard_permission_authority: Option<crate::types::game_state::CastingVariant>,
     /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
     /// while casting this spell. Used by keyword abilities such as Squad
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.

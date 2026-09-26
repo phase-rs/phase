@@ -10637,6 +10637,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            required_cast_keyword: None,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -10722,6 +10723,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            required_cast_keyword: None,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
@@ -11622,6 +11624,7 @@ mod detect_condition_if_replacement_exemption_tests {
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: Some(CounterType::Finality),
+            required_cast_keyword: None,
         });
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),

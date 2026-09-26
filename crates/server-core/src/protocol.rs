@@ -3328,8 +3328,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_80_for_exile_look_authority() {
-        assert_eq!(PROTOCOL_VERSION, 80);
+    fn protocol_version_is_81_for_graveyard_cast_methods() {
+        assert_eq!(PROTOCOL_VERSION, 81);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3340,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_80_for_exile_look_authority` stays
+    /// `protocol_version_is_81_for_graveyard_cast_methods` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
