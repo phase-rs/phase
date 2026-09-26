@@ -13,6 +13,12 @@ pub mod blitz;
 mod blitz_tests;
 pub mod boosters;
 pub mod bracket_estimate;
+// The bracket corpus harness: labelled-deck fixtures, the scorer, and the
+// golden-expectation ratchet. Gated so it is excluded from the shipped lib /
+// WASM surface — it performs std::fs I/O and changes no game behavior.
+// Mirrors `analysis::corpus`'s `combo-verify` gate (analysis/mod.rs:43-46).
+#[cfg(any(test, feature = "bracket-corpus"))]
+pub mod bracket_corpus;
 pub mod card_subset;
 pub mod casting;
 pub(crate) mod casting_costs;
@@ -195,6 +201,17 @@ pub(crate) mod zones;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
+#[cfg(any(test, feature = "bracket-corpus"))]
+pub use bracket_corpus::{
+    assert_floor_matches_population, assert_ratchet_history, expectation_row_from_reading,
+    held_out_split, load_corpus_dir, load_expectations, parse_corpus_fixture, parse_expectations,
+    reading_from_estimate, rows_digest, score_corpus, unresolved_names, AxisMiss, AxisScore,
+    BandMiss, CorpusDispute, CorpusFixture, CorpusFixtureError, CorpusFraction, CorpusLabel,
+    CorpusLoadError, CorpusMiss, CorpusReading, CorpusRuleStatus, CorpusScore, CorpusSource,
+    CorpusSplit, ExpectationFiredRow, ExpectationRow, ExpectationsError, ExpectationsFile,
+    FiredState, GateRegime, LabelBasis, RatchetEntry, ARMED_RULES, HELD_OUT_MODULUS,
+    HELD_OUT_RESIDUE, HELD_OUT_RULE_SENTENCE, MIN_AXIS_POPULATION_N, MIN_BAND_POPULATION_N,
+};
 pub use bracket_estimate::{
     estimate_bracket, estimate_bracket_for_request, AxisReading, BracketAxis, BracketCheck,
     BracketCheckOutcome, BracketCoverage, BracketEstimate, BracketEstimateRequest,

@@ -18,6 +18,11 @@ forge = []
 proptest = ["dep:proptest"]
 # Exposes raw zone placement for test crates; never enabled by production consumers.
 test-support = []
+# The bracket corpus harness + fixture loader. Gated out of the shipped lib /
+# WASM surface (it does std::fs I/O and carries no game behavior), exactly as
+# `combo-verify` gates `analysis::corpus`. Enabled for test builds through the
+# dev-dependency self-reference below.
+bracket-corpus = []
 # Generates only the self-contained interaction DTO contract. Production
 # consumers do not enable this feature and continue to use the existing action
 # transport until the explicit adapter cutover.
@@ -124,7 +129,7 @@ serde_json = "1"
 
 [dev-dependencies]
 flate2 = "1"
-engine = { path = ".", package = "phase-engine", features = ["test-support"] }
+engine = { path = ".", package = "phase-engine", features = ["test-support", "bracket-corpus"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
 assert_matches = "1.5"
