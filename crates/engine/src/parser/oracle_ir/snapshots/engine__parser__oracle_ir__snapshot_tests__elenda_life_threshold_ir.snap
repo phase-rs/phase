@@ -1,0 +1,137 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 205,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "As long as your life total is greater than your starting life total, ~ gets +1/+1 and has menace. ~ gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total."
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "AddPower",
+                "value": 1
+              },
+              {
+                "type": "AddToughness",
+                "value": 1
+              },
+              {
+                "type": "AddKeyword",
+                "keyword": "Menace"
+              }
+            ],
+            "condition": {
+              "type": "QuantityComparison",
+              "lhs": {
+                "type": "Ref",
+                "qty": {
+                  "type": "LifeTotal",
+                  "player": {
+                    "type": "Controller"
+                  }
+                }
+              },
+              "comparator": "GT",
+              "rhs": {
+                "type": "Ref",
+                "qty": {
+                  "type": "StartingLifeTotal"
+                }
+              }
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "As long as your life total is greater than your starting life total, ~ gets +1/+1 and has menace."
+          },
+          "source_text": "As long as your life total is greater than your starting life total, ~ gets +1/+1 and has menace. ~ gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.",
+          "body_ir": null
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 205,
+          "precision": "Exact",
+          "ordinal_within_span": 1
+        },
+        "fragment": "As long as your life total is greater than your starting life total, ~ gets +1/+1 and has menace. ~ gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total."
+      },
+      "node": {
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [
+              {
+                "type": "AddPower",
+                "value": 5
+              },
+              {
+                "type": "AddToughness",
+                "value": 5
+              }
+            ],
+            "condition": {
+              "type": "QuantityComparison",
+              "lhs": {
+                "type": "Ref",
+                "qty": {
+                  "type": "LifeAboveStarting"
+                }
+              },
+              "comparator": "GE",
+              "rhs": {
+                "type": "Fixed",
+                "value": 10
+              }
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "~ gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total."
+          },
+          "source_text": "As long as your life total is greater than your starting life total, ~ gets +1/+1 and has menace. ~ gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.",
+          "body_ir": null
+        }
+      }
+    }
+  ],
+  "source_text": "As long as your life total is greater than your starting life total, Elenda gets +1/+1 and has menace. Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.",
+  "card_name": "Elenda, Saint of Dusk"
+}

@@ -5813,8 +5813,61 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         }
     };
 
+    // CR 119: "your life total is at least N greater than your starting life
+    // total" is a life-offset threshold, not an absolute LifeTotal comparison.
+    // Reuse LifeAboveStarting so the static and intervening-if paths share the
+    // same runtime quantity. Keep this exact suffix ahead of the generic
+    // comparator and numeric fallbacks below.
+    if matches!(scope, LifeTotalScope::Controller) {
+        if let Ok((rest, n)) = preceded(
+            tag::<_, _, OracleError<'_>>("at least "),
+            terminated(parse_number, tag(" greater than your starting life total")),
+        )
+        .parse(rest)
+        {
+            return Ok((rest, make_quantity_ge(QuantityRef::LifeAboveStarting, n)));
+        }
+    }
+
     if let Ok((rest, comparator)) = parse_life_total_comparator(rest) {
         let (rest, rhs) = nom_quantity::parse_quantity(rest)?;
+        // Existential subjects need a per-candidate starting-life operand.
+        // A single Min/Max aggregate compared to one controller baseline is
+        // not equivalent when player baselines differ (for example, the
+        // Archenemy's 40 life versus a hero's 20). Keep the original ability
+        // controller on the runtime path; `ScopedPlayer` binds each candidate.
+        if !matches!(scope, LifeTotalScope::Controller)
+            && rhs.any_ref(&mut |qty| {
+                matches!(
+                    qty,
+                    QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::ScopedPlayer
+                    }
+                )
+            })
+        {
+            let relation = match scope {
+                LifeTotalScope::Controller => unreachable!("controller is not existential"),
+                LifeTotalScope::AllPlayers => crate::types::ability::PlayerRelation::All,
+                LifeTotalScope::Opponent => crate::types::ability::PlayerRelation::Opponent,
+            };
+            return Ok((
+                rest,
+                make_quantity_ge(
+                    QuantityRef::PlayerCount {
+                        filter: PlayerFilter::PlayerAttribute {
+                            relation,
+                            attr: Box::new(QuantityRef::LifeTotal {
+                                player: PlayerScope::ScopedPlayer,
+                            }),
+                            comparator,
+                            value: Box::new(rhs),
+                        },
+                    },
+                    1,
+                ),
+            ));
+        }
         return Ok((
             rest,
             StaticCondition::QuantityComparison {
@@ -17271,7 +17324,9 @@ mod tests {
                 assert!(matches!(
                     inner.as_ref(),
                     QuantityExpr::Ref {
-                        qty: QuantityRef::StartingLifeTotal
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::Controller,
+                        }
                     }
                 ));
             }
@@ -17293,33 +17348,43 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::LifeTotal {
-                                player:
-                                    PlayerScope::AllPlayers {
-                                        aggregate: AggregateFunction::Min,
-                                        exclude: None,
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::PlayerAttribute {
+                                        relation: crate::types::ability::PlayerRelation::All,
+                                        attr,
+                                        comparator: Comparator::LE,
+                                        value,
                                     },
                             },
                     },
-                comparator: Comparator::LE,
-                rhs:
-                    QuantityExpr::DivideRounded {
-                        inner,
-                        divisor: 2,
-                        rounding: RoundingMode::Down,
-                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             } => {
                 assert!(matches!(
-                    inner.as_ref(),
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::StartingLifeTotal
+                    attr.as_ref(),
+                    QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer,
                     }
+                ));
+                assert!(matches!(
+                    value.as_ref(),
+                    QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                        inner,
+                    } if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::StartingLifeTotal {
+                                player: PlayerScope::ScopedPlayer,
+                            }
+                        }
+                    )
                 ));
             }
             other => {
-                panic!(
-                    "expected AllPlayers(Min) LE DivideRounded(StartingLifeTotal), got {other:?}"
-                )
+                panic!("expected candidate-relative existential life threshold, got {other:?}")
             }
         }
     }
@@ -17336,30 +17401,43 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::LifeTotal {
-                                player:
-                                    PlayerScope::Opponent {
-                                        aggregate: AggregateFunction::Min,
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::PlayerAttribute {
+                                        relation: crate::types::ability::PlayerRelation::Opponent,
+                                        attr,
+                                        comparator: Comparator::LT,
+                                        value,
                                     },
                             },
                     },
-                comparator: Comparator::LT,
-                rhs:
-                    QuantityExpr::DivideRounded {
-                        inner,
-                        divisor: 2,
-                        rounding: RoundingMode::Down,
-                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             } => {
                 assert!(matches!(
-                    inner.as_ref(),
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::StartingLifeTotal
+                    attr.as_ref(),
+                    QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer,
                     }
+                ));
+                assert!(matches!(
+                    value.as_ref(),
+                    QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                        inner,
+                    } if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::StartingLifeTotal {
+                                player: PlayerScope::ScopedPlayer,
+                            }
+                        }
+                    )
                 ));
             }
             other => {
-                panic!("expected Opponent(Min) LT DivideRounded(StartingLifeTotal), got {other:?}")
+                panic!("expected candidate-relative opponent life threshold, got {other:?}")
             }
         }
     }
@@ -17417,14 +17495,18 @@ mod tests {
                 "your life total is greater than your starting life total",
                 Comparator::GT,
                 QuantityExpr::Ref {
-                    qty: QuantityRef::StartingLifeTotal,
+                    qty: QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::Controller,
+                    },
                 },
             ),
             (
                 "your life total is greater than or equal to your starting life total",
                 Comparator::GE,
                 QuantityExpr::Ref {
-                    qty: QuantityRef::StartingLifeTotal,
+                    qty: QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::Controller,
+                    },
                 },
             ),
         ] {
@@ -17450,6 +17532,104 @@ mod tests {
         }
     }
 
+    /// CR 119: the exact Elenda wording compares the difference from starting
+    /// life, while ordinary life-total comparators remain absolute.
+    #[test]
+    fn your_life_total_at_least_greater_than_starting_life_total() {
+        for text in [
+            "your life total is at least 10 greater than your starting life total",
+            "your life total is at least ten greater than your starting life total",
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeAboveStarting,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 10 },
+                },
+                "Elenda's threshold is a life-above-starting comparison for {text:?}",
+            );
+        }
+
+        let (rest, absolute) = parse_inner_condition("your life total is greater than 10").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            absolute,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            },
+            "an absolute life comparator must keep LifeTotal",
+        );
+
+        assert!(
+            parse_inner_condition(
+                "your life total is at least 10 less than your starting life total"
+            )
+            .is_err(),
+            "the new grammar must not invent a less-than life-offset form",
+        );
+    }
+
+    #[test]
+    fn a_players_life_total_at_least_greater_than_your_starting_life_is_unsupported() {
+        let (rest, supported) = parse_inner_condition(
+            "a player's life total is less than or equal to half their starting life total",
+        )
+        .expect("the all-player, candidate-relative life route must parse");
+        assert_eq!(rest, "");
+        match supported {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::PlayerAttribute {
+                                        relation: PlayerRelation::All,
+                                        attr,
+                                        comparator: Comparator::LE,
+                                        value,
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert!(matches!(
+                    attr.as_ref(),
+                    QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                ));
+                assert!(value.any_ref(&mut |qty| matches!(
+                    qty,
+                    QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                )));
+            }
+            other => panic!("expected candidate-relative all-player comparison, got {other:?}"),
+        }
+
+        assert!(
+            parse_inner_condition(
+                "a player's life total is at least 10 greater than your starting life total"
+            )
+            .is_err(),
+            "controller-relative life-above-starting syntax must not capture an all-players scope",
+        );
+    }
+
     /// CR 119: "you have at least N life more than your starting life total"
     /// (Angel of Destiny class) — reuses the `LifeAboveStarting` building block
     /// (current life − starting life total), so the canonical shape is
@@ -17461,6 +17641,8 @@ mod tests {
         for text in [
             "you have at least 15 life more than your starting life total",
             "you have 15 or more life more than your starting life total",
+            "your life total is at least 15 greater than your starting life total",
+            "your life total is at least fifteen greater than your starting life total",
         ] {
             let (rest, c) = parse_inner_condition(text).unwrap();
             assert_eq!(rest, "", "must fully consume {text:?}");
@@ -17476,6 +17658,20 @@ mod tests {
                 "expected LifeAboveStarting GE Fixed(15) for {text:?}",
             );
         }
+    }
+
+    #[test]
+    fn less_than_life_offset_does_not_use_life_above_starting() {
+        let (rest, condition) = parse_inner_condition(
+            "your life total is less than 10 greater than your starting life total",
+        )
+        .expect("generic absolute life comparison remains parseable");
+        assert_eq!(rest, " greater than your starting life total");
+        assert_ne!(
+            condition,
+            make_quantity_ge(QuantityRef::LifeAboveStarting, 10),
+            "the specific life-offset grammar is GE-only and must not reinterpret LT as a threshold"
+        );
     }
 
     /// Regression guard: the new life-offset branch must NOT steal the plain
