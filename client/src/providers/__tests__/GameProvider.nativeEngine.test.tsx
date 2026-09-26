@@ -858,24 +858,53 @@ describe("GameProvider native AI routing", () => {
     expect(sessionStorage.getItem("phase:draft-deck:game")).toBe(raw);
   });
 
-  it("retains raw bytes after a transient authority read failure and starts on retry", async () => {
+  it.each(["lifecycle", "run"].flatMap((read) =>
+    ["raw", "fallback", "saved"].map((entry) => ({ read, entry })),
+  ))("preserves $read authority read errors through $entry and retries the same game", async ({ read, entry }) => {
     seedSoloRun("run", "game");
     const key = "phase:draft-deck:game";
     const raw = JSON.stringify(publishedPayload());
-    sessionStorage.setItem(key, raw);
-    loadDraftRun.mockRejectedValueOnce(new Error("IDB unavailable"));
+    if (entry !== "fallback") sessionStorage.setItem(key, raw);
+    const savedState = { players: [{}, {}], turn: 7 } as never;
+    if (entry === "saved") loadGameStrict.mockResolvedValue(savedState);
+    const reader = read === "run" ? loadDraftRun : inspectActiveQuickDraftLifecycle;
+    reader.mockRejectedValueOnce(new Error(`${read} read unavailable`));
     const onNoDeck = vi.fn();
     const first = render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
-    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(`${read} read unavailable`));
+    expect(reader).toHaveBeenCalledWith(read === "run" ? "run" : "inspect");
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
-    expect(sessionStorage.getItem(key)).toBe(raw);
+    expect(gameStoreState.resumeGame).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(entry === "fallback" ? null : raw);
     first.unmount();
 
     render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
-    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    if (entry === "saved") {
+      await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledWith("game", expect.anything(), savedState));
+    } else {
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    }
     await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
     const controllers = vi.mocked(createGameLoopController).mock.results;
     expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+  });
+
+  it.each([
+    { lastOpponentSeat: 4 }, { lastOpponentSeat: null },
+    { draft_set_codes: null }, { draft_set_codes: "TST" }, { draft_set_codes: [7] },
+  ])("rejects malformed durable authority %j and accepts its coherent sibling", async (fields) => {
+    const run = seedSoloRun("run", "game");
+    loadDraftRun.mockResolvedValue({ ...run, usedBotSeats: [1, 4], ...fields });
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(loadDraftRun).toHaveBeenCalledWith("run");
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    first.unmount();
+    loadDraftRun.mockResolvedValue({ ...run, lastOpponentSeat: 1, draft_set_codes: [] });
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
   });
 
   it("refuses malformed solo handoff without consuming it or loading an unrelated deck", async () => {

@@ -88,7 +88,10 @@ const formatGate = vi.hoisted(() => ({
 }));
 
 vi.mock("@wasm/draft", () => wasm);
-vi.mock("../../services/quickDraftPersistence", () => persistence);
+vi.mock("../../services/quickDraftPersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/quickDraftPersistence")>(),
+  ...persistence,
+}));
 vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../adapter/wasm-adapter")>(),
   getSharedAdapter: () => ({ evaluateDeckFormatGate: formatGate.evaluate }),
@@ -1028,7 +1031,7 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().runState).toEqual(run);
     await useDraftStore.getState().launchNextMatch(vi.fn());
     expect(formatGate.evaluate.mock.calls.map(([request]) => (request as { draft_set_codes: string[] }).draft_set_codes))
-      .toEqual([["TST"], ["TST"]]);
+      .toEqual([[], []]);
   });
 
   it.each(["session read", "adapter import"])("recovers a complete run when the separate %s fails", async (failure) => {
@@ -2219,8 +2222,8 @@ describe("draft store workspace authority", () => {
   it.each([
     { durable: undefined, projected: [], expected: [], saves: 1 },
     { durable: undefined, projected: undefined, expected: undefined, saves: 0 },
-    { durable: ["Original", "Original"], projected: ["Other"], expected: ["Original", "Original"], saves: 0 },
-    { durable: [], projected: ["Other"], expected: [], saves: 0 },
+    { durable: ["Original", "Original"], projected: ["Other"], expected: ["Original", "Original"], saves: 1 },
+    { durable: [], projected: ["Other"], expected: [], saves: 1 },
     { durable: null, projected: ["Other"], expected: null, saves: 0 },
   ])("resumes legacy source metadata only from the host accessor: $durable / $projected", async ({ durable, projected, expected, saves }) => {
     persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
@@ -2249,7 +2252,7 @@ describe("draft store workspace authority", () => {
       expect(useDraftStore.getState().runState).toBeNull();
     }
     expect(persistence.saveDraftRun).toHaveBeenCalledTimes(saves);
-    if (saves) expect(persistence.saveDraftRun).toHaveBeenCalledWith("legacy", expect.objectContaining({ booster_pack_pool: [] }));
+    if (saves) expect(persistence.saveDraftRun).toHaveBeenCalledWith("legacy", expect.objectContaining({ booster_pack_pool: expected, lastOpponentSeat: 1, draft_set_codes: [] }));
   });
 
   it.each([false, true])("durably upgrades a legacy staged launch from the engine view (next=%s)", async (next) => {
@@ -3156,4 +3159,194 @@ describe("draft store workspace authority", () => {
     expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
     expect(navigate).toHaveBeenCalledOnce();
   });
+
+  it.each(["seat", "codes"])("preserves retained %s authority after a rejected run-only gate and retry", async (assertion) => {
+    const codes = ["opaque+token", "CaseToken", "opaque+token"];
+    const run: DraftRunState = { format: "run", results: [{ gameId: "prior", result: "draw" }],
+      playerDeck: ["Player"], opponentDeck: ["Bot 4"], usedBotSeats: [1, 4],
+      lastOpponentSeat: 4, draft_set_codes: codes };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "retained", setCode: "DISPLAY+ONLY",
+      difficulty: 2, phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    formatGate.evaluate.mockResolvedValueOnce({ compatible: true, reasons: [] })
+      .mockResolvedValueOnce({ compatible: false, reasons: ["opponent rejected"] });
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("opponent rejected");
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toEqual(run);
+    expect(navigate).not.toHaveBeenCalled();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(4);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+    if (assertion === "seat") {
+      expect(useDraftStore.getState().runState?.activeMatch).toMatchObject({ botSeat: 4, opponentDeck: ["Bot 4"] });
+    } else {
+      for (const [request] of formatGate.evaluate.mock.calls) expect(request).toMatchObject({ draft_set_codes: codes });
+    }
+  });
+
+  it.each([4, 1])("retains the exact seat/deck pair and opaque tokens through launch, retry, result, and run-only recovery (seat=%s)", async (finalSeat) => {
+    const codes = ["opaque+token", "CaseToken", "opaque+token"];
+    await startLaunchWithBotSeats([1, 4]);
+    const draftId = useDraftStore.getState().draftId!;
+    useDraftStore.setState((state) => ({ selectedSet: "DISPLAY+ONLY",
+      view: { ...state.view!, draft_set_codes: codes } }));
+    wasm.submit_deck.mockReturnValue({ ...useDraftStore.getState().view!, status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    expect(wasm.submit_deck).toHaveBeenCalledOnce();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    wasm.get_bot_deck.mockImplementation((seat) => ({ main_deck: [`Bot ${seat}`], lands: {} }));
+    let durable: DraftRunState | null = null;
+    persistence.loadDraftRun.mockImplementation(async () => durable);
+    persistence.publishInitialDraftMatch.mockImplementationOnce(async (input) => {
+      durable = input.run as DraftRunState;
+      throw new Error("metadata failed");
+    });
+    persistence.publishStagedDraftMatch.mockImplementation(async (...args: unknown[]) => {
+      const input = args[0] as { run?: DraftRunState };
+      if (input.run) durable = input.run;
+    });
+    const meta: ActiveQuickDraftMeta = { id: draftId, setCode: "DISPLAY+ONLY", difficulty: 2,
+      phase: "playing", pickCount: 0, updatedAt: Date.now() };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(meta);
+    persistence.recordDraftMatchResult.mockImplementation(async (input) => {
+      const { activeMatch: _stage, ...run } = durable!;
+      durable = { ...run, results: [...run.results, { gameId: input.gameId, result: input.result }] };
+      return { run: durable, meta: input.makeMeta(durable) };
+    });
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchMatch(navigate)).rejects.toThrow("metadata failed");
+    expect(durable).toMatchObject({ lastOpponentSeat: 1, draft_set_codes: codes,
+      activeMatch: { botSeat: 1, opponentDeck: ["Bot 1"] } });
+    // Durable publication wins over both the display label and a newer view.
+    useDraftStore.setState((state) => ({ view: { ...state.view!, draft_set_codes: ["OTHER"] } }));
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(wasm.get_bot_deck).toHaveBeenCalledTimes(1);
+    await useDraftStore.getState().recordMatchResult(useDraftStore.getState().runState!.activeMatch!.gameId, "draw");
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(useDraftStore.getState().runState).toMatchObject({ usedBotSeats: [1, 4],
+      lastOpponentSeat: 4, opponentDeck: ["Bot 4"], activeMatch: { botSeat: 4 } });
+    if (finalSeat === 1) {
+      await useDraftStore.getState().recordMatchResult(useDraftStore.getState().runState!.activeMatch!.gameId, "draw");
+      await useDraftStore.getState().launchNextMatch(navigate);
+    }
+    expect(useDraftStore.getState().runState).toMatchObject({ usedBotSeats: [1, 4],
+      lastOpponentSeat: finalSeat, opponentDeck: [`Bot ${finalSeat}`], draft_set_codes: codes });
+    await useDraftStore.getState().recordMatchResult(useDraftStore.getState().runState!.activeMatch!.gameId, "draw");
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState().adapter).toBeNull();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    const rounds = finalSeat === 1 ? 3 : 2;
+    expect(wasm.get_bot_deck).toHaveBeenCalledTimes(rounds);
+    expect(persistence.recordDraftMatchResult).toHaveBeenCalledTimes(rounds);
+    expect(navigate).toHaveBeenCalledTimes(rounds + 1);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(1 + 2 * (rounds + 2));
+    for (const [request] of formatGate.evaluate.mock.calls) expect(request).toMatchObject({ draft_set_codes: codes });
+    expect(useDraftStore.getState().runState).toMatchObject({ lastOpponentSeat: finalSeat,
+      draft_set_codes: codes, opponentDeck: [`Bot ${finalSeat}`],
+      activeMatch: { botSeat: finalSeat, opponentDeck: [`Bot ${finalSeat}`] } });
+  });
+
+  it.each([undefined, [] as string[], ["Stored+Token"]])("latches only absent run codes from a restored view (%j)", async (stored) => {
+    const codes = ["View+Token", "CaseToken", "View+Token"];
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Forest"],
+      opponentDeck: ["Bot 4"], usedBotSeats: [1, 4], lastOpponentSeat: 4,
+      ...(stored === undefined ? {} : { draft_set_codes: stored }) };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "codes", setCode: "DISPLAY+ONLY",
+      difficulty: 2, phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue({ sessionJson: "session", mainDeck: ["Forest"],
+      landCounts: {}, poolSortMode: "color", poolPanelOpen: true, workspace: null });
+    wasm.import_draft_session.mockReturnValue({ ...view([card("human", "Forest")]), draft_set_codes: codes });
+    wasm.booster_pack_pool_for_game.mockReturnValue(undefined);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "codes" });
+    const expected = stored ?? codes;
+    expect(useDraftStore.getState().runState?.draft_set_codes).toEqual(expected);
+    if (stored === undefined) expect(persistence.saveDraftRun).toHaveBeenCalledWith("codes", expect.objectContaining({ draft_set_codes: codes }));
+    else expect(persistence.saveDraftRun).not.toHaveBeenCalled();
+    wasm.submit_deck.mockReturnValue({ ...useDraftStore.getState().view!, status: "Pairing" });
+    await useDraftStore.getState().submitDeck();
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Bot 1"], lands: {} });
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(3);
+    for (const [request] of formatGate.evaluate.mock.calls) expect(request).toMatchObject({ draft_set_codes: expected });
+  });
+
+  it("replays a matching legacy active stage from multi-seat history without choosing a new opponent", async () => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Bot 4"], usedBotSeats: [1, 4],
+      activeMatch: { draftId: "legacy-active", gameId: "same-game", format: "run", resultCountAtLaunch: 0,
+        botSeat: 4, opponentDeck: ["Bot 4"] } };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "legacy-active", setCode: "DISPLAY+ONLY",
+      difficulty: 2, phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    expect(persistence.saveDraftRun).not.toHaveBeenCalled();
+    const navigate = vi.fn();
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      gameId: "same-game", run: expect.objectContaining({ lastOpponentSeat: 4, draft_set_codes: [] }) }));
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("same-game"));
+  });
+
+  it("keeps ambiguous legacy history readable but refuses a new run-only stage until an adapter selects a pair", async () => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Forest"],
+      opponentDeck: ["Unknown Bot"], usedBotSeats: [1, 4] };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "ambiguous", setCode: "DISPLAY+ONLY", difficulty: 2, phase: "playing" });
+    persistence.loadDraftRun.mockResolvedValue(run);
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "ambiguous" });
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(persistence.saveDraftRun).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().runState).toEqual(run);
+    expect(navigate).not.toHaveBeenCalled();
+    persistence.loadQuickDraftSession.mockResolvedValue({ sessionJson: "session", mainDeck: ["Forest"],
+      landCounts: {}, poolSortMode: "color", poolPanelOpen: true, workspace: null });
+    wasm.import_draft_session.mockReturnValue(view([card("human", "Forest")]));
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Selected Bot"], lands: {} });
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(useDraftStore.getState().runState).toMatchObject({ lastOpponentSeat: 1,
+      opponentDeck: ["Selected Bot"], activeMatch: { botSeat: 1 } });
+  });
+
+  it.each([null, "TST", [7]])("rejects malformed persisted codes %j before gates and accepts stored empty authority", async (codes) => {
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Bot 4"], usedBotSeats: [1, 4], lastOpponentSeat: 4 };
+    persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "invalid-codes", setCode: "DISPLAY+ONLY", difficulty: 2, phase: "playing" });
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+    persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: codes });
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("unavailable");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: [] });
+    expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
+    const navigate = vi.fn();
+    persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: codes });
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: [] });
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    for (const [request] of formatGate.evaluate.mock.calls) expect(request).toMatchObject({ draft_set_codes: [] });
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
 });

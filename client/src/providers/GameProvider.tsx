@@ -1496,20 +1496,16 @@ export function GameProvider({
       };
       const unavailableDraftStage = () => new Error(tRef.current("draft:run.resumeUnavailable"));
       const loadExactDraftRun = async (): Promise<DraftRunState> => {
-        try {
-          const meta = await inspectActiveQuickDraftLifecycle("inspect");
-          if (!meta || meta.id !== draftId) throw unavailableDraftStage();
-          const run = await loadDraftRun(draftId!);
-          if (!run) throw unavailableDraftStage();
-          const { isCoherentUnresolvedDraftStage } = await import("../stores/draftStore");
-          if (!isCoherentUnresolvedDraftStage(run, draftId!, gameId)
-            || (meta.setCode === "custom-cube" && !Array.isArray(run.booster_pack_pool))) {
-            throw unavailableDraftStage();
-          }
-          return run;
-        } catch {
+        const meta = await inspectActiveQuickDraftLifecycle("inspect");
+        if (!meta || meta.id !== draftId) throw unavailableDraftStage();
+        const run = await loadDraftRun(draftId!);
+        if (!run) throw unavailableDraftStage();
+        const { isCoherentUnresolvedDraftStage } = await import("../stores/draftStore");
+        if (!isCoherentUnresolvedDraftStage(run, draftId!, gameId)
+          || (meta.setCode === "custom-cube" && !Array.isArray(run.booster_pack_pool))) {
           throw unavailableDraftStage();
         }
+        return run;
       };
       const startDraftDeck = async (raw: string) => {
         try {
