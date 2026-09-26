@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { GameAction, GameObject, WaitingFor } from "../../adapter/types.ts";
 import type { ActivationAffordances, ObjectActivation } from "../cardActionChoice.ts";
 import {
+  castActionsForObject,
   collectObjectActions,
   deriveActivationAffordances,
   isManaObjectAction,
@@ -323,6 +324,23 @@ describe("resolveDirectPlayOrCastAction", () => {
         makeGameObject({ abilities: [{ consumes_source: false }] }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("castActionsForObject", () => {
+  it("keeps spell casts distinct from the PlayLand special action", () => {
+    const castAction: GameAction = {
+      type: "CastSpell",
+      data: { object_id: 1, card_id: 100, targets: [] },
+    };
+    const playLandAction: GameAction = {
+      type: "PlayLand",
+      data: { object_id: 1, card_id: 100 },
+    };
+
+    expect(
+      castActionsForObject({ "1": [playLandAction, castAction] }, 1),
+    ).toEqual([castAction]);
   });
 });
 

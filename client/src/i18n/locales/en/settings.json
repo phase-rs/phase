@@ -181,6 +181,9 @@
   },
   "multiplayer": {
     "title": "Multiplayer",
+    "opponentView": "Opponent View",
+    "followActiveOpponent": "Follow active opponent",
+    "followActiveOpponentDescription": "Automatically focus the opponent whose turn it is.",
     "displayName": "Display Name",
     "displayNamePlaceholder": "Enter your name",
     "serverSelectionNote": "Server selection moved to the lobby — open Multiplayer and use the server chip (or \"Pick server\" in P2P mode) to switch regions, configure a self-hosted instance, or test connectivity."

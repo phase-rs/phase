@@ -65,6 +65,8 @@ const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
     activePlayerId: 0,
     playerNames: new Map<string, string>(),
     playerAvatars: new Map<string, string>(),
+    playerLatencies: {} as Record<number, number | null>,
+    disconnectedPlayers: new Set<number>(),
     connectionStatus: "disconnected",
     isSpectator: false,
     toasts: new Map<string, { message: string; expiresAt: number; showCountdown: boolean }>(),
@@ -117,6 +119,8 @@ vi.mock("../../stores/gameStore", async () => ({
         waitingFor: storeOverrides.waitingFor,
         gameId: "pod-game-1",
         legalActions: [],
+        stateHistory: [],
+        dispatch: vi.fn(),
         endContinuousEffectOffers: [],
         autoPassRecommended: false,
         spellCosts: {},
@@ -151,6 +155,9 @@ vi.mock("../../stores/gameStore", async () => ({
 // `FORMAT_DEFAULTS.Limited` at module top level, so the Proxy must answer.
 vi.mock("../../stores/multiplayerStore", () => ({
   useMultiplayerStore: mockUseMultiplayerStore,
+  getPlayerDisplayName: (playerId: number, myId?: number) =>
+    playerId === myId ? "You" : `Opp ${playerId + 1}`,
+  getOpponentDisplayName: (playerId: number) => `Opp ${playerId + 1}`,
   FORMAT_DEFAULTS: new Proxy({}, { get: (_target, key) => ({ format: String(key) }) }),
 }));
 

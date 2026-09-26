@@ -181,6 +181,9 @@
   },
   "multiplayer": {
     "title": "Multijugador",
+    "opponentView": "Vista del oponente",
+    "followActiveOpponent": "Seguir al oponente activo",
+    "followActiveOpponentDescription": "Enfoca automáticamente al oponente cuyo turno está en curso.",
     "displayName": "Nombre visible",
     "displayNamePlaceholder": "Introduce tu nombre",
     "serverSelectionNote": "La selección de servidor se trasladó a la sala de espera — abre Multijugador y usa el chip de servidor (o \"Elegir servidor\" en modo P2P) para cambiar de región, configurar una instancia autoalojada o probar la conectividad."

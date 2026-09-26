@@ -16,7 +16,7 @@ function renderGameMenu(
 ) {
   const onToggleMultiplayerBoardLayout = vi.fn();
 
-  render(
+  const view = render(
     <MemoryRouter initialEntries={["/game/test-game"]}>
       <GameMenu
         gameId="test-game"
@@ -35,13 +35,24 @@ function renderGameMenu(
     </MemoryRouter>,
   );
 
-  return { onToggleMultiplayerBoardLayout };
+  return { ...view, onToggleMultiplayerBoardLayout };
 }
 
 describe("GameMenu", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it("uses the shared compact Liquid Glass edge control", () => {
+    const { container } = renderGameMenu();
+    const menuButton = screen.getByRole("button", { name: "Game menu" });
+
+    expect(menuButton).toHaveClass("tabletop-liquid-glass-control", "h-11", "w-11");
+    expect(menuButton).toHaveAttribute("data-game-menu-button");
+    expect(container.querySelector("[data-game-menu-anchor]")).toHaveStyle({
+      left: "var(--game-menu-inline, var(--game-control-safe-left))",
+    });
   });
 
   it("renders the split/legacy board layout toggle inside the menu", () => {

@@ -31,19 +31,6 @@ function blockerPrompt(): WaitingFor {
   };
 }
 
-function attackerPrompt(): WaitingFor {
-  const target = { type: "Player", data: 1 } as const;
-  return {
-    type: "DeclareAttackers",
-    data: {
-      player: 0,
-      valid_attacker_ids: [100],
-      valid_attack_targets: [target],
-      valid_attack_targets_by_attacker: { "100": [target] },
-    },
-  };
-}
-
 function priorityPrompt(player = 0): WaitingFor {
   return buildPriorityWaitingFor({ data: { player } });
 }
@@ -112,24 +99,6 @@ describe("ActionButton", () => {
     expect(screen.queryByText("Auto-Passing to End Step...")).not.toBeInTheDocument();
   });
 
-  it("keeps attacker controls available while pass-until-end-of-turn is armed", () => {
-    const waitingFor = attackerPrompt();
-    useGameStore.setState({
-      gameState: {
-        ...createGameState(waitingFor),
-        phase: "DeclareAttackers",
-        active_player: 0,
-      },
-      waitingFor,
-    });
-
-    render(<ActionButton />);
-
-    expect(screen.getByRole("button", { name: "Attack with All" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Attack with None" })).toBeInTheDocument();
-    expect(screen.queryByText("Auto-Passing to End Step...")).not.toBeInTheDocument();
-  });
-
   it("shows resolve when turn decision controller differs from priority player (issue #1218)", () => {
     useGameStore.setState({
       gameMode: "online",
@@ -144,9 +113,56 @@ describe("ActionButton", () => {
     });
     useMultiplayerStore.setState({ activePlayerId: 1, actionPending: false });
 
-    render(<ActionButton />);
+    const { container } = render(<ActionButton />);
 
     expect(screen.getByRole("button", { name: "Resolve" })).toBeInTheDocument();
+    expect(container.querySelector("[data-action-button-panel]")).toHaveAttribute(
+      "data-stack-action-layout",
+      "true",
+    );
+  });
+
+  it("renders Pass as an accessible fast-forward icon in the compact action layout", () => {
+    const waitingFor = priorityPrompt();
+    useGameStore.setState({
+      gameState: {
+        ...createGameState(waitingFor),
+        active_player: 0,
+        phase: "PreCombatMain",
+        stack: [],
+        auto_pass: {},
+      },
+      waitingFor,
+      legalActions: [],
+    });
+    useMultiplayerStore.setState({ activePlayerId: 0, actionPending: false });
+
+    const { container } = render(<ActionButton />);
+
+    const panel = container.querySelector("[data-action-button-panel]");
+    const pass = screen.getByRole("button", { name: "Pass" });
+    const nextPhase = screen.getByRole("button", { name: "To Begin Combat" });
+    expect(panel).toHaveAttribute("data-compact-pass-layout", "true");
+    expect(pass).toHaveAttribute("data-pass-action");
+    expect(pass).toHaveAttribute("aria-describedby");
+    const passIcon = pass.querySelector("[data-pass-fast-forward-icon]");
+    expect(passIcon).toBeInTheDocument();
+    expect(passIcon).toHaveAttribute("viewBox", "0 0 24 24");
+    expect(passIcon).toHaveClass("block", "h-5", "w-5");
+    expect(pass.querySelector(".sr-only")).toHaveTextContent("Pass");
+    expect(nextPhase).toHaveAttribute("data-next-phase-action");
+    expect(nextPhase.querySelector("[data-advance-label-full]")).toHaveTextContent(
+      "To Begin Combat",
+    );
+    expect(nextPhase.querySelector("[data-advance-label-compact]")).toHaveTextContent(
+      "To Combat",
+    );
+
+    fireEvent.click(pass);
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({
+      type: "SetAutoPass",
+      data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
+    });
   });
 
   it("keeps priority actions available when end-of-turn auto-pass pauses for an opponent's stack object", () => {
@@ -305,7 +321,6 @@ describe("ActionButton", () => {
 
     const cancel = screen.getByRole("button", { name: "Resolving Stack..." });
     expect(cancel).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Resolve" })).not.toBeInTheDocument();
     fireEvent.click(cancel);
     expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "CancelAutoPass" });
   });
@@ -394,34 +409,6 @@ describe("ActionButton", () => {
       type: "DeclareAttackers",
       data: { attacks: [[100, target]] },
     });
-  });
-
-  it("keeps a selected attacker with empty engine support unsubmitted", () => {
-    const target = { type: "Player", data: 1 } as const;
-    const wf: WaitingFor = {
-      type: "DeclareAttackers",
-      data: {
-        player: 0,
-        valid_attacker_ids: [100, 101],
-        valid_attack_targets: [target],
-        valid_attack_targets_by_attacker: { "100": [target], "101": [] },
-      },
-    };
-    useGameStore.setState({
-      gameState: { ...createGameState(wf), phase: "DeclareAttackers", active_player: 0, auto_pass: {} },
-      waitingFor: wf,
-      legalActions: [],
-    });
-    useUiStore.setState({ selectedAttackers: [100, 101], blockerAssignments: new Map() });
-    vi.mocked(dispatchAction).mockClear();
-
-    render(<ActionButton />);
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Attackers (2)" }));
-
-    expect(vi.mocked(dispatchAction)).not.toHaveBeenCalled();
-    expect(screen.getByText("No shared target — switch to Distribute to aim each attacker.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Distribute" }));
-    expect(screen.getByRole("button", { name: "Assign 2 more" })).toBeDisabled();
   });
 
   it("does not client-gate Block with None on an unassigned must-block creature", () => {

@@ -181,6 +181,9 @@
   },
   "multiplayer": {
     "title": "Multijoueur",
+    "opponentView": "Vue de l’adversaire",
+    "followActiveOpponent": "Suivre l’adversaire actif",
+    "followActiveOpponentDescription": "Affiche automatiquement l’adversaire dont c’est le tour.",
     "displayName": "Nom affiché",
     "displayNamePlaceholder": "Saisissez votre nom",
     "serverSelectionNote": "La sélection du serveur a été déplacée vers le salon — ouvrez Multijoueur et utilisez la puce du serveur (ou « Choisir un serveur » en mode P2P) pour changer de région, configurer une instance auto-hébergée ou tester la connectivité."

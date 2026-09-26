@@ -1,4 +1,9 @@
 {
+  "landscapeGate": {
+    "title": "Ruota il dispositivo",
+    "description": "Il campo di battaglia è disponibile in modalità orizzontale su telefoni e tablet.",
+    "exit": "Torna al menu"
+  },
   "playerLatency": {"host":"Host","waiting":"In attesa","value":"{{ms}} ms","description":"Latenza di andata e ritorno verso l’host. Una risposta mancante non disconnette la partita."},
   "abilityBlock": {
     "badge": "Bloccata",
@@ -135,6 +140,14 @@
     "holdCtrlFront": "Tieni premuto Ctrl per il fronte",
     "holdCtrlFlip": "Tieni premuto Ctrl per girare",
     "flip": "Gira",
+    "detailAriaLabel": "Dettagli della carta: {{name}}",
+    "closeDetails": "Chiudi i dettagli della carta",
+    "detailViewOptions": "Vista dei dettagli della carta",
+    "detailView": {
+      "live": "In gioco",
+      "original": "Originale",
+      "parse": "Analisi"
+    },
     "report": "Segnala un problema",
     "reported": "Segnalato ✓",
     "altParsedAbilities": "Alt: abilità analizzate",
@@ -2436,6 +2449,20 @@
     "EndCombat": "Fine combattimento",
     "PostCombatMain": "Fase principale 2",
     "End": "Sottofase finale",
+    "Cleanup": "Ripulitura"
+  },
+  "phaseNameCompact": {
+    "Untap": "STAP",
+    "Upkeep": "Mantenimento",
+    "Draw": "Pesca",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combattimento",
+    "DeclareAttackers": "Attaccanti",
+    "DeclareBlockers": "Bloccanti",
+    "CombatDamage": "Danno",
+    "EndCombat": "Fine combattimento",
+    "PostCombatMain": "Principale 2",
+    "End": "Finale",
     "Cleanup": "Ripulitura"
   },
   "counterMoveDistribution": {

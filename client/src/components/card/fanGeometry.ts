@@ -1,10 +1,10 @@
 // Shared card-fan geometry — the overlap / tilt / arc math that lays a row of
 // cards out as a held "hand". Extracted from PlayerHand so any centered spread
 // of cards can share the same geometry building block while choosing the
-// density appropriate to its surface: compact for constrained overlays/mobile,
-// wide for the desktop player hand where adjacent hover targets matter.
+// density appropriate to its surface: compact for constrained overlays, tight
+// for a narrow hand that retains the wide silhouette, and wide for desktop.
 
-export type FanGeometryProfile = "compact" | "wide";
+export type FanGeometryProfile = "compact" | "tight" | "wide";
 
 // Signed overlap FRACTION of one card width by which each card slides over the
 // previous one (negative == leftward). Tightens continuously as the row grows so
@@ -21,6 +21,16 @@ function overlapFraction(rowSize: number, profile: FanGeometryProfile): number {
     // substantially more of each adjacent card than the compact 4× profile,
     // while the lower clamp still reins in unusually large Commander hands.
     return Math.max(-0.86, Math.min(-0.35, 4.5 / (rowSize - 1) - 1));
+  }
+
+  if (profile === "tight") {
+    if (rowSize <= 3) return -0.12;
+    if (rowSize <= 5) return -0.2;
+    if (rowSize <= 7) return -0.35;
+    // Preserve the wide fan's shallow arc and gentle card angles while fitting
+    // overflow hands into about 4.7 card widths. Only horizontal overlap gets
+    // denser as the hand grows; this must not turn into the compact semicircle.
+    return Math.max(-0.88, Math.min(-0.42, 3.7 / (rowSize - 1) - 1));
   }
 
   if (rowSize <= 5) return -0.25;
@@ -64,7 +74,7 @@ export function getArcCoefficient(
   rowSize: number,
   profile: FanGeometryProfile = "compact",
 ): number {
-  if (profile === "wide") {
+  if (profile === "wide" || profile === "tight") {
     if (rowSize <= 7) return 3.5;
     // Flatter desktop arc: keep the outermost drop around 32px.
     const maxDist = (rowSize - 1) / 2;
@@ -103,7 +113,7 @@ export function fanGeometry(
   // Size the SHAPE (tilt + arc) from at least two cards so a lone card still
   // fans (a raw delta of 0 would render flat).
   const shape = Math.max(2, totalCards);
-  const delta = profile === "wide"
+  const delta = profile === "wide" || profile === "tight"
     ? Math.min(4, 24 / (shape - 1))
     : Math.min(6, 36 / (shape - 1));
   const arcCoeff = getArcCoefficient(shape, profile);

@@ -23,7 +23,7 @@ interface ArtCropCardProps {
 }
 
 const PT_COLORS: Record<PTColor, string> = {
-  green: "text-green-800",
+  blue: "text-blue-800",
   red: "text-red-700",
   white: "text-[#111]",
 };

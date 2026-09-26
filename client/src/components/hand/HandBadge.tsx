@@ -15,7 +15,7 @@ export function HandBadge({ className }: { className?: string } = {}) {
   return (
     <button
       aria-label={t("hand.viewFullHand", { count: handSize })}
-      className={`flex items-center justify-center gap-1.5 rounded-full border border-cyan-400/20 bg-slate-950/64 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-300 ring-1 ring-cyan-400/15 backdrop-blur-xl transition-all duration-200 hover:border-cyan-300/40 hover:text-white hover:ring-cyan-300/30 lg:px-3.5 lg:py-1.5 lg:text-[11px] ${className ?? ""}`}
+      className={`tabletop-control-chip flex min-h-11 items-center justify-center gap-1.5 border border-cyan-400/20 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-300 transition-all duration-200 hover:border-cyan-300/40 hover:text-white lg:min-h-0 lg:px-3.5 lg:py-1.5 lg:text-[11px] ${className ?? ""}`}
       onClick={() => setMobileHandOpen(true)}
     >
       <svg

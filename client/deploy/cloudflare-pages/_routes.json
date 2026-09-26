@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "include": ["/card-image-art/*", "/card-image-back/*"],
+  "exclude": []
+}

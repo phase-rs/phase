@@ -1,4 +1,9 @@
 {
+  "landscapeGate": {
+    "title": "Drehe dein Gerät",
+    "description": "Das Schlachtfeld ist auf Smartphones und Tablets im Querformat verfügbar.",
+    "exit": "Zurück zum Menü"
+  },
   "playerLatency": {"host":"Host","waiting":"Warten","value":"{{ms}} ms","description":"Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."},
   "abilityBlock": {
     "badge": "Blockiert",
@@ -135,6 +140,14 @@
     "holdCtrlFront": "Strg halten für Vorderseite",
     "holdCtrlFlip": "Strg halten zum Umdrehen",
     "flip": "Umdrehen",
+    "detailAriaLabel": "Kartendetails: {{name}}",
+    "closeDetails": "Kartendetails schließen",
+    "detailViewOptions": "Kartendetailansicht",
+    "detailView": {
+      "live": "Im Spiel",
+      "original": "Original",
+      "parse": "Analyse"
+    },
     "report": "Problem melden",
     "reported": "Gemeldet ✓",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
@@ -2436,6 +2449,20 @@
     "EndCombat": "Kampfende",
     "PostCombatMain": "Hauptphase 2",
     "End": "Endschritt",
+    "Cleanup": "Aufräumen"
+  },
+  "phaseNameCompact": {
+    "Untap": "Enttappen",
+    "Upkeep": "Versorgung",
+    "Draw": "Ziehen",
+    "PreCombatMain": "Hauptphase 1",
+    "BeginCombat": "Kampf",
+    "DeclareAttackers": "Angreifer",
+    "DeclareBlockers": "Blocker",
+    "CombatDamage": "Schaden",
+    "EndCombat": "Kampfende",
+    "PostCombatMain": "Hauptphase 2",
+    "End": "Ende",
     "Cleanup": "Aufräumen"
   },
   "counterMoveDistribution": {

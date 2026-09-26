@@ -1,6 +1,8 @@
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { GameAction } from "../../../adapter/types.ts";
+import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import type { MobileHandGesture } from "../../../stores/uiStore.ts";
 import { buildGameObject } from "../../../test/factories/gameObjectFactory.ts";
@@ -13,6 +15,7 @@ vi.mock("../../card/CardImage.tsx", () => ({
 afterEach(() => {
   cleanup();
   usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
+  useGameStore.setState({ legalActionsByObject: {} });
 });
 
 describe("MobileHeldHandCard", () => {
@@ -57,6 +60,27 @@ describe("MobileHeldHandCard", () => {
     );
 
     expect(document.querySelector("[data-mobile-held-card]")).toBeNull();
+  });
+
+  it("uses an outer cyan glow without a cyan frame only for a cast action", () => {
+    const castAction: GameAction = {
+      type: "CastSpell",
+      data: { object_id: object.id, card_id: object.card_id, targets: [] },
+    };
+    useGameStore.setState({
+      legalActionsByObject: { [String(object.id)]: [castAction] },
+    });
+
+    render(
+      <MobileHeldHandCard
+        gesture={{ ...gesture, castReady: false }}
+        object={object}
+      />,
+    );
+
+    const heldCard = document.querySelector("[data-mobile-held-card]");
+    expect(heldCard?.className).toContain("shadow-[0_0_4px_2px");
+    expect(heldCard?.className).not.toContain("ring-cyan");
   });
 
   it("disables velocity tilt when animations are disabled", () => {
