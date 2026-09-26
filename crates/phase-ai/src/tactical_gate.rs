@@ -52,11 +52,13 @@ use crate::combat_ai::is_lethal_attack_available;
 use crate::config::AiConfig;
 use crate::context::AiContext;
 use crate::planner::PreparedCandidate;
-use crate::policies::context::{collect_ability_effects, PolicyContext};
+use crate::policies::context::PolicyContext;
 use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
 };
-use crate::policies::stack_awareness::{has_pending_removal, will_target_die_from_stack};
+use crate::policies::stack_awareness::{
+    damage_kills, has_pending_removal, node_damage, nodes_acting_on, will_target_die_from_stack,
+};
 use crate::policies::strategy_helpers::can_pay_ward_cost;
 use crate::search::ability_is_temporary_combat_modifier;
 
@@ -1469,57 +1471,59 @@ fn should_reject_pump_window(
     !pump_changes_combat_outcome(ctx.state, ctx.ai_player, power_bonus, toughness_bonus)
 }
 
-/// Check if pumping can actually save a creature from hostile stack effects.
-/// Destroy/Exile/Counter/Bounce kill regardless of stats — pump doesn't help.
-/// Only damage-based removal can be survived with a toughness boost.
+/// Whether a pump of `toughness_bonus` toughness, which resolves before every
+/// stack entry (CR 405.5), keeps an AI creature a stack entry acts on from
+/// dying.
+///
+/// The nodes acting on the creature are read in the order they resolve
+/// ([`nodes_acting_on`]) up to the first `Destroy`, `Counter`, `Bounce` or
+/// `ChangeZone` node. A `Destroy` or `Counter` there answers false: a pump
+/// does not stop it. A `Bounce` or `ChangeZone` there ends the read: damage
+/// that resolves after it does not reach the creature (CR 400.7), so only the
+/// damage before it is judged.
 fn pump_can_save_from_hostile_stack(
     state: &GameState,
     ai_player: PlayerId,
     toughness_bonus: i32,
 ) -> bool {
-    use engine::types::ability::QuantityExpr;
-
-    state.stack.iter().any(|entry| {
-        let Some(ability) = entry.ability() else {
+    let mut acted_on: Vec<ObjectId> = Vec::new();
+    for target in state
+        .stack
+        .iter()
+        .flat_map(|entry| engine::game::effects::stack_reach::stack_entry_node_reach(state, entry))
+        .flat_map(|reach| reach.acted_on)
+    {
+        if let TargetRef::Object(id) = target {
+            if !acted_on.contains(&id) {
+                acted_on.push(id);
+            }
+        }
+    }
+    acted_on.iter().any(|object_id| {
+        let Some(object) = state.objects.get(object_id) else {
             return false;
         };
-        ability.targets.iter().any(|target| {
-            let TargetRef::Object(object_id) = target else {
-                return false;
-            };
-            let Some(object) = state.objects.get(object_id) else {
-                return false;
-            };
-            if object.controller != ai_player
-                || !object.card_types.core_types.contains(&CoreType::Creature)
-            {
-                return false;
-            }
+        if object.controller != ai_player
+            || !object.card_types.core_types.contains(&CoreType::Creature)
+        {
+            return false;
+        }
 
-            let effects = collect_ability_effects(ability);
-            for effect in &effects {
-                match effect {
-                    // Destroy/Exile/Counter/Bounce — pump doesn't save
-                    Effect::Destroy { .. } | Effect::Counter { .. } | Effect::Bounce { .. } => {
-                        return false
-                    }
-                    Effect::ChangeZone { .. } => return false,
-                    // Damage — pump saves if toughness + bonus > damage
-                    Effect::DealDamage {
-                        amount: QuantityExpr::Fixed { value },
-                        ..
-                    } => {
-                        let toughness = object.toughness.unwrap_or(0);
-                        let remaining = toughness - object.damage_marked as i32;
-                        if remaining + toughness_bonus > *value {
-                            return true;
-                        }
-                    }
-                    _ => {}
+        let mut dealt = Vec::new();
+        for reach in nodes_acting_on(state, *object_id) {
+            match &reach.node.effect {
+                Effect::Destroy { .. } | Effect::Counter { .. } => return false,
+                Effect::Bounce { .. } | Effect::ChangeZone { .. } => break,
+                // Damage whose amount is not fixed is not judged.
+                Effect::DealDamage { .. } => {
+                    dealt.extend(node_damage(state, reach.node, object));
                 }
+                _ => {}
             }
-            false
-        })
+        }
+        // The pump saves the creature only from damage that kills it without
+        // the pump and not with it.
+        damage_kills(object, &dealt, 0) && !damage_kills(object, &dealt, toughness_bonus)
     })
 }
 
@@ -8301,5 +8305,531 @@ mod tests {
 
         assert_parses_as_temporary_pump(state, dragon);
         assert_eq!(gate_activation(state, dragon), GateDecision::Reject);
+    }
+
+    const ARC_TRAIL: &str =
+        "Arc Trail deals 2 damage to any target and 1 damage to any other target.";
+
+    /// Arc Trail cast by P0 at `first` (2 damage) and `second` (1 damage).
+    fn arc_trail_on_stack(
+        first: (PlayerId, i32),
+        second: (PlayerId, i32),
+    ) -> (GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let a = scenario
+            .add_creature(first.0, "First", first.1, first.1)
+            .id();
+        let b = scenario
+            .add_creature(second.0, "Second", second.1, second.1)
+            .id();
+        let card = scenario
+            .add_spell_to_hand_from_oracle(P0, "Arc Trail", true, ARC_TRAIL)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        runner.cast(card).target_objects(&[a, b]).commit();
+        (runner, a, b)
+    }
+
+    /// `assess_candidate` for P1 choosing `target` for a destroy spell.
+    fn destroy_target_gate(state: &GameState, target: ObjectId) -> GateDecision {
+        let destroy = Effect::Destroy {
+            target: TargetFilter::Any,
+            cant_regenerate: false,
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: P1,
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(902),
+                    CardId(902),
+                    ResolvedAbility::new(destroy, Vec::new(), ObjectId(902), P1),
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![TargetRef::Object(target)],
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                selection: TargetSelectionProgress::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+            metadata: ActionMetadata::for_actor(Some(P1), TacticalClass::Target),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P1,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    #[test]
+    fn arc_trail_penalizes_the_creature_it_kills_not_the_one_it_grazes() {
+        let (runner, grazed, killed) = arc_trail_on_stack((P1, 3), (P1, 1));
+        let state = runner.state();
+        let root = state
+            .stack
+            .back()
+            .and_then(|e| e.ability())
+            .expect("Arc Trail");
+        assert!(
+            root.sub_ability
+                .as_ref()
+                .is_some_and(|node| node.targets == vec![TargetRef::Object(killed)]),
+            "reach guard: the 1-damage node declares the creature it kills"
+        );
+        assert_eq!(
+            destroy_target_gate(state, killed),
+            GateDecision::AllowWithPenalty(-10.0)
+        );
+        assert_eq!(destroy_target_gate(state, grazed), GateDecision::Allow);
+    }
+
+    #[test]
+    fn pump_cannot_save_a_creature_from_damage_aimed_at_another() {
+        let (runner, ai_creature, _) = arc_trail_on_stack((P1, 1), (P0, 1));
+        let state = runner.state();
+        let root = state
+            .stack
+            .back()
+            .and_then(|e| e.ability())
+            .expect("Arc Trail");
+        assert_eq!(
+            root.targets,
+            vec![TargetRef::Object(ai_creature)],
+            "reach guard: the 2-damage root aims at the AI's creature"
+        );
+        assert!(
+            pump_can_save_from_hostile_stack(state, P1, 2),
+            "control: +2 toughness survives the 2 damage aimed at it"
+        );
+        assert!(!pump_can_save_from_hostile_stack(state, P1, 1));
+    }
+
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+    const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
+
+    /// P0's Shock at P1's creature with toughness `toughness` and `keywords`,
+    /// on the stack.
+    fn shock_on_stack(toughness: i32, keywords: &[Keyword]) -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = {
+            let mut builder = scenario.add_creature(P1, "Victim", 2, toughness);
+            for keyword in keywords {
+                builder.with_keyword(keyword.clone());
+            }
+            builder.id()
+        };
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        let mut runner = scenario.build();
+        runner.cast(shock).target_object(victim).commit();
+        (runner, victim)
+    }
+
+    #[test]
+    fn a_pump_saves_a_creature_only_from_damage_that_kills_it_without_the_pump() {
+        let (runner, _) = shock_on_stack(2, &[]);
+        assert!(
+            pump_can_save_from_hostile_stack(runner.state(), P1, 1),
+            "control: 2 damage kills a 2-toughness creature, and +1 toughness survives it"
+        );
+        let (runner, _) = shock_on_stack(3, &[]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 1));
+        let (runner, _) = shock_on_stack(2, &[Keyword::Indestructible]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 1));
+
+        // A 1/1 of P0's pings P1's 1/1: +1 toughness survives the ping unless
+        // the 1/1 has deathtouch.
+        for deathtouch in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let victim = scenario.add_creature(P1, "Victim", 1, 1).id();
+            let pinger = {
+                let mut builder = scenario.add_creature_from_oracle(
+                    P0,
+                    "Prodigal Pyromancer",
+                    1,
+                    1,
+                    PRODIGAL_PYROMANCER,
+                );
+                if deathtouch {
+                    builder.with_keyword(Keyword::Deathtouch);
+                }
+                builder.id()
+            };
+            let mut state = scenario.build().state().clone();
+            let ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+                &state.objects[&pinger].abilities[0],
+                pinger,
+                P0,
+                vec![TargetRef::Object(victim)],
+            );
+            let id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: pinger,
+                controller: P0,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: pinger,
+                    ability: Box::new(ability),
+                },
+            });
+            assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 1), !deathtouch);
+        }
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_of_every_node_that_acts_on_the_creature() {
+        let (runner, victim) = shock_on_stack(3, &[]);
+        let mut state = runner.state().clone();
+        let root = state
+            .stack
+            .back_mut()
+            .and_then(StackEntry::ability_mut)
+            .expect("Shock");
+        let mut again = root.clone();
+        again.targets = Vec::new();
+        let Effect::DealDamage { target, .. } = &mut again.effect else {
+            panic!("Shock deals damage");
+        };
+        *target = TargetFilter::ParentTarget;
+        root.sub_ability = Some(Box::new(again));
+        let entry = state.stack.back().expect("Shock");
+        assert_eq!(
+            engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
+                .iter()
+                .filter(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                .count(),
+            2,
+            "reach guard: both damage nodes act on the creature"
+        );
+        assert!(!pump_can_save_from_hostile_stack(&state, P1, 1));
+        assert!(
+            pump_can_save_from_hostile_stack(&state, P1, 2),
+            "control: 4 damage does not kill it with +2 toughness"
+        );
+    }
+
+    #[test]
+    fn a_three_player_arc_trail_threatens_each_creature_it_damages() {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let third = PlayerId(2);
+        let first = scenario.add_creature(third, "First", 2, 2).id();
+        let second = scenario.add_creature(P1, "Second", 1, 1).id();
+        let card = scenario
+            .add_spell_to_hand_from_oracle(P0, "Arc Trail", true, ARC_TRAIL)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        runner.cast(card).target_objects(&[first, second]).commit();
+        let state = runner.state();
+        assert_eq!(state.players.len(), 3, "reach guard: three players");
+        assert_eq!(
+            state
+                .stack
+                .back()
+                .and_then(|e| e.ability())
+                .map(|root| root.targets.clone()),
+            Some(vec![TargetRef::Object(first)]),
+            "reach guard: the root aims only at the third player's creature"
+        );
+        assert!(will_target_die_from_stack(state, second));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 1));
+        assert!(pump_can_save_from_hostile_stack(state, third, 1));
+    }
+
+    const MURDER: &str = "Destroy target creature.";
+    const RECKLESS_EMBERMAGE: &str =
+        "{1}{R}: This creature deals 1 damage to any target and 1 damage to itself.";
+    const PSIONIC_ENTITY: &str =
+        "{T}: This creature deals 2 damage to any target and 3 damage to itself.";
+
+    /// P0 casts each of `spells` (name, Oracle text) at P1's creature with
+    /// toughness `toughness`, each spell its own stack entry.
+    fn spells_at_one_creature(toughness: i32, spells: &[(&str, &str)]) -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_creature(P1, "Victim", 2, toughness).id();
+        let ids: Vec<ObjectId> = spells
+            .iter()
+            .map(|(name, text)| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P0, name, true, text)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id()
+            })
+            .collect();
+        for _ in spells {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        for id in ids {
+            runner.cast(id).target_object(victim).commit();
+        }
+        (runner, victim)
+    }
+
+    /// Puts `source`'s first ability on the stack under `controller`, aimed at
+    /// `targets`.
+    fn activate_first_ability(
+        state: &mut GameState,
+        source: ObjectId,
+        controller: PlayerId,
+        targets: Vec<TargetRef>,
+    ) {
+        let ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+            &state.objects[&source].abilities[0],
+            source,
+            controller,
+            targets,
+        );
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: source,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_of_every_stack_entry_that_acts_on_the_creature() {
+        let (runner, victim) = spells_at_one_creature(3, &[("Shock", SHOCK), ("Shock", SHOCK)]);
+        let state = runner.state();
+        assert!(
+            state.stack.len() == 2
+                && state.stack.iter().all(|entry| {
+                    engine::game::effects::stack_reach::stack_entry_node_reach(state, entry)
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                }),
+            "reach guard: each Shock is its own stack entry acting on the creature"
+        );
+        assert!(will_target_die_from_stack(state, victim));
+        assert!(!pump_can_save_from_hostile_stack(state, P1, 1));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 2));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 3));
+
+        let (runner, _) = spells_at_one_creature(2, &[("Murder", MURDER), ("Shock", SHOCK)]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 3));
+    }
+
+    #[test]
+    fn damage_from_an_entry_of_the_creatures_controller_counts_toward_the_pump() {
+        // P1's Reckless Embermage pings P0 and itself; P0's Prodigal Pyromancer
+        // pings the Embermage.
+        for embermage_activated in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let embermage = scenario
+                .add_creature_from_oracle(P1, "Reckless Embermage", 2, 2, RECKLESS_EMBERMAGE)
+                .id();
+            let pyromancer = scenario
+                .add_creature_from_oracle(P0, "Prodigal Pyromancer", 1, 1, PRODIGAL_PYROMANCER)
+                .id();
+            let mut state = scenario.build().state().clone();
+            if embermage_activated {
+                activate_first_ability(&mut state, embermage, P1, vec![TargetRef::Player(P0)]);
+            }
+            activate_first_ability(
+                &mut state,
+                pyromancer,
+                P0,
+                vec![TargetRef::Object(embermage)],
+            );
+            assert_eq!(
+                pump_can_save_from_hostile_stack(&state, P1, 1),
+                embermage_activated
+            );
+        }
+    }
+
+    #[test]
+    fn damage_the_creatures_protection_prevents_is_not_lethal() {
+        // P1's Psionic Entity (blue) deals 2 damage to P0 and 3 damage to itself.
+        for protected in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let entity = {
+                let mut builder =
+                    scenario.add_creature_from_oracle(P1, "Psionic Entity", 2, 2, PSIONIC_ENTITY);
+                builder.with_color(vec![engine::types::mana::ManaColor::Blue]);
+                if protected {
+                    builder.with_keyword(Keyword::Protection(
+                        engine::types::keywords::ProtectionTarget::Color(
+                            engine::types::mana::ManaColor::Blue,
+                        ),
+                    ));
+                }
+                builder.id()
+            };
+            let mut state = scenario.build().state().clone();
+            activate_first_ability(&mut state, entity, P1, vec![TargetRef::Player(P0)]);
+            let entry = state.stack.back().expect("Psionic Entity's ability");
+            assert!(
+                engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
+                    .iter()
+                    .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
+                "reach guard: the 3-damage node acts on the Entity"
+            );
+            assert_eq!(will_target_die_from_stack(&state, entity), !protected);
+            assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 2), !protected);
+        }
+    }
+
+    const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
+    const OTHERWORLDLY_JOURNEY: &str = "Exile target creature. At the beginning of the next end step, return that card to the battlefield under its owner's control with a +1/+1 counter on it.";
+    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+    const UNSUMMON: &str = "Return target creature to its owner's hand.";
+
+    /// Each of `spells` (caster, name, Oracle text) cast in order at P1's 2/2,
+    /// each its own stack entry, then, when `pumped`, P1's Giant Growth at the
+    /// 2/2 on top of them. Returns the board before the Giant Growth and the
+    /// zone the 2/2 is in once the stack has resolved.
+    fn spells_then_giant_growth(
+        spells: &[(PlayerId, &str, &str)],
+        pumped: bool,
+    ) -> (GameState, Zone) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_creature(P1, "Victim", 2, 2).id();
+        let ids: Vec<(PlayerId, ObjectId)> = spells
+            .iter()
+            .map(|(caster, name, text)| {
+                let id = scenario
+                    .add_spell_to_hand_from_oracle(*caster, name, true, text)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                (*caster, id)
+            })
+            .collect();
+        let growth = scenario
+            .add_spell_to_hand_from_oracle(P1, "Giant Growth", true, GIANT_GROWTH)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        let cast_as = |runner: &mut GameRunner, caster: PlayerId, id: ObjectId| {
+            let state = runner.state_mut();
+            state.priority_player = caster;
+            state.waiting_for = WaitingFor::Priority { player: caster };
+            runner.cast(id).target_object(victim).commit();
+        };
+        for (caster, id) in ids {
+            cast_as(&mut runner, caster, id);
+        }
+        let board = runner.state().clone();
+        assert!(
+            board.stack.len() == spells.len()
+                && board.stack.iter().all(|entry| {
+                    engine::game::effects::stack_reach::stack_entry_node_reach(&board, entry)
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                }),
+            "reach guard: each spell is its own stack entry acting on the 2/2"
+        );
+        if pumped {
+            cast_as(&mut runner, P1, growth);
+        }
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert!(state.stack.is_empty(), "the stack resolved");
+        let zones: Vec<Zone> = state
+            .objects
+            .values()
+            .filter(|object| object.name == "Victim")
+            .map(|object| object.zone)
+            .collect();
+        let [zone] = zones[..] else {
+            panic!("one Victim, found in {zones:?}");
+        };
+        (board, zone)
+    }
+
+    /// Whether, once the stack has resolved, P1's 2/2 is in the graveyard
+    /// without the Giant Growth and elsewhere with it, paired with the board
+    /// before the Giant Growth.
+    fn giant_growth_saves_the_two_two(spells: &[(PlayerId, &str, &str)]) -> (bool, GameState) {
+        let (board, unpumped) = spells_then_giant_growth(spells, false);
+        let (_, pumped) = spells_then_giant_growth(spells, true);
+        (
+            unpumped == Zone::Graveyard && pumped != Zone::Graveyard,
+            board,
+        )
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_that_resolves_before_a_zone_change() {
+        for zone_change in [
+            (P1, "Cloudshift", CLOUDSHIFT),
+            (P0, "Otherworldly Journey", OTHERWORLDLY_JOURNEY),
+            (P0, "Unsummon", UNSUMMON),
+        ] {
+            let (saves, board) =
+                giant_growth_saves_the_two_two(&[zone_change, (P0, "Shock", SHOCK)]);
+            assert!(saves, "engine: {}, then Shock", zone_change.1);
+            assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+        }
+    }
+
+    #[test]
+    fn damage_below_a_zone_change_leaves_the_pump_nothing_to_save() {
+        let (saves, board) =
+            giant_growth_saves_the_two_two(&[(P0, "Shock", SHOCK), (P1, "Cloudshift", CLOUDSHIFT)]);
+        assert!(!saves, "engine: Shock, then Cloudshift");
+        assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+    }
+
+    #[test]
+    fn a_pump_saves_nothing_from_a_destroy_above_or_below_the_damage() {
+        for spells in [
+            [(P0, "Murder", MURDER), (P0, "Shock", SHOCK)],
+            [(P0, "Shock", SHOCK), (P0, "Murder", MURDER)],
+        ] {
+            let (saves, board) = giant_growth_saves_the_two_two(&spells);
+            assert!(!saves, "engine: {}, then {}", spells[0].1, spells[1].1);
+            assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+        }
     }
 }

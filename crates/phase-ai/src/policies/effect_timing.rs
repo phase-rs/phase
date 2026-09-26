@@ -2130,7 +2130,7 @@ mod tests {
 
     fn counter_effect() -> Effect {
         Effect::Counter {
-            target: TargetFilter::Any,
+            target: TargetFilter::StackSpell,
             source_rider: None,
             countered_spell_zone: None,
         }
@@ -2162,8 +2162,7 @@ mod tests {
             obj.toughness = Some(toughness);
         }
         let ability = ResolvedAbility::new(effect, targets, source_id, controller);
-        let id = ObjectId(state.next_object_id);
-        state.next_object_id += 1;
+        let id = source_id;
         state.stack.push_back(StackEntry {
             id,
             source_id,
