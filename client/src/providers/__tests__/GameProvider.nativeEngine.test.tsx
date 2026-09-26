@@ -1,4 +1,4 @@
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
@@ -16,12 +16,15 @@ const {
   WebSocketAdapter,
   WasmAdapter,
   clearActiveGame,
+  clearGameStrict,
+  loadGameStrict,
   ensureNativeEngine,
   fetchAvatarArtUrl,
   gameStoreState,
   getSharedAdapter,
   loadActiveGame,
   loadDraftRun,
+  inspectActiveQuickDraftLifecycle,
   nativeAdapterInitialize,
   nativeAdapters,
   multiplayerDraftGetState,
@@ -171,12 +174,17 @@ const {
     WebSocketAdapter,
     WasmAdapter,
     clearActiveGame: vi.fn(),
+    clearGameStrict: vi.fn(async () => undefined),
+    loadGameStrict: vi.fn<(_gameId: string) => Promise<unknown>>(async () => null),
     ensureNativeEngine: vi.fn(),
     fetchAvatarArtUrl,
     gameStoreState,
     getSharedAdapter,
     loadActiveGame: vi.fn<() => Record<string, unknown> | null>(() => null),
     loadDraftRun: vi.fn<() => Promise<Record<string, unknown> | null>>(async () => null),
+    inspectActiveQuickDraftLifecycle: vi.fn(async () => null as {
+      id: string; setCode: string; phase?: string; currentGameId?: string;
+    } | null),
     nativeAdapterInitialize,
     nativeAdapters,
     multiplayerDraftGetState,
@@ -221,7 +229,14 @@ vi.mock("../../stores/gameStore", () => ({
   useGameStore,
 }));
 
-vi.mock("../../constants/storage", () => ({
+vi.mock("../../services/gamePersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/gamePersistence")>(),
+  clearGameStrict,
+  loadGameStrict,
+}));
+
+vi.mock("../../constants/storage", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../constants/storage")>(),
   ACTIVE_DECK_KEY: "active-deck",
   isRandomDeckSelection: () => false,
   loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),
@@ -316,6 +331,7 @@ vi.mock("../../pwa/updateMarker", () => ({
 
 vi.mock("../../services/quickDraftPersistence", () => ({
   loadDraftRun,
+  inspectActiveQuickDraftLifecycle,
 }));
 
 vi.mock("../../services/serverDetection", () => ({
@@ -326,13 +342,51 @@ import type { FormatConfig } from "../../adapter/types";
 import { GameProvider } from "../GameProvider";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { clearPromptOverlayState } from "../../game/sessionCleanup";
+import { createGameLoopController } from "../../game/controllers/gameLoopController";
+import { loadGame } from "../../stores/gameStore";
+
+const UNAVAILABLE = "This draft run is unavailable. End Run to draft again.";
+
+function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null) {
+  return {
+    player: { main_deck: playerDeck, sideboard: [], commander: [] },
+    opponent: { main_deck: opponentDeck, sideboard: [], commander: [] },
+    ai_decks: [],
+    ...(pool === undefined ? {} : { booster_pack_pool: pool }),
+  };
+}
+
+function seedSoloRun(draftId: string, gameId: string, options: {
+  playerDeck?: string[]; opponentDeck?: string[]; pool?: string[] | null;
+  setCode?: string; phase?: string; currentGameId?: string;
+} = {}) {
+  const playerDeck = options.playerDeck ?? ["Player"];
+  const opponentDeck = options.opponentDeck ?? ["Opponent"];
+  const run = {
+    format: "run", results: [], usedBotSeats: [1], playerDeck, opponentDeck,
+    ...(options.pool === undefined ? {} : { booster_pack_pool: options.pool }),
+    activeMatch: { draftId, gameId, format: "run", resultCountAtLaunch: 0, botSeat: 1, opponentDeck },
+  };
+  inspectActiveQuickDraftLifecycle.mockResolvedValue({
+    id: draftId, setCode: options.setCode ?? "TST",
+    phase: options.phase ?? "playing", currentGameId: options.currentGameId ?? gameId,
+  });
+  loadDraftRun.mockResolvedValue(run);
+  return run;
+}
 
 describe("GameProvider native AI routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearGameStrict.mockResolvedValue(undefined);
+    loadGameStrict.mockReset();
+    loadGameStrict.mockResolvedValue(null);
+    vi.mocked(loadGame).mockReset();
+    vi.mocked(loadGame).mockResolvedValue(null);
     sessionStorage.clear();
     loadDraftRun.mockReset();
     loadDraftRun.mockResolvedValue(null);
+    inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
     useGameStore.subscribe.mockReset();
     useGameStore.subscribe.mockImplementation(() => () => {});
     clearActiveGame.mockReset();
@@ -377,7 +431,12 @@ describe("GameProvider native AI routing", () => {
     loadDraftRun.mockResolvedValue({
       format: "run", results: [], usedBotSeats: [1], playerDeck, opponentDeck,
       booster_pack_pool: pool,
+      activeMatch: {
+        draftId: "cube-run", gameId: "recovered-cube", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck,
+      },
     });
+    inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "cube-run", setCode: pool === undefined ? "TST" : "custom-cube" });
     render(<GameProvider gameId="recovered-cube" mode="ai" source="draft" draftId="cube-run"><div /></GameProvider>);
     await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
     expect(getSharedAdapter).toHaveBeenCalled();
@@ -389,6 +448,785 @@ describe("GameProvider native AI routing", () => {
     expect(ensureNativeEngine).not.toHaveBeenCalled();
   });
 
+  it("retains exact solo handoff bytes and engine reason until a playable retry", async () => {
+    const key = "phase:draft-deck:ante-game";
+    seedSoloRun("ante-run", "ante-game", { playerDeck: ["Contract from Below"] });
+    const raw = '{ "player": {"main_deck":["Contract from Below"],"sideboard":[],"commander":[]}, "opponent": {"main_deck":["Opponent"],"sideboard":[],"commander":[]}, "ai_decks":[] }';
+    sessionStorage.setItem(key, raw);
+    const reason = "Contract from Below is not legal without ante";
+    gameStoreState.initGame.mockRejectedValueOnce(new Error(reason));
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="ante-game" mode="ai" source="draft" draftId="ante-run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(reason));
+    expect(gameStoreState.initGame).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+    first.unmount();
+
+    render(<GameProvider gameId="ante-game" mode="ai" source="draft" draftId="ante-run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+  });
+
+  it("waits for initial durability before starting and consuming a raw draft handoff", async () => {
+    const key = "phase:draft-deck:durable-raw";
+    seedSoloRun("run", "durable-raw");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    let finish!: () => void;
+    gameStoreState.initGame.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<GameProvider gameId="durable-raw" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame.mock.calls[0][7]).toBe("strict");
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+    finish();
+    await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+  });
+
+  it("reports initial write failure, keeps raw handoff, and retries the same game", async () => {
+    const key = "phase:draft-deck:write-retry";
+    seedSoloRun("run", "write-retry");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    const reason = "IndexedDB initial write failed";
+    gameStoreState.initGame.mockRejectedValueOnce(new Error(reason));
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="write-retry" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(reason));
+    expect(gameStoreState.initGame.mock.calls[0][7]).toBe("strict");
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+    first.unmount();
+    render(<GameProvider gameId="write-retry" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
+    expect(gameStoreState.initGame).toHaveBeenCalledTimes(2);
+    expect(gameStoreState.initGame.mock.calls[1][7]).toBe("strict");
+  });
+
+  it("waits for strict durability in the run-only fallback and retries a failed write", async () => {
+    seedSoloRun("run", "stage-write");
+    let rejectWrite!: (error: Error) => void;
+    gameStoreState.initGame.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectWrite = reject; }));
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="stage-write" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame.mock.calls[0][7]).toBe("strict");
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    rejectWrite(new Error("IndexedDB stage write failed"));
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith("IndexedDB stage write failed"));
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    first.unmount();
+    render(<GameProvider gameId="stage-write" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(createGameLoopController).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame).toHaveBeenCalledTimes(2);
+    expect(gameStoreState.initGame.mock.calls[1][7]).toBe("strict");
+  });
+
+  it("does not replay a retained raw handoff after End Run removes its authority", async () => {
+    const key = "phase:draft-deck:ended-game";
+    const raw = JSON.stringify(publishedPayload());
+    seedSoloRun("ended-run", "ended-game");
+    sessionStorage.setItem(key, raw);
+    gameStoreState.initGame.mockRejectedValueOnce(new Error("exact engine error"));
+    const firstError = vi.fn();
+    const first = render(<GameProvider gameId="ended-game" mode="ai" source="draft" draftId="ended-run" onNoDeck={firstError}><div /></GameProvider>);
+    await waitFor(() => expect(firstError).toHaveBeenCalledWith("exact engine error"));
+    expect(gameStoreState.initGame).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+    first.unmount();
+
+    inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
+    loadDraftRun.mockResolvedValue(null);
+    const afterEndRun = vi.fn();
+    render(<GameProvider gameId="ended-game" mode="ai" source="draft" draftId="ended-run" onNoDeck={afterEndRun}><div /></GameProvider>);
+    await waitFor(() => expect(afterEndRun).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).toHaveBeenCalledOnce();
+    expect(vi.mocked(createGameLoopController)).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+  });
+
+  it.each([false, true])("restores a progressed solo snapshot with raw handoff=%s", async (withRaw) => {
+    const savedState = { players: [{}, {}], turn: 7 } as never;
+    const key = "phase:draft-deck:progressed";
+    seedSoloRun("run", "progressed", { phase: "launching", currentGameId: "old-game" });
+    if (withRaw) sessionStorage.setItem(key, JSON.stringify(publishedPayload()));
+    loadGameStrict.mockResolvedValue(savedState);
+    const first = render(<GameProvider gameId="progressed" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledWith("progressed", expect.anything(), savedState));
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBeNull();
+    first.unmount();
+    render(<GameProvider gameId="progressed" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledTimes(2));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("requires a live run before solo saved restore with raw handoff=%s", async (withRaw) => {
+    const savedState = { players: [{}, {}], turn: 7 } as never;
+    const key = "phase:draft-deck:ended-saved";
+    if (withRaw) sessionStorage.setItem(key, JSON.stringify(publishedPayload()));
+    loadGameStrict.mockResolvedValueOnce(savedState);
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="ended-saved" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(loadGameStrict).toHaveBeenCalledWith("ended-saved");
+    expect(gameStoreState.resumeGame).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(withRaw ? JSON.stringify(publishedPayload()) : null);
+  });
+
+  it.each([false, true].flatMap((withRaw) =>
+    ["metadata ID", "draft ID", "game ID", "resolved stage", "Cube source"].map((change) => [withRaw, change] as const),
+  ))("rejects mismatched solo saved authority with raw handoff=%s and %s", async (withRaw, change) => {
+    const run = seedSoloRun("run", "saved-authority");
+    if (change === "metadata ID") inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "other", setCode: "TST" });
+    if (change === "draft ID") loadDraftRun.mockResolvedValue({ ...run, activeMatch: { ...run.activeMatch, draftId: "other" } });
+    if (change === "game ID") loadDraftRun.mockResolvedValue({ ...run, activeMatch: { ...run.activeMatch, gameId: "different" } });
+    if (change === "resolved stage") loadDraftRun.mockResolvedValue({ ...run, results: [{ gameId: "saved-authority", result: "win" }] });
+    if (change === "Cube source") inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "run", setCode: "custom-cube" });
+    const raw = JSON.stringify(publishedPayload());
+    if (withRaw) sessionStorage.setItem("phase:draft-deck:saved-authority", raw);
+    loadGameStrict.mockResolvedValueOnce({ players: [{}, {}] } as never);
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="saved-authority" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(loadGameStrict).toHaveBeenCalledWith("saved-authority");
+    expect(gameStoreState.resumeGame).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("phase:draft-deck:saved-authority")).toBe(withRaw ? raw : null);
+  });
+
+  it('uses exact raw handoff and engine error when snapshot is missing', async () => {
+    seedSoloRun("run", "raw-retry");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem("phase:draft-deck:raw-retry", raw);
+    const reason = "Exact engine ante error";
+    gameStoreState.initGame.mockRejectedValueOnce(new Error(reason));
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="raw-retry" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(reason));
+    expect(gameStoreState.initGame.mock.calls[0][2]).toEqual(publishedPayload());
+    expect(sessionStorage.getItem("phase:draft-deck:raw-retry")).toBe(raw);
+  });
+
+  it.each([false, true])("stops solo startup on a strict read error with raw handoff=%s", async (withRaw) => {
+    const gameId = withRaw ? "raw-read-error" : "staged-read-error";
+    seedSoloRun("run", gameId);
+    const raw = JSON.stringify(publishedPayload());
+    if (withRaw) sessionStorage.setItem(`phase:draft-deck:${gameId}`, raw);
+    const readError = new Error("saved game read failed");
+    loadGameStrict.mockRejectedValueOnce(readError);
+    const onNoDeck = vi.fn();
+    const onResumeReset = vi.fn();
+    const first = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck} onResumeReset={onResumeReset}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(readError.message));
+    expect(loadGameStrict).toHaveBeenCalledWith(gameId);
+    expect(loadDraftRun).not.toHaveBeenCalled();
+    expect(gameStoreState.resumeGame).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    expect(onResumeReset).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(`phase:draft-deck:${gameId}`)).toBe(withRaw ? raw : null);
+    first.unmount();
+
+    const savedState = { players: [{}, {}], turn: 12 } as never;
+    loadGameStrict.mockResolvedValueOnce(savedState);
+    const restored = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledWith(gameId, expect.anything(), savedState));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    restored.unmount();
+
+    loadGameStrict.mockResolvedValueOnce(null);
+    render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame.mock.calls[0][2]).toMatchObject(publishedPayload());
+  });
+
+  it("does not report a deferred strict read rejection after unmount", async () => {
+    seedSoloRun("run", "late-read-error");
+    let rejectRead!: (error: Error) => void;
+    loadGameStrict.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectRead = reject; }));
+    const onNoDeck = vi.fn();
+    const mounted = render(<GameProvider gameId="late-read-error" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(loadGameStrict).toHaveBeenCalledWith("late-read-error"));
+    mounted.unmount();
+    await act(async () => { rejectRead(new Error("read failed after unmount")); });
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect(loadDraftRun).not.toHaveBeenCalled();
+    expect(gameStoreState.resumeGame).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it("does not restore after a deferred saved run authority read resolves post-unmount", async () => {
+    const run = seedSoloRun("run", "authority-delayed");
+    loadGameStrict.mockResolvedValueOnce({ players: [{}, {}] } as never);
+    let resolveRun!: (value: typeof run) => void;
+    loadDraftRun.mockReturnValueOnce(new Promise((resolve) => { resolveRun = resolve; }));
+    const onNoDeck = vi.fn();
+    const mounted = render(<GameProvider gameId="authority-delayed" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(loadDraftRun).toHaveBeenCalledWith("run"));
+    mounted.unmount();
+    await act(async () => { resolveRun(run); });
+    expect(gameStoreState.resumeGame).not.toHaveBeenCalled();
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    expect(onNoDeck).not.toHaveBeenCalled();
+  });
+
+  it("restores a saved snapshot again when raw handoff removal fails", async () => {
+    seedSoloRun("run", "retry-removal");
+    const key = "phase:draft-deck:retry-removal";
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    const savedState = { players: [{}, {}], turn: 11 } as never;
+    loadGameStrict.mockResolvedValue(savedState);
+    const originalRemove = sessionStorage.removeItem.bind(sessionStorage);
+    const removal = vi.spyOn(sessionStorage, "removeItem").mockImplementation((item) => {
+      if (item === key) throw new Error("storage removal failed");
+      return originalRemove(item);
+    });
+    const onNoDeck = vi.fn();
+    try {
+      const first = render(<GameProvider gameId="retry-removal" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledOnce());
+      expect(sessionStorage.getItem(key)).toBe(raw);
+      expect(onNoDeck).not.toHaveBeenCalled();
+      first.unmount();
+      removal.mockRestore();
+      render(<GameProvider gameId="retry-removal" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+      await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledTimes(2));
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    } finally {
+      removal.mockRestore();
+    }
+  });
+
+  it("keeps replacement handoff bytes written while a saved solo game restores", async () => {
+    seedSoloRun("run", "saved-replaced");
+    const key = "phase:draft-deck:saved-replaced";
+    const oldRaw = JSON.stringify(publishedPayload(["Old"]));
+    const replacement = JSON.stringify(publishedPayload(["Replacement"]));
+    sessionStorage.setItem(key, oldRaw);
+    loadGameStrict.mockResolvedValueOnce({ players: [{}, {}] } as never);
+    let finishRestore!: () => void;
+    gameStoreState.resumeGame.mockImplementationOnce(() => new Promise<void>((resolve) => { finishRestore = resolve; }));
+    render(<GameProvider gameId="saved-replaced" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledOnce());
+    expect(sessionStorage.getItem(key)).toBe(oldRaw);
+    sessionStorage.setItem(key, replacement);
+    finishRestore();
+    await waitFor(() => expect(createGameLoopController).toHaveBeenCalledOnce());
+    expect(sessionStorage.getItem(key)).toBe(replacement);
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it("does not restore after a deferred solo saved load resolves post-unmount", async () => {
+    seedSoloRun("run", "delayed");
+    let resolveLoad!: (state: never) => void;
+    loadGameStrict.mockReturnValueOnce(new Promise((resolve) => { resolveLoad = resolve; }));
+    const onNoDeck = vi.fn();
+    const mounted = render(<GameProvider gameId="delayed" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(loadGameStrict).toHaveBeenCalledWith("delayed"));
+    mounted.unmount();
+    await act(async () => { resolveLoad({ players: [{}, {}] } as never); });
+    expect(loadDraftRun).not.toHaveBeenCalled();
+    expect(gameStoreState.resumeGame).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(onNoDeck).not.toHaveBeenCalled();
+  });
+
+  it("does not initialize a staged fallback after its run read resolves post-unmount", async () => {
+    const run = seedSoloRun("run", "staged-delayed");
+    let resolveRun!: (value: typeof run) => void;
+    loadDraftRun.mockReturnValueOnce(new Promise((resolve) => { resolveRun = resolve; }));
+    const onNoDeck = vi.fn();
+    const mounted = render(<GameProvider gameId="staged-delayed" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(loadDraftRun).toHaveBeenCalledWith("run"));
+    mounted.unmount();
+    await act(async () => { resolveRun(run); });
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    expect(onNoDeck).not.toHaveBeenCalled();
+  });
+
+  it.each(["raw", "durable"])("uses the unresolved run despite stale metadata on the %s path", async (path) => {
+    seedSoloRun("stale-run", "current-game", { phase: "launching", currentGameId: "prior-game" });
+    if (path === "raw") sessionStorage.setItem("phase:draft-deck:current-game", JSON.stringify(publishedPayload()));
+    render(<GameProvider gameId="current-game" mode="ai" source="draft" draftId="stale-run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame.mock.calls[0][2]).toMatchObject(publishedPayload());
+  });
+
+  it("rejects a wrong active draft ID even when the run and payload match", async () => {
+    seedSoloRun("run", "game");
+    inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "other-run", setCode: "TST" });
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem("phase:draft-deck:game", raw);
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("phase:draft-deck:game")).toBe(raw);
+  });
+
+  it.each(["draft ID", "game ID", "resolved stage"])("rejects raw handoff with wrong %s authority", async (change) => {
+    const run = seedSoloRun("run", "game");
+    if (change === "draft ID") loadDraftRun.mockResolvedValue({ ...run, activeMatch: { ...run.activeMatch, draftId: "other" } });
+    if (change === "game ID") loadDraftRun.mockResolvedValue({ ...run, activeMatch: { ...run.activeMatch, gameId: "other" } });
+    if (change === "resolved stage") loadDraftRun.mockResolvedValue({ ...run, results: [{ gameId: "game", result: "win" }] });
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem("phase:draft-deck:game", raw);
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("phase:draft-deck:game")).toBe(raw);
+  });
+
+  it("requires a Cube source array for a raw handoff and preserves duplicate order", async () => {
+    seedSoloRun("cube", "cube-game", { setCode: "custom-cube" });
+    const key = "phase:draft-deck:cube-game";
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="cube-game" mode="ai" source="draft" draftId="cube" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+    first.unmount();
+
+    const pool = ["Cube A", "Cube A", "Cube B"];
+    seedSoloRun("cube", "cube-game", { setCode: "custom-cube", pool });
+    sessionStorage.setItem(key, JSON.stringify(publishedPayload(["Player"], ["Opponent"], pool)));
+    render(<GameProvider gameId="cube-game" mode="ai" source="draft" draftId="cube"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame.mock.calls[0][2]).toMatchObject({ booster_pack_pool: pool });
+  });
+
+  it("rejects a raw Cube source whose duplicates or order differ from the run", async () => {
+    const pool = ["Cube A", "Cube A", "Cube B"];
+    seedSoloRun("cube", "cube-game", { setCode: "custom-cube", pool });
+    const key = "phase:draft-deck:cube-game";
+    const raw = JSON.stringify(publishedPayload(["Player"], ["Opponent"], ["Cube A", "Cube B", "Cube A"]));
+    sessionStorage.setItem(key, raw);
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="cube-game" mode="ai" source="draft" draftId="cube" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+  });
+
+  it("accepts a published null booster source on an ordinary run", async () => {
+    seedSoloRun("run", "game", { pool: null });
+    sessionStorage.setItem("phase:draft-deck:game", JSON.stringify(publishedPayload(["Player"], ["Opponent"], null)));
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(gameStoreState.initGame.mock.calls[0][2]).toMatchObject({ booster_pack_pool: null });
+  });
+
+  const invalidPayloads: Array<[string, (payload: ReturnType<typeof publishedPayload>) => unknown]> = [
+    ["player main deck", (p) => ({ ...p, player: { ...p.player, main_deck: ["Other"] } })],
+    ["opponent main deck", (p) => ({ ...p, opponent: { ...p.opponent, main_deck: ["Other"] } })],
+    ["player sideboard", (p) => ({ ...p, player: { ...p.player, sideboard: ["Other"] } })],
+    ["opponent sideboard", (p) => ({ ...p, opponent: { ...p.opponent, sideboard: ["Other"] } })],
+    ["player commander", (p) => ({ ...p, player: { ...p.player, commander: ["Other"] } })],
+    ["opponent commander", (p) => ({ ...p, opponent: { ...p.opponent, commander: ["Other"] } })],
+    ["AI decks", (p) => ({ ...p, ai_decks: [{ main_deck: ["Other"] }] })],
+    ["missing player", (p) => ({ opponent: p.opponent, ai_decks: [] })],
+    ["non-array AI decks", (p) => ({ ...p, ai_decks: {} })],
+    ["top-level engine field", (p) => ({ ...p, draft_set_codes: ["TST"] })],
+    ["nested engine field", (p) => ({ ...p, player: { ...p.player, companion: ["Other"] } })],
+    ["extra booster source", (p) => ({ ...p, booster_pack_pool: ["Other"] })],
+  ];
+  it.each(invalidPayloads)("rejects a raw handoff with mismatched %s", async (_label, mutate) => {
+    seedSoloRun("run", "game");
+    const raw = JSON.stringify(mutate(publishedPayload()));
+    sessionStorage.setItem("phase:draft-deck:game", raw);
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("phase:draft-deck:game")).toBe(raw);
+  });
+
+  it.each(["lifecycle", "run"].flatMap((read) =>
+    ["raw", "fallback", "saved"].map((entry) => ({ read, entry })),
+  ))("preserves $read authority read errors through $entry and retries the same game", async ({ read, entry }) => {
+    seedSoloRun("run", "game");
+    const key = "phase:draft-deck:game";
+    const raw = JSON.stringify(publishedPayload());
+    if (entry !== "fallback") sessionStorage.setItem(key, raw);
+    const savedState = { players: [{}, {}], turn: 7 } as never;
+    if (entry === "saved") loadGameStrict.mockResolvedValue(savedState);
+    const reader = read === "run" ? loadDraftRun : inspectActiveQuickDraftLifecycle;
+    reader.mockRejectedValueOnce(new Error(`${read} read unavailable`));
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(`${read} read unavailable`));
+    expect(reader).toHaveBeenCalledWith(read === "run" ? "run" : "inspect");
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(gameStoreState.resumeGame).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(entry === "fallback" ? null : raw);
+    first.unmount();
+
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    if (entry === "saved") {
+      await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledWith("game", expect.anything(), savedState));
+    } else {
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    }
+    await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+  });
+
+  it.each([
+    { lastOpponentSeat: 4 }, { lastOpponentSeat: null },
+    { draft_set_codes: null }, { draft_set_codes: "TST" }, { draft_set_codes: [7] },
+  ])("rejects malformed durable authority %j and accepts its coherent sibling", async (fields) => {
+    const run = seedSoloRun("run", "game");
+    loadDraftRun.mockResolvedValue({ ...run, usedBotSeats: [1, 4], ...fields });
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(loadDraftRun).toHaveBeenCalledWith("run");
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    first.unmount();
+    loadDraftRun.mockResolvedValue({ ...run, lastOpponentSeat: 1, draft_set_codes: [] });
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+  });
+
+  it("refuses malformed solo handoff without consuming it or loading an unrelated deck", async () => {
+    const key = "phase:draft-deck:bad-json";
+    sessionStorage.setItem(key, "{broken");
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="bad-json" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(expect.stringContaining("JSON")));
+    expect(sessionStorage.getItem(key)).toBe("{broken");
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed handoff read without starting an unrelated deck", async () => {
+    const originalGetItem = sessionStorage.getItem.bind(sessionStorage);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation((key) => {
+      if (key === "phase:draft-deck:unreadable") throw new Error("session read failed");
+      return originalGetItem(key);
+    });
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="unreadable" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith("session read failed"));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    read.mockRestore();
+  });
+
+  it("restores a saved solo draft when reading its optional handoff throws", async () => {
+    seedSoloRun("run", "saved-unreadable");
+    const savedState = { players: [{}, {}], turn: 12 } as never;
+    loadGameStrict.mockResolvedValueOnce(savedState);
+    const key = "phase:draft-deck:saved-unreadable";
+    const originalGetItem = sessionStorage.getItem.bind(sessionStorage);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation((item) => {
+      if (item === key) throw new Error("session read failed");
+      return originalGetItem(item);
+    });
+    const onNoDeck = vi.fn();
+    try {
+      render(<GameProvider gameId="saved-unreadable" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledWith("saved-unreadable", expect.anything(), savedState));
+      await waitFor(() => expect(createGameLoopController).toHaveBeenCalledOnce());
+      expect(vi.mocked(createGameLoopController).mock.results[0]?.value.start).toHaveBeenCalled();
+      expect(loadGameStrict).toHaveBeenCalledWith("saved-unreadable");
+      expect(read).toHaveBeenCalledWith(key);
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(clearGameStrict).not.toHaveBeenCalled();
+      expect(onNoDeck).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it("retains a handoff when controller start throws", async () => {
+    const key = "phase:draft-deck:controller-failure";
+    seedSoloRun("run", "controller-failure");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    vi.mocked(createGameLoopController).mockImplementationOnce(() => ({
+      start: vi.fn(() => { throw new Error("controller failed"); }),
+      stop: vi.fn(), dispose: vi.fn(),
+    } as unknown as ReturnType<typeof createGameLoopController>));
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="controller-failure" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith("controller failed"));
+    expect(gameStoreState.initGame).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+  });
+
+  it.each(["consume read", "consume removal"])("keeps a playable draft started when the %s throws", async (failure) => {
+    const key = `phase:draft-deck:${failure}`;
+    seedSoloRun("run", failure);
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    const originalGetItem = sessionStorage.getItem.bind(sessionStorage);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation((item) => {
+      if (failure === "consume read" && item === key && gameStoreState.initGame.mock.calls.length > 0) {
+        throw new Error("consume read failed");
+      }
+      return originalGetItem(item);
+    });
+    const removal = vi.spyOn(sessionStorage, "removeItem").mockImplementation(() => {
+      if (failure === "consume removal") throw new Error("consume removal failed");
+    });
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId={failure} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => {
+      const controllers = vi.mocked(createGameLoopController).mock.results;
+      expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+    });
+    expect(gameStoreState.initGame).toHaveBeenCalledOnce();
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect(originalGetItem(key)).toBe(raw);
+    read.mockRestore();
+    removal.mockRestore();
+  });
+
+  it.each([
+    { label: "ordinary local", source: undefined, mode: "local" as const },
+    { label: "Commander", source: "multiplayer" as const, mode: "ai" as const },
+  ])("restores a saved $label game when handoff storage cannot be read", async ({ source, mode }) => {
+    const savedState = { players: [{}, {}] } as never;
+    vi.mocked(loadGame).mockResolvedValueOnce(savedState);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation(() => {
+      throw new Error("session read failed");
+    });
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="saved-local" mode={mode} source={source} onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledWith("saved-local", expect.anything(), savedState));
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    expect(controllers[controllers.length - 1]?.value.start).toHaveBeenCalled();
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    read.mockRestore();
+  });
+
+  it("keeps new handoff bytes written while the old initialization waits", async () => {
+    const key = "phase:draft-deck:in-flight";
+    seedSoloRun("run", "in-flight", { playerDeck: ["Old"] });
+    const oldRaw = JSON.stringify(publishedPayload(["Old"]));
+    const newRaw = JSON.stringify(publishedPayload(["New"]));
+    sessionStorage.setItem(key, oldRaw);
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    gameStoreState.initGame.mockImplementationOnce(async () => { await pending; });
+    render(<GameProvider gameId="in-flight" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    sessionStorage.setItem(key, newRaw);
+    finish();
+    await waitFor(() => expect(vi.mocked(createGameLoopController)).toHaveBeenCalled());
+    expect(sessionStorage.getItem(key)).toBe(newRaw);
+  });
+
+  it("keeps the solo handoff when its in-flight initialization is cancelled", async () => {
+    const key = "phase:draft-deck:cancelled";
+    seedSoloRun("run", "cancelled");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    gameStoreState.initGame.mockImplementationOnce(async () => { await pending; });
+    const onNoDeck = vi.fn();
+    const mounted = render(<GameProvider gameId="cancelled" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    mounted.unmount();
+    finish();
+    await Promise.resolve();
+    expect(sessionStorage.getItem(key)).toBe(raw);
+    expect(onNoDeck).not.toHaveBeenCalled();
+  });
+
+  it("does not initialize after an unresolved draft authority read is cancelled", async () => {
+    const key = "phase:draft-deck:cancelled-read";
+    const run = seedSoloRun("run", "cancelled-read");
+    const authority = await import("../../stores/draftStore");
+    const checkAuthority = vi.spyOn(authority, "isCoherentUnresolvedDraftStage");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    let finish!: (value: typeof run) => void;
+    const pending = new Promise<typeof run>((resolve) => { finish = resolve; });
+    loadDraftRun.mockReturnValueOnce(pending);
+    const onNoDeck = vi.fn();
+    try {
+      const mounted = render(<GameProvider gameId="cancelled-read" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(loadDraftRun).toHaveBeenCalledWith("run"));
+      mounted.unmount();
+      await act(async () => { finish(run); });
+      await waitFor(() => expect(checkAuthority).toHaveBeenCalled());
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(vi.mocked(createGameLoopController)).not.toHaveBeenCalled();
+      expect(onNoDeck).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(key)).toBe(raw);
+    } finally {
+      checkAuthority.mockRestore();
+    }
+  });
+
+  it("refuses a wrong game ID in an otherwise durable solo run", async () => {
+    inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "run", setCode: "TST" });
+    loadDraftRun.mockResolvedValue({ format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId: "run", gameId: "different-game", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } });
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="requested-game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it("refuses a resolved stage without starting an unrelated deck", async () => {
+    inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "run", setCode: "TST" });
+    loadDraftRun.mockResolvedValue({ format: "run", results: [{ gameId: "finished-game", result: "win" }],
+      playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId: "run", gameId: "finished-game", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } });
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="finished-game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["card database unavailable", false],
+    ["card database unavailable", true],
+    ["incompatible snapshot", false],
+    ["incompatible snapshot", true],
+  ])("preserves a progressed solo save after %s with raw handoff=%s and retries it", async (message, withRaw) => {
+    const gameId = `restore-retry-${message.replace(/ /g, "-")}-${withRaw}`;
+    const key = `phase:draft-deck:${gameId}`;
+    const raw = JSON.stringify(publishedPayload());
+    if (withRaw) sessionStorage.setItem(key, raw);
+    seedSoloRun("run", gameId);
+    const savedState = { players: [{}, {}], turn: 13 } as never;
+    loadGameStrict.mockResolvedValue(savedState);
+    gameStoreState.resumeGame.mockRejectedValueOnce(new Error(message));
+    const onNoDeck = vi.fn();
+    const onResumeReset = vi.fn();
+    const first = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck} onResumeReset={onResumeReset}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(message));
+    expect(loadGameStrict).toHaveBeenCalledWith(gameId);
+    expect(gameStoreState.resumeGame).toHaveBeenCalledOnce();
+    expect(gameStoreState.resumeGame).toHaveBeenCalledWith(gameId, expect.anything(), savedState);
+    expect(onResumeReset).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(createGameLoopController).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(withRaw ? raw : null);
+    first.unmount();
+
+    const second = render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck} onResumeReset={onResumeReset}><div /></GameProvider>);
+    await waitFor(() => expect(createGameLoopController).toHaveBeenCalledOnce());
+    expect(loadGameStrict).toHaveBeenCalledTimes(2);
+    expect(gameStoreState.resumeGame).toHaveBeenCalledTimes(2);
+    expect(gameStoreState.resumeGame).toHaveBeenNthCalledWith(2, gameId, expect.anything(), savedState);
+    expect(vi.mocked(createGameLoopController).mock.results[0]?.value.start).toHaveBeenCalledOnce();
+    expect(onNoDeck).toHaveBeenCalledTimes(1);
+    expect(onResumeReset).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    await waitFor(() => expect(sessionStorage.getItem(key)).toBeNull());
+    second.unmount();
+  });
+
+  it("reports a saved solo restore failure even when its optional handoff cannot be read", async () => {
+    const gameId = "unreadable-restore";
+    seedSoloRun("run", gameId);
+    const savedState = { players: [{}, {}], turn: 8 } as never;
+    loadGameStrict.mockResolvedValueOnce(savedState);
+    const error = new Error("card database unavailable");
+    gameStoreState.resumeGame.mockRejectedValueOnce(error);
+    const originalGet = sessionStorage.getItem.bind(sessionStorage);
+    const read = vi.spyOn(sessionStorage, "getItem").mockImplementation((key) => {
+      if (key === `phase:draft-deck:${gameId}`) throw new Error("handoff read failed");
+      return originalGet(key);
+    });
+    const onNoDeck = vi.fn();
+    try {
+      render(<GameProvider gameId={gameId} mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(error.message));
+      expect(gameStoreState.resumeGame).toHaveBeenCalledWith(gameId, expect.anything(), savedState);
+      expect(clearGameStrict).not.toHaveBeenCalled();
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(createGameLoopController).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it.each([false, true])("does not reset a solo saved game when restore rejects after unmount with raw handoff=%s", async (withRaw) => {
+    seedSoloRun("run", "late-reject");
+    const raw = JSON.stringify(publishedPayload());
+    if (withRaw) sessionStorage.setItem("phase:draft-deck:late-reject", raw);
+    loadGameStrict.mockResolvedValueOnce({ players: [{}, {}] } as never);
+    let rejectResume!: (error: Error) => void;
+    gameStoreState.resumeGame.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectResume = reject; }));
+    const onResumeReset = vi.fn();
+    const onNoDeck = vi.fn();
+    const mounted = render(<GameProvider gameId="late-reject" mode="ai" source="draft" draftId="run" onResumeReset={onResumeReset} onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledOnce());
+    mounted.unmount();
+    await act(async () => { rejectResume(new Error("late incompatibility")); });
+    expect(onResumeReset).not.toHaveBeenCalled();
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("phase:draft-deck:late-reject")).toBe(withRaw ? raw : null);
+  });
+
+  it.each([false, true])("retains solo snapshot when restored controller fails with raw handoff=%s", async (withRaw) => {
+    seedSoloRun("run", "controller-restore");
+    const raw = JSON.stringify(publishedPayload());
+    if (withRaw) sessionStorage.setItem("phase:draft-deck:controller-restore", raw);
+    const savedState = { players: [{}, {}], turn: 9 } as never;
+    loadGameStrict.mockResolvedValue(savedState);
+    vi.mocked(createGameLoopController).mockReturnValueOnce({
+      start: vi.fn(() => { throw new Error("controller startup failed"); }),
+      stop: vi.fn(), dispose: vi.fn(),
+    } as never);
+    const onNoDeck = vi.fn();
+    const first = render(<GameProvider gameId="controller-restore" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith("controller startup failed"));
+    expect(clearGameStrict).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("phase:draft-deck:controller-restore")).toBe(withRaw ? raw : null);
+    first.unmount();
+    render(<GameProvider gameId="controller-restore" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledTimes(2));
+    expect(gameStoreState.resumeGame).toHaveBeenLastCalledWith("controller-restore", expect.anything(), savedState);
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it("refuses a Cube fallback with no original booster source", async () => {
+    inspectActiveQuickDraftLifecycle.mockResolvedValue({ id: "cube-run", setCode: "custom-cube" });
+    loadDraftRun.mockResolvedValue({ format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1],
+      activeMatch: { draftId: "cube-run", gameId: "cube-game", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] } });
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="cube-game" mode="ai" source="draft" draftId="cube-run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
   it.each([7, 8])("consumes all %i Commander seats and cube metadata on the desktop local route", async (playerCount) => {
     const deck = (seat: number) => ({ main_deck: [`Draft seat ${seat}`], sideboard: [], commander: [`Legend ${seat}`] });
     const payload = {
@@ -398,12 +1236,18 @@ describe("GameProvider native AI routing", () => {
     };
     const key = `phase:draft-deck:commander-${playerCount}`;
     sessionStorage.setItem(key, JSON.stringify(payload));
+    gameStoreState.initGame.mockImplementationOnce((...args: unknown[]) => {
+      if (args[7] === "strict") return Promise.reject(new Error("strict write rejected"));
+      return Promise.resolve();
+    });
     render(<GameProvider gameId={`commander-${playerCount}`} mode="ai" source="multiplayer" playerCount={playerCount}><div /></GameProvider>);
     await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
     expect(getSharedAdapter).toHaveBeenCalled();
     expect(gameStoreState.initGame.mock.calls[0][2]).toEqual(payload);
     expect(gameStoreState.initGame.mock.calls[0][4]).toBe(playerCount);
+    expect(gameStoreState.initGame.mock.calls[0][7]).toBe("best-effort");
     expect(sessionStorage.getItem(key)).toBeNull();
+    expect(createGameLoopController).toHaveBeenCalledOnce();
     expect(nativeAdapterInitialize).not.toHaveBeenCalled();
     expect(ensureNativeEngine).not.toHaveBeenCalled();
     expect(loadDraftRun).not.toHaveBeenCalled();

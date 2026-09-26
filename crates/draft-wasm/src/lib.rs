@@ -1378,18 +1378,16 @@ fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
 
-            // CR 903.3 + CR 903.6: eligibility and colour identity are both read
-            // off a `CardFace`, so with no card database this crate cannot
-            // designate a commander -- and a 60-card pile with no commander is
-            // not a Commander deck. Refuse rather than return a deck whose
-            // legality was never judged: the caller loads the database at host
-            // setup, and a silent empty designation would put three of four seats
-            // into a game CR 903.6 cannot start. The four CR 905.1a kinds report
-            // `0` here and are unaffected.
-            if session.config.kind.commanders_required() > 0 && card_db.is_none() {
-                return Err(
-                    "Card database must be loaded before a Commander Draft bot deck".to_string(),
-                );
+            // CR 407.3 + CR 903.3: Cube addables and Commander designations
+            // require typed faces. Ordinary set-backed pods can propose a
+            // deck without this optional database; game admission still
+            // checks every submitted name and excludes ante cards.
+            let requires_card_db = match &session.config.source {
+                DraftSource::Set { .. } => session.config.kind.commanders_required() > 0,
+                DraftSource::Cube { .. } => true,
+            };
+            if requires_card_db && card_db.is_none() {
+                return Err("Card database must be loaded before a draft bot deck".to_string());
             }
 
             let deck = suggest::suggest_deck(
@@ -1401,35 +1399,16 @@ fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
                 &session.config.addable_cards,
             );
 
-            // CR 903.13f(1): "A player's deck must contain at least 60 cards".
-            // New and restored Commander Cube sessions clamp configured
-            // `min_deck_size` to the engine-published Cube floor, so this guard
-            // enforces at least 60 for every session.
-            //
-            // `min_deck_size` is also the same value `apply_submit_deck` hands
-            // `validate_limited_deck` for the human on this pod
-            // (`draft-core/src/session.rs`), which is what makes the two
-            // authorities on this session agree. That validator rejects a short
-            // deck with `LimitedDeckError::TooFewCards`
-            // (`draft-core/src/validation.rs`, CR 100.2b); a bot deck reaches no
-            // such gate, so the postcondition is asserted here instead. It fires
-            // when `suggest_addable_cards`'s CustomOnly arm finds no addable card
-            // inside the commander's colour identity (CR 903.5c) and returns
-            // nothing to fill the land slots with. Refuse rather than ship a deck
-            // this engine would refuse from a human on the same session: the
-            // alternative is a CR 903.13f(1) violation nobody can see without
-            // counting the bot's cards. The four CR 905.1a kinds report `0` here
-            // and are unaffected -- without that gate this would change their
-            // behaviour, which is outside this phase's scope; the general case
-            // belongs to `validate_limited_deck`, which already owns it on every
-            // path a human deck takes.
+            // Enforce the session-configured floor for the bot, as
+            // `validate_limited_deck` does for human decks. CR 100.2b sets
+            // ordinary Limited at 40 cards; CR 903.13f(1) sets Commander Draft
+            // at 60. Custom Cube floors are configuration, not CR 100.2b.
+            // Never publish an undersized proposal if the bot runs out of cards.
             let deck_total: usize =
                 deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>();
-            if session.config.kind.commanders_required() > 0
-                && deck_total < session.config.min_deck_size
-            {
+            if deck_total < session.config.min_deck_size {
                 return Err(format!(
-                    "Commander Draft bot deck reached {deck_total} cards, minimum is {}",
+                    "Draft bot deck reached {deck_total} cards, minimum is {}",
                     session.config.min_deck_size
                 ));
             }
@@ -4555,6 +4534,24 @@ mod create_multiplayer_draft_tests {
         CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
     }
 
+    fn install_ante_fixture_db() {
+        let mut cards: serde_json::Value =
+            serde_json::from_str(&commander_fixture_db_json()).unwrap();
+        let mut contract = cards["beta"].clone();
+        contract["name"] = serde_json::json!("Contract from Below");
+        contract["card_type"]["core_types"] = serde_json::json!(["Sorcery"]);
+        contract["oracle_text"] = serde_json::json!(
+            "Remove this card from your deck before playing if you're not playing for ante.\nDiscard your hand, ante the top card of your library, then draw seven cards."
+        );
+        cards["contract from below"] = contract;
+        let mut forest = cards["plains"].clone();
+        forest["name"] = serde_json::json!("Forest");
+        forest["color_identity"] = serde_json::json!(["Green"]);
+        cards["forest"] = forest;
+        let db = CardDatabase::from_json_str(&cards.to_string()).unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
     #[test]
     fn quick_cube_config_raises_zero_to_one_without_lowering_higher_requests() {
         let settings = |min_deck_size| CubeDraftSettings {
@@ -4743,8 +4740,7 @@ mod create_multiplayer_draft_tests {
         clear_state();
     }
 
-    /// VM-4e — [B1] the PRECONDITION refusal: a Commander pod whose host never
-    /// loaded `CARD_DB`.
+    /// VM-4e — the source/kind gate when the host has no `CARD_DB`.
     ///
     /// `install_commander_fixture_db()` is deliberately NOT called. Do not add
     /// it back as an oversight — the whole subject of this row is the database's
@@ -4752,7 +4748,7 @@ mod create_multiplayer_draft_tests {
     /// a SET pool, so session creation itself needs no database, which is what
     /// makes the fixture constructible.
     #[test]
-    fn get_bot_deck_inner_refuses_a_commander_pod_with_no_card_database() {
+    fn get_bot_deck_inner_requires_faces_for_commander_and_cube_but_not_set_premier() {
         clear_state();
         start_commander_pod(4);
 
@@ -4762,16 +4758,149 @@ mod create_multiplayer_draft_tests {
             "the message must name the card database: {err}"
         );
 
-        // Paired control ON THE SAME no-database state: `Premier` still builds a
-        // deck. This is the reach guard — it proves the fixture reaches
-        // `suggest_deck` at all — and it isolates the `commanders_required() > 0`
-        // conjunct, so the four CR 905.1a kinds provably keep today's behaviour.
+        // The normal Set-backed Premier host does not fetch CARD_DB. Its bot
+        // still proposes a complete deck from the drafted pool and basics.
         clear_state();
         start_commander_pod(1);
+        let deck = get_bot_deck_inner(1).expect("Set Premier builds without CARD_DB");
+        assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
+        assert_eq!(
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
+            40
+        );
+        assert!(deck.commander.is_empty());
 
-        let deck = get_bot_deck_inner(1).expect("Premier needs no designation");
+        assert!(get_bot_deck_inner(8).unwrap_err().contains("out of range"));
+
+        // Positive reach: the same Premier seat builds with its database.
+        install_commander_fixture_db();
+        let deck = get_bot_deck_inner(1).expect("Premier builds with typed faces");
         assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
 
+        // Cube's host loads faces at creation. Clearing them after creation
+        // models a resumed Cube whose database is missing at bot proposal.
+        clear_state();
+        install_fixture_db();
+        let cube_input = serde_json::json!({
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "20 Alpha\n20 Beta",
+                "cube_name": "Test Cube",
+                "cube_draft_settings": {
+                    "pod_size": 2,
+                    "pack_count": 1,
+                    "cards_per_pack": 2,
+                    "min_deck_size": 4,
+                    "addable_cards": { "policy": "StandardBasics", "custom": [] }
+                }
+            }
+        });
+        let seats = serde_json::json!([
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Bot", "name": "Bot 1" }
+        ]);
+        create_multiplayer_draft_inner(
+            &cube_input.to_string(),
+            &seats.to_string(),
+            1,
+            42,
+            "cube-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Cube session must be installed before testing missing faces");
+        seed_bot_pool(1, mono_white_bot_pool());
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let err = get_bot_deck_inner(1).expect_err("Cube requires typed faces");
+        assert!(err.contains("Card database"), "{err}");
+
+        clear_state();
+    }
+
+    #[test]
+    fn limited_bot_entry_admits_only_a_typed_ante_free_full_deck() {
+        clear_state();
+        install_ante_fixture_db();
+        let cube_input = serde_json::json!({
+            "type": "Cube",
+            "data": {
+                "cube_list_text": "100 Alpha\n100 Beta\n1 Contract from Below",
+                "cube_name": "Ante Cube",
+                "cube_draft_settings": {
+                    "pod_size": 2,
+                    "pack_count": 1,
+                    "cards_per_pack": 2,
+                    "min_deck_size": 40,
+                    "addable_cards": {
+                        "policy": "CustomOnly",
+                        "custom": ["Contract from Below", "Forest"]
+                    }
+                }
+            }
+        });
+        let seats = serde_json::json!([
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Bot", "name": "Bot 1" }
+        ]);
+        create_multiplayer_draft_inner(
+            &cube_input.to_string(),
+            &seats.to_string(),
+            1,
+            42,
+            "ante-cube",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Cube with typed addable faces must start");
+        let mut pool = mono_white_bot_pool();
+        pool.insert(
+            0,
+            DraftCardInstance {
+                instance_id: "ante-first".to_string(),
+                name: "Contract from Below".to_string(),
+                set_code: "TST".to_string(),
+                collector_number: "0".to_string(),
+                rarity: "rare".to_string(),
+                colors: vec!["B".to_string()],
+                cmc: 1,
+                type_line: "Sorcery".to_string(),
+                draft_effect: None,
+            },
+        );
+        seed_bot_pool(1, pool.clone());
+        CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().unwrap();
+            assert!(db
+                .get_face_by_name("Contract from Below")
+                .is_some_and(engine::game::face_uses_ante));
+            assert!(db
+                .get_face_by_name("Forest")
+                .is_some_and(|face| !engine::game::face_uses_ante(face)));
+        });
+
+        let deck = get_bot_deck_inner(1).expect("the legal land fills the proposal");
+        assert!(deck.main_deck.contains(&"Alpha".to_string()));
+        assert!(!deck.main_deck.contains(&"Contract from Below".to_string()));
+        assert_eq!(deck.lands.get("Forest"), Some(&36));
+        assert_eq!(
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
+            40
+        );
+
+        set_addable_cards(DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: vec!["Contract from Below".to_string()],
+        });
+        let err = get_bot_deck_inner(1).expect_err("ante-only fill is short");
+        assert!(err.contains("minimum is 40"), "{err}");
+
+        seed_bot_pool(1, vec![pool[0].clone()]);
+        set_addable_cards(DeckAddableCards::standard_basics());
+        let err = get_bot_deck_inner(1).expect_err("all-ante pool is exhausted");
+        assert!(err.contains("reached 0 cards"), "{err}");
         clear_state();
     }
 

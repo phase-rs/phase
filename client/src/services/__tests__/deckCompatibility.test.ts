@@ -51,11 +51,38 @@ async function loadDeckCompatibility() {
 }
 
 beforeEach(() => {
+  adapterMock.cardDbLoaded = true;
   adapterMock.checkDeckCompatibility.mockReset();
   adapterMock.checkDeckCompatibility.mockImplementation(async () => compatibleResult());
 });
 
 describe("evaluateDeckCompatibility — CR 903.13f(3) draft set codes", () => {
+  it("forwards a non-Commander request through a rejected adapter and retries it", async () => {
+    adapterMock.cardDbLoaded = false;
+    adapterMock.checkDeckCompatibility
+      .mockRejectedValueOnce(new Error("CARD_DB worker rejected request"))
+      .mockResolvedValueOnce(compatibleResult());
+    const statuses: string[] = [];
+    const { evaluateDeckCompatibility } = await loadDeckCompatibility();
+
+    await expect(evaluateDeckCompatibility(DECK, {
+      selectedFormat: null,
+      draftSetCodes: ["TST"],
+      onStatus: (status) => statuses.push(status),
+    })).rejects.toThrow("CARD_DB worker rejected request");
+    expect(statuses).toEqual(["loading-card-database", "checking-deck"]);
+    expect(adapterMock.checkDeckCompatibility).toHaveBeenLastCalledWith(expect.objectContaining({
+      selected_format: null,
+      draft_set_codes: ["TST"],
+    }));
+
+    await expect(evaluateDeckCompatibility(DECK, {
+      selectedFormat: null,
+      draftSetCodes: ["TST"],
+    })).resolves.toEqual(compatibleResult());
+    expect(adapterMock.checkDeckCompatibility).toHaveBeenCalledTimes(2);
+  });
+
   it("sends the drafted set codes on the request the adapter receives", async () => {
     const { evaluateDeckCompatibility } = await loadDeckCompatibility();
 
