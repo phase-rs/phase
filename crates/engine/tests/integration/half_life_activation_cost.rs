@@ -1,5 +1,6 @@
 use engine::ai_support::legal_actions_full;
 use engine::game::casting::can_activate_ability_now;
+use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCost, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetRef,
@@ -9,6 +10,7 @@ use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::KeywordKind;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -247,6 +249,19 @@ fn untargeted_half_life_pays_rounded_amount() {
         ));
         let outcome = runner.activate(source, 0).resolve();
         assert_eq!(outcome.state().players[P0.0 as usize].life, life - payment);
+        // CR 613.1g: Layer 7 applies the resolved power/toughness change.
+        assert_eq!(outcome.power_toughness(source), (4, 4));
+        // CR 613.1f: Layer 6 applies the resolved flying grant.
+        assert!(object_has_effective_keyword_kind(
+            outcome.state(),
+            source,
+            KeywordKind::Flying,
+        ));
+        // CR 613.1d: Layer 4 applies the resolved creature subtypes.
+        assert_eq!(
+            outcome.state().objects[&source].card_types.subtypes,
+            vec!["Phyrexian".to_string(), "Horror".to_string()],
+        );
         assert!(outcome
             .events()
             .iter()
