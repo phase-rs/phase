@@ -1378,6 +1378,11 @@ export class P2PDraftHost {
       throw err;
     }
 
+    // Force the first persisted state to upload immediately so the host
+    // claims the backup row before any guest can observe the started draft.
+    this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
+    await this.persistSessionStrict();
+
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
       try {
