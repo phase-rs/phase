@@ -1,4 +1,4 @@
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
@@ -717,6 +717,32 @@ describe("GameProvider native AI routing", () => {
     await Promise.resolve();
     expect(sessionStorage.getItem(key)).toBe(raw);
     expect(onNoDeck).not.toHaveBeenCalled();
+  });
+
+  it("does not initialize after an unresolved draft authority read is cancelled", async () => {
+    const key = "phase:draft-deck:cancelled-read";
+    const run = seedSoloRun("run", "cancelled-read");
+    const authority = await import("../../stores/draftStore");
+    const checkAuthority = vi.spyOn(authority, "isCoherentUnresolvedDraftStage");
+    const raw = JSON.stringify(publishedPayload());
+    sessionStorage.setItem(key, raw);
+    let finish!: (value: typeof run) => void;
+    const pending = new Promise<typeof run>((resolve) => { finish = resolve; });
+    loadDraftRun.mockReturnValueOnce(pending);
+    const onNoDeck = vi.fn();
+    try {
+      const mounted = render(<GameProvider gameId="cancelled-read" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+      await waitFor(() => expect(loadDraftRun).toHaveBeenCalledWith("run"));
+      mounted.unmount();
+      await act(async () => { finish(run); });
+      await waitFor(() => expect(checkAuthority).toHaveBeenCalled());
+      expect(gameStoreState.initGame).not.toHaveBeenCalled();
+      expect(vi.mocked(createGameLoopController)).not.toHaveBeenCalled();
+      expect(onNoDeck).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(key)).toBe(raw);
+    } finally {
+      checkAuthority.mockRestore();
+    }
   });
 
   it("refuses a wrong game ID in an otherwise durable solo run", async () => {

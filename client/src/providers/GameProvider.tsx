@@ -1515,6 +1515,7 @@ export function GameProvider({
           const deckList = JSON.parse(raw) as DeckListPayload;
           if (soloDraft) {
             const run = await loadExactDraftRun();
+            if (cancelled) return;
             if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
           }
           await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
