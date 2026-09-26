@@ -644,10 +644,19 @@ fn original_x_mana_sacrifice_guard_still_refuses_the_unsupported_route() {
     let result = catch_unwind(AssertUnwindSafe(|| {
         runner.act(GameAction::ChooseX { value: 1 })
     }));
-    assert!(
-        result.is_err(),
-        "the existing debug assertion must refuse this unsupported X suffix"
-    );
+    match result {
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied());
+            assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"));
+        }
+        Ok(Err(engine::game::engine::EngineError::ActionNotAllowed(message))) => {
+            assert_eq!(message, "non-self sacrifice/exile cost unhandled");
+        }
+        Ok(other) => panic!("unsupported X sacrifice suffix unexpectedly proceeded: {other:?}"),
+    }
 }
 
 #[test]
