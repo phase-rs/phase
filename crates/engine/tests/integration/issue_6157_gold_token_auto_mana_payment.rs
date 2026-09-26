@@ -22,7 +22,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastPaymentMode, ManaChoice, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ManaChoice, PayCostKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaColor, ManaCost, ManaType};
 use engine::types::phase::Phase;
@@ -525,4 +525,77 @@ fn check_instant_only_mana_ability_activates_with_priority() {
         })
         .expect("instant-only mana must be activatable with priority");
     assert!(runner.state().objects[&source].tapped);
+}
+
+#[test]
+fn lions_eye_diamond_activates_with_priority() {
+    run_with_mana_test_stack(check_lions_eye_diamond_activates_with_priority);
+}
+
+fn check_lions_eye_diamond_activates_with_priority() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spare_a = scenario.add_card_to_hand(P0, "Spare Card A");
+    let spare_b = scenario.add_card_to_hand(P0, "Spare Card B");
+    let diamond = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Lion's Eye Diamond",
+            "Discard your hand, Sacrifice this artifact: Add three mana of any one color. Activate only as an instant.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let ability_index = runner.state().objects[&diamond]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsInstant)
+        })
+        .expect("Oracle-built Diamond must retain its instant-only restriction");
+    assert!(matches!(
+        *runner.state().objects[&diamond].abilities[ability_index].effect,
+        Effect::Mana { .. }
+    ));
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: diamond,
+            ability_index,
+        })
+        .expect("Diamond must activate while its controller has priority");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            player: P0,
+            kind: PayCostKind::Discard,
+            count: 2,
+            ..
+        }
+    ));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![spare_a, spare_b],
+        })
+        .expect("discarding the hand must complete Diamond's activation cost");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ChooseManaColor { player: P0, .. }),
+        "Diamond activation waits for {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().players[P0.0 as usize].hand.is_empty());
+    assert_eq!(runner.state().objects[&diamond].zone, Zone::Graveyard);
+
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("Diamond adds three mana of the chosen color");
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 3);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
 }
