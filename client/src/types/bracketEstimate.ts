@@ -47,10 +47,14 @@ export interface BracketEstimate {
   data_version: string;
 }
 
+// Mirrors the sections `estimate_bracket` counts, plus `sideboard`, which the
+// engine ignores but which every caller already sends.
 export interface BracketDeckRequest {
   commander: string[];
   main_deck: string[];
   sideboard: string[];
+  companion: string[];
+  signature_spell: string[];
 }
 
 export const BRACKET_TIER_NUMERIC: Record<CommanderBracketTier, 1 | 2 | 3 | 4 | 5> = {

@@ -68,6 +68,34 @@ describe("useBracketEstimate", () => {
     expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
   });
 
+  it("sends companion and signature spell to the adapter", async () => {
+    const adapter = makeAdapter();
+    const deckWithCommanderSections: ParsedDeck = {
+      main: [{ name: "Forest", count: 2 }],
+      sideboard: [{ name: "Pyroblast", count: 1 }],
+      companion: "Lutri, the Spellchaser",
+      signature_spell: ["Lightning Bolt"],
+    };
+
+    renderHook(() =>
+      useBracketEstimate({
+        deck: deckWithCommanderSections,
+        commanders: ["Krenko, Mob Boss"],
+        format: "Commander",
+        adapter,
+      }),
+    );
+    await waitFor(() => expect(adapter.estimateBracket).toHaveBeenCalledTimes(1));
+
+    expect(adapter.estimateBracket.mock.calls[0][0]).toEqual({
+      commander: ["Krenko, Mob Boss"],
+      main_deck: ["Forest", "Forest"],
+      sideboard: ["Pyroblast"],
+      companion: ["Lutri, the Spellchaser"],
+      signature_spell: ["Lightning Bolt"],
+    });
+  });
+
   it("debounces rapid deck updates into a single call", async () => {
     vi.useFakeTimers();
     const adapter = makeAdapter();

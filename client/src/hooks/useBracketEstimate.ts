@@ -4,6 +4,7 @@ import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import type { EngineAdapter, GameFormat } from "../adapter/types";
 import type { BracketEstimate } from "../types/bracket";
 import { isCommanderFamilyFormat } from "../types/bracket";
+import { expandParsedDeck } from "../services/deckParser";
 import type { ParsedDeck } from "../services/deckParser";
 import { buildBracketDeckKey } from "./bracketDeckKey";
 
@@ -106,11 +107,14 @@ export function useBracketEstimate({
     const scheduledKey = deckKey;
     const timer = setTimeout(async () => {
       try {
+        const expanded = expandParsedDeck(deck);
         const result = await readCacheOrFetch(scheduledKey, () =>
           adapter.estimateBracket({
             commander: commanders,
-            main_deck: deck.main.flatMap((e) => Array(e.count).fill(e.name)),
-            sideboard: deck.sideboard.flatMap((e) => Array(e.count).fill(e.name)),
+            main_deck: expanded.main_deck,
+            sideboard: expanded.sideboard,
+            companion: expanded.companion,
+            signature_spell: expanded.signature_spell,
           }),
         );
         if (pendingKeyRef.current !== scheduledKey) {
@@ -134,10 +138,10 @@ export function useBracketEstimate({
       }
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
-    // `commanders`, `deck.main`, and `deck.sideboard` are intentionally
-    // omitted: their content is fully captured by `deckKey`, which changes
-    // only when the deck actually differs. Including the raw arrays would
-    // cause re-runs on every object-identity churn with no observable change.
+    // `commanders` and the raw `deck` sections are intentionally omitted:
+    // their content is fully captured by `deckKey`, which changes only when
+    // the deck actually differs. Including the raw arrays would cause re-runs
+    // on every object-identity churn with no observable change.
   }, [eligible, deckKey, adapter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { estimate, loading, unsupported };

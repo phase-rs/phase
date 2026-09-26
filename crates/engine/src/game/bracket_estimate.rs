@@ -135,12 +135,45 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
         return None;
     }
 
+    // Which deck sections carry cards that can be in a Commander-family game.
+    // Enforced by an exhaustive destructure: adding a field to `PlayerDeckList`
+    // breaks this binding and forces the next author to classify it.
+    //
+    // This is WotC Commander Format Panel guidance, not the Comprehensive Rules —
+    // no `// CR` annotation applies (see the module header).
+    let PlayerDeckList {
+        commander,       // counted — the commander is a card in the game
+        main_deck,       // counted — the 99
+        companion,       // counted — starts outside the game but can be brought in
+        signature_spell, // counted — Oathbreaker RC second command-zone card
+        sideboard,       // NOT counted — Commander has no sideboard; the deck
+        //   builder parses one, and the request still carries it
+        attraction_deck,  // NOT counted — Unfinity variant, outside the 100
+        planar_deck,      // NOT counted — Planechase variant deck
+        scheme_deck,      // NOT counted — Archenemy variant deck
+        contraption_deck, // NOT counted — Unstable variant deck
+        sticker_sheets,   // NOT counted — Unfinity stickers, not cards in the deck
+        bracket_tier: _,  // the player's declaration, not a card list
+    } = deck;
+    let _ = (
+        sideboard,
+        attraction_deck,
+        planar_deck,
+        scheme_deck,
+        contraption_deck,
+        sticker_sheets,
+    );
+
     let mut axes: BTreeMap<BracketAxis, AxisReading> = BracketAxis::iter()
         .map(|axis| (axis, AxisReading::default()))
         .collect();
 
-    let all_cards = deck.commander.iter().chain(deck.main_deck.iter());
-    for name in all_cards {
+    let counted_names = commander
+        .iter()
+        .chain(main_deck.iter())
+        .chain(companion.iter())
+        .chain(signature_spell.iter());
+    for name in counted_names {
         for axis in db.bracket_signals_for(name).axes() {
             let reading = axes.entry(axis).or_default();
             reading.count = reading.count.saturating_add(1);
@@ -398,6 +431,93 @@ mod tests {
             e.violations.contains_key(&BracketAxis::GameChangers),
             "GameChangers violation must be present"
         );
+    }
+
+    #[test]
+    fn companion_card_is_counted() {
+        let db = db_with_signals(&[(
+            "Lutri, the Spellchaser",
+            BracketSignals {
+                game_changer: true,
+                ..Default::default()
+            },
+        )]);
+        let d = PlayerDeckList {
+            companion: vec!["Lutri, the Spellchaser".to_string()],
+            ..deck(vec!["Cmdr"], vec!["Forest"])
+        };
+        let e = estimate_bracket(&d, &db).unwrap();
+
+        assert_eq!(e.tier, CommanderBracketTier::Upgraded);
+        assert_eq!(
+            e.axes[&BracketAxis::GameChangers].contributing,
+            vec!["Lutri, the Spellchaser"]
+        );
+    }
+
+    #[test]
+    fn signature_spell_card_is_counted() {
+        let db = db_with_signals(&[(
+            "Smothering Tithe",
+            BracketSignals {
+                game_changer: true,
+                ..Default::default()
+            },
+        )]);
+        let d = PlayerDeckList {
+            signature_spell: vec!["Smothering Tithe".to_string()],
+            ..deck(vec!["Cmdr"], vec!["Forest"])
+        };
+        let e = estimate_bracket(&d, &db).unwrap();
+
+        assert_eq!(e.tier, CommanderBracketTier::Upgraded);
+        assert_eq!(
+            e.axes[&BracketAxis::GameChangers].contributing,
+            vec!["Smothering Tithe"]
+        );
+    }
+
+    #[test]
+    fn sideboard_card_is_not_counted() {
+        let db = db_with_signals(&[(
+            "Smothering Tithe",
+            BracketSignals {
+                game_changer: true,
+                ..Default::default()
+            },
+        )]);
+        let d = PlayerDeckList {
+            sideboard: vec!["Smothering Tithe".to_string()],
+            ..deck(vec!["Cmdr"], vec!["Forest"])
+        };
+        let e = estimate_bracket(&d, &db).unwrap();
+
+        assert_eq!(e.tier, CommanderBracketTier::Exhibition);
+        assert!(e.axes[&BracketAxis::GameChangers].contributing.is_empty());
+    }
+
+    #[test]
+    fn variant_format_decks_are_not_counted() {
+        let db = db_with_signals(&[(
+            "Smothering Tithe",
+            BracketSignals {
+                game_changer: true,
+                ..Default::default()
+            },
+        )]);
+        let excluded_card = vec!["Smothering Tithe".to_string()];
+        let d = PlayerDeckList {
+            attraction_deck: excluded_card.clone(),
+            planar_deck: excluded_card.clone(),
+            scheme_deck: excluded_card.clone(),
+            contraption_deck: excluded_card.clone(),
+            sticker_sheets: excluded_card,
+            ..deck(vec!["Cmdr"], vec!["Forest"])
+        };
+        let e = estimate_bracket(&d, &db).unwrap();
+
+        assert_eq!(e.tier, CommanderBracketTier::Exhibition);
+        assert!(e.axes[&BracketAxis::GameChangers].contributing.is_empty());
     }
 
     #[test]
