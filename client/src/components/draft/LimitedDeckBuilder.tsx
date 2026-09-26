@@ -17,6 +17,7 @@ import { menuButtonClass } from "../menu/buttonStyles";
 import { PopoverMenu } from "../menu/PopoverMenu";
 import { CommanderPanel } from "../deck-builder/CommanderPanel";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
+import type { GameFormat } from "../../adapter/types";
 import type { DeckEntry } from "../../services/deckParser";
 import type { ParsedDeck } from "../../services/deckParser";
 import {
