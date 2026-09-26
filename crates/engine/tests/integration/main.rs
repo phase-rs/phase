@@ -1266,6 +1266,7 @@ mod superlative_player_subject_control;
 mod support;
 mod support_keyword_cr_701_41a;
 mod suppressor_skyguard_prevent_2924;
+mod surge_cast_election;
 mod surveil_rest_pile_redirect_continuation;
 mod surveillance_phantasm_scry_or_surveil;
 mod swans_prevention_followup;

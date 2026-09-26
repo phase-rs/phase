@@ -9447,6 +9447,11 @@ pub enum AlternativeCastKeyword {
     /// the stack (CR 708.4) and resolves to a face-down permanent. Maps to
     /// `CastingVariant::FaceDown`.
     FaceDown,
+    /// CR 702.117a: Surge alternative cost paid from hand, available only if the
+    /// caster or a teammate has cast another spell this turn. A pure cost
+    /// substitution; the surge provenance is recorded at resolution (stack.rs) so
+    /// "if its surge cost was paid" intervening-ifs (Reckless Bushwhacker) can read it.
+    Surge,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than

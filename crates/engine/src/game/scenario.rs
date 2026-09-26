@@ -2110,6 +2110,9 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::FaceDown => {
                     "AlternativeCastChoice(FaceDown)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Surge => {
+                    "AlternativeCastChoice(Surge)"
+                }
             },
             WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
             WaitingFor::CipherEncodeChoice { .. } => "CipherEncodeChoice",

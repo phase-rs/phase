@@ -11524,6 +11524,19 @@ fn apply_non_priority_pass_action(
                         &mut events,
                     )?
                 }
+                AlternativeCastKeyword::Surge => {
+                    // CR 702.117a: Handle the "cast normally vs cast for the surge
+                    // cost" choice.
+                    casting::handle_surge_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
             }
         }
         (
