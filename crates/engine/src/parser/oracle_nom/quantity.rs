@@ -6904,6 +6904,7 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_quantity::parse_for_each_clause;
     use crate::types::ability::{
         AggregateFunction, ControllerRef, FilterProp, ObjectProperty, PlayerFilter, QuantityRef,
         SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
@@ -8711,8 +8712,6 @@ mod tests {
     /// form) is the per-player life history, not the triggering event's amount.
     #[test]
     fn parse_for_each_one_life_changed_this_turn_reads_life_history() {
-        use crate::parser::oracle_quantity::parse_for_each_clause;
-
         let opponents = PlayerScope::Opponent {
             aggregate: AggregateFunction::Sum,
         };
