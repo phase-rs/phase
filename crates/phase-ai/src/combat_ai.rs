@@ -14,14 +14,17 @@ use engine::types::format::FormatTopology;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 use engine::util::Deadline;
 
+use crate::combat_triggers::{block_trigger_shifts, connect_trigger_value, BlockShifts, PtShift};
 use crate::config::{AiConfig, AiProfile, CombatEvModel, ExecutionMode};
 use crate::damage_reflection::has_damage_reflection_to_controller;
 use crate::eval::{creature_combat_value, evaluate_creature, threat_level, KeywordBonuses};
+use crate::life_resource::life_loss_cost;
 use crate::manland::{self, AnimatedBody};
 use crate::projection::{project_to, projection_deadline, Projection, ProjectionHorizon};
 use crate::session::AiSession;
@@ -1620,6 +1623,24 @@ pub fn choose_blockers_with_profile(
         .map(|&id| (id, evaluate_creature(state, id)))
         .collect();
     let blocker_value = |id: &ObjectId| -> f64 { blocker_values.get(id).copied().unwrap_or(0.0) };
+    // What the player actually loses when a blocker dies: its value less what it
+    // can cash in first. A blocker whose ability sacrifices itself for a payoff
+    // activates it before damage once it is doomed (CR 117.1b), so a Mogg
+    // Fanatic-style chump costs little. Used wherever a blocker is expected to
+    // die; ranking the blocks that survive still uses the full value.
+    // `choose_blockers` carries an `AiProfile`, not the full `AiConfig`, so the
+    // salvage payoff is priced at the default policy penalties.
+    let penalties = crate::config::PolicyPenalties::default();
+    let blocker_losses: HashMap<ObjectId, f64> = available_blockers
+        .iter()
+        .map(|&id| {
+            let salvage = crate::policies::self_cost::self_sacrifice_salvage_value(
+                state, player, id, &penalties,
+            );
+            (id, (blocker_value(&id) - salvage).max(0.0))
+        })
+        .collect();
+    let blocker_loss = |id: &ObjectId| -> f64 { blocker_losses.get(id).copied().unwrap_or(0.0) };
 
     // CR 509.1b + CR 702.111b: the minimum number of creatures that must block a
     // given attacker. Menace is only the most common source of that floor — a
@@ -1648,10 +1669,15 @@ pub fn choose_blockers_with_profile(
         ) as usize
     };
 
-    // Sort attackers by value (highest first) to prioritize blocking high-value threats
+    // Sort attackers by value (highest first) to prioritize blocking high-value threats.
+    // An attacker's value includes its connect payoff ("whenever this deals combat
+    // damage to a player, draw a card"): killing it ends that stream for good.
     let mut sorted_attackers: Vec<(ObjectId, f64)> = attacker_ids
         .iter()
-        .map(|&id| (id, evaluate_creature(state, id)))
+        .map(|&id| {
+            let connect = state.objects.get(&id).map_or(0.0, connect_trigger_value);
+            (id, evaluate_creature(state, id) + connect)
+        })
         .collect();
     sorted_attackers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1705,6 +1731,58 @@ pub fn choose_blockers_with_profile(
     // costs life on top of the exchange (handled per-attacker below).
     let incoming_power = sum_power(state, attacker_ids);
     let p_life = state.players[player.0 as usize].life;
+    // CR 510.1a + CR 702.4b: the combat damage the whole attack deals the player
+    // if nothing is blocked, from the engine's damage authority.
+    let unblocked_by_attacker: HashMap<ObjectId, i32> = attacker_ids
+        .iter()
+        .map(|&id| (id, unblocked_combat_damage(state, id)))
+        .collect();
+    let unblocked_of =
+        |id: ObjectId| -> i32 { unblocked_by_attacker.get(&id).copied().unwrap_or(0) };
+    let incoming_damage: i32 = unblocked_by_attacker.values().sum();
+    // The damage the attack still deals the player once the blocks committed so
+    // far are in place. Every later block is priced at this margin, so life a
+    // block already saved is never credited to the next one.
+    let mut remaining_incoming = incoming_damage
+        - assignments
+            .iter()
+            .map(|&(bid, aid)| {
+                (unblocked_of(aid)
+                    - engine::game::combat_damage::combat_damage_to_defender(state, aid, &[bid]))
+                .max(0)
+            })
+            .sum::<i32>();
+
+    // What a block buys beyond the exchange itself: the life it saves, priced by
+    // how close that life is to the player's last turn (CR 104.3b + CR 704.5a),
+    // and — when the block stops all damage to the player (CR 510.1c) — the
+    // attacker's connect payoff it denies. A nontrampler that is blocked deals no
+    // damage to the player, so its "deals combat damage to a player" and "isn't
+    // blocked" triggers never fire; a trampler still connects with its excess
+    // (CR 702.19b), so only the life is credited against it.
+    let block_upside = |attacker: &engine::game::game_object::GameObject,
+                        damage_prevented: i32,
+                        remaining: i32|
+     -> f64 {
+        // Priced at the margin of the whole attack: the life still lost with
+        // the blocks committed so far (`remaining`), minus the life lost with
+        // this block's damage also taken off. A block that leaves the combat
+        // lethal anyway buys no life at all — chumping one attacker while the
+        // rest still kill the player is not a save — and once earlier blocks
+        // have saved the player, the survival they bought is not counted again.
+        let prevented = damage_prevented
+            .min(unblocked_of(attacker.id))
+            .min(remaining);
+        let life = life_loss_cost(state, player, remaining, profile.stabilize_bias)
+            - life_loss_cost(state, player, remaining - prevented, profile.stabilize_bias);
+        let denied = if attacker.has_keyword(&Keyword::Trample) {
+            0.0
+        } else {
+            connect_trigger_value(attacker)
+        };
+        life + denied
+    };
+
     let favorable_kill_targets: HashMap<ObjectId, Vec<ObjectId>> = if matches!(
         objective,
         CombatObjective::Race | CombatObjective::Stabilize
@@ -1719,7 +1797,7 @@ pub fn choose_blockers_with_profile(
                 if has_damage_reflection_to_controller(blocker) {
                     return None;
                 }
-                let selected_blocker_value = blocker_value(&bid);
+                let selected_blocker_value = blocker_loss(&bid);
                 let targets: Vec<ObjectId> = sorted_attackers
                     .iter()
                     .filter_map(|&(aid, attacker_value)| {
@@ -1732,7 +1810,7 @@ pub fn choose_blockers_with_profile(
                             return None;
                         }
                         let attacker = state.objects.get(&aid)?;
-                        let (kills, survives) = evaluate_block_outcome(blocker, attacker);
+                        let (kills, survives) = evaluate_block_outcome(state, blocker, attacker);
                         if !kills {
                             return None;
                         }
@@ -1743,10 +1821,12 @@ pub fn choose_blockers_with_profile(
                         let damage_prevented = if attacker.has_keyword(&Keyword::Trample) {
                             blocker.toughness.unwrap_or(1)
                         } else {
-                            attacker.power.unwrap_or(0)
+                            unblocked_of(aid)
                         };
                         let favorable_trade = priority != 1
-                            || selected_blocker_value <= attacker_value + damage_prevented as f64;
+                            || selected_blocker_value
+                                <= attacker_value
+                                    + block_upside(attacker, damage_prevented, remaining_incoming);
                         favorable_trade.then_some(aid)
                     })
                     .collect();
@@ -1796,7 +1876,7 @@ pub fn choose_blockers_with_profile(
             })
             .filter_map(|&bid| {
                 let blocker = state.objects.get(&bid)?;
-                let (kills, survives) = evaluate_block_outcome(blocker, attacker);
+                let (kills, survives) = evaluate_block_outcome(state, blocker, attacker);
                 // Prefer: survives and kills > survives > kills > neither
                 let priority = (survives as u8) * 2 + (kills as u8);
                 // This blocker can only chump here, but it kills a still-unblocked
@@ -1811,11 +1891,25 @@ pub fn choose_blockers_with_profile(
                 {
                     return None;
                 }
-                Some((bid, priority, blocker_value(&bid)))
+                // A block the blocker survives is ranked by the body kept in
+                // front; one it dies in, by what dying actually costs.
+                let rank_value = if survives {
+                    blocker_value(&bid)
+                } else {
+                    blocker_loss(&bid)
+                };
+                Some((bid, priority, rank_value))
             })
             .max_by(|a, b| {
-                a.1.cmp(&b.1)
-                    .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+                // Among blocks that survive, keep the best body in front. Among
+                // chumps (priority 0) and trades (priority 1) the body is lost,
+                // so spend the one whose loss costs least.
+                let by_value = a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal);
+                a.1.cmp(&b.1).then(if a.1 < 2 {
+                    by_value.reverse()
+                } else {
+                    by_value
+                })
             });
 
         if let Some((blocker_id, priority, selected_blocker_value)) = best {
@@ -1841,10 +1935,13 @@ pub fn choose_blockers_with_profile(
             // the blocker is too small to make a meaningful difference.
             let has_trample = attacker.has_keyword(&Keyword::Trample);
             let blocker_toughness = blocker_obj.and_then(|b| b.toughness).unwrap_or(1);
+            // CR 510.1c: a blocked nontrampler deals the player nothing, so the
+            // block saves everything it would have dealt unblocked — both strikes
+            // of a double striker (CR 702.4b), not one step's power.
             let damage_prevented = if has_trample {
                 blocker_toughness
             } else {
-                attacker_power
+                unblocked_of(attacker_id)
             };
 
             // For damage-reflection creatures, the net life change from blocking is
@@ -1863,30 +1960,41 @@ pub fn choose_blockers_with_profile(
                 && damage_prevented >= 2
                 && matches!(objective, CombatObjective::Stabilize)
                 && effective_life <= attacker_power * 3;
-            // Race chump: losing the damage race, block anything with power >= 2
-            let should_chump_race =
-                priority == 0 && attacker_power >= 2 && matches!(objective, CombatObjective::Race);
+            let upside = block_upside(attacker, damage_prevented, remaining_incoming);
+            // Value chump: the life saved (priced by how close it is to the
+            // player's last turn) plus the denied connect payoff outweighs the body
+            // with margin to spare. The margin is the body's option value — kept
+            // alive, it can still chump on a later turn when life is dearer, or
+            // trade. This replaces a flat "losing the race, chump anything with
+            // power >= 2", which threw away a creature to save 2 life at any
+            // total. Stabilize keeps its own survival override above.
+            let should_chump_for_value =
+                priority == 0 && selected_blocker_value * CHUMP_OPTION_PREMIUM < upside;
             // CR 903.10a: Skip chumps that don't actually save under commander damage
             // (e.g. 1/1 in front of a 12/12 trample commander with 3 cmd-damage headroom).
             let chump_unsafe =
                 priority == 0 && commander_chump_unsafe(state, player, attacker_id, &[blocker_id]);
             let favorable_trade =
-                priority != 1 || selected_blocker_value <= attacker_value + damage_prevented as f64;
+                priority != 1 || selected_blocker_value <= attacker_value + upside;
             if !chump_unsafe
                 && ((priority > 0 && favorable_trade)
                     || should_chump_stabilize
-                    || should_chump_race)
+                    || should_chump_for_value)
             {
                 assignments.push((blocker_id, attacker_id));
                 used_blockers.insert(blocker_id);
                 blocked_attackers.insert(attacker_id);
+                remaining_incoming -= damage_prevented.min(unblocked_of(attacker_id));
             }
         }
     }
 
     // Gang-blocking pass (CR 509.1a): assign multiple blockers to a single attacker
-    // when no single blocker can kill it but combined power can.
-    // Only gang-block when the combined blocker value is less than the attacker value.
+    // that no single blocker handled. A value gang is chosen by resolving each
+    // candidate gang through `gang_exchange` — block-time triggers, both damage
+    // steps, and the attacker dividing its damage to kill the most blocker value
+    // (CR 510.1c) — and is declared only when the kill, the life saved and the
+    // denied connect payoff outweigh the blockers actually lost.
     for &(attacker_id, attacker_value) in &sorted_attackers {
         if blocked_attackers.contains(&attacker_id) {
             continue; // Already blocked
@@ -1895,46 +2003,26 @@ pub fn choose_blockers_with_profile(
             Some(a) => a,
             None => continue,
         };
-        let attacker_toughness = attacker.toughness.unwrap_or(0);
         let attacker_power = attacker.power.unwrap_or(0);
         let attacker_has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
-        let attacker_has_first_strike = attacker.has_keyword(&Keyword::FirstStrike)
-            || attacker.has_keyword(&Keyword::DoubleStrike);
         let attacker_has_trample = attacker.has_keyword(&Keyword::Trample);
 
         // Collect eligible unused blockers sorted by value (ascending = sacrifice cheapest)
-        let mut gang_candidates: Vec<(ObjectId, i32, f64)> = available_blockers
+        let mut gang_candidates: Vec<(ObjectId, f64)> = available_blockers
             .iter()
             .filter(|&&bid| {
                 !used_blockers.contains(&bid)
                     && can_block_with_engine_map(state, bid, attacker_id, valid_block_targets)
             })
-            .filter_map(|&bid| {
-                let b = state.objects.get(&bid)?;
-                Some((bid, b.power.unwrap_or(0), blocker_value(&bid)))
-            })
+            .map(|&bid| (bid, blocker_value(&bid)))
             .collect();
-        gang_candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        gang_candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Skip if any single blocker can already kill it (handled in second pass above).
-        // CR 509.1b: Exception — an attacker with a minimum-blocker floor MUST be
-        // gang-blocked even when a single blocker could kill it, because a lone
-        // block is an illegal declaration.
+        // An attacker a single blocker could kill but the second pass left unblocked
+        // was declined as a bad trade; a gang that loses less may still be worth it,
+        // so it is not skipped here.
+        // CR 509.1b: the declaration needs at least this many creatures on it.
         let needed_blockers = required_blockers(&attacker_id);
-        if needed_blockers <= 1
-            && gang_candidates.iter().any(|&(bid, _, _)| {
-                state
-                    .objects
-                    .get(&bid)
-                    .map(|b| {
-                        let (kills, _) = evaluate_block_outcome(b, attacker);
-                        kills
-                    })
-                    .unwrap_or(false)
-            })
-        {
-            continue;
-        }
 
         // CR 509.1b + CR 903.10a: the lethal-pressure test for the survival override
         // below. Hoisted above the two value heuristics that follow because both of
@@ -1961,91 +2049,9 @@ pub fn choose_blockers_with_profile(
         // the blockers is assigned to the player, and under deathtouch "lethal" is
         // only 1 per blocker (CR 702.2c), so a trampler's damage still lands.
         //
-        // The two heuristics below are value heuristics — correct when the question
-        // is "is this trade worth it", wrong when the question is "do I survive".
-        // They may only decline a block that is not the difference between living
-        // and losing (issue #7183).
-        let survival_route_is_live = floor_stabilize_route;
-
-        // CR 702.7b: If attacker has first strike and blocker doesn't, the blocker
-        // dies before dealing damage. Skip blockers that would die to first strike —
-        // they contribute no damage, so they cannot be counted toward a kill.
-        let effective_candidates: Vec<(ObjectId, i32, f64)> = gang_candidates
-            .iter()
-            .copied()
-            .filter(|&(bid, _, _)| {
-                if !attacker_has_first_strike {
-                    return true;
-                }
-                let b = match state.objects.get(&bid) {
-                    Some(b) => b,
-                    None => return false,
-                };
-                // Blocker survives first strike if it has first strike too,
-                // or if attacker can't kill it in the first strike step
-                b.has_keyword(&Keyword::FirstStrike)
-                    || b.has_keyword(&Keyword::DoubleStrike)
-                    || attacker_power < b.toughness.unwrap_or(0)
-            })
-            .collect();
-
-        // CR 702.2c: Deathtouch means any nonzero damage is lethal, so one
-        // blocker with deathtouch is enough — no need to gang-block.
-        // Also skip if attacker has deathtouch: every blocker dies, so
-        // gang-blocking just loses more creatures — unless the block is the
-        // player's only route to surviving the turn, where CR 510.1c makes the
-        // doomed block a full save anyway.
-        if attacker_has_deathtouch && !survival_route_is_live {
-            continue;
-        }
-
-        // Find minimum set of blockers whose combined power >= attacker toughness
-        let mut combined_power = 0;
-        let mut gang_set: Vec<ObjectId> = Vec::new();
-        let mut gang_value = 0.0;
-        for &(bid, power, value) in &effective_candidates {
-            combined_power += power;
-            gang_set.push(bid);
-            gang_value += value;
-            if combined_power >= attacker_toughness {
-                break;
-            }
-        }
-
-        // CR 509.1b: The declaration needs at least `needed_blockers` creatures on
-        // this attacker. Top the gang set up to that floor even when combined power
-        // already suffices — a short set is an illegal declaration, not a cheaper
-        // one. Loops rather than adding a single blocker: menace's floor is 2, but a
-        // `MinBlockers` restriction can require any number (Pathrazer of Ulamog
-        // requires 3), so one top-up is not enough (issue #7183).
-        // Damage-dealing candidates come first so the kill claim below stays honest.
-        // Only when a doomed block is still a full save (CR 510.1c) may the floor be
-        // filled out with blockers that die to first strike before dealing damage
-        // (CR 702.7b) — otherwise a legal, life-saving declaration is impossible to
-        // reach for a floored first- or double-striker at all.
-        while gang_set.len() < needed_blockers {
-            let next = effective_candidates
-                .iter()
-                .find(|(bid, _, _)| !gang_set.contains(bid))
-                .copied()
-                .or_else(|| {
-                    if !survival_route_is_live {
-                        return None;
-                    }
-                    // Contributes no damage, so it is added with zero power: it pads
-                    // the CR 509.1b floor without inflating `combined_power`.
-                    gang_candidates
-                        .iter()
-                        .find(|(bid, _, _)| !gang_set.contains(bid))
-                        .map(|&(bid, _, value)| (bid, 0, value))
-                });
-            let Some((bid, power, value)) = next else {
-                break;
-            };
-            combined_power += power;
-            gang_set.push(bid);
-            gang_value += value;
-        }
+        // The value gang below answers "is this trade worth it"; the survival gang
+        // answers "do I survive". Neither may decline a block that is the
+        // difference between living and losing (issue #7183).
 
         // The engine owns this calculation. `combat_damage_to_defender` models both
         // damage steps (CR 702.4b), the blockers a first striker removes between them
@@ -2088,10 +2094,7 @@ pub fn choose_blockers_with_profile(
         // nontrampler any legal block already prevents everything (CR 510.1c), so the
         // cheapest bodies are correct there and the existing value order stands.
         let survival_gang: Option<Vec<ObjectId>> = if floor_stabilize_route {
-            let mut pool: Vec<(ObjectId, f64)> = gang_candidates
-                .iter()
-                .map(|&(bid, _, value)| (bid, value))
-                .collect();
+            let mut pool: Vec<(ObjectId, f64)> = gang_candidates.clone();
             if attacker_has_trample {
                 pool.sort_by(|a, b| {
                     let absorb = |bid: ObjectId| {
@@ -2173,15 +2176,75 @@ pub fn choose_blockers_with_profile(
             })
         };
 
-        // CR 702.2c: never gang a deathtouch attacker for *value* — every blocker
-        // assigned any damage dies, so the kill is paid for with the whole gang.
-        // Preserves the pre-existing skip for deathtouch attackers now that the
-        // survival route no longer short-circuits them out of the pass.
-        let gang_kills_for_value = !attacker_has_deathtouch
-            && combined_power >= attacker_toughness
-            && gang_value <= attacker_value
-            && gang_set.len() >= needed_blockers
-            && !reflects_damage(&gang_set);
+        // Value gang: the candidate gang whose exchange nets the most. The attacker
+        // must die, and what that kill is worth — plus the life the block saves and
+        // the connect payoff it denies — must exceed the blockers the attacker
+        // actually kills. Pricing the real losses (not the whole gang) is what makes
+        // a double block of two 2/2s into a 3/3 correct, and the block-time triggers
+        // in `gang_exchange` are what make the same double block into a 2/2 with
+        // flanking wrong (both blockers shrink to 1/1 and the flanker kills both).
+        // Reflecting blockers hand the attacker's damage back to the player, so they
+        // never join a value gang.
+        let value_gang: Option<Vec<ObjectId>> = {
+            let pool: Vec<ObjectId> = gang_candidates
+                .iter()
+                .filter(|(bid, _)| {
+                    state
+                        .objects
+                        .get(bid)
+                        .is_some_and(|b| !has_damage_reflection_to_controller(b))
+                })
+                .map(|&(bid, _)| bid)
+                .take(GANG_SEARCH_POOL)
+                .collect();
+            let min_size = needed_blockers.max(2);
+            let max_size = GANG_MAX_SIZE.max(min_size).min(pool.len());
+            let connect = connect_trigger_value(attacker);
+            let mut best: Option<(f64, Vec<ObjectId>)> = None;
+            for size in min_size..=max_size {
+                for gang in combinations(&pool, size) {
+                    let Some(outcome) = gang_exchange(
+                        state,
+                        attacker_id,
+                        &gang,
+                        BlockTriggers::Project,
+                        &BOTH_DAMAGE_STEPS,
+                        |id| blocker_value(&id),
+                    ) else {
+                        continue;
+                    };
+                    if !outcome.attacker_dies {
+                        continue;
+                    }
+                    let lost: f64 = outcome.killed.iter().map(blocker_loss).sum();
+                    let through = damage_through(&gang);
+                    // A gang that still lets lethal damage through saves nothing that
+                    // matters; the survival route owns that question.
+                    if through >= effective_life {
+                        continue;
+                    }
+                    // CR 510.1c: a gang that lets nothing through denies the payoff.
+                    let denied = if through == 0 { connect } else { 0.0 };
+                    let prevented = (unblocked_damage - through).clamp(0, remaining_incoming);
+                    let life_saved =
+                        life_loss_cost(state, player, remaining_incoming, profile.stabilize_bias)
+                            - life_loss_cost(
+                                state,
+                                player,
+                                remaining_incoming - prevented,
+                                profile.stabilize_bias,
+                            );
+                    let net = attacker_value + life_saved + denied - lost;
+                    let better = best.as_ref().is_none_or(|(best_net, best_gang)| {
+                        net > *best_net || (net == *best_net && gang.len() < best_gang.len())
+                    });
+                    if net > 0.0 && better {
+                        best = Some((net, gang));
+                    }
+                }
+            }
+            best.map(|(_, gang)| gang)
+        };
 
         // The survival route already proved its own set legal and lethal-averting;
         // it only remains to reject the two shapes that save nothing.
@@ -2191,12 +2254,9 @@ pub fn choose_blockers_with_profile(
 
         // Gang-block to kill when the trade is worth it, else to survive. Never below
         // the CR 509.1b floor, which would make the declaration illegal.
-        let declared_gang = if gang_kills_for_value {
-            Some(gang_set)
-        } else {
-            stabilizing_gang
-        };
+        let declared_gang = value_gang.or(stabilizing_gang);
         if let Some(gang_set) = declared_gang {
+            remaining_incoming -= (unblocked_damage - damage_through(&gang_set)).max(0);
             for bid in gang_set {
                 assignments.push((bid, attacker_id));
                 used_blockers.insert(bid);
@@ -2330,6 +2390,46 @@ pub fn choose_blockers_with_profile(
     emit_block_trace(player, &available_blockers, &assignments);
     assignments
 }
+
+/// CR 510.1a + CR 702.4b: the combat damage `attacker_id` deals the player if
+/// nothing blocks it, over both damage steps, from the engine's damage
+/// authority.
+fn unblocked_combat_damage(state: &GameState, attacker_id: ObjectId) -> i32 {
+    engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, &[])
+}
+
+/// The cheapest this many unused blockers are searched for a value gang.
+const GANG_SEARCH_POOL: usize = 6;
+/// Largest gang searched for value (a minimum-blocker floor can raise it).
+const GANG_MAX_SIZE: usize = 3;
+
+/// Every `size`-element subset of `pool`, in lexicographic index order.
+fn combinations(pool: &[ObjectId], size: usize) -> Vec<Vec<ObjectId>> {
+    if size == 0 || size > pool.len() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut indices: Vec<usize> = (0..size).collect();
+    loop {
+        out.push(indices.iter().map(|&i| pool[i]).collect());
+        // Advance the rightmost index that still has room to move.
+        let Some(slot) = (0..size)
+            .rev()
+            .find(|&k| indices[k] < pool.len() - size + k)
+        else {
+            return out;
+        };
+        indices[slot] += 1;
+        for k in slot + 1..size {
+            indices[k] = indices[k - 1] + 1;
+        }
+    }
+}
+
+/// A chump blocker must save more than its own value by this factor. A body kept
+/// alive can still chump on a later turn, when each point of life is worth more,
+/// so spending it now needs a margin over its face value.
+const CHUMP_OPTION_PREMIUM: f64 = 1.5;
 
 /// CR 510.1c + CR 903.10a: Returns true when blocking `attacker` with a single creature of
 /// `chump_toughness` would NOT prevent commander-damage lethality. For non-commander attackers
@@ -2954,7 +3054,7 @@ where
             // CR 702.7b + CR 702.4b + CR 702.2c: keyword-aware outcome (first
             // strike, double strike, deathtouch), not a raw P/T comparison.
             let (blocker_kills_attacker, blocker_survives) =
-                evaluate_block_outcome(blocker, attacker);
+                evaluate_block_outcome(state, blocker, attacker);
             // Defender utility: the attacker value it removes (only if the block
             // is lethal) minus the value of its own blocker (only if that blocker
             // dies). A free kill scores `attacker_value`; a trade nets the
@@ -3013,6 +3113,16 @@ impl BlockStats {
                 || obj.has_keyword(&Keyword::Infect),
             indestructible: obj.has_keyword(&Keyword::Indestructible),
         }
+    }
+
+    /// CR 509.1h + CR 603.3: the stats a block-time trigger (flanking, bushido,
+    /// rampage, a printed "blocks or becomes blocked" pump) leaves the creature
+    /// with. Those triggers resolve in the declare blockers step, before combat
+    /// damage, so the exchange is fought at the shifted stats.
+    fn shifted(mut self, shift: PtShift) -> Self {
+        self.power += shift.power;
+        self.toughness += shift.toughness;
+        self
     }
 
     /// Synthetic body for a latent man-land — a hypothetical future permanent
@@ -3109,9 +3219,23 @@ fn block_exchange(blocker: &BlockStats, attacker: &BlockStats) -> (bool, bool) {
     let mut atk = Combatant::new(attacker);
     let mut blk = Combatant::new(blocker);
 
+    // CR 704.5f + CR 704.5g: a block-time trigger can leave a creature dead
+    // before any damage is dealt (flanking takes a 1/1 blocker to 0 toughness).
+    // It is put into the graveyard by state-based actions and assigns nothing.
+    let atk_dead_0 = atk.dead();
+    let blk_dead_0 = blk.dead();
+
     // Step 1 (CR 510.1a) — only first/double strikers assign, simultaneously.
-    let a_p1 = if a_first { atk.power() } else { 0 };
-    let b_p1 = if b_first { blk.power() } else { 0 };
+    let a_p1 = if a_first && !atk_dead_0 {
+        atk.power()
+    } else {
+        0
+    };
+    let b_p1 = if b_first && !blk_dead_0 {
+        blk.power()
+    } else {
+        0
+    };
     blk.take_hit(a_p1, attacker.deathtouch, attacker.damage_as_counters);
     atk.take_hit(b_p1, blocker.deathtouch, blocker.damage_as_counters);
     let atk_dead_1 = atk.dead();
@@ -3129,15 +3253,288 @@ fn block_exchange(blocker: &BlockStats, attacker: &BlockStats) -> (bool, bool) {
     (atk.dead(), !blk.dead())
 }
 
-/// Evaluate whether a single blocker kills the attacker and/or survives combat.
+/// Evaluate whether a single blocker kills the attacker and/or survives combat,
+/// at the stats the pair's block-time triggers leave them with (CR 509.1h +
+/// CR 603.3): flanking shrinks the blocker, bushido grows either side.
 fn evaluate_block_outcome(
+    state: &GameState,
     blocker: &engine::game::game_object::GameObject,
     attacker: &engine::game::game_object::GameObject,
 ) -> (bool, bool) {
+    let shifts = block_trigger_shifts(state, attacker.id, &[blocker.id]);
     block_exchange(
-        &BlockStats::from_object(blocker),
-        &BlockStats::from_object(attacker),
+        &BlockStats::from_object(blocker).shifted(shifts.blockers[0]),
+        &BlockStats::from_object(attacker).shifted(shifts.attacker),
     )
+}
+
+/// What a gang block costs and gains, from [`gang_exchange`].
+struct GangOutcome {
+    /// Whether the blockers kill the attacker.
+    attacker_dies: bool,
+    /// The blockers the attacker kills, when it divides its damage to destroy
+    /// as much blocker value as it can.
+    killed: Vec<ObjectId>,
+}
+
+/// Above this many blockers, the attacker's damage division is chosen
+/// greedily instead of exhaustively (2^n subsets).
+const GANG_EXACT_DIVISION_LIMIT: usize = 8;
+
+/// CR 509.1a + CR 510.1c: resolves one attacker against several blockers,
+/// through both combat damage steps (CR 510.1a, CR 702.7b, CR 702.4b), at the
+/// stats their block-time triggers leave them with (CR 509.1h + CR 603.3).
+///
+/// Every blocker assigns its full power to the attacker. The attacker's
+/// controller divides its damage among the blockers as they choose (CR 510.1c),
+/// and is assumed to kill the most blocker value its power allows. That is the
+/// pessimistic reading the defender must plan for. Lethal per blocker counts
+/// damage already marked and deathtouch (CR 702.2c: any damage is lethal).
+fn gang_exchange<F>(
+    state: &GameState,
+    attacker_id: ObjectId,
+    blocker_ids: &[ObjectId],
+    triggers: BlockTriggers,
+    steps: &[DamageStep],
+    value_for: F,
+) -> Option<GangOutcome>
+where
+    F: Fn(ObjectId) -> f64,
+{
+    let attacker = state.objects.get(&attacker_id)?;
+    let blockers: Vec<&engine::game::game_object::GameObject> = blocker_ids
+        .iter()
+        .map(|id| state.objects.get(id))
+        .collect::<Option<_>>()?;
+    let shifts = match triggers {
+        BlockTriggers::Project => block_trigger_shifts(state, attacker_id, blocker_ids),
+        BlockTriggers::AlreadyApplied => BlockShifts {
+            attacker: PtShift::default(),
+            blockers: vec![PtShift::default(); blocker_ids.len()],
+        },
+    };
+    let attacker_stats = BlockStats::from_object(attacker).shifted(shifts.attacker);
+    let blocker_stats: Vec<BlockStats> = blockers
+        .iter()
+        .zip(&shifts.blockers)
+        .map(|(obj, &shift)| BlockStats::from_object(obj).shifted(shift))
+        .collect();
+    let values: Vec<f64> = blocker_ids.iter().map(|&id| value_for(id)).collect();
+
+    let mut atk = Combatant::new(&attacker_stats);
+    let mut blks: Vec<Combatant<'_>> = blocker_stats.iter().map(Combatant::new).collect();
+
+    // CR 704.5f + CR 704.5g: creatures a block-time trigger already killed
+    // deal no damage.
+    let a_first = attacker_stats.first_strike || attacker_stats.double_strike;
+    let mut atk_alive = !atk.dead();
+    let mut blk_alive: Vec<bool> = blks.iter().map(|b| !b.dead()).collect();
+
+    for &step in steps {
+        let atk_deals = atk_alive
+            && match step {
+                DamageStep::First => a_first,
+                DamageStep::Regular => attacker_stats.double_strike || !a_first,
+            };
+        let atk_power = if atk_deals { atk.power() } else { 0 };
+        let blocker_hits: Vec<(i32, bool, bool)> = blks
+            .iter()
+            .zip(&blk_alive)
+            .map(|(b, &alive)| {
+                let first = b.stats.first_strike || b.stats.double_strike;
+                let deals = alive
+                    && match step {
+                        DamageStep::First => first,
+                        DamageStep::Regular => b.stats.double_strike || !first,
+                    };
+                (
+                    if deals { b.power() } else { 0 },
+                    b.stats.deathtouch,
+                    b.stats.damage_as_counters,
+                )
+            })
+            .collect();
+
+        // CR 510.1c: the attacker divides its damage among the blockers.
+        let lethal: Vec<Option<i32>> = blks
+            .iter()
+            .zip(&blk_alive)
+            .map(|(b, &alive)| alive.then(|| lethal_for(b, &attacker_stats)))
+            .collect();
+        for index in kill_division(atk_power, &lethal, &values) {
+            let needed = lethal[index].unwrap_or(0);
+            blks[index].take_hit(
+                needed,
+                attacker_stats.deathtouch,
+                attacker_stats.damage_as_counters,
+            );
+        }
+        // CR 510.2: all combat damage in a step is dealt simultaneously.
+        for (amount, deathtouch, as_counters) in blocker_hits {
+            atk.take_hit(amount, deathtouch, as_counters);
+        }
+        atk_alive = atk_alive && !atk.dead();
+        for (alive, b) in blk_alive.iter_mut().zip(&blks) {
+            *alive = *alive && !b.dead();
+        }
+    }
+
+    Some(GangOutcome {
+        attacker_dies: !atk_alive,
+        killed: blocker_ids
+            .iter()
+            .zip(&blk_alive)
+            .filter(|(_, &alive)| !alive)
+            .map(|(&id, _)| id)
+            .collect(),
+    })
+}
+
+/// Whether an exchange should project block-time triggers onto the combatants.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockTriggers {
+    /// A hypothetical block: the triggers have not fired yet, so project them.
+    Project,
+    /// Blockers are already declared, so any block-time trigger has already
+    /// resolved and its pump is part of the current P/T. A trigger still on the
+    /// stack is not projected. That errs toward the stats printed right now.
+    AlreadyApplied,
+}
+
+/// CR 509.1h + CR 510.1c: whether `creature_id` dies in the combat damage still
+/// to come in this combat, given the blocks already declared. Stated in the
+/// same exchange model the blocking AI plans with, so the two never disagree.
+/// Used to tell when giving up a creature costs nothing, e.g. sacrificing a
+/// blocked Mogg Fanatic for its ping before damage kills it anyway.
+pub(crate) fn creature_dies_in_current_combat(state: &GameState, creature_id: ObjectId) -> bool {
+    // Blocks exist only from the declare blockers step on (CR 509.1); combat
+    // damage is dealt at the start of the damage step (CR 510.1), and a
+    // first-strike step leaves the regular damage still to come (CR 510.4).
+    if !matches!(state.phase, Phase::DeclareBlockers | Phase::CombatDamage) {
+        return false;
+    }
+    let Some(combat) = state.combat.as_ref() else {
+        return false;
+    };
+    // Only damage still to come can kill: damage already dealt is marked on the
+    // survivors (and the dead are gone), so re-simulating a finished step would
+    // count it twice.
+    if combat.regular_damage_done {
+        return false;
+    }
+    let steps: &[DamageStep] = if combat.first_strike_done {
+        &[DamageStep::Regular]
+    } else {
+        &BOTH_DAMAGE_STEPS
+    };
+    let value_for = |id: ObjectId| evaluate_creature(state, id);
+    let exchange_of = |attacker_id: ObjectId| -> Option<GangOutcome> {
+        let blockers = combat.blocker_assignments.get(&attacker_id)?;
+        if blockers.is_empty() {
+            return None;
+        }
+        gang_exchange(
+            state,
+            attacker_id,
+            blockers,
+            BlockTriggers::AlreadyApplied,
+            steps,
+            value_for,
+        )
+    };
+    if let Some(outcome) = exchange_of(creature_id) {
+        return outcome.attacker_dies;
+    }
+    combat
+        .blocker_to_attacker
+        .get(&creature_id)
+        .is_some_and(|attackers| {
+            attackers.iter().any(|&attacker_id| {
+                exchange_of(attacker_id)
+                    .is_some_and(|outcome| outcome.killed.contains(&creature_id))
+            })
+        })
+}
+
+/// CR 510.4: the combat damage steps, in order. A first step in which no
+/// creature has first or double strike deals nothing, so running both is safe.
+#[derive(Clone, Copy)]
+enum DamageStep {
+    First,
+    Regular,
+}
+
+const BOTH_DAMAGE_STEPS: [DamageStep; 2] = [DamageStep::First, DamageStep::Regular];
+
+/// CR 702.19b + CR 702.2c: the damage `attacker` must assign to kill `blocker`
+/// from its current state, matching `Combatant::dead`.
+fn lethal_for(blocker: &Combatant<'_>, attacker: &BlockStats) -> i32 {
+    if blocker.stats.indestructible {
+        if !attacker.damage_as_counters {
+            // CR 702.12b: damage never destroys it, deathtouch included.
+            return i32::MAX;
+        }
+        // CR 702.12b + CR 704.5f: only 0 toughness removes it, so wither /
+        // infect counters (CR 702.80a / 702.90c) must reach it; marked damage
+        // and deathtouch's destroy do not help.
+        return blocker.toughness().max(1);
+    }
+    if attacker.deathtouch {
+        return 1; // CR 702.2c
+    }
+    // CR 704.5g: marked damage is checked against current toughness, so it
+    // counts toward the threshold whether the new damage is marked or lowers
+    // toughness as counters (CR 704.5f at 0).
+    (blocker.toughness() - blocker.marked).max(1)
+}
+
+/// The blockers `power` damage kills when divided to destroy the most value:
+/// the value-maximising subset whose lethal thresholds fit in `power`. `None`
+/// in `lethal` marks a blocker that is already dead.
+fn kill_division(power: i32, lethal: &[Option<i32>], values: &[f64]) -> Vec<usize> {
+    if power <= 0 {
+        return Vec::new();
+    }
+    let live: Vec<usize> = (0..lethal.len())
+        .filter(|&i| lethal[i].is_some_and(|needed| needed <= power))
+        .collect();
+    if live.len() > GANG_EXACT_DIVISION_LIMIT {
+        let mut order = live;
+        order.sort_by(|&a, &b| values[b].total_cmp(&values[a]));
+        let mut left = power;
+        return order
+            .into_iter()
+            .filter(|&i| {
+                let needed = lethal[i].unwrap_or(i32::MAX);
+                let fits = needed <= left;
+                if fits {
+                    left -= needed;
+                }
+                fits
+            })
+            .collect();
+    }
+    let mut best: (f64, Vec<usize>) = (0.0, Vec::new());
+    for mask in 1u32..(1u32 << live.len()) {
+        let chosen: Vec<usize> = live
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| mask & (1 << bit) != 0)
+            .map(|(_, &i)| i)
+            .collect();
+        let spent: i64 = chosen
+            .iter()
+            .map(|&i| i64::from(lethal[i].unwrap_or(0)))
+            .sum();
+        if spent > i64::from(power) {
+            continue;
+        }
+        let value: f64 = chosen.iter().map(|&i| values[i]).sum();
+        if value > best.0 || (value == best.0 && chosen.len() > best.1.len()) {
+            best = (value, chosen);
+        }
+    }
+    best.1
 }
 
 /// CR 509.1a: man-lands the defender could still animate this combat, as latent
@@ -3214,6 +3611,9 @@ fn latent_body_can_block(
 
 /// CR 509.1a: the block a rational defender would make with one of its latent
 /// man-land bodies — the analog of [`defender_best_block`] over synthetic bodies.
+/// Block-time triggers are not projected here: a synthetic body has no
+/// `ObjectId` to match trigger filters against, and the latent block is already
+/// discounted by `latent_blocker_credence`.
 fn latent_defender_best_block(
     state: &GameState,
     attacker_id: ObjectId,
@@ -3407,7 +3807,10 @@ fn should_attack_ev(input: &AttackEvInputs<'_>) -> bool {
     }
 
     let lifelink_bonus = if has_lifelink { 0.5 } else { 0.0 };
-    let expected_dmg = power * (1.0 - p_block_any) * (1.0 + lifelink_bonus);
+    // CR 510.1 + CR 509.1h: a connect payoff ("deals combat damage to a player",
+    // "attacks and isn't blocked") lands exactly when the damage does.
+    let connect = connect_trigger_value(input.attacker);
+    let expected_dmg = (power * (1.0 + lifelink_bonus) + connect) * (1.0 - p_block_any);
 
     let upside = match input.objective {
         CombatObjective::Race => RACE_ATTACK_UPSIDE,
@@ -4140,10 +4543,13 @@ mod tests {
         );
     }
 
-    /// The reservation only withholds a blocker that actually has a trade. With
-    /// nothing on the board it can kill, the Race chump behaviour is unchanged.
+    /// With nothing on the board it can kill, the reservation withholds nothing,
+    /// and whether the 4/2 chumps the 6/6 is decided by what the life is worth.
+    /// In the Race band at a healthy 22 that is not a creature: 6 damage leaves
+    /// the player well clear of the clock (the old flat Race rule chumped anyway,
+    /// throwing the body away). Under lethal pressure the chump is still taken.
     #[test]
-    fn chump_still_taken_when_no_trade_exists() {
+    fn chump_only_taken_when_the_life_is_worth_the_creature() {
         let mut state = setup();
         let wall = add_creature(&mut state, PlayerId(0), "Wall", 2, 5, vec![]);
         let ogre = add_creature(&mut state, PlayerId(0), "Ogre", 6, 6, vec![]);
@@ -4155,12 +4561,17 @@ mod tests {
             CombatObjective::Race,
             "life 22 vs incoming 8 over own board power 4 must land in the Race band"
         );
-
         let blockers = choose_blockers(&state, PlayerId(1), &[wall, ogre]);
+        assert!(
+            blockers.is_empty(),
+            "at 22 life the 4/2 is worth more than 6 damage, got {blockers:?}"
+        );
 
+        state.players[1].life = 9;
+        let blockers = choose_blockers(&state, PlayerId(1), &[wall, ogre]);
         assert!(
             blockers.contains(&(blocker, ogre)),
-            "with no trade available the 4/2 should still chump the 6/6, got {blockers:?}"
+            "at 9 life facing 8 power the 4/2 must chump the 6/6, got {blockers:?}"
         );
     }
 
@@ -8047,13 +8458,15 @@ mod tests {
     }
 
     /// The survival override is scoped to lethal pressure: at a comfortable life
-    /// total the AI must still decline an unprofitable gang block rather than
-    /// throwing three 4/4s at a 5/5. Guards against the fix over-blocking.
+    /// total the AI must still decline an unprofitable gang block. Three 4/4s
+    /// cannot kill a 5/13, so the block only feeds it a 4/4. Guards against the
+    /// fix over-blocking. (A 5/5 would be a correct value gang now: it kills
+    /// only one of the three 4/4s that kill it.)
     #[test]
     fn min_blockers_attacker_is_not_gang_blocked_when_not_under_pressure() {
         let mut state = setup();
         state.players[1].life = 40;
-        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 5, 5, vec![]);
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 5, 13, vec![]);
         add_min_blockers_restriction(&mut state, attacker, 3);
         for i in 0..10 {
             add_creature(
@@ -8070,8 +8483,8 @@ mod tests {
 
         assert!(
             assignments.is_empty(),
-            "at 40 life a 5/5 is not worth three 4/4s — the survival override must not \
-             fire outside Stabilize. Got {assignments:?}"
+            "at 40 life a gang that cannot kill the 5/13 only loses a 4/4 — the survival \
+             override must not fire outside Stabilize. Got {assignments:?}"
         );
     }
 
@@ -8349,6 +8762,14 @@ mod tests {
     /// in the first step and never reaches the second. Two creatures, same result.
     ///
     /// Guards the shrink pass; without it the AI sacrifices a blocker it did not need.
+    ///
+    /// Superseded on this board by the value gang: the third blocker is NOT spent.
+    /// The attacker's 10 first-step damage can kill a wall and the deathtoucher
+    /// (6 + 1) but never both walls (12), and it dies before its second strike, so
+    /// all three blockers lose exactly what two lose while holding the damage to 0
+    /// instead of 3 (CR 510.1c: the attacker divides its damage). The shrink pass
+    /// stays covered by the menace deathtouch trampler tests, which have no value
+    /// gang.
     #[test]
     fn survival_gang_drops_blockers_the_rest_of_the_gang_makes_redundant() {
         let mut state = setup();
@@ -8381,9 +8802,9 @@ mod tests {
             .collect();
         assert_eq!(
             on_attacker.len(),
-            2,
-            "one wall plus the first-strike deathtoucher already holds this to 3 \
-             against 4 life — the third blocker is spent for nothing. Got \
+            3,
+            "the attacker can kill one wall and the deathtoucher at most, so the second \
+             wall costs nothing and absorbs the 3 that would trample over. Got \
              {assignments:?}"
         );
         // Still a legal declaration against the CR 702.111b menace floor.
@@ -8819,7 +9240,8 @@ mod tests {
         let attacker = state.objects.get(&atk).unwrap();
         let blocker = state.objects.get(&blk).unwrap();
 
-        let (blocker_kills_attacker, blocker_survives) = evaluate_block_outcome(blocker, attacker);
+        let (blocker_kills_attacker, blocker_survives) =
+            evaluate_block_outcome(&state, blocker, attacker);
         assert!(
             blocker_kills_attacker,
             "the 3/3 first striker kills the 2/2 double striker in the first step"
@@ -8839,6 +9261,7 @@ mod tests {
         state.objects.get_mut(&blk).unwrap().damage_marked = 2;
 
         let (_, blocker_survives) = evaluate_block_outcome(
+            &state,
             state.objects.get(&blk).unwrap(),
             state.objects.get(&atk).unwrap(),
         );
@@ -8863,6 +9286,7 @@ mod tests {
         );
 
         let (blocker_kills_attacker, blocker_survives) = evaluate_block_outcome(
+            &state,
             state.objects.get(&blk).unwrap(),
             state.objects.get(&atk).unwrap(),
         );
@@ -8900,6 +9324,7 @@ mod tests {
         );
 
         let (_, blocker_survives) = evaluate_block_outcome(
+            &state,
             state.objects.get(&blk).unwrap(),
             state.objects.get(&atk).unwrap(),
         );
@@ -8907,6 +9332,74 @@ mod tests {
             !blocker_survives,
             "three -1/-1 counters take the indestructible 3/3 to 0 toughness — it dies"
         );
+    }
+
+    #[test]
+    fn wither_division_counts_marked_damage_toward_lethal() {
+        // CR 704.5g: marked damage is checked against current toughness, so a
+        // 3/3 with 2 damage marked dies to a single -1/-1 counter (toughness 2,
+        // 2 marked). A 2-power wither attacker divides its damage to kill it,
+        // the more valuable blocker, rather than the fresh 2/2.
+        let mut state = setup();
+        let atk = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Blight",
+            2,
+            2,
+            vec![Keyword::Wither],
+        );
+        let wounded = add_creature(&mut state, PlayerId(1), "Wounded", 3, 3, vec![]);
+        state.objects.get_mut(&wounded).unwrap().damage_marked = 2;
+        let bear = add_creature(&mut state, PlayerId(1), "Bear", 2, 2, vec![]);
+
+        let outcome = gang_exchange(
+            &state,
+            atk,
+            &[wounded, bear],
+            BlockTriggers::Project,
+            &BOTH_DAMAGE_STEPS,
+            |id| if id == wounded { 10.0 } else { 1.0 },
+        )
+        .unwrap();
+        assert_eq!(outcome.killed, vec![wounded]);
+    }
+
+    #[test]
+    fn deathtouch_counters_need_zero_toughness_against_indestructible() {
+        // CR 702.12b: deathtouch's destroy does not remove an indestructible
+        // creature; only reaching 0 toughness does (CR 704.5f). A 1-power
+        // deathtouch infect attacker cannot kill an indestructible 3/3, so it
+        // spends its damage on the 1/1 it can kill.
+        let mut state = setup();
+        let atk = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Needle",
+            1,
+            1,
+            vec![Keyword::Deathtouch, Keyword::Infect],
+        );
+        let rock = add_creature(
+            &mut state,
+            PlayerId(1),
+            "Rock",
+            3,
+            3,
+            vec![Keyword::Indestructible],
+        );
+        let token = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+
+        let outcome = gang_exchange(
+            &state,
+            atk,
+            &[rock, token],
+            BlockTriggers::Project,
+            &BOTH_DAMAGE_STEPS,
+            |id| if id == rock { 10.0 } else { 1.0 },
+        )
+        .unwrap();
+        assert_eq!(outcome.killed, vec![token]);
     }
 
     #[test]
@@ -8926,6 +9419,7 @@ mod tests {
         let blk = add_creature(&mut state, PlayerId(1), "Bear", 3, 3, vec![]);
 
         let (blocker_kills_attacker, blocker_survives) = evaluate_block_outcome(
+            &state,
             state.objects.get(&blk).unwrap(),
             state.objects.get(&atk).unwrap(),
         );

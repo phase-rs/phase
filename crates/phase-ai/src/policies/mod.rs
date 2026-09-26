@@ -61,7 +61,7 @@ mod sacrifice_cost_mana_gate;
 mod sacrifice_land_protection;
 mod sacrifice_value;
 mod self_bounce_target;
-mod self_cost;
+pub(crate) mod self_cost;
 mod self_cost_value;
 mod self_protection_classify;
 mod self_untap_loop;

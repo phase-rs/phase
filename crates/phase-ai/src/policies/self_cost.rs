@@ -41,6 +41,7 @@
 //! (`self_cost_value.rs`) fetches the activated ability and turns these
 //! predicates into a `PolicyVerdict`.
 
+use engine::game::casting::{find_one_of_cost, one_of_branch_payable_in};
 use engine::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
 use engine::game::effects::draw::{preview_draw_delivery, DrawDeliveryPreview};
 use engine::game::filter::{matches_target_filter, FilterContext};
@@ -191,9 +192,56 @@ fn self_counter_removal_cost(cost: &AbilityCost) -> Option<(u32, &CounterType)> 
     }
 }
 
+/// CR 118.3 + CR 601.2h + CR 602.2b: `cost` with each choice between costs
+/// settled on the cheapest branch (by [`real_self_cost`]) that the player can
+/// actually pay. Payability is the engine's activation authority, judged inside
+/// the whole cost and including mana, so a `{2}` branch without the mana to
+/// pay it is not an option. A choice with no payable branch stays unresolved.
+///
+/// Callers that price an activation and then ask what paying it gives up (the
+/// option premium, materiality) read this one resolved cost, so every question
+/// is answered about the branch the AI would actually pay.
+pub(crate) fn resolve_payable_cost(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: Option<usize>,
+    penalties: &PolicyPenalties,
+) -> AbilityCost {
+    let mut resolved = cost.clone();
+    while let Some(branches) = find_one_of_cost(&resolved) {
+        let cheapest = branches
+            .iter()
+            .filter(|branch| {
+                one_of_branch_payable_in(
+                    state,
+                    ai_player,
+                    source_id,
+                    &resolved,
+                    branch,
+                    ability_index,
+                )
+            })
+            .filter_map(|branch| resolved.resolve_first_one_of(branch))
+            .map(|candidate| {
+                let price = real_self_cost(state, ai_player, source_id, &candidate, penalties);
+                (price, candidate)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        match cheapest {
+            Some((_, candidate)) => resolved = candidate,
+            None => break,
+        }
+    }
+    resolved
+}
+
 /// Price the self-inflicted portion of `cost` in card-equivalent units.
 /// `Composite` sums its sub-costs (you pay them all); `OneOf` takes the minimum
 /// (the payer chooses the cheapest). Out-of-scope sub-costs (mana, tap) price 0.
+/// This `OneOf` reading ignores payability; settle choices first with
+/// [`resolve_payable_cost`] when pricing a real activation.
 pub(crate) fn real_self_cost(
     state: &GameState,
     ai_player: PlayerId,
@@ -341,6 +389,10 @@ fn sacrifice_leaf_cost(
     penalties: &PolicyPenalties,
 ) -> f64 {
     if matches!(target, TargetFilter::SelfRef) {
+        // A source that is leaving anyway is given up for nothing extra.
+        if source_is_doomed(state, ai_player, source_id) {
+            return 0.0;
+        }
         return sacrifice_cost(state, source_id, penalties);
     }
     let filter_ctx = FilterContext::from_source(state, source_id);
@@ -572,6 +624,21 @@ fn effect_benefit_value(
             resolve_quantity(state, amount, ai_player, source_id).max(0) as f64
                 * penalties.self_cost_pay_life_per_point,
         ),
+        // CR 120.3e + CR 704.5g: a small fixed ping whose only real payoff is a
+        // creature kill (the classifier found it non-trivial below the face
+        // ceiling and not lethal to a player) is worth the best opposing creature
+        // it kills, priced like any permanent given up. Larger or lethal-to-player
+        // damage stays unpriced: its payoff is not a single creature.
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value },
+            target,
+            ..
+        } if *value <= FACE_DAMAGE_TRIVIAL_CEILING
+            && !(filter_admits_player(target)
+                && damage_lethal_to_opponent(state, ai_player, *value)) =>
+        {
+            best_creature_kill_value(state, ai_player, source_id, target, *value, penalties)
+        }
         // CR 707.2 + CR 202.3: a token copy of a creature card with the chosen
         // mana value. Priced X-AGNOSTICALLY at one card-equivalent: at the
         // activation decision the player has not announced X yet
@@ -1034,8 +1101,8 @@ fn damage_lethal_to_opponent(state: &GameState, ai_player: PlayerId, value: i32)
     })
 }
 
-/// True when `value` fixed damage would be lethal to at least one opponent
-/// creature the filter admits (via `lethal_to_creature`).
+/// True when `value` fixed damage from `source_id` would be lethal to at
+/// least one opposing creature it can legally target.
 fn damage_kills_creature(
     state: &GameState,
     ai_player: PlayerId,
@@ -1043,23 +1110,58 @@ fn damage_kills_creature(
     target: &TargetFilter,
     value: i32,
 ) -> bool {
+    killable_opposing_creatures(state, ai_player, source_id, target, value)
+        .next()
+        .is_some()
+}
+
+/// The value of the most valuable opposing creature `value` fixed damage kills
+/// among those `target` admits, or `None` when it kills none (so the chain is
+/// not priced off a kill that is not there).
+fn best_creature_kill_value(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    target: &TargetFilter,
+    value: i32,
+    penalties: &PolicyPenalties,
+) -> Option<f64> {
+    killable_opposing_creatures(state, ai_player, source_id, target, value)
+        .map(|id| sacrifice_cost(state, id, penalties))
+        .max_by(f64::total_cmp)
+}
+
+/// CR 115.2 + CR 702.16b: the opposing creatures `source_id` can legally
+/// target under `target` (the engine's targeting authority, so hexproof,
+/// shroud and protection from the source's qualities are honoured) that
+/// `value` fixed damage kills.
+fn killable_opposing_creatures<'a>(
+    state: &'a GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    target: &TargetFilter,
+    value: i32,
+) -> impl Iterator<Item = ObjectId> + 'a {
+    use engine::types::ability::TargetRef;
     let opponents = players::opponents(state, ai_player);
-    let filter_ctx = FilterContext::from_source(state, source_id);
     let damage = Effect::DealDamage {
         amount: QuantityExpr::Fixed { value },
         target: TargetFilter::Any,
         damage_source: None,
         excess: None,
     };
-    state.battlefield.iter().any(|&id| {
-        let Some(obj) = state.objects.get(&id) else {
-            return false;
-        };
-        opponents.contains(&obj.controller)
-            && obj.card_types.core_types.contains(&CoreType::Creature)
-            && matches_target_filter(state, id, target, &filter_ctx)
-            && lethal_to_creature(state, id, &[&damage]) == Some(true)
-    })
+    engine::game::targeting::find_legal_targets(state, target, ai_player, source_id)
+        .into_iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .filter(move |id| {
+            state.objects.get(id).is_some_and(|obj| {
+                opponents.contains(&obj.controller)
+                    && obj.card_types.core_types.contains(&CoreType::Creature)
+            }) && lethal_to_creature(state, *id, &[&damage]) == Some(true)
+        })
 }
 
 fn removal_is_trivial(
@@ -1107,15 +1209,179 @@ fn put_counter_fizzles(
         .is_some_and(|cost| sacrifice_must_remove_source(state, ai_player, source_id, cost))
 }
 
+/// True when the source is about to leave the battlefield regardless of what
+/// the AI does with it, so sacrificing it for value surrenders nothing:
+///
+/// - CR 509.1h + CR 510.1c: blockers are declared and the combat damage still
+///   to come kills it (a blocked Mogg Fanatic, a chump blocker).
+/// - CR 115.1 + CR 117.1b: an opponent's spell or ability on the stack
+///   targets it with an unconditional effect that removes it from the battlefield or is
+///   provably lethal to it. Sacrificing in response is the classic answer to
+///   removal; a harmless or beneficial targeted effect dooms nothing.
+pub(crate) fn source_is_doomed(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    use engine::types::ability::TargetRef;
+    if crate::combat_ai::creature_dies_in_current_combat(state, source_id) {
+        return true;
+    }
+    state.stack.iter().any(|entry| {
+        entry.controller != ai_player
+            && entry.ability().is_some_and(|ability| {
+                // Only the links of the chain that target the source act on it.
+                // CR 608.2c: a link with a condition is skipped at resolution
+                // when the condition is false, and whether it holds is decided
+                // then, not now — so only unconditional links count as doom.
+                let mut aimed: Vec<&Effect> = Vec::new();
+                let mut link = Some(ability);
+                while let Some(current) = link {
+                    if current.condition.is_none()
+                        && current.targets.iter().any(
+                            |target| matches!(target, TargetRef::Object(id) if *id == source_id),
+                        )
+                    {
+                        aimed.push(&current.effect);
+                    }
+                    link = current.sub_ability.as_deref();
+                }
+                !aimed.is_empty() && effects_remove_creature(state, source_id, &aimed)
+            })
+    })
+}
+
+/// True when `effects`, all aimed at `creature_id`, take it off the
+/// battlefield: destroy (CR 701.8a) unless indestructible (CR 702.12b),
+/// bounce or exile or any other zone change away from the battlefield
+/// (CR 400.7), a change of control (CR 613.1b), or damage / toughness
+/// reduction that is provably lethal (CR 704.5f / 704.5g).
+fn effects_remove_creature(state: &GameState, creature_id: ObjectId, effects: &[&Effect]) -> bool {
+    let indestructible = state
+        .objects
+        .get(&creature_id)
+        .is_some_and(|obj| obj.has_keyword(&engine::types::keywords::Keyword::Indestructible));
+    effects.iter().any(|effect| match effect {
+        Effect::Destroy { .. } => !indestructible,
+        Effect::Bounce { .. } | Effect::GainControl { .. } => true,
+        Effect::ChangeZone { destination, .. } => *destination != Zone::Battlefield,
+        _ => false,
+    }) || lethal_to_creature(state, creature_id, effects) == Some(true)
+}
+
+/// Share of a self-sacrificing source's value that an activation must clear
+/// on top of breaking even. A permanent whose ability sacrifices itself keeps
+/// that ability available for as long as it stays on the battlefield, at
+/// instant speed unless restricted, while it goes on attacking and blocking.
+/// Cashing it in for an exactly even trade gives that option up for nothing.
+/// Holding it keeps the trade available and adds the body's combat value
+/// until the moment it is doomed, when the premium drops to zero (see
+/// [`source_is_doomed`]).
+const SELF_SACRIFICE_OPTION_SHARE: f64 = 0.5;
+
+/// The margin a self-sacrificing activation's payoff must clear beyond its
+/// cost: [`SELF_SACRIFICE_OPTION_SHARE`] of the source's value when paying
+/// `cost` necessarily sacrifices a source that is not already doomed, else 0.
+pub(crate) fn self_sacrifice_option_premium(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    penalties: &PolicyPenalties,
+) -> f64 {
+    if !sacrifice_must_remove_source(state, ai_player, source_id, cost)
+        || source_is_doomed(state, ai_player, source_id)
+    {
+        return 0.0;
+    }
+    SELF_SACRIFICE_OPTION_SHARE * sacrifice_cost(state, source_id, penalties)
+}
+
+/// CR 117.1b + CR 701.21a: what a creature can still cash in when it is about
+/// to die — the best confidently priced payoff among its activated abilities
+/// whose only non-mana cost is sacrificing itself. A blocker that dies in
+/// combat can activate such an ability before damage (the doomed source pays
+/// nothing extra, see [`source_is_doomed`]), so losing it costs its value
+/// minus this. Unpriced or trivial payoffs count as 0, so this never credits a
+/// payoff the self-cost policy would not.
+///
+/// CR 602.5 + CR 118.3: only abilities the engine's activation authority says
+/// can be activated now count. Blocks are chosen in the attacker's turn during
+/// combat, the same window the salvage would be activated in, so a sorcery-speed
+/// or "only during your turn" sacrifice, one under an activation prohibition,
+/// and one whose mana the player cannot produce are all excluded.
+pub(crate) fn self_sacrifice_salvage_value(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    penalties: &PolicyPenalties,
+) -> f64 {
+    let Some(controller) = state.objects.get(&source_id).map(|obj| obj.controller) else {
+        return 0.0;
+    };
+    engine::game::casting::activated_ability_definitions(state, source_id)
+        .into_iter()
+        .filter(|(_, ability)| ability.cost.as_ref().is_some_and(cost_sacrifices_only_self))
+        .filter(|&(index, _)| {
+            engine::game::casting::can_activate_ability_now(state, controller, source_id, index)
+        })
+        .filter_map(|(_, ability)| {
+            match appraise_benefit(state, ai_player, source_id, &ability, penalties) {
+                BenefitAppraisal::Priced { value } => Some(value.max(0.0)),
+                BenefitAppraisal::Trivial { .. } | BenefitAppraisal::Unpriced => None,
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+fn is_self_sacrifice(cost: &AbilityCost) -> bool {
+    matches!(cost, AbilityCost::Sacrifice(sacrifice) if matches!(sacrifice.target, TargetFilter::SelfRef))
+}
+
+/// A cost that sacrifices the source itself plus, at most, mana. Any other
+/// component (tapping a blocker, paying life, discarding) is not something a
+/// salvage estimate should assume is free.
+fn cost_sacrifices_only_self(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            costs.iter().any(is_self_sacrifice)
+                && costs
+                    .iter()
+                    .all(|c| is_self_sacrifice(c) || matches!(c, AbilityCost::Mana { .. }))
+        }
+        other => is_self_sacrifice(other),
+    }
+}
+
 /// True when paying `cost` necessarily sacrifices the ability's source — either
 /// a `SelfRef` sacrifice, or a filtered sacrifice whose only legal AI-controlled
-/// target is the source itself.
+/// target is the source itself. A composite cost does so when any component
+/// does; a choice between costs only when every branch the
+/// player can pay does, since a payable branch that spares the source is a way
+/// to activate without losing it.
+///
+/// CR 118.3 + CR 601.2h: which branches are payable is the engine's activation
+/// authority, judged inside the whole cost and including mana — a
+/// `{2}` branch with no mana available leaves only the sacrifice.
 fn sacrifice_must_remove_source(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
 ) -> bool {
+    if let Some(branches) = find_one_of_cost(cost) {
+        let mut payable = branches
+            .iter()
+            .filter(|branch| {
+                one_of_branch_payable_in(state, ai_player, source_id, cost, branch, None)
+            })
+            .filter_map(|branch| cost.resolve_first_one_of(branch))
+            .peekable();
+        return payable.peek().is_some()
+            && payable.all(|resolved| {
+                sacrifice_must_remove_source(state, ai_player, source_id, &resolved)
+            });
+    }
     match cost {
         AbilityCost::Sacrifice(sacrifice) => {
             if matches!(sacrifice.target, TargetFilter::SelfRef) {
@@ -1139,9 +1405,10 @@ fn sacrifice_must_remove_source(
             }
             matched_any && !matched_other
         }
-        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
+        AbilityCost::Composite { costs } => costs
             .iter()
             .any(|c| sacrifice_must_remove_source(state, ai_player, source_id, c)),
+        // A `OneOf` never reaches here: every choice was settled above.
         _ => false,
     }
 }

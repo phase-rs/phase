@@ -22374,7 +22374,10 @@ pub(crate) fn find_eligible_unattach_for_cost_targets(
         .collect()
 }
 
-pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
+/// CR 601.2h + CR 602.2b: the branches of the first unresolved `OneOf` in `cost`, searched
+/// depth-first through `Composite` (the one [`AbilityCost::resolve_first_one_of`]
+/// replaces).
+pub fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
     match cost {
         AbilityCost::OneOf { costs } => Some(costs),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_one_of_cost),
@@ -22412,7 +22415,7 @@ pub(crate) fn payable_one_of_activation_branches(
 /// CR 601.2h + CR 602.2b + CR 118.3: a disjunctive cost branch is payable iff the
 /// total activation cost, with that branch substituted for the first unresolved
 /// OneOf, passes the activation payability authority.
-pub(crate) fn one_of_branch_payable_in(
+pub fn one_of_branch_payable_in(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
