@@ -147,8 +147,9 @@ fn load_mode1() -> GameState {
 /// declaration WAS accepted, and the drive then committed **nothing** and re-offered
 /// (`f4-offer-fires-no-ff.zip`, `game-state-turn-5-…19-56-54-597Z.json`), derived by the same
 /// `jq -c '{gameState}' … | gzip -9 -n` plus the same U5 `deck_size` migration MODE1
-/// documents (968,121 B, sha256
-/// `04bb89f9910edf1c828a7639217620481e40609febc0a3801e59a14857c35b9d`).
+/// documents, plus the #6373 `AdditionalPhase.after` anchor migration (in place, scratch
+/// migrator) (968,153 B, sha256
+/// `b93dfb178565ee61f316e6bbbb62028b0dd0c7dfc3ba40cd7f697f8cd0aa8663`).
 ///
 /// Its distinguishing field is the COMPLEMENT of MODE1's: `may_trigger_auto_choices` is EMPTY
 /// (the user cleared the "always take" as a workaround), so this board reaches the offer

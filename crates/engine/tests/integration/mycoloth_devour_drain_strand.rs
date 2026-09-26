@@ -22,9 +22,9 @@
 //! | artifact | bytes | sha256 |
 //! |---|---|---|
 //! | `game-state-turn-15-2026-08-15T14-02-22-524Z.json` (raw capture) | 11 944 525 | `ec8c609c1f2ccb92d76afc536ddd10aab6e9b9d62d15f408e2e40cdb81de0107` |
-//! | derived `mycoloth_devour_wedge_turn15.json.gz` | 393 753 | `18bab04a4ff3f9c4ab55a9b95b5f39f648a071ae755484dcf51600b7bd5ec2c2` |
+//! | derived `mycoloth_devour_wedge_turn15.json.gz` | 393 761 | `b7e83521f548fe0776a47d5954d887653e5ea29d7050421bfbae5bbcae138f25` |
 //! | `game-state-turn-20-2026-08-15T01-13-36-601Z.json` (raw capture) | 13 351 646 | `1788737cf6d499f8878c9869546967c0aad768d8187ae2959d5cc0bc54dd6353` |
-//! | derived `mycoloth_devour_wedge_turn20.json.gz` | 314 865 | `9f7e662fbbfc811080fc5359e36b9ca5f673cb4996745b310efb6613e2755064` |
+//! | derived `mycoloth_devour_wedge_turn20.json.gz` | 314 873 | `45f1422dfc84eb51e1a60e9dbfdf30c055c0de937cb13b96972951de5f32d7ec` |
 //!
 //! Byte-reproducible regeneration is the recipe below **plus the U5 `deck_size`
 //! migration** — `-n` is load-bearing, since without it gzip stamps an mtime and
@@ -41,6 +41,10 @@
 //! `format` field, `Commander` for both captures. Piping a raw dump straight
 //! through does not merely miss the digest; it yields a fixture that
 //! `PersistedGameState` cannot deserialize, and a red test on a green engine.
+//! Then the retired `combat_phases_started_this_turn` /
+//! `end_steps_started_this_turn` keys must be rewritten to
+//! `steps_started_this_turn` (`{"BeginCombat": n, "End": m}`, zeros dropped,
+//! placed at the first old key).
 //!
 //! # What these fixtures do and do not prove
 //!

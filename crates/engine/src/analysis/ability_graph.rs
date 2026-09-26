@@ -3005,7 +3005,7 @@ mod tests {
             &activated(Effect::AdditionalPhase {
                 target: TargetFilter::Controller,
                 phase: crate::types::phase::Phase::BeginCombat,
-                after: crate::types::phase::Phase::PostCombatMain,
+                after: crate::types::ability::ExtraPhaseAnchor::this_main_phase(),
                 followed_by: Vec::new(),
                 count: fixed(1),
                 attacker_restriction: None,
@@ -3020,7 +3020,7 @@ mod tests {
             effect_projection(&Effect::AdditionalPhase {
                 target: TargetFilter::Controller,
                 phase: crate::types::phase::Phase::Upkeep,
-                after: crate::types::phase::Phase::Upkeep,
+                after: crate::types::ability::ExtraPhaseAnchor::ThisStep,
                 followed_by: Vec::new(),
                 count: fixed(1),
                 attacker_restriction: None,

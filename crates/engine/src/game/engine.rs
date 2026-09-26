@@ -8932,6 +8932,7 @@ fn pass_priority_once_with_pipeline(
     state.pending_activations.clear();
 
     let stack_was_empty = state.stack.is_empty();
+    let phase_before_pass = state.phase;
     // PR-3 (Option C) Defect-1: capture the pre-pipeline stack frame for the
     // loop-shortcut window maintenance below. `stack_top_before` is the resolving
     // entry's id; a real resolution this beat replaces the top with a different id
@@ -9029,6 +9030,14 @@ fn pass_priority_once_with_pipeline(
         && state.stack.is_empty()
         && !turns::phase_transition_requires_settlement(state)
     {
+        // CR 514.3a: a pass that deferred inside the cleanup step is the one
+        // after which "another cleanup step begins"; the retry runs that step.
+        // (A pass that deferred as it entered Cleanup from an earlier step
+        // retries the step whose begin its entry already recorded.) The
+        // priority reducer's Cleanup arm records the undeferred repeat.
+        if phase_before_pass == Phase::Cleanup {
+            turns::record_step_begin(state, Phase::Cleanup);
+        }
         let waiting_for = turns::auto_advance(state, events);
         sync_waiting_for(state, &waiting_for);
         wf = waiting_for;
@@ -15456,7 +15465,8 @@ fn apply_non_priority_pass_action(
         // fields") is FALSE at source: that function's body reads only
         // `ResourceVector::snapshot(&f.normalized)` and
         // `window_scope_from_cover_frames(..).phase_invariant`, and `phase_invariant` is
-        // `turn_number` + `phase` + `extra_phases.is_empty()`. Neither field is in it.
+        // `turn_number` + `phase` + `extra_phases.is_empty()` + `extra_phase_resume.is_empty()`.
+        // Neither field is in it.
         //
         // The consumer that DOES read them is BASIS A — the ring scans that call
         // `analysis::resource::loop_states_equal_modulo_resources(prior, state)` with `prior`
@@ -18229,6 +18239,9 @@ pub fn start_game_with_starting_player(
         state.seat_order.rotate_left(idx);
     }
     state.phase = Phase::Untap;
+    // CR 103.8 + CR 500.1: the first turn begins in its untap step, which game
+    // setup places directly rather than through the turn machine's step entry.
+    turns::record_step_begin(state, Phase::Untap);
 
     events.push(GameEvent::TurnStarted {
         player_id: starting_player,
@@ -18277,6 +18290,9 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     // so the starting player's own first turn must be counted here.
     state.players[starting_player.0 as usize].turns_taken += 1;
     state.phase = Phase::Untap;
+    // CR 103.8 + CR 500.1: the first turn begins in its untap step, which game
+    // setup places directly rather than through the turn machine's step entry.
+    turns::record_step_begin(state, Phase::Untap);
 
     events.push(GameEvent::TurnStarted {
         player_id: starting_player,
@@ -23812,8 +23828,9 @@ mod bounded_offer_conjunct_tests {
     /// a period seen twice: `frames` successive normalized snapshots, each mutated by `shape`.
     ///
     /// `2k + 1 = 3` frames at `k = 1` is the smallest ring `ring_delta_signature` will certify,
-    /// and every frame shares `turn_number` / `phase` / `extra_phases`, so the CR 703.1
-    /// turn-position conjunct passes and this fixture is not silently testing that instead.
+    /// and every frame shares `turn_number` / `phase` / `extra_phases` / `extra_phase_resume`,
+    /// so the CR 703.1 turn-position conjunct passes and this fixture is not silently testing
+    /// that instead.
     ///
     /// PARAMETERIZED BY SEAT COUNT rather than given a sibling: a row needing two drained seats
     /// at distinct lives (so the argmin is unique and no axis it reads is single-entry) differs
@@ -25393,15 +25410,17 @@ mod resolving_carrier_settle_tests {
         settle_resolving_stack_entry_after_continuation_resume,
         take_cleanup_deferred_probe_for_test,
     };
+    use crate::game::zones::create_object;
     use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::actions::GameAction;
     use crate::types::events::GameEvent;
     use crate::types::game_state::{
         GameState, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
     };
-    use crate::types::identifiers::{ObjectId, TriggerFiring};
+    use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     const SOURCE: ObjectId = ObjectId(60);
 
@@ -25631,6 +25650,65 @@ mod resolving_carrier_settle_tests {
             1,
             "the settled continuation must cross exactly one turn boundary"
         );
+    }
+
+    /// CR 514.3a: when every player passes on an empty stack in the cleanup
+    /// step, "another cleanup step begins". If a live carrier defers that pass,
+    /// the pipeline's retry runs the new cleanup step, so the retry counts it.
+    /// Nine cards in hand make the retried step stop at its discard prompt
+    /// (CR 514.1), before the turn wrap would clear the tally.
+    #[test]
+    fn deferred_cleanup_retry_counts_the_cleanup_step_it_begins() {
+        let mut state = GameState::new_two_player(0x9194);
+        state.phase = Phase::Cleanup;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 1;
+        for i in 0..9 {
+            create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Hand,
+            );
+        }
+        state.resolving_stack_entry = Some(carrier(triggered_kind()));
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        let gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            SOURCE,
+            PlayerId(0),
+        );
+        state.park_ability_continuation(PendingContinuation::new(Box::new(gain_life), &state));
+        let starting_turn = state.turn_number;
+
+        let _ = take_cleanup_deferred_probe_for_test();
+        apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("the final Cleanup pass must settle the continuation");
+
+        assert!(
+            take_cleanup_deferred_probe_for_test(),
+            "reach guard: the pass must take the deferred-Cleanup retry"
+        );
+        assert_eq!(state.turn_number, starting_turn);
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DiscardToHandSize {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert_eq!(state.steps_started_this_turn.count(Phase::Cleanup), 1);
     }
 }
 

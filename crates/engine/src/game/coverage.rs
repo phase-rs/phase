@@ -2431,6 +2431,9 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
                 format!("at that player's next {}", fmt_phase(phase))
             }
         },
+        DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, .. } => {
+            format!("at that added {}", fmt_phase(phase))
+        }
         DelayedTriggerCondition::WhenLeavesPlay { .. } => "when leaves play".into(),
         DelayedTriggerCondition::WhenDies { .. } => "when dies".into(),
         DelayedTriggerCondition::WhenLeavesPlayFiltered { filter } => {

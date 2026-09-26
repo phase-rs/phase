@@ -7,6 +7,7 @@ use crate::game::game_object::GameObject;
 use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
+use crate::game::turns;
 use crate::types::ability::{ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -190,6 +191,17 @@ pub fn resolve_combat_damage(
     }
 
     // --- Regular damage sub-step ---
+    // CR 510.4 + CR 702.7b + CR 702.4b: after a first-strike combat damage step
+    // the phase gets a second combat damage step, which begins here, just before
+    // its damage is assigned (CR 703.4k). A `None` cursor marks the sub-step's
+    // first entry; a resume after an assignment prompt leaves it `Some`.
+    if state
+        .combat
+        .as_ref()
+        .is_some_and(|c| c.first_strike_done && c.damage_step_index.is_none())
+    {
+        turns::record_step_begin(state, crate::types::phase::Phase::CombatDamage);
+    }
     if let Some(waiting) = collect_damage_assignments(state, CombatDamageSubStep::Regular) {
         return Some(waiting);
     }
@@ -1971,15 +1983,18 @@ fn shield_specific_source(filter: &crate::types::ability::TargetFilter) -> Optio
 mod tests {
     use super::*;
     use crate::game::combat::{AttackerInfo, CombatState};
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, Comparator, ContinuousModification, ControllerRef, DamageModification,
         Effect, QuantityExpr, QuantityRef, ReplacementDefinition, StaticCondition,
         StaticDefinition, TargetFilter, TriggerDefinition, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::triggers::TriggerMode;
@@ -5293,5 +5308,242 @@ mod tests {
         kw(&mut state, b, vec![Keyword::FirstStrike]);
         state.objects.get_mut(&b).unwrap().assigns_no_combat_damage = true;
         assert_eq!(combat_damage_to_defender(&state, a, &[b]), 10);
+    }
+
+    /// Verbatim Oracle text (Scryfall).
+    const NO_MERCY: &str = "Whenever a creature deals damage to you, destroy it.";
+
+    /// Drives a scenario at P0's precombat main to its combat damage step:
+    /// `attackers` attack P1, and `blocks` (`(blocker, attacker)`) are declared
+    /// when P1 is asked. Returns once the phase is `CombatDamage`; each caller
+    /// asserts the `waiting_for` it expects there, so a drive that stops short
+    /// fails.
+    fn drive_to_combat_damage(
+        runner: &mut GameRunner,
+        attackers: &[ObjectId],
+        blocks: Vec<(ObjectId, ObjectId)>,
+    ) {
+        runner.pass_both_players();
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: attackers
+                    .iter()
+                    .map(|&id| (id, AttackTarget::Player(P1)))
+                    .collect(),
+                bands: vec![],
+            })
+            .expect("declare attackers");
+        let mut blocks = Some(blocks);
+        for _ in 0..8 {
+            if runner.state().phase == Phase::CombatDamage {
+                return;
+            }
+            match &runner.state().waiting_for {
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: blocks.take().unwrap_or_default(),
+                        })
+                        .expect("declare blockers");
+                }
+                WaitingFor::Priority { .. } => runner.pass_both_players(),
+                _ => return,
+            }
+        }
+    }
+
+    fn combat_damage_steps(runner: &GameRunner) -> u32 {
+        runner
+            .state()
+            .steps_started_this_turn
+            .count(Phase::CombatDamage)
+    }
+
+    fn combat(runner: &GameRunner) -> &CombatState {
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .expect("combat is in progress")
+    }
+
+    /// CR 510.4 + CR 702.7b + CR 702.4b: a first-strike combat damage step is
+    /// followed by a second combat damage step, and both are counted. Here the
+    /// second step follows the first in the same `resolve_combat_damage` call.
+    #[test]
+    fn step_tally_counts_the_second_combat_damage_step() {
+        for double_strike in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let attacker = if double_strike {
+                // Fencing Ace: 1/1, double strike.
+                scenario
+                    .add_creature(P0, "Fencing Ace", 1, 1)
+                    .double_strike()
+                    .id()
+            } else {
+                // Youthful Knight: 2/1, first strike.
+                scenario
+                    .add_creature(P0, "Youthful Knight", 2, 1)
+                    .first_strike()
+                    .id()
+            };
+            let mut runner = scenario.build();
+            let life_before = runner.life(P1);
+            drive_to_combat_damage(&mut runner, &[attacker], vec![]);
+
+            let state = runner.state();
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                "double strike {double_strike}: {:?}",
+                state.waiting_for
+            );
+            assert!(state.stack.is_empty());
+            assert!(combat(&runner).first_strike_done && combat(&runner).regular_damage_done);
+            // Youthful Knight hits once for 2; Fencing Ace hits in both steps for 1.
+            assert_eq!(
+                runner.life(P1),
+                life_before - 2,
+                "double strike {double_strike}"
+            );
+            assert_eq!(
+                state.steps_started_this_turn.count(Phase::BeginCombat),
+                1,
+                "one combat"
+            );
+            assert_eq!(
+                combat_damage_steps(&runner),
+                2,
+                "double strike {double_strike}: the first-strike step and the second step"
+            );
+        }
+    }
+
+    /// CR 510.4's paired negative: with neither first strike nor double strike
+    /// there is one combat damage step, counted once.
+    #[test]
+    fn step_tally_counts_one_combat_damage_step_without_first_strike() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut runner = scenario.build();
+        let life_before = runner.life(P1);
+        drive_to_combat_damage(&mut runner, &[bears], vec![]);
+
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        // Reach guards: the regular sub-step head was reached and dealt the damage.
+        assert!(combat(&runner)
+            .first_strike_participants
+            .as_ref()
+            .is_some_and(|participants| participants.is_empty()));
+        assert!(!combat(&runner).first_strike_done);
+        assert!(combat(&runner).regular_damage_done);
+        assert_eq!(runner.life(P1), life_before - 2);
+        assert_eq!(combat_damage_steps(&runner), 1);
+    }
+
+    /// CR 510.3a + CR 510.4: a trigger from the first-strike step pauses the
+    /// combat before the second step. The second step is counted once, when it
+    /// begins through the `priority.rs` completeness gate, and not before.
+    #[test]
+    fn step_tally_counts_the_second_combat_damage_step_after_a_pause() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let knight = scenario
+            .add_creature(P0, "Youthful Knight", 2, 1)
+            .first_strike()
+            .id();
+        scenario
+            .add_creature_from_oracle(P1, "No Mercy", 0, 0, NO_MERCY)
+            .as_enchantment();
+        let mut runner = scenario.build();
+        let life_before = runner.life(P1);
+        drive_to_combat_damage(&mut runner, &[knight], vec![]);
+
+        // In the pause: No Mercy's trigger is on the stack after the first step.
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().stack.len(), 1);
+        assert!(combat(&runner).first_strike_done);
+        assert!(!combat(&runner).regular_damage_done);
+        assert_eq!(runner.life(P1), life_before - 2);
+        assert_eq!(
+            combat_damage_steps(&runner),
+            1,
+            "the second step has not begun"
+        );
+
+        runner.advance_until_stack_empty();
+        for _ in 0..4 {
+            if runner.state().phase != Phase::CombatDamage || combat(&runner).regular_damage_done {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority into the second combat damage step");
+        }
+
+        assert_eq!(runner.state().phase, Phase::CombatDamage);
+        assert!(combat(&runner).regular_damage_done);
+        assert_eq!(runner.state().objects[&knight].zone, Zone::Graveyard);
+        assert_eq!(runner.life(P1), life_before - 2);
+        assert_eq!(combat_damage_steps(&runner), 2);
+    }
+
+    /// CR 510.1c + CR 510.4: an interactive damage assignment inside the second
+    /// combat damage step resumes that step; it does not begin another one.
+    #[test]
+    fn step_tally_does_not_recount_a_resumed_second_combat_damage_step() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let knight = scenario
+            .add_creature(P0, "Youthful Knight", 2, 1)
+            .first_strike()
+            .id();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let cadet_1 = scenario.add_creature(P1, "Eager Cadet", 1, 1).id();
+        let cadet_2 = scenario.add_creature(P1, "Eager Cadet", 1, 1).id();
+        let mut runner = scenario.build();
+        let life_before = runner.life(P1);
+        drive_to_combat_damage(
+            &mut runner,
+            &[knight, bears],
+            vec![(cadet_1, bears), (cadet_2, bears)],
+        );
+
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::AssignCombatDamage { attacker_id, .. } if attacker_id == bears
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert!(combat(&runner).first_strike_done);
+        assert!(!combat(&runner).regular_damage_done);
+        assert!(combat(&runner).damage_step_index.is_some());
+        assert_eq!(runner.life(P1), life_before - 2);
+        assert_eq!(combat_damage_steps(&runner), 2);
+
+        // Grizzly Bears' 2 power divided as P0 chooses between its two blockers,
+        // CR 510.1c; 1 each destroys both 1/1 Cadets.
+        runner
+            .act(GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(cadet_1, 1), (cadet_2, 1)],
+                trample_damage: 0,
+                controller_damage: 0,
+            })
+            .expect("assign the Bears' damage");
+
+        assert!(combat(&runner).regular_damage_done);
+        assert_eq!(runner.state().objects[&cadet_1].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&cadet_2].zone, Zone::Graveyard);
+        assert_eq!(combat_damage_steps(&runner), 2);
     }
 }

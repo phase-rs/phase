@@ -16,7 +16,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // cost-reduction election (`ReductionProvenance::{AbilityCostRider,
 // TransientEffect}` and the `activation_cost_snapshot` carrier); v80 reshapes
 // the face-down exile look link (`ExileLinkKind::HideawayLookable { grant,
-// lookers, source_incarnation }`).
+// lookers, source_incarnation }`); v81 retypes `AdditionalPhase.after` to
+// `ExtraPhaseAnchor`, adds `DelayedTriggerCondition::AtBeginningOfAddedPhase`,
+// replaces `ExtraPhase.phase` and the `extra_phase_resume` element with
+// `TurnSegment`-carrying records and minted ids, and replaces the two per-turn
+// step counters with the `steps_started_this_turn` tally.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -24,7 +28,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // v77 pre-emptive bump ahead of new format names, the v78 CR 611.2a
 // event-deadline duration parse bump, the v79 activated-ability
 // cost-reduction election, and the v80 exile look-link reshape.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 9;
+// +10: the v81 CR 500.8–500.10 added-phase anchoring parse bump.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 10;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -55,7 +60,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +6: wire 60 moves with full-game v78 for the event-deadline duration.
 // +7: wire 61 moves with full-game v79 for the activated-ability cost election.
 // +8: wire 62 moves with full-game v80 for the exile look-link reshape.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 8;
+// +9: wire 63 moves with full-game v81 for added-phase anchoring.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 9;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

@@ -9109,7 +9109,7 @@ mod tests {
         let ap = ability_rw_profile(&ra(Effect::AdditionalPhase {
             target: TargetFilter::Controller,
             phase: crate::types::phase::Phase::PostCombatMain,
-            after: crate::types::phase::Phase::PostCombatMain,
+            after: crate::types::ability::ExtraPhaseAnchor::ThisPhase { named: None },
             followed_by: vec![],
             count: qfix(1),
             attacker_restriction: None,

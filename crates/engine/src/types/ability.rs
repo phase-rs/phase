@@ -18,13 +18,13 @@ use super::game_state::{
     TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{
-    CardId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
 };
-use super::phase::Phase;
+use super::phase::{Phase, PhaseGroup};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::proposed_event::AppliedReplacementKey;
 use super::replacements::ReplacementEvent;
@@ -5742,6 +5742,17 @@ pub enum DelayedTriggerCondition {
             skip_serializing_if = "DelayedTriggerPlayerBinding::is_controller"
         )]
         binding: DelayedTriggerPlayerBinding,
+    },
+    /// CR 603.7a + CR 500.6: "at the beginning of that combat" — names the phase
+    /// that the preceding instruction of the same resolution added (CR 500.8),
+    /// and fires when its step `phase` begins as that phase begins, never at
+    /// another occurrence of the same step. The parser emits `entry: None` (the
+    /// anaphor); `effects::delayed_trigger::resolve` binds it to the added
+    /// phase's `ExtraPhaseId`, or creates no trigger if no phase was added.
+    AtBeginningOfAddedPhase {
+        phase: Phase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<ExtraPhaseId>,
     },
     /// "when [object] leaves the battlefield"
     WhenLeavesPlay {
@@ -15561,6 +15572,44 @@ impl StepSkipTarget {
     }
 }
 
+/// CR 500.8 + CR 500.9 + CR 500.10: where an added phase or step is inserted.
+/// `ThisStep` and `ThisPhase` are resolved when the effect resolves, against
+/// the step it resolves in; `FirstOfTurn`, against the steps begun this turn.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ExtraPhaseAnchor {
+    /// A fixed step, independent of where the effect resolves.
+    Step(Phase),
+    /// CR 500.9: "after this step" — the step in which the effect resolves.
+    ThisStep,
+    /// CR 500.8 + CR 500.10: "after this phase" — the final step of the phase in
+    /// which the effect resolves. `named` is the phase the text names, as the
+    /// CR 500.1 phases it may be: `None` for a bare "this phase"; for
+    /// "this main phase", both main phases (CR 505.1: "individually and
+    /// collectively known as the main phase"). If the effect resolves in a phase
+    /// outside `named`, there is no such phase to add after and nothing is added
+    /// (CR 500.8).
+    ThisPhase { named: Option<Vec<PhaseGroup>> },
+    /// CR 500.8 + CR 505.1a + CR 505.1b: "after the first combat phase this
+    /// turn" / "after the second main phase this turn" — the first phase of
+    /// this group this turn (every main phase after the first is a postcombat
+    /// main phase, so the second main phase is the first postcombat one). The
+    /// insert follows that phase's last step. If that phase has already ended
+    /// there is no such phase to add after, and nothing is added (World at War
+    /// and Swinging Ship rulings). The parser names only `Combat` and
+    /// `PostcombatMain`.
+    FirstOfTurn(PhaseGroup),
+}
+
+impl ExtraPhaseAnchor {
+    /// CR 505.1: "after this main phase".
+    pub fn this_main_phase() -> Self {
+        Self::ThisPhase {
+            named: Some(vec![PhaseGroup::PrecombatMain, PhaseGroup::PostcombatMain]),
+        }
+    }
+}
+
 /// CR 614.10 + CR 614.10a: How long a skip effect persists.
 ///
 /// CR 614.10: "Skip [something]" is a replacement effect equivalent to
@@ -19635,11 +19684,14 @@ pub enum Effect {
     /// Splitter of Seconds' "that many additional upkeep steps" thread the
     /// triggering event amount through `QuantityRef::EventContextAmount`. Legacy
     /// callers and explicit "an additional" wording deserialize to a Fixed 1.
+    /// `after` is the CR 500.8/500.9/500.10 insertion point, resolved at
+    /// resolution time by `additional_phase::resolve`; `ThisStep`/`ThisPhase` are
+    /// relative to the step the effect resolves in.
     AdditionalPhase {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
         phase: Phase,
-        after: Phase,
+        after: ExtraPhaseAnchor,
         #[serde(default)]
         followed_by: Vec<Phase>,
         #[serde(default = "default_quantity_one")]

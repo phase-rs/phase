@@ -561,8 +561,8 @@ fn restore_dump(json: &str) -> GameState {
 /// artifact's provenance rather than a claim about it:
 /// `unzip -p combofb-dumps-pristine/dina-conqueror-offers-no-ff.zip |
 ///  jq -c '{gameState}' | gzip -9 -n`
-/// → 841475 bytes, sha256
-/// `12f91f38616bd90386fdb7a137371a9f9ec5c6adcb12dd1bbad04bde167ea2b2`.
+/// → 841479 bytes, sha256
+/// `2f074a73963d8f4a87ced4ec3af315e402632046aa3ce9e9b66a9c26960c60cc`.
 ///
 /// That pipeline ALONE is no longer sufficient: this capture predates U5, so
 /// its bare `"deck_size": 100` must first become the adjacently-tagged
@@ -571,8 +571,11 @@ fn restore_dump(json: &str) -> GameState {
 /// through does not merely miss the digest; it yields a fixture
 /// `PersistedGameState` cannot deserialize, so `restore_dump`'s
 /// `.expect("gameState deserializes through the production decoder")` aborts —
-/// a red test on a green engine. `dina_noff_turn5_loader.rs` carries the full
-/// provenance table for this same artifact.
+/// a red test on a green engine. Then the retired
+/// `combat_phases_started_this_turn` / `end_steps_started_this_turn` keys must
+/// be rewritten to `steps_started_this_turn` (`{"BeginCombat": n, "End": m}`,
+/// zeros dropped, placed at the first old key). `dina_noff_turn5_loader.rs`
+/// carries the full provenance table for this same artifact.
 ///
 /// `gzip -n` is a no-op from a pipe but load-bearing from a file (it strips the
 /// stored name and mtime), so KEEP it: a re-derivation that stages the 21 MB

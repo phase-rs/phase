@@ -12691,6 +12691,8 @@ fn false_gate_consumes_one_shot(condition: &DelayedTriggerCondition) -> bool {
     match condition {
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        // CR 603.7b: a bound added phase begins once.
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
         // A concrete `ObjectId`: the same single-occurrence argument as a
         // bound-single-object filter, already resolved to one object.
         | DelayedTriggerCondition::WhenLeavesPlay { .. } => true,
@@ -13346,6 +13348,22 @@ fn delayed_trigger_event_with_index(
                     // Fall through to fire THIS turn — the LOUD wrong-timing
                     // signal (caught by the paired test), never silent-never-fire.
                 }
+            }
+            events
+                .iter()
+                .enumerate()
+                .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
+                .map(|(idx, event)| (idx, event.clone()))
+        }
+        // CR 603.7a + CR 500.6: the bound added phase begins. Its first step
+        // `phase` begins while its unit is the innermost inserted unit in
+        // progress (`turns::take_scheduled_successor` records the unit as it
+        // takes the entry). Any other beginning of the same step, natural or
+        // added, is not that phase. An unbound anaphor never fires.
+        DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, entry } => {
+            let entry = (*entry)?;
+            if state.extra_phase_resume.last().map(|unit| unit.entry) != Some(entry) {
+                return None;
             }
             events
                 .iter()
@@ -14813,7 +14831,9 @@ fn evaluate_trigger_condition_with_source(
         }
         // CR 500.8 + CR 506.1 + CR 603.4: Intervening-if for "if it's the
         // first combat phase of the turn".
-        TriggerCondition::FirstCombatPhaseOfTurn => state.combat_phases_started_this_turn == 1,
+        TriggerCondition::FirstCombatPhaseOfTurn => {
+            state.steps_started_this_turn.count(Phase::BeginCombat) == 1
+        }
         // CR 603.4: "if you cast a [type] spell this turn" — check per-player cast history.
         TriggerCondition::CastSpellThisTurn { filter } => match filter {
             None => state
@@ -22190,7 +22210,7 @@ pub mod tests {
         let mut state = setup();
         let condition = TriggerCondition::FirstCombatPhaseOfTurn;
 
-        state.combat_phases_started_this_turn = 0;
+        state.steps_started_this_turn.clear();
         assert!(!check_trigger_condition(
             &state,
             &condition,
@@ -22199,7 +22219,7 @@ pub mod tests {
             None,
         ));
 
-        state.combat_phases_started_this_turn = 1;
+        state.steps_started_this_turn.record(Phase::BeginCombat);
         assert!(check_trigger_condition(
             &state,
             &condition,
@@ -22208,7 +22228,7 @@ pub mod tests {
             None,
         ));
 
-        state.combat_phases_started_this_turn = 2;
+        state.steps_started_this_turn.record(Phase::BeginCombat);
         assert!(!check_trigger_condition(
             &state,
             &condition,

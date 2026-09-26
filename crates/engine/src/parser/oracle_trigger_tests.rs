@@ -19235,7 +19235,7 @@ fn phase_trigger_enchanted_players_first_upkeep() {
         Some(Effect::AdditionalPhase {
             target: TargetFilter::TriggeringPlayer,
             phase: Phase::Upkeep,
-            after: Phase::Upkeep,
+            after: crate::types::ability::ExtraPhaseAnchor::ThisStep,
             followed_by,
             ..
         }) if followed_by.is_empty()

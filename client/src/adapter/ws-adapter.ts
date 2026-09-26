@@ -210,6 +210,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 81 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
+ *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
+ *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a
+ *      minted id, and steps_started_this_turn replaces the two per-turn step
+ *      counters — see PROTOCOL_VERSION's own `/// 81` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
+ *      JSON.parse, so a v80 client would take the new shapes with no decode
+ *      error; the exact-match version check at connect refuses the pairing
+ *      instead.
  * 80 — ExileLinkKind.HideawayLookable carries { grant, lookers,
  *      source_incarnation } in serialized GameState, and
  *      DerivedViews.linked_exile_ids is new and rendered directly. The
@@ -553,7 +562,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      activation_cost_snapshot fields are additive and skipped when empty, so
  *      every spell frame is byte-identical to v78.
  */
-export const PROTOCOL_VERSION = 80;
+export const PROTOCOL_VERSION = 81;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
