@@ -1399,10 +1399,11 @@ fn get_bot_deck_inner(bot_seat: u8) -> Result<suggest::SuggestedDeck, String> {
                 &session.config.addable_cards,
             );
 
-            // CR 100.2b / CR 903.13f(1): the session's configured minimum is
-            // also passed to `validate_limited_deck` for the human deck. A bot
-            // can fall short when no eligible custom addable card exists or
-            // its entire pool was excluded. Never publish such a proposal.
+            // Enforce the session-configured floor for the bot, as
+            // `validate_limited_deck` does for human decks. CR 100.2b sets
+            // ordinary Limited at 40 cards; CR 903.13f(1) sets Commander Draft
+            // at 60. Custom Cube floors are configuration, not CR 100.2b.
+            // Never publish an undersized proposal if the bot runs out of cards.
             let deck_total: usize =
                 deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>();
             if deck_total < session.config.min_deck_size {
