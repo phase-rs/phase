@@ -44,6 +44,12 @@
 //! | `PendingCast` | 6,632 | 1,376 | 1,792 |
 //! | `PendingTrigger` | 6,000 | 744 | 1,024 |
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc when #9248 (the activation
+//! cost carrier) merged with the activation cost-reduction election: 13,840 B,
+//! over the ceiling. Boxing `pending_mass_library_order_choice` (328 B inline,
+//! populated only between the batches of one resolution) brought it to 13,520,
+//! whose ceiling by the rule above is still 13,824.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!

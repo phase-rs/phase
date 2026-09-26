@@ -990,7 +990,10 @@ fn complete_mana_ability_activation(
     let Some(ability_index) = ability_index else {
         return;
     };
-    super::restrictions::record_ability_activation(state, source_id, ability_index);
+    // CR 602.2 + CR 605.3a: counted like every activation, but not journaled:
+    // the turn journal holds non-mana activations only (see
+    // `GameState::abilities_activated_this_turn_by_player`).
+    super::restrictions::record_ability_activation(state, source_id, ability_index, None);
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
         source_id,

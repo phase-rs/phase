@@ -1,7 +1,9 @@
 //! Final authority for composable per-event ledger facts.
 
 use crate::types::ability::TriggerDefinitionRef;
-use crate::types::game_state::{CastOccurrence, GameState, SpellCastRecord};
+use crate::types::game_state::{
+    AbilityActivationRecord, CastOccurrence, GameState, SpellCastRecord,
+};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
@@ -112,13 +114,27 @@ pub(crate) fn validate_spell_cast_recording(
 }
 
 /// CR 602.5b: Increment exactly one activated-ability occurrence's turn and
-/// game counters.
+/// game counters, and (CR 602.2 + CR 601.2i) append its captured
+/// [`AbilityActivationRecord`] to its activator's turn journal. The single
+/// write path for the journal: only the stack-placement authority passes a
+/// record; a mana ability's completion counts with `None` (mana abilities are
+/// not journaled).
 pub fn record_ability_activation(
     state: &mut GameState,
     source: ObjectId,
     ability_index: usize,
+    record: Option<AbilityActivationRecord>,
 ) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
     let key = (source, ability_index);
+    let expected_turn_history_len = match &record {
+        Some(record) => Some(history_len(
+            state
+                .abilities_activated_this_turn_by_player
+                .get(&record.activator)
+                .map_or(0, |history| history.len()),
+        )?),
+        None => None,
+    };
     resolve_and_apply_ledger_edit(
         state,
         ResolvedLedgerEdit::AbilityActivated {
@@ -134,6 +150,8 @@ pub fn record_ability_activation(
                 .get(&key)
                 .copied()
                 .unwrap_or(0),
+            record: record.map(Box::new),
+            expected_turn_history_len,
         },
     )
 }
@@ -334,8 +352,31 @@ pub fn apply_resolved_ledger_edit(
             ability_index,
             expected_turn_count,
             expected_game_count,
+            record,
+            expected_turn_history_len,
         } => {
             let key = (*source, *ability_index);
+            // CR 602.2 + CR 601.2i: the record and its history length are a
+            // pair; a legacy command carries neither and appends nothing.
+            match (record, expected_turn_history_len) {
+                (Some(record), Some(expected_len)) => {
+                    let actual = state
+                        .abilities_activated_this_turn_by_player
+                        .get(&record.activator)
+                        .map_or(0, |history| history.len());
+                    if history_len(actual)? != *expected_len {
+                        return Err(
+                            ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch,
+                        );
+                    }
+                }
+                (None, None) => {}
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(
+                        ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch,
+                    );
+                }
+            }
             if state
                 .activated_abilities_this_turn
                 .get(&key)
@@ -365,6 +406,13 @@ pub fn apply_resolved_ledger_edit(
             state
                 .activated_abilities_this_game
                 .insert(key, next_game_count);
+            if let Some(record) = record {
+                state
+                    .abilities_activated_this_turn_by_player
+                    .entry(record.activator)
+                    .or_default()
+                    .push_back(record.as_ref().clone());
+            }
         }
         ResolvedLedgerEdit::CrimeCommitted {
             player,
@@ -677,5 +725,127 @@ mod tests {
             Some(3)
         );
         assert_eq!(state.trigger_fire_counts_this_turn.len(), 1);
+    }
+
+    fn activation_source(state: &mut GameState) -> ObjectId {
+        let id = ObjectId(81);
+        state.objects.insert(
+            id,
+            GameObject::new(
+                id,
+                CardId(81),
+                PlayerId(0),
+                "Journal Source".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        id
+    }
+
+    fn activation_command(
+        source: ObjectId,
+        expected_count: u32,
+        record: Option<AbilityActivationRecord>,
+        expected_turn_history_len: Option<u32>,
+    ) -> ResolvedLedgerEditCommand {
+        ResolvedLedgerEditCommand {
+            edit: ResolvedLedgerEdit::AbilityActivated {
+                source,
+                ability_index: 0,
+                expected_turn_count: expected_count,
+                expected_game_count: expected_count,
+                record: record.map(Box::new),
+                expected_turn_history_len,
+            },
+            cause: RulesExecutionNodeRef::Proposal(ResolvedCommandOrdinal(0)),
+        }
+    }
+
+    fn journal_record(state: &GameState, source: ObjectId) -> AbilityActivationRecord {
+        crate::game::casting::capture_activation_record_from(
+            state,
+            PlayerId(0),
+            source,
+            None,
+            &[crate::types::ability::TargetRef::Player(PlayerId(1))],
+        )
+        .expect("the source exists")
+    }
+
+    /// CR 602.2 + CR 601.2i: a replayed activation with its record appends
+    /// exactly that record, and a stale history length is refused whole.
+    #[test]
+    fn activation_replay_appends_its_record_and_refuses_a_stale_history_length() {
+        let mut state = GameState::new_two_player(7);
+        let source = activation_source(&mut state);
+        let record = journal_record(&state, source);
+        apply_resolved_ledger_edit(
+            &mut state,
+            &activation_command(source, 0, Some(record.clone()), Some(0)),
+        )
+        .expect("a paired record replays");
+        assert_eq!(
+            state.abilities_activated_this_turn_by_player[&PlayerId(0)]
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![record.clone()]
+        );
+        assert_eq!(state.activated_abilities_this_turn[&(source, 0)], 1);
+
+        let before = state.clone();
+        assert_eq!(
+            apply_resolved_ledger_edit(
+                &mut state,
+                &activation_command(source, 1, Some(record), Some(0)),
+            ),
+            Err(ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch)
+        );
+        assert!(state == before, "a refused replay changes nothing");
+    }
+
+    /// A legacy `AbilityActivated` (recorded before the journal existed)
+    /// carries neither half and still advances the counters, but appends no
+    /// journal row: nothing is invented for an activation whose facts were
+    /// never captured.
+    #[test]
+    fn a_legacy_activation_replay_appends_no_journal_row() {
+        let mut state = GameState::new_two_player(7);
+        let source = activation_source(&mut state);
+        apply_resolved_ledger_edit(&mut state, &activation_command(source, 0, None, None))
+            .expect("a legacy command replays");
+        assert_eq!(state.activated_abilities_this_turn[&(source, 0)], 1);
+        assert_eq!(state.activated_abilities_this_game[&(source, 0)], 1);
+        assert!(
+            state.abilities_activated_this_turn_by_player.is_empty(),
+            "no journal row from a legacy command"
+        );
+    }
+
+    /// r5c #4: only `(None, None)` and `(Some, Some)` are well-formed. Either
+    /// half alone is refused at apply, before any counter moves.
+    #[test]
+    fn a_half_present_activation_record_pair_is_refused_at_apply() {
+        let mut state = GameState::new_two_player(7);
+        let source = activation_source(&mut state);
+        let record = journal_record(&state, source);
+        for (label, command) in [
+            (
+                "record without length",
+                activation_command(source, 0, Some(record.clone()), None),
+            ),
+            (
+                "length without record",
+                activation_command(source, 0, None, Some(0)),
+            ),
+        ] {
+            let before = state.clone();
+            assert_eq!(
+                apply_resolved_ledger_edit(&mut state, &command),
+                Err(ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch),
+                "{label}"
+            );
+            assert!(state == before, "{label}: nothing changes");
+        }
     }
 }

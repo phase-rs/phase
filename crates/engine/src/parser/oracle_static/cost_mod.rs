@@ -4,6 +4,7 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_nom::error::oracle_err;
 use crate::types::ability::CastTimingPermission;
 use crate::types::mana::{ManaCost, ManaCostShard};
 
@@ -105,25 +106,48 @@ pub(crate) fn parse_action_cost_reduction(text: &str, lower: &str) -> Option<Sta
     )
 }
 
+/// CR 601.2f + CR 602.1 + CR 606.1 + CR 115.9b + CR 118.7: the parsed head of an
+/// activated-ability cost-modifier line, as produced by
+/// [`parse_activated_ability_cost_head`].
+///
+/// A named alias rather than a bare tuple in the signature: the head grew a
+/// `targets` axis (the CR 115.9b "that target[s] <X>" clause) and six positional
+/// members in a return type is where the shape stops documenting itself.
+pub(crate) struct ActivatedAbilityCostHead<'a> {
+    /// The ability-tag keyword the runtime gate matches (`"activated"` / `"loyalty"`).
+    pub keyword: &'static str,
+    /// The source-scope subject phrase, with any target clause already split off.
+    pub subject: &'a str,
+    /// CR 115.9b: the optional "that target[s] <X>" restriction.
+    pub targets: Option<TargetFilter>,
+    /// The literal `{N}`; meaningless when `is_x` is true.
+    pub amount: u32,
+    /// True when the amount was the variable `{X}`, whose referent the caller parses.
+    pub is_x: bool,
+    /// CR 118.7: the direction of the adjustment.
+    pub mode: CostModifyMode,
+}
+
 /// CR 601.2f + CR 602.1 + CR 606.1 + CR 118.7: shared grammar head for
-/// "<activated|loyalty> abilities of <subject> cost {N|X} <less|more> to activate".
-/// Returns `(keyword_tag, subject_slice, amount, is_x, mode)` with the remainder
-/// positioned immediately after "activate", so the static caller can continue with
-/// `opt(parse_where_x_is_self_stat)` and the transient-effect caller can ignore the
-/// tail. Single authority for both the permanent-static form (dispatch.rs) and the
-/// transient (this-turn) form, which lowers to a `GenericEffect` carrying the same
-/// `StaticMode::ReduceAbilityCost` for a `Duration::UntilEndOfTurn` (oracle_effect,
-/// The Dining Car's chaos body).
+/// "<activated|loyalty> abilities of <subject> [that target[s] <X>] cost {N|X}
+/// <less|more> to activate", returned as an [`ActivatedAbilityCostHead`] with the
+/// remainder positioned immediately after "activate", so the static caller can
+/// continue with `opt(parse_where_x_is_self_stat)` and the transient-effect caller
+/// can ignore the tail. Single authority for both the permanent-static form
+/// (dispatch.rs) and the transient (this-turn) form, which lowers to a
+/// `GenericEffect` carrying the same `StaticMode::ReduceAbilityCost` for a
+/// `Duration::UntilEndOfTurn` (oracle_effect, The Dining Car's chaos body).
 /// The input must already be lowercase (mana braces are case-stable: `{2}`, `{x}`).
 pub(crate) fn parse_activated_ability_cost_head(
     i: &str,
-) -> OracleResult<'_, (&'static str, &str, u32, bool, CostModifyMode)> {
+) -> OracleResult<'_, ActivatedAbilityCostHead<'_>> {
     let (i, keyword) = alt((
         value("activated", tag("activated abilities of ")),
         value("loyalty", tag("loyalty abilities of ")),
     ))
     .parse(i)?;
     let (i, subject) = take_until(" cost ").parse(i)?;
+    let (_, (subject, targets)) = split_ability_target_restriction(subject)?;
     let (i, _) = tag(" cost ").parse(i)?;
     // CR 107.3 + CR 601.2f: the amount is a fixed `{N}` (Training Grounds) or the
     // variable `{X}` (Agatha), whose value is supplied by a trailing referent the
@@ -143,7 +167,98 @@ pub(crate) fn parse_activated_ability_cost_head(
         value(CostModifyMode::Raise, tag("more to activate")),
     ))
     .parse(i)?;
-    Ok((i, (keyword, subject, amount_n, is_x, mode)))
+    Ok((
+        i,
+        ActivatedAbilityCostHead {
+            keyword,
+            subject,
+            targets,
+            amount: amount_n,
+            is_x,
+            mode,
+        },
+    ))
+}
+
+/// CR 115.9b + CR 602.2b: the optional intervening target restriction on an
+/// activated-ability cost modifier — "… that target[s] <subject> …".
+/// Returns the source subject and parsed target filter. Input is lowercase.
+pub(crate) fn split_ability_target_restriction(
+    i: &str,
+) -> OracleResult<'_, (&str, Option<TargetFilter>)> {
+    let parsed = (
+        take_until::<_, _, OracleError<'_>>(" that target"),
+        alt((
+            tag::<_, _, OracleError<'_>>(" that targets "),
+            tag::<_, _, OracleError<'_>>(" that target "),
+        )),
+        nom::combinator::rest::<_, OracleError<'_>>,
+    )
+        .parse(i);
+    if let Ok((rest, (subject, _, target_text))) = parsed {
+        let (_, _) = eof::<_, OracleError<'_>>.parse(rest)?;
+        let (filter, remainder) = parse_type_phrase_folding(target_text.trim());
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Ok(("", (subject.trim(), Some(filter))));
+        }
+        let (filter, remainder) = parse_target(target_text.trim());
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Ok(("", (subject.trim(), Some(filter))));
+        }
+        return Err(oracle_err(i));
+    }
+    Ok(("", (i.trim(), None)))
+}
+
+/// [`split_ability_target_restriction`] for a phrase that must carry NOTHING
+/// but an optional target restriction between its ability subject and ` cost`.
+/// Any other qualifier there ("equip abilities you activate OF OTHER
+/// EQUIPMENT cost …") restricts which abilities the modifier applies to, and
+/// this parser has no field for it, so the line is refused (a nom `Verify`
+/// error) rather than emitted as a broader, unrestricted modifier.
+pub(crate) fn split_bare_ability_target_restriction(
+    i: &str,
+) -> OracleResult<'_, Option<TargetFilter>> {
+    map(
+        nom::combinator::verify(split_ability_target_restriction, |(residue, _)| {
+            residue.trim().is_empty()
+        }),
+        |(_, targets)| targets,
+    )
+    .parse(i)
+}
+
+/// [`split_ability_target_restriction`] for a phrase that may also name the
+/// abilities' SOURCES: "equip abilities you activate OF OTHER EQUIPMENT cost …"
+/// (Bladehold War-Whip). Returns `(source filter, target restriction)`. The
+/// qualifier must be exactly `of <type phrase>`; anything else is refused like
+/// [`split_bare_ability_target_restriction`]. Input is lowercase.
+pub(crate) fn split_ability_source_and_target_restriction(
+    i: &str,
+) -> OracleResult<'_, (Option<TargetFilter>, Option<TargetFilter>)> {
+    let (rest, (residue, targets)) = split_ability_target_restriction(i)?;
+    let residue = residue.trim();
+    if residue.is_empty() {
+        return Ok((rest, (None, targets)));
+    }
+    let (subject, _) = tag::<_, _, OracleError<'_>>("of ").parse(residue)?;
+    let (_, source) = parse_ability_source_subject(subject)?;
+    Ok((rest, (Some(source), targets)))
+}
+
+/// CR 602.2: the `<sources>` of an ability-scoped cost modifier ("abilities of
+/// other Equipment", "the first activated ability of an artifact"). A subject
+/// the type-phrase grammar can't consume whole, or reads as "any object", is
+/// refused rather than widened to every ability.
+pub(crate) fn parse_ability_source_subject(subject: &str) -> OracleResult<'_, TargetFilter> {
+    let (source, remainder) = parse_type_phrase_folding(subject);
+    if !remainder.trim().is_empty() || matches!(source, TargetFilter::Any) {
+        return Err(nom::Err::Error(OracleError::new(
+            subject,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((remainder, source))
 }
 
 pub(crate) fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {

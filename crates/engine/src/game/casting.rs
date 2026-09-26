@@ -3,20 +3,22 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
     AdditionalCost, BoardWideCostModifier, CardPlayMode, CardSelectionMode, CardTypeSetSource,
     CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification,
-    CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, EffectKind,
-    FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope,
-    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
-    RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
-    TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter,
+    ControllerRef, CostObjectCount, CostPaidObjectSnapshot, CostReduction, CounterCostSelection,
+    Duration, Effect, EffectKind, FilterProp, GameRestriction, ModalSelectionCondition,
+    ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr,
+    QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition,
+    StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
 use crate::types::casting_costs::{
     amount_is_order_relevant, ActivationCostLock, ActivationCostLockPoint, ActivationCostSnapshot,
     CostReductionAnalysis, CostReductionCoverage, CostReductionElection, CostReductionEntry,
-    CostReductionOutcome, ReductionProvenance,
+    CostReductionOutcome, ManaCarrier, ReductionProvenance, SettledTail,
 };
 use crate::types::events::{ActivatedAbilityKind, GameEvent};
+use crate::types::game_state::{AbilityActivationRecord, ActivationTargetFact, LKISnapshot};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
     CastOfferKind, CastPaymentMode, CastingPermissionIndex, CastingVariant,
@@ -23229,8 +23231,21 @@ pub(crate) fn activation_verdict(
             return ActivationVerdict::Illegal;
         }
     }
+    // CR 601.2f: a cost rider whose target-reading condition this engine can't
+    // evaluate against targets leaves the price undeterminable: not offered.
+    if !activation_cost_rider_is_priceable(&ability_def) {
+        return ActivationVerdict::Illegal;
+    }
     // CR 601.2f: Apply self-referential cost reduction before affordability check.
-    apply_cost_reduction(state, &mut ability_def, player, source_id);
+    // CR 601.2c + CR 602.2b: a cost that may depend on the targets is judged
+    // over the legal assignments; `proved_unpayable` means none is affordable.
+    let proved_unpayable = fold_activation_cost_for_feasibility(
+        state,
+        &mut ability_def,
+        player,
+        source_id,
+        ability_index,
+    );
     let affordability_cost = ability_def
         .cost
         .clone()
@@ -23258,9 +23273,10 @@ pub(crate) fn activation_verdict(
         return ActivationVerdict::Illegal;
     }
     // CR 118.3: the resource-availability gate — the ONE evaluation.
-    let cost_not_payable = affordability_cost.as_ref().is_some_and(|cost| {
-        !can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index))
-    });
+    let cost_not_payable = proved_unpayable
+        || affordability_cost.as_ref().is_some_and(|cost| {
+            !can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index))
+        });
     if cost_not_payable && query == ActivationQuery::Legality {
         return ActivationVerdict::Illegal;
     }
@@ -23508,6 +23524,11 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
         return Ok(None);
     };
     if mana_cost.is_without_paying_mana() {
+        // CR 601.2h: nothing left to pay, so payment is skipped. This is the
+        // payment-skip decision, deliberately distinct from the settlement
+        // write-back's carrier choice (M3), which keys on `NoCost` instead.
+        #[cfg(feature = "test-support")]
+        super::perf_counters::record_activation_zero_mana_leg_skip();
         return Ok(None);
     }
     let excluded_sources = remaining
@@ -23683,20 +23704,31 @@ pub(crate) fn resume_activation_after_cost_election(
             ));
         }
     };
-    snapshot.lock = ActivationCostLock::Locked {
-        point,
-        order: Some(order),
-    };
     let resumed = match point {
-        ActivationCostLockPoint::Announcement => activate_with_cost_carrier(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            Some(snapshot),
-            events,
-        ),
+        // CR 601.2c + CR 602.2b: an election raised at target settlement
+        // resumes into its settled tail, never back through the announcement.
+        ActivationCostLockPoint::TargetSettlement => {
+            return resume_settlement_after_cost_election(state, player, pending, order, events);
+        }
+        ActivationCostLockPoint::Announcement => {
+            snapshot.lock = ActivationCostLock::Locked {
+                point,
+                order: Some(order),
+            };
+            activate_with_cost_carrier(
+                state,
+                player,
+                pending.object_id,
+                ability_index,
+                Some(snapshot),
+                events,
+            )
+        }
         ActivationCostLockPoint::XAnnounced => {
+            snapshot.lock = ActivationCostLock::Locked {
+                point,
+                order: Some(order),
+            };
             let mut pending = pending.clone();
             let object_id = pending.object_id;
             apply_activation_x_fold(&mut pending, snapshot);
@@ -23981,6 +24013,13 @@ fn activate_with_cost_carrier(
         }
     }
 
+    // CR 601.2f: a price that can't be determined can't be announced.
+    if !activation_cost_rider_is_priceable(&ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "this ability's cost depends on its target in a way that can't be determined"
+                .to_string(),
+        ));
+    }
     // CR 601.2f + CR 602.2b: collect this activation's cost modifiers exactly
     // once (or, resuming the caster's election, take the snapshot its prompt
     // carried) and fold the PREVIEW the gates below read. The ability's cost
@@ -23996,14 +24035,25 @@ fn activate_with_cost_carrier(
             Some(snapshot)
         }
         None => ability_def.cost.clone().map(|base_cost| {
-            let modifiers =
-                collect_activation_cost_modifiers(state, &ability_def, player, source_id);
-            // CR 601.2b + CR 601.2f: a MANA `{X}` is announced before the total
-            // cost is determined, and a floor counts the cost's mana, so such a
-            // lock waits for X. The discriminator is the typed cost structure
-            // (a mana leg carrying an `X` shard); a non-mana X (remove X
-            // counters, pay X energy) changes no mana and locks here.
-            let point = if casting_costs::extract_x_mana_cost(&base_cost).is_some() {
+            let modifiers = collect_activation_cost_modifiers(
+                state,
+                &ability_def,
+                player,
+                source_id,
+                TargetGating::Independent,
+            );
+            // CR 601.2b + CR 601.2c + CR 601.2f: the lock waits for the LATEST
+            // fold that can still change the modifiers or the cost they apply to.
+            // A target-gated modifier waits for the targets (CR 601.2c comes
+            // after the X announcement, CR 601.2b, so target settlement also
+            // prices a chosen X). Otherwise a MANA `{X}` is announced before the
+            // total cost is determined, and a floor counts the cost's mana, so
+            // such a lock waits for X. The discriminator is the typed cost
+            // structure (a mana leg carrying an `X` shard); a non-mana X (remove
+            // X counters, pay X energy) changes no mana and locks here.
+            let point = if may_gain_target_gated_modifiers(state, &ability_def, player, source_id) {
+                ActivationCostLockPoint::TargetSettlement
+            } else if casting_costs::extract_x_mana_cost(&base_cost).is_some() {
                 ActivationCostLockPoint::XAnnounced
             } else {
                 ActivationCostLockPoint::Announcement
@@ -24012,11 +24062,41 @@ fn activate_with_cost_carrier(
                 base_cost,
                 raise_total: modifiers.raise_total,
                 reductions: modifiers.reductions,
+                mana_carrier: ManaCarrier::Whole,
+                settlement_tail: None,
                 lock: ActivationCostLock::Open { point },
             })
         }),
     };
+    // CR 601.2c + CR 601.2f + CR 602.2b: an activation whose cost may depend on
+    // its targets is locked at target settlement, not here. Its printed cost is
+    // carried unfolded, with the target-independent modifiers already collected.
+    let lock_deferred_to_targets = carrier.as_deref().is_some_and(|snapshot| {
+        matches!(
+            snapshot.lock,
+            ActivationCostLock::Open {
+                point: ActivationCostLockPoint::TargetSettlement
+            }
+        )
+    });
+    // The gates below read a PREVIEW. A deferred activation previews its best
+    // case (every target-gated reduction, no target-gated raise): settlement
+    // decides the real price exactly, before any payment, so an optimistic
+    // preview can only become a refused target, never a stranded payment.
     let preview_cost = carrier.as_ref().map(|snapshot| {
+        let mut reductions = snapshot.reductions.clone();
+        if lock_deferred_to_targets {
+            reductions.extend(
+                collect_activation_cost_modifiers(
+                    state,
+                    &ability_def,
+                    player,
+                    source_id,
+                    TargetGating::AnyTargets,
+                )
+                .reductions,
+            );
+        }
         finish_activation_fold(
             state,
             player,
@@ -24024,7 +24104,7 @@ fn activate_with_cost_carrier(
             fold_activation_cost(
                 &snapshot.base_cost,
                 snapshot.raise_total,
-                &snapshot.reductions,
+                &reductions,
                 locked_activation_order(snapshot),
             ),
         )
@@ -24150,13 +24230,17 @@ fn activate_with_cost_carrier(
             ActivationCostLock::Open {
                 point: ActivationCostLockPoint::XAnnounced,
             } => deferred_to_x = true,
-            ActivationCostLock::Locked { .. } => {}
+            // Locked at target settlement, with the committed targets.
+            ActivationCostLock::Open {
+                point: ActivationCostLockPoint::TargetSettlement,
+            }
+            | ActivationCostLock::Locked { .. } => {}
         }
     }
     // The lock is the only writer of the ability's cost. A lock deferred to the
-    // X announcement leaves the printed cost unfolded: its `{X}` leg is folded,
-    // whole, once X is concrete (`lock_activation_cost_at_x`).
-    ability_def.cost = if deferred_to_x {
+    // X announcement or to target settlement leaves the printed cost unfolded:
+    // the later lock folds every modifier once, against the concrete cost.
+    ability_def.cost = if deferred_to_x || lock_deferred_to_targets {
         carrier.as_ref().map(|snapshot| snapshot.base_cost.clone())
     } else {
         preview_cost
@@ -24274,6 +24358,11 @@ fn activate_with_cost_carrier(
     // CR 603.4: Stamp the printed-ability index for per-turn resolution tracking
     // before any branch path that pushes this ability onto the stack.
     resolved.ability_index = Some(ability_index);
+    // CR 602.2 + CR 601.2c (capture A): the activation's journal facts,
+    // captured now, before any cost is paid. Target settlement adds the
+    // committed targets on every target-first route.
+    resolved.activation_record =
+        capture_activation_record(state, player, source_id, ability_index, &resolved).map(Box::new);
     // CR 602.2b + CR 601.2b/c: an X announcement can determine how many
     // targets an ability has. Before X is chosen, target-slot construction may
     // reject that specific class of otherwise legal activation; defer only that
@@ -24965,6 +25054,7 @@ fn activate_with_cost_carrier(
     }
 
     if let Some(ref cost) = ability_def.cost {
+        require_locked_activation_cost(carrier.as_deref(), ActivationCostGuardSite::DirectPay)?;
         if variable_speed_payment_range(cost, effective_speed(state, player)).is_some() {
             return Ok(begin_variable_speed_payment(
                 state,
@@ -25035,6 +25125,11 @@ fn activate_with_cost_carrier(
     }
 
     // Push to stack
+    // CR 602.2: the record captured before payment is required to place the
+    // ability; without one the activation can't complete legally and is
+    // reversed (never recorded from post-payment facts).
+    let mut resolved = resolved;
+    let record = take_activation_record(&mut resolved, player)?;
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
     let announced_targets = flatten_targets_in_chain(&resolved);
@@ -25055,11 +25150,47 @@ fn activate_with_cost_carrier(
     );
     commit_crime_after_stack_placement(state, crime_candidate, player, events);
 
-    record_activated_ability_placed(state, player, source_id, ability_index, entry_id, events);
+    record_activated_ability_placed(
+        state,
+        player,
+        source_id,
+        ability_index,
+        entry_id,
+        record,
+        events,
+    );
 
     priority::clear_priority_passes(state);
 
     Ok(WaitingFor::Priority { player })
+}
+
+/// CR 602.2 + CR 601.2c: take an activation's pre-payment record for its
+/// placement. A missing record means the activation's facts were never
+/// captured before payment, so it can't be completed legally: it is reversed
+/// at the action boundary with nothing recorded.
+pub(crate) fn take_activation_record(
+    ability: &mut ResolvedAbility,
+    player: PlayerId,
+) -> Result<AbilityActivationRecord, EngineError> {
+    ability
+        .activation_record
+        .take()
+        .map(|record| *record)
+        .ok_or(EngineError::ActivationReversed { player })
+}
+
+/// [`take_activation_record`]'s check, for a continuation that places the
+/// ability later and must refuse before it pays anything.
+pub(crate) fn require_activation_record(
+    ability: &ResolvedAbility,
+    player: PlayerId,
+) -> Result<(), EngineError> {
+    if ability.activation_record.is_some() {
+        Ok(())
+    } else {
+        Err(EngineError::ActivationReversed { player })
+    }
 }
 
 /// CR 602.2 + CR 117.1b: the bookkeeping every placement of a player-activated
@@ -25076,12 +25207,18 @@ fn activate_with_cost_carrier(
 /// placed ability is read from THAT entry by id — never from the top of the
 /// stack, which cannot tell two activations of one permanent's same ability
 /// apart.
+///
+/// `record` is the activation's facts, captured before any of its cost was
+/// paid (CR 601.2c precedes CR 601.2h). It is a required input: a placement
+/// cannot be recorded without it, so no site can publish facts read after
+/// payment, and none can leave a placed activation out of the turn journal.
 pub(crate) fn record_activated_ability_placed(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
     placed_entry: ObjectId,
+    record: AbilityActivationRecord,
     events: &mut Vec<GameEvent>,
 ) {
     // The caller just pushed this entry, and `stack::push_to_stack` always
@@ -25099,7 +25236,7 @@ pub(crate) fn record_activated_ability_placed(
                 )),
         "record_activated_ability_placed must name the entry its caller just pushed"
     );
-    restrictions::record_ability_activation(state, source_id, ability_index);
+    restrictions::record_ability_activation(state, source_id, ability_index, Some(record));
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
     state.pending_activations.push((source_id, ability_index));
@@ -25117,6 +25254,115 @@ pub(crate) fn record_activated_ability_placed(
         player,
         events,
     );
+}
+
+/// CR 602.2 + CR 601.2c: capture an activation's journal facts while they are
+/// live, before any of its cost is paid: the activator, the source as it is
+/// now, and the committed targets of the whole chain (CR 115.1), each object
+/// target as it is now. The activation analog of building a
+/// `SpellCastRecord` at cast time.
+pub(crate) fn capture_activation_record(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability: &ResolvedAbility,
+) -> Option<AbilityActivationRecord> {
+    capture_activation_record_from(
+        state,
+        player,
+        source_id,
+        activation_ability_definition(state, source_id, ability_index).as_ref(),
+        &flatten_targets_in_chain(ability),
+    )
+}
+
+/// [`capture_activation_record`] from an ability definition and its committed
+/// targets.
+pub(crate) fn capture_activation_record_from(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    def: Option<&AbilityDefinition>,
+    targets: &[TargetRef],
+) -> Option<AbilityActivationRecord> {
+    // The source exists whenever its ability is announced; a missing one
+    // yields no record, which the placement authority refuses (fail-closed).
+    let source_lki = state
+        .objects
+        .get(&source_id)?
+        .snapshot_public_characteristics();
+    let targets = targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Player(player) => Some(ActivationTargetFact::Player(*player)),
+            TargetRef::Object(id) => {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| ActivationTargetFact::Object {
+                        id: *id,
+                        lki: Box::new(obj.snapshot_public_characteristics()),
+                    })
+            }
+        })
+        .collect();
+    Some(AbilityActivationRecord {
+        activator: player,
+        source: source_id,
+        source_lki,
+        ability_tag: def.and_then(|def| def.ability_tag),
+        is_loyalty_ability: def
+            .and_then(|def| def.cost.as_ref())
+            .is_some_and(crate::types::ability::is_loyalty_ability_cost),
+        targets,
+    })
+}
+
+/// CR 602.2 + CR 601.2c: at target settlement, replace a captured record's
+/// targets with the committed chain targets as they are now, before payment. An
+/// activation that reaches settlement without a record (a pending restored from
+/// before the journal existed) is captured whole here, still before payment.
+fn capture_settled_targets(state: &GameState, player: PlayerId, pending: &mut PendingCast) {
+    let Some(ability_index) = pending.activation_ability_index else {
+        return;
+    };
+    let Some(fresh) = capture_activation_record(
+        state,
+        player,
+        pending.object_id,
+        ability_index,
+        &pending.ability,
+    ) else {
+        return;
+    };
+    match pending.ability.activation_record.as_deref_mut() {
+        Some(record) => record.targets = fresh.targets,
+        None => pending.ability.activation_record = Some(Box::new(fresh)),
+    }
+}
+
+/// Test fixtures that park a hand-built activation `PendingCast` mid-pipeline
+/// skip its announcement, so they stamp the pre-payment record that announcement
+/// would have captured. Panics on a spell pending or a missing source.
+#[cfg(any(test, feature = "test-support"))]
+pub fn stamp_announced_activation_record(
+    state: &GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) {
+    let ability_index = pending
+        .activation_ability_index
+        .expect("stamp_announced_activation_record needs an activation pending");
+    let record = capture_activation_record(
+        state,
+        player,
+        pending.object_id,
+        ability_index,
+        &pending.ability,
+    )
+    .expect("stamp_announced_activation_record needs the activation's source");
+    pending.ability.activation_record = Some(Box::new(record));
 }
 
 /// CR 601.2i: If the player is unable or unwilling to complete a cast, the
@@ -25483,9 +25729,32 @@ pub(crate) fn loyalty_ability_gains_mana_tax(
     if !matches!(ability_def.cost, Some(AbilityCost::Loyalty { .. })) {
         return false;
     }
-    let mut probe = ability_def.clone();
-    apply_cost_reduction(state, &mut probe, player, source_id);
-    !matches!(probe.cost, Some(AbilityCost::Loyalty { .. }))
+    // CR 601.2c + CR 602.2b: the fast path never re-prices after targets, so it
+    // may keep a loyalty ability only if NO assignment can add mana. Route on the
+    // worst case: every target-gated raise that passes its non-target gates. An
+    // over-route is safe, because the general flow folds with committed targets.
+    let Some(base) = ability_def.cost.as_ref() else {
+        return false;
+    };
+    let mut modifiers = collect_activation_cost_modifiers(
+        state,
+        ability_def,
+        player,
+        source_id,
+        TargetGating::Independent,
+    );
+    modifiers.raise_total = modifiers.raise_total.saturating_add(
+        collect_activation_cost_modifiers(
+            state,
+            ability_def,
+            player,
+            source_id,
+            TargetGating::AnyTargets,
+        )
+        .raise_total,
+    );
+    let probe = fold_activation_cost(base, modifiers.raise_total, &modifiers.reductions, None);
+    !matches!(probe, AbilityCost::Loyalty { .. })
 }
 
 /// CR 601.2f + CR 602.2b: Determine an activation's cost under the caster-optimal
@@ -25498,7 +25767,13 @@ fn apply_cost_reduction(
     player: PlayerId,
     source_id: ObjectId,
 ) {
-    let modifiers = collect_activation_cost_modifiers(state, ability_def, player, source_id);
+    let modifiers = collect_activation_cost_modifiers(
+        state,
+        ability_def,
+        player,
+        source_id,
+        TargetGating::Independent,
+    );
     if let Some(cost) = ability_def.cost.take() {
         let folded =
             fold_activation_cost(&cost, modifiers.raise_total, &modifiers.reductions, None);
@@ -25566,17 +25841,52 @@ impl ActivationCostModifiers {
             CostModifyMode::Minimum => {}
         }
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.raise_total == 0 && self.reductions.is_empty()
+    }
+}
+
+/// CR 601.2c + CR 602.2b: which activation cost modifiers the collector takes,
+/// split by whether applicability reads the activation's chosen targets.
+///
+/// A target-gated modifier (Professor Hojo's "that targets a creature you
+/// control", Kopala's "that target a Merfolk you control", a self rider whose
+/// condition or count reads a target) cannot be determined before targets are
+/// committed (CR 601.2c precedes CR 601.2f). So collection is split along that
+/// axis, and each consumer names the side it needs.
+#[derive(Clone, Copy)]
+pub(crate) enum TargetGating<'a> {
+    /// Only modifiers whose applicability reads no target: the announcement
+    /// collection.
+    Independent,
+    /// Only target-gated modifiers, each included iff `ability`'s committed
+    /// targets qualify for it: the target-settlement collection.
+    Committed(&'a ResolvedAbility),
+    /// Every target-gated modifier that passes its non-target gates, whatever
+    /// the targets. Bounds only: a reduction here is the best any assignment
+    /// can get, a raise the worst it can suffer. A self rider whose COUNT reads
+    /// a target is unbounded here (`u32::MAX`), since its amount is unknown.
+    AnyTargets,
+}
+
+impl TargetGating<'_> {
+    fn takes_target_gated(&self) -> bool {
+        !matches!(self, TargetGating::Independent)
+    }
 }
 
 /// CR 601.2f + CR 602.2b: collect every modifier that applies to activating
 /// `ability_def` — the ability's own "costs {N} less/more" rider, printed
 /// `ReduceAbilityCost` statics, and duration-scoped continuous ones — without
-/// applying any of them. The single collection authority for activation costs.
+/// applying any of them. The single collection authority for activation costs;
+/// `gating` selects the target-independent or the target-gated side.
 pub(crate) fn collect_activation_cost_modifiers(
     state: &GameState,
     ability_def: &AbilityDefinition,
     player: PlayerId,
     source_id: ObjectId,
+    gating: TargetGating<'_>,
 ) -> ActivationCostModifiers {
     let mut modifiers = ActivationCostModifiers::default();
     let source_name = state
@@ -25586,15 +25896,28 @@ pub(crate) fn collect_activation_cost_modifiers(
         .unwrap_or_default();
 
     if let Some(ref rider) = ability_def.cost_reduction {
-        // CR 602.2b + CR 601.2f: A conditional flat modification ("costs {N} less/more … if [cond]")
-        // applies only when its gate holds at cost-determination time. `None` =
-        // unconditional (the "for each" scaling form and all legacy reductions).
-        let condition_met = rider.condition.as_ref().is_none_or(|cond| {
-            crate::game::restrictions::evaluate_condition(state, player, source_id, cond)
-        });
-        if condition_met {
-            let count = super::quantity::resolve_quantity(state, &rider.count, player, source_id);
-            let delta = (rider.amount_per as i32 * count).max(0) as u32;
+        let delta = if ability_cost_reduction_is_target_dependent(rider) {
+            self_rider_target_gated_delta(state, rider, player, source_id, gating)
+        } else if gating.takes_target_gated() {
+            None
+        } else {
+            // CR 602.2b + CR 601.2f: A conditional flat modification ("costs {N}
+            // less/more … if [cond]") applies only when its gate holds at
+            // cost-determination time. `None` = unconditional (the "for each"
+            // scaling form and all legacy reductions).
+            rider
+                .condition
+                .as_ref()
+                .is_none_or(|cond| {
+                    crate::game::restrictions::evaluate_condition(state, player, source_id, cond)
+                })
+                .then(|| {
+                    let count =
+                        super::quantity::resolve_quantity(state, &rider.count, player, source_id);
+                    (rider.amount_per as i32 * count).max(0) as u32
+                })
+        };
+        if let Some(delta) = delta {
             // CR 601.2f + CR 118.7: self-referential text uses the same
             // Reduce/Raise axis as external ability-cost statics, and is unfloored.
             modifiers.push(
@@ -25622,10 +25945,1285 @@ pub(crate) fn collect_activation_cost_modifiers(
             ability_def,
             player,
             source_id,
+            gating,
             &mut modifiers,
         );
     }
     modifiers
+}
+
+fn ability_cost_reduction_is_target_dependent(reduction: &CostReduction) -> bool {
+    reduction
+        .condition
+        .as_ref()
+        .is_some_and(parsed_condition_reads_targets)
+        || quantity_expr_reads_target_object(&reduction.count)
+}
+
+// CR 601.2c + CR 602.2b + CR 115.1: the classifiers below decide whether an
+// activation's own cost rider reads THIS activation's chosen targets, and so must
+// wait for them to be committed before it can be priced.
+//
+// The direction of error is what shapes them. A false NEGATIVE prices the rider
+// before any target exists, which is a silent misprice. So the two enums a rider is
+// built from, `QuantityRef` and `ParsedCondition`, are matched EXHAUSTIVELY: a new
+// variant fails to compile here until someone decides whether it reads a target.
+// The smaller scope types they carry are matched exhaustively for the same reason.
+// `TargetFilter` follows the repo's convention for filter predicates (explicit
+// recursion, `_ => false`; compare `TargetFilter::references_cost_paid_object`),
+// naming each variant that is relative to a chosen target.
+//
+// Measured on the corpus: of the 83 printed self cost riders, exactly 2 carry any
+// target reference (Dragonfire Blade, Raft Security Officer), both on targeted
+// abilities, and both were already classified as target-dependent before these
+// classifiers were widened. So widening them changes no current card.
+
+fn parsed_condition_reads_targets(condition: &ParsedCondition) -> bool {
+    match condition {
+        // CR 115.1: the condition is ABOUT the chosen targets.
+        ParsedCondition::SpellTargetsFilter { .. } => true,
+        ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_reads_target_object(lhs) || quantity_expr_reads_target_object(rhs)
+        }
+        ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
+            quantity_ref_reads_target_object(lhs) || quantity_ref_reads_target_object(rhs)
+        }
+        ParsedCondition::ControlsCreatureWithKeyword { controller, .. } => {
+            controller_ref_reads_chosen_target(controller)
+        }
+        ParsedCondition::YouAttackedWithAtLeast { filter, .. }
+        | ParsedCondition::YouCastSpellThisTurn { filter } => filter
+            .as_ref()
+            .is_some_and(target_filter_reads_chosen_target),
+        ParsedCondition::BattlefieldEntriesThisTurn { filter, .. } => {
+            target_filter_reads_chosen_target(filter)
+        }
+        ParsedCondition::PlayerCountAtLeast { filter, .. } => {
+            player_filter_reads_chosen_target(filter)
+        }
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
+            conditions.iter().any(parsed_condition_reads_targets)
+        }
+        ParsedCondition::Not { condition } => parsed_condition_reads_targets(condition),
+        // Source-, zone-, turn-history- and controller-relative facts: none names a
+        // target of this activation.
+        ParsedCondition::SourceInZone { .. }
+        | ParsedCondition::SourceIsAttacking
+        | ParsedCondition::SourceIsAttackingOrBlocking
+        | ParsedCondition::SourceIsBlocked
+        | ParsedCondition::SourcePowerAtLeast { .. }
+        | ParsedCondition::SourceHasCounterAtLeast { .. }
+        | ParsedCondition::SourceHasNoCounter { .. }
+        | ParsedCondition::SourceEnteredThisTurn
+        | ParsedCondition::SourceAttackedThisTurn
+        | ParsedCondition::SourceIsCreature
+        | ParsedCondition::SourceAttachedTo { .. }
+        | ParsedCondition::SourceUntappedAttachedTo { .. }
+        | ParsedCondition::SourceLacksKeyword { .. }
+        | ParsedCondition::SourceIsColor { .. }
+        | ParsedCondition::FirstSpellThisGame
+        | ParsedCondition::OpponentSearchedLibraryThisTurn
+        | ParsedCondition::BeenAttackedThisStep
+        | ParsedCondition::ZoneCardCountAtLeast { .. }
+        | ParsedCondition::ZoneCardTypeCountAtLeast { .. }
+        | ParsedCondition::ZoneCoreTypeCardCountAtLeast { .. }
+        | ParsedCondition::ZoneSubtypeCardCountAtLeast { .. }
+        | ParsedCondition::OpponentPoisonAtLeast { .. }
+        | ParsedCondition::HandSizeExact { .. }
+        | ParsedCondition::HandSizeOneOf { .. }
+        | ParsedCondition::CreaturesYouControlTotalPowerAtLeast { .. }
+        | ParsedCondition::YouControlLandSubtypeAny { .. }
+        | ParsedCondition::YouControlSubtypeCountAtLeast { .. }
+        | ParsedCondition::YouControlCoreTypeCountAtLeast { .. }
+        | ParsedCondition::YouControlColorPermanentCountAtLeast { .. }
+        | ParsedCondition::YouControlSubtypeOrGraveyardCardSubtype { .. }
+        | ParsedCondition::YouControlLegendaryCreature
+        | ParsedCondition::YouControlNamedPlaneswalker { .. }
+        | ParsedCondition::YouControlCreatureWithPowerAtLeast { .. }
+        | ParsedCondition::YouControlCreatureWithPt { .. }
+        | ParsedCondition::YouControlAnotherColorlessCreature
+        | ParsedCondition::YouControlSnowPermanentCountAtLeast { .. }
+        | ParsedCondition::YouControlDifferentPowerCreatureCountAtLeast { .. }
+        | ParsedCondition::YouControlLandsWithSameNameAtLeast { .. }
+        | ParsedCondition::YouControlNoCreatures
+        | ParsedCondition::YouAttackedThisTurn
+        | ParsedCondition::YouAttackedSourceControllerThisTurn
+        | ParsedCondition::YouPlayedLandThisTurn
+        | ParsedCondition::YouCastNoncreatureSpellThisTurn
+        | ParsedCondition::YouCastSpellCountAtLeast { .. }
+        | ParsedCondition::YouGainedLifeThisTurn
+        | ParsedCondition::YouCreatedTokenThisTurn
+        | ParsedCondition::YouDiscardedCardThisTurn
+        | ParsedCondition::YouSacrificedArtifactThisTurn
+        | ParsedCondition::CreatureDiedThisTurn
+        | ParsedCondition::YouHadCreatureEnterThisTurn
+        | ParsedCondition::YouHadAngelOrBerserkerEnterThisTurn
+        | ParsedCondition::YouHadArtifactEnterThisTurn
+        | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
+        | ParsedCondition::HasCityBlessing
+        | ParsedCondition::HasEnduringStory
+        | ParsedCondition::CompletedDungeon { .. }
+        | ParsedCondition::HasMaxSpeed
+        | ParsedCondition::IsYourTurn
+        | ParsedCondition::IsOpponentsTurn
+        | ParsedCondition::IsDuringUpkeep
+        | ParsedCondition::ControlsCommander { .. } => false,
+    }
+}
+
+/// Delegates the traversal to `QuantityExpr::any_ref`, so a new expression
+/// wrapper can't bypass target detection.
+fn quantity_expr_reads_target_object(expr: &QuantityExpr) -> bool {
+    expr.any_ref(&mut quantity_ref_reads_target_object)
+}
+
+fn quantity_ref_reads_target_object(qty: &QuantityRef) -> bool {
+    match qty {
+        // Object-relative: reads a target iff the object is the chosen target.
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+            object_scope_reads_chosen_target(scope)
+        }
+        // Player-relative: reads a target iff the player is the chosen target.
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::PartySize { player }
+        | QuantityRef::Speed { player }
+        | QuantityRef::LifeGainedThisTurn { player }
+        | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::LandsPlayedThisTurn { player, .. }
+        | QuantityRef::PlayerChosenNumber { player }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
+        | QuantityRef::CardsDiscardedThisTurn { player }
+        | QuantityRef::PlayerActionsThisTurn { player, .. } => {
+            player_scope_reads_chosen_target(player)
+        }
+        QuantityRef::SacrificedThisTurn { player, filter }
+        | QuantityRef::BattlefieldEntriesThisTurn { player, filter }
+        | QuantityRef::TokensCreatedThisTurn { player, filter } => {
+            player_scope_reads_chosen_target(player) || target_filter_reads_chosen_target(filter)
+        }
+        // Named for a target outright.
+        QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::TargetZoneCardCount { .. } => true,
+        // CR 601.2h: "mana spent to cast" the ability's target.
+        QuantityRef::ManaSpentToCast { scope, .. } => {
+            matches!(
+                scope,
+                crate::types::ability::CastManaObjectScope::AbilityTarget
+            )
+        }
+        // Filter-scoped counts: read a target iff their filter is target-relative.
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => {
+            target_filter_reads_chosen_target(filter)
+        }
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            target_filter_reads_chosen_target(filter)
+        }
+        QuantityRef::CounterAddedThisTurn { target, .. } => {
+            target_filter_reads_chosen_target(target)
+        }
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            target_filter_reads_chosen_target(source) || target_filter_reads_chosen_target(target)
+        }
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(target_filter_reads_chosen_target),
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_reads_chosen_target(filter)
+        }
+        QuantityRef::BasicLandTypeCount { controller }
+        | QuantityRef::CommanderManaValue { owner: controller } => {
+            controller_ref_reads_chosen_target(controller)
+        }
+        QuantityRef::AttachmentsOnLeavingObject { controller, .. } => controller
+            .as_ref()
+            .is_some_and(controller_ref_reads_chosen_target),
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_reads_chosen_target(aggregate.source())
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            card_type_set_source_reads_chosen_target(source)
+        }
+        // Game, source, event-context, resolution and turn-history values: none is
+        // relative to a target of this activation.
+        QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::VoteCount { .. } => false,
+    }
+}
+
+fn object_scope_reads_chosen_target(scope: &ObjectScope) -> bool {
+    match scope {
+        // CR 115.1 + CR 601.2c: a declared target, of this ability or of its
+        // chain root.
+        ObjectScope::Target | ObjectScope::ChainRootTarget => true,
+        // Resolved through the effect-context referent, the cost-paid object, the
+        // triggering event, or a resolution-local set: none is the declared target
+        // list of this activation.
+        ObjectScope::Source
+        | ObjectScope::Recipient
+        | ObjectScope::EventSource
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::EventTarget
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource => false,
+    }
+}
+
+fn player_scope_reads_chosen_target(player: &PlayerScope) -> bool {
+    match player {
+        PlayerScope::Target | PlayerScope::ParentObjectTargetController => true,
+        PlayerScope::AllPlayers { exclude, .. } => exclude
+            .as_deref()
+            .is_some_and(player_scope_reads_chosen_target),
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::RecipientController
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => false,
+    }
+}
+
+fn controller_ref_reads_chosen_target(controller: &ControllerRef) -> bool {
+    match controller {
+        ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::ParentTargetOwner => true,
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::ScopedPlayer
+        | ControllerRef::EventTargetController
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. } => false,
+    }
+}
+
+fn player_filter_reads_chosen_target(filter: &PlayerFilter) -> bool {
+    match filter {
+        PlayerFilter::ParentObjectTargetController | PlayerFilter::ParentObjectTargetOwner => true,
+        PlayerFilter::AllExcept { exclude } => player_filter_reads_chosen_target(exclude),
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(target_filter_reads_chosen_target),
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            target_filter_reads_chosen_target(filter) || quantity_expr_reads_target_object(count)
+        }
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_reads_target_object(attr) || quantity_expr_reads_target_object(value)
+        }
+        PlayerFilter::TrackedSetPossessor { filter, .. } => {
+            target_filter_reads_chosen_target(filter)
+        }
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ChosenPlayer { .. } => false,
+    }
+}
+
+fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource) -> bool {
+    match source {
+        CardTypeSetSource::Objects { filter } => target_filter_reads_chosen_target(filter),
+        CardTypeSetSource::TurnJournal { filter, .. } => filter
+            .as_ref()
+            .is_some_and(target_filter_reads_chosen_target),
+        CardTypeSetSource::AnyOf { sources } => {
+            sources.iter().any(card_type_set_source_reads_chosen_target)
+        }
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => false,
+    }
+}
+
+/// CR 115.1: whether a filter is relative to a chosen target of this activation,
+/// either a parent-target anaphor or a controller bound to a declared target.
+fn target_filter_reads_chosen_target(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner => true,
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }) => {
+            controller
+                .as_ref()
+                .is_some_and(controller_ref_reads_chosen_target)
+                || properties.iter().any(|prop| {
+                    matches!(prop, FilterProp::Owned { controller } if controller_ref_reads_chosen_target(controller))
+                })
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_reads_chosen_target)
+        }
+        TargetFilter::Not { filter } => target_filter_reads_chosen_target(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => target_filter_reads_chosen_target(filter),
+        _ => false,
+    }
+}
+
+fn parsed_condition_satisfied_with_committed_targets(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    condition: &ParsedCondition,
+) -> bool {
+    match condition {
+        ParsedCondition::SpellTargetsFilter { filter } => {
+            let Some(source_controller) = state.objects.get(&source_id).map(|obj| obj.controller)
+            else {
+                return false;
+            };
+            selected_targets_match_filter(
+                state,
+                source_id,
+                source_controller,
+                ability,
+                filter,
+                false,
+            )
+        }
+        ParsedCondition::And { conditions } => conditions.iter().all(|inner| {
+            parsed_condition_satisfied_with_committed_targets(
+                state, player, source_id, ability, inner,
+            )
+        }),
+        ParsedCondition::Or { conditions } => conditions.iter().any(|inner| {
+            parsed_condition_satisfied_with_committed_targets(
+                state, player, source_id, ability, inner,
+            )
+        }),
+        ParsedCondition::Not { condition } => !parsed_condition_satisfied_with_committed_targets(
+            state, player, source_id, ability, condition,
+        ),
+        // CR 601.2c + CR 601.2f: a comparison that reads the chosen target is
+        // resolved against the committed targets, through the same resolver the
+        // rider's count uses, so condition and count can't disagree.
+        ParsedCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } if parsed_condition_reads_targets(condition) => {
+            let chain = ability_with_chain_targets(ability);
+            comparator.evaluate(
+                super::quantity::resolve_quantity_with_targets(state, lhs, &chain),
+                super::quantity::resolve_quantity_with_targets(state, rhs, &chain),
+            )
+        }
+        // The per-opponent comparison binds each opponent as the scoped player
+        // for its right-hand side, exactly as the target-free evaluator does,
+        // with the committed targets supplied to both sides.
+        ParsedCondition::QuantityVsEachOpponent {
+            lhs,
+            comparator,
+            rhs,
+        } if parsed_condition_reads_targets(condition) => {
+            let targets = flatten_targets_in_chain(ability);
+            let resolve = |qty: &QuantityRef, scope: PlayerId| {
+                super::quantity::resolve_quantity_scoped_with_targets(
+                    state,
+                    &QuantityExpr::Ref { qty: qty.clone() },
+                    source_id,
+                    scope,
+                    &targets,
+                )
+            };
+            let lhs_value = resolve(lhs, player);
+            // CR 102.2 + CR 102.3 + CR 800.4a: each opponent still in the game,
+            // not every other seat (a player who left the game or a teammate is
+            // not an opponent).
+            super::players::opponents(state, player)
+                .into_iter()
+                .all(|opponent| comparator.evaluate(lhs_value, resolve(rhs, opponent)))
+        }
+        _ => restrictions::evaluate_condition(state, player, source_id, condition),
+    }
+}
+
+/// CR 601.2c + CR 115.1: `ability` with its `targets` replaced by the committed
+/// targets of its whole chain. A multi-mode activation carries a later chosen
+/// mode, and that mode's targets, on its `sub_ability`, so a cost that reads
+/// "the target" must read the chain, not only the root mode. Player, chosen X
+/// and every other binding are kept.
+fn ability_with_chain_targets(ability: &ResolvedAbility) -> ResolvedAbility {
+    let mut chain = ability.clone();
+    chain.targets = flatten_targets_in_chain(ability);
+    chain
+}
+
+/// CR 601.2c + CR 601.2f: whether a self cost rider's condition can be decided
+/// against committed targets by this engine. The target-free condition
+/// evaluator (`restrictions::evaluate_condition`) sees no targets, so a
+/// condition that reads one must be evaluated through
+/// [`parsed_condition_satisfied_with_committed_targets`]; the shapes it does
+/// not cover are refused, so an ability whose price can't be determined is
+/// never offered or placed rather than silently priced without its target.
+///
+/// Measured on the corpus: no printed card reaches a refused shape.
+fn cost_rider_condition_is_priceable(condition: &ParsedCondition) -> bool {
+    if !parsed_condition_reads_targets(condition) {
+        return true;
+    }
+    match condition {
+        ParsedCondition::SpellTargetsFilter { .. }
+        | ParsedCondition::QuantityComparison { .. }
+        | ParsedCondition::QuantityVsEachOpponent { .. } => true,
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
+            conditions.iter().all(cost_rider_condition_is_priceable)
+        }
+        ParsedCondition::Not { condition } => cost_rider_condition_is_priceable(condition),
+        // Target-relative only through a filter or controller the target-free
+        // evaluator resolves without targets.
+        ParsedCondition::ControlsCreatureWithKeyword { .. }
+        | ParsedCondition::YouAttackedWithAtLeast { .. }
+        | ParsedCondition::YouCastSpellThisTurn { .. }
+        | ParsedCondition::BattlefieldEntriesThisTurn { .. }
+        | ParsedCondition::PlayerCountAtLeast { .. } => false,
+        // `parsed_condition_reads_targets` admits no other variant.
+        _ => false,
+    }
+}
+
+/// Whether `ability_def`'s own cost rider can be priced (see
+/// [`cost_rider_condition_is_priceable`]).
+pub(crate) fn activation_cost_rider_is_priceable(ability_def: &AbilityDefinition) -> bool {
+    ability_def
+        .cost_reduction
+        .as_ref()
+        .and_then(|rider| rider.condition.as_ref())
+        .is_none_or(cost_rider_condition_is_priceable)
+}
+
+/// CR 601.2c + CR 602.2b: whether an activation's cost may gain a target-gated
+/// modifier once its targets are chosen, so its lock must wait for them.
+///
+/// A SUPERSET by construction: a false negative would lock the cost before a
+/// target-gated modifier could be counted, which is a silent misprice. So it
+/// asks only whether some target-gated modifier passes every gate that doesn't
+/// read targets, and whether the ability will settle targets at all (in any
+/// mode, for a modal ability). An ability with no target slot never reaches
+/// target settlement, and no target-gated modifier can qualify without a
+/// target, so its cost locks at announcement as before.
+pub(crate) fn may_gain_target_gated_modifiers(
+    state: &GameState,
+    ability_def: &AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if collect_activation_cost_modifiers(
+        state,
+        ability_def,
+        player,
+        source_id,
+        TargetGating::AnyTargets,
+    )
+    .is_empty()
+    {
+        return false;
+    }
+    // CR 601.2c: it will settle targets iff it has a target slot now, or one
+    // that waits for X (CR 601.2b announces X first).
+    let settles_targets = |def: &AbilityDefinition| {
+        match build_target_slots_for_announcement(
+            state,
+            &build_resolved_from_def(def, source_id, player),
+        ) {
+            Ok(TargetSlotBuildOutcome::Slots(slots)) => !slots.is_empty(),
+            Ok(TargetSlotBuildOutcome::RequiresChosenX) => true,
+            // An illegal target set refuses the activation on its own.
+            Err(_) => false,
+        }
+    };
+    if ability_def.modal.is_some() {
+        ability_def.mode_abilities.iter().any(settles_targets)
+    } else {
+        settles_targets(ability_def)
+    }
+}
+
+/// The most units of work one activation-cost feasibility search may spend
+/// before it answers `Undecided` (see [`ActivationCostFeasibility`]).
+pub(crate) const ACTIVATION_COST_SEARCH_BUDGET: u32 = 20_000;
+
+/// CR 118.3 + CR 601.2c + CR 602.2b: whether some legal target assignment makes
+/// an activation whose cost depends on its targets affordable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActivationCostFeasibility {
+    /// Some legal assignment's full cost is payable.
+    Payable,
+    /// Proved: every legal assignment's cost is unpayable.
+    Unpayable,
+    /// The search could not decide within its budget. The activation is still
+    /// offered: target settlement prices the chosen targets exactly, before any
+    /// payment, so an optimistic offer can only become a refused target.
+    Undecided,
+}
+
+/// CR 601.2f + CR 602.2b: fold `ability_def.cost` for the pre-activation
+/// affordability probe, and report whether it is PROVED unpayable.
+///
+/// A cost that can't gain a target-gated modifier folds as the preview does.
+/// Otherwise the target-free bounds decide the common case without a search:
+/// the cost with every target-gated raise and no target-gated reduction is the
+/// worst any assignment can suffer (a raise never lowers a total and a
+/// reduction never raises one), and the cost with every reduction and no raise
+/// is the best. Payable at the worst means payable for any targets; unpayable
+/// at the best means unpayable for any. Only the window between them walks the
+/// legal assignments.
+fn fold_activation_cost_for_feasibility(
+    state: &GameState,
+    ability_def: &mut AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    if !may_gain_target_gated_modifiers(state, ability_def, player, source_id) {
+        apply_cost_reduction(state, ability_def, player, source_id);
+        return false;
+    }
+    let Some(base) = ability_def.cost.clone() else {
+        return false;
+    };
+    let independent = collect_activation_cost_modifiers(
+        state,
+        ability_def,
+        player,
+        source_id,
+        TargetGating::Independent,
+    );
+    let any = collect_activation_cost_modifiers(
+        state,
+        ability_def,
+        player,
+        source_id,
+        TargetGating::AnyTargets,
+    );
+    let worst = fold_activation_cost(
+        &base,
+        independent.raise_total.saturating_add(any.raise_total),
+        &independent.reductions,
+        None,
+    );
+    let mut best_reductions = independent.reductions.clone();
+    best_reductions.extend(any.reductions);
+    let best = fold_activation_cost(&base, independent.raise_total, &best_reductions, None);
+    let payable = |cost: &AbilityCost| {
+        can_pay_ability_cost_now(
+            state,
+            player,
+            source_id,
+            &activation_cost_for_affordability(cost.clone(), ability_def.ability_tag),
+            Some(ability_index),
+        )
+    };
+    if payable(&worst) {
+        ability_def.cost = Some(worst);
+        return false;
+    }
+    if !payable(&best) {
+        ability_def.cost = Some(best);
+        return false;
+    }
+    #[cfg(feature = "test-support")]
+    super::perf_counters::record_activation_cost_window_search();
+    let mut budget = super::ability_utils::WorkBudget::new(ACTIVATION_COST_SEARCH_BUDGET);
+    let verdict = activation_cost_feasibility_search(
+        state,
+        ability_def,
+        player,
+        source_id,
+        ability_index,
+        &base,
+        &independent,
+        &mut budget,
+    );
+    ability_def.cost = Some(best);
+    verdict == ActivationCostFeasibility::Unpayable
+}
+
+/// CR 601.2c + CR 602.2b: walk the legal target assignments of a non-modal
+/// activation for one whose FULL cost (the target-independent modifiers plus
+/// exactly the target-gated ones that assignment qualifies for) is payable.
+/// Modal abilities and X-dependent target counts answer `Undecided`: their
+/// assignments aren't known before modes or X are chosen.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn activation_cost_feasibility_search(
+    state: &GameState,
+    ability_def: &AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    base: &AbilityCost,
+    independent: &ActivationCostModifiers,
+    budget: &mut super::ability_utils::WorkBudget,
+) -> ActivationCostFeasibility {
+    activation_cost_feasibility_search_with_witness(
+        state,
+        ability_def,
+        player,
+        source_id,
+        ability_index,
+        base,
+        independent,
+        budget,
+    )
+    .0
+}
+
+/// [`activation_cost_feasibility_search`], also returning the accepted
+/// assignment when it is `Payable`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn activation_cost_feasibility_search_with_witness(
+    state: &GameState,
+    ability_def: &AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    base: &AbilityCost,
+    independent: &ActivationCostModifiers,
+    budget: &mut super::ability_utils::WorkBudget,
+) -> (ActivationCostFeasibility, Option<Vec<Option<TargetRef>>>) {
+    if ability_def.modal.is_some() {
+        return (ActivationCostFeasibility::Undecided, None);
+    }
+    let ability = build_resolved_from_def(ability_def, source_id, player);
+    let Ok(TargetSlotBuildOutcome::Slots(target_slots)) =
+        build_target_slots_for_announcement(state, &ability)
+    else {
+        return (ActivationCostFeasibility::Undecided, None);
+    };
+    let mut visitor = ActivationCostVisitor {
+        state,
+        ability_def,
+        player,
+        source_id,
+        ability_index,
+        base,
+        independent,
+        ability: &ability,
+        priced: Vec::new(),
+        witness: None,
+    };
+    let verdict = match super::ability_utils::walk_target_completions(
+        state,
+        &ability,
+        &target_slots,
+        &ability_def.target_constraints,
+        &mut visitor,
+        budget,
+    ) {
+        super::ability_utils::WalkOutcome::Accepted => ActivationCostFeasibility::Payable,
+        super::ability_utils::WalkOutcome::Rejected => ActivationCostFeasibility::Unpayable,
+        super::ability_utils::WalkOutcome::BudgetExhausted => ActivationCostFeasibility::Undecided,
+    };
+    (verdict, visitor.witness)
+}
+
+/// The completion visitor behind [`activation_cost_feasibility_search`]: it
+/// accepts a legal assignment iff that assignment's full cost is payable. Each
+/// distinct cost is priced once, so assignments that qualify for the same
+/// modifiers share one payability probe.
+struct ActivationCostVisitor<'a> {
+    state: &'a GameState,
+    ability_def: &'a AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    base: &'a AbilityCost,
+    independent: &'a ActivationCostModifiers,
+    ability: &'a ResolvedAbility,
+    priced: Vec<(AbilityCost, bool)>,
+    witness: Option<Vec<Option<TargetRef>>>,
+}
+
+impl super::ability_utils::CompletionVisitor for ActivationCostVisitor<'_> {
+    fn accept(&mut self, selected_slots: &[Option<TargetRef>]) -> bool {
+        let targets: Vec<TargetRef> = selected_slots.iter().flatten().cloned().collect();
+        let mut candidate = self.ability.clone();
+        if assign_targets_in_chain(self.state, &mut candidate, &targets).is_err() {
+            return false;
+        }
+        // The SAME collector target settlement uses, so the offer and the
+        // settled price can't disagree about which modifiers qualify.
+        let committed = collect_activation_cost_modifiers(
+            self.state,
+            self.ability_def,
+            self.player,
+            self.source_id,
+            TargetGating::Committed(&candidate),
+        );
+        let mut reductions = self.independent.reductions.clone();
+        reductions.extend(committed.reductions);
+        let cost = fold_activation_cost(
+            self.base,
+            self.independent
+                .raise_total
+                .saturating_add(committed.raise_total),
+            &reductions,
+            None,
+        );
+        let payable = match self.priced.iter().find(|(priced, _)| *priced == cost) {
+            Some(&(_, payable)) => payable,
+            None => {
+                let payable = can_pay_ability_cost_now(
+                    self.state,
+                    self.player,
+                    self.source_id,
+                    &activation_cost_for_affordability(cost.clone(), self.ability_def.ability_tag),
+                    Some(self.ability_index),
+                );
+                self.priced.push((cost, payable));
+                payable
+            }
+        };
+        if payable {
+            self.witness = Some(selected_slots.to_vec());
+        }
+        payable
+    }
+
+    /// CR 115.6: the empty completion of an all-optional run is legal but may
+    /// be unaffordable when a qualifying target is what makes it payable, so
+    /// the walk must go on past a refused one.
+    fn explores_past_refused_empty_completion(&self) -> bool {
+        true
+    }
+}
+
+/// The activation cost-work entries that refuse an unlocked cost. Each is a
+/// function that can begin paying part of an activation's cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationCostGuardSite {
+    /// `activate_with_cost_carrier`'s untargeted direct payment.
+    DirectPay = 0,
+    /// `finish_selected_return_to_hand_after_automatic`.
+    ReturnAfterAutomatic = 1,
+    /// `handle_return_to_hand_for_cost`.
+    ReturnToHand = 2,
+    /// `handle_remove_counter_for_cost`.
+    RemoveCounter = 3,
+    /// `handle_remove_counter_distribution_for_cost`.
+    RemoveCounterDistribution = 4,
+    /// `push_activated_ability_to_stack`, at its entry.
+    PushToStack = 5,
+    /// `finalize_mana_payment_with_resume`'s activation branch.
+    ManaResume = 6,
+    /// `finalize_mana_payment_with_phyrexian_choices`'s activation branch.
+    PhyrexianResume = 7,
+}
+
+impl ActivationCostGuardSite {
+    pub const COUNT: usize = 8;
+}
+
+/// CR 601.2f + CR 601.2h: an activation's cost is paid only after its total is
+/// locked. A carrier still `Open` means its lock was deferred to target
+/// settlement and settlement hasn't run, so paying now would pay a price that
+/// ignores the target-gated modifiers. Every entry that can begin cost work
+/// checks this first, so a route that bypasses settlement fails closed, with no
+/// side effect, instead of silently mispricing.
+pub(crate) fn require_locked_activation_cost(
+    snapshot: Option<&ActivationCostSnapshot>,
+    site: ActivationCostGuardSite,
+) -> Result<(), EngineError> {
+    #[cfg(feature = "test-support")]
+    super::perf_counters::record_activation_cost_guard(site);
+    #[cfg(not(feature = "test-support"))]
+    let _ = site;
+    match snapshot.map(|snapshot| &snapshot.lock) {
+        Some(ActivationCostLock::Open { .. }) => Err(EngineError::InvalidAction(
+            "an activation's cost must be locked before any of it is paid (CR 601.2f)".to_string(),
+        )),
+        Some(ActivationCostLock::Locked { .. }) | None => Ok(()),
+    }
+}
+
+/// CR 601.2c + CR 602.2b: continue a settled, target-first activation into
+/// the payment flow. `SurfaceThenBoundary` is the interactive target-selection
+/// tail (surface the next unpaid interactive cost unless this shape defers it
+/// to the payment boundary); `Boundary` goes straight to the boundary.
+pub(crate) fn run_settled_activation_tail(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    tail: SettledTail,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    pending.activation_target_selection = ActivationTargetSelection::Settled;
+    if matches!(tail, SettledTail::SurfaceThenBoundary)
+        && !casting_costs::target_first_activation_defers_interactive_costs_to_payment_boundary(
+            &pending,
+            casting_costs::TargetFirstPaymentHandoff::BeforeManaPayment,
+        )
+    {
+        if let Some(waiting_for) = casting_costs::surface_next_unpaid_interactive_activation_cost(
+            state,
+            player,
+            &mut pending,
+            events,
+        )? {
+            return Ok(waiting_for);
+        }
+    }
+    casting_costs::finish_activated_ability_at_payment_boundary(state, player, pending, events)
+}
+
+/// CR 601.2c + CR 601.2f + CR 602.2b: the target-settlement cost lock, run once
+/// an activation's targets are committed and before any cost is paid. Called
+/// INSTEAD of the site's tail at every route that settles a target-first
+/// activation.
+///
+/// A `Locked` carrier passes straight through, so no cost is locked twice. An
+/// `Open` one (its announcement deferred the lock, because a target-gated
+/// modifier might apply) collects the target-gated modifiers the committed
+/// targets qualify for, adds them to the target-independent ones it already
+/// carries, and folds every modifier ONCE: raises, then reductions, under the
+/// caster's CR 601.2f election if more than one total is reachable.
+///
+/// CR 601.2h: "Unpayable costs can't be paid." The price is checked against the
+/// cheapest reachable total before the tail runs, so an activation whose chosen
+/// targets make it unaffordable is refused here, with nothing paid, rather than
+/// entering a payment it cannot finish.
+pub(crate) fn settle_activation_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    tail: SettledTail,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    #[cfg(feature = "test-support")]
+    super::perf_counters::record_activation_settlement(pending.activation_cost_snapshot.as_deref());
+    pending.activation_target_selection = ActivationTargetSelection::Settled;
+    // CR 602.2 + CR 601.2c (capture T): every settled target-first route
+    // passes here after its targets are committed and before any payment, so
+    // the committed targets' facts are captured now, whatever the lock.
+    let activator = pending.ability.controller;
+    capture_settled_targets(state, activator, &mut pending);
+    // CR 602.2 + CR 601.2f: from here on the draft is an invariant of the
+    // pending activation, so an activation that couldn't be captured (its
+    // source is gone) is reversed now, before any of its cost is paid, rather
+    // than at placement.
+    if pending.activation_ability_index.is_some() {
+        require_activation_record(&pending.ability, player)?;
+    }
+    let open = pending
+        .activation_cost_snapshot
+        .as_deref()
+        .is_some_and(|snapshot| {
+            matches!(
+                snapshot.lock,
+                ActivationCostLock::Open {
+                    point: ActivationCostLockPoint::TargetSettlement
+                }
+            )
+        });
+    if !open {
+        if pending.activation_cost_snapshot.is_none() {
+            refuse_unsnapshotted_target_gated_activation(state, player, &pending)?;
+        }
+        return run_settled_activation_tail(state, player, pending, tail, events);
+    }
+    let lock_order = lock_activation_cost_at_settlement(state, player, &mut pending)?;
+    match lock_order {
+        SettlementLock::Locked => run_settled_activation_tail(state, player, pending, tail, events),
+        SettlementLock::Election(outcomes) => {
+            // CR 602.2 + CR 602.2b -> CR 601.2: only a LEGAL activation may raise
+            // the election. Dry-run the real tail under the default (cheapest)
+            // order on an owned clone, discarded with everything it did.
+            let mut dry_run = pending.clone();
+            if let Some(snapshot) = dry_run.activation_cost_snapshot.as_deref_mut() {
+                snapshot.lock = ActivationCostLock::Locked {
+                    point: ActivationCostLockPoint::TargetSettlement,
+                    order: None,
+                };
+            }
+            write_back_settled_activation_cost(&mut dry_run, None);
+            let mut probe = state.clone();
+            run_settled_activation_tail(&mut probe, player, dry_run, tail, &mut Vec::new())?;
+            let snapshot = pending
+                .activation_cost_snapshot
+                .as_deref_mut()
+                .expect("an open carrier is present");
+            snapshot.settlement_tail = Some(tail);
+            let reductions = snapshot.reductions.clone();
+            Ok(WaitingFor::OrderCostReductions {
+                player,
+                reductions,
+                hybrid_symbols: Vec::new(),
+                outcomes,
+                pending_cast: Box::new(pending),
+            })
+        }
+    }
+}
+
+/// What the settlement lock decided for an `Open` carrier.
+enum SettlementLock {
+    /// Locked under the default order and written back.
+    Locked,
+    /// More than one total is reachable: the caster elects (CR 601.2f).
+    Election(Vec<CostReductionOutcome>),
+}
+
+/// Adds the committed-target modifiers to an `Open` carrier, rebuilds its fold
+/// base from the carrier that holds the unpaid mana, checks the cheapest total
+/// is payable, and either locks it (writing the folded cost back) or reports
+/// the election. The carrier stays `Open` for an election.
+fn lock_activation_cost_at_settlement(
+    state: &GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) -> Result<SettlementLock, EngineError> {
+    let (source_id, ability_index) = (
+        pending.object_id,
+        pending.activation_ability_index.ok_or_else(|| {
+            EngineError::InvalidAction("an activation settlement needs its ability index".into())
+        })?,
+    );
+    let mut ability_def = activation_ability_definition(state, source_id, ability_index)
+        .ok_or_else(|| EngineError::InvalidAction("the activated ability is gone".into()))?;
+    // CR 601.2c + CR 601.2f: the unpaid mana lives in exactly one of two
+    // carriers. `pending.cost` holds it whenever it carries mana (the `{X}` and
+    // hoisted-mana-leg paths); otherwise `activation_cost` holds the whole
+    // cost. Keyed on `NoCost`, not `is_without_paying_mana()`: a concrete `{0}`
+    // is a real cost (CR 107.4d), so an X=0 leg is still the carrier.
+    #[cfg(feature = "test-support")]
+    super::perf_counters::record_activation_settlement_writeback();
+    let mana_carrier = if matches!(pending.cost, ManaCost::NoCost) {
+        ManaCarrier::Whole
+    } else {
+        ManaCarrier::Split
+    };
+    let base = match mana_carrier {
+        ManaCarrier::Whole => pending.activation_cost.clone(),
+        ManaCarrier::Split => Some(AbilityCost::Mana {
+            cost: pending.cost.clone(),
+        }),
+    };
+    let committed = {
+        // The collector reads the definition's cost only for its shape
+        // (loyalty, mana ability), so it sees the carried one.
+        ability_def.cost = base.clone().or(ability_def.cost.take());
+        collect_activation_cost_modifiers(
+            state,
+            &ability_def,
+            player,
+            source_id,
+            TargetGating::Committed(&pending.ability),
+        )
+    };
+    let snapshot = pending
+        .activation_cost_snapshot
+        .as_deref_mut()
+        .expect("settlement locks an open carrier");
+    snapshot.raise_total = snapshot.raise_total.saturating_add(committed.raise_total);
+    snapshot.reductions.extend(committed.reductions);
+    snapshot.mana_carrier = mana_carrier;
+    if let Some(base) = base {
+        // Re-captured from the carrier: an X chosen since announcement is
+        // concretized in it, so the fold prices the chosen X.
+        snapshot.base_cost = base;
+    } else {
+        // Nothing unpaid carries mana or any cost, so there is nothing to fold.
+        snapshot.lock = ActivationCostLock::Locked {
+            point: ActivationCostLockPoint::TargetSettlement,
+            order: None,
+        };
+        return Ok(SettlementLock::Locked);
+    }
+
+    // CR 601.2h: the default order is the minimum over every order, so the
+    // cheapest reachable total is payable iff some elected order is.
+    let cheapest = settled_activation_total_cost(pending, None);
+    // CR 601.2h + CR 733.1: an activation that can't be completed legally is
+    // reversed ENTIRELY, not left at its target prompt for another target
+    // (CR 733.2 allows a fresh, legal activation instead). Nothing was accepted
+    // before this lock, so the action boundary's typed reversal restores the
+    // state before the action and returns priority.
+    if !can_pay_ability_cost_now(state, player, source_id, &cheapest, Some(ability_index)) {
+        return Err(EngineError::ActivationReversed { player });
+    }
+    let snapshot = pending
+        .activation_cost_snapshot
+        .as_deref_mut()
+        .expect("settlement locks an open carrier");
+    if let Some(outcomes) = analyze_activation_cost_election(snapshot) {
+        return Ok(SettlementLock::Election(outcomes));
+    }
+    snapshot.lock = ActivationCostLock::Locked {
+        point: ActivationCostLockPoint::TargetSettlement,
+        order: None,
+    };
+    write_back_settled_activation_cost(pending, None);
+    Ok(SettlementLock::Locked)
+}
+
+/// The whole cost an `Open`-at-settlement carrier would lock under `order`:
+/// the folded mana leg together with any non-mana residual.
+fn settled_activation_total_cost(
+    pending: &PendingCast,
+    order: Option<&[ReductionProvenance]>,
+) -> AbilityCost {
+    let snapshot = pending
+        .activation_cost_snapshot
+        .as_deref()
+        .expect("a settled carrier is present");
+    let folded = fold_activation_cost(
+        &snapshot.base_cost,
+        snapshot.raise_total,
+        &snapshot.reductions,
+        order,
+    );
+    match (snapshot.mana_carrier, pending.activation_cost.clone()) {
+        (ManaCarrier::Split, Some(residual)) => AbilityCost::Composite {
+            costs: vec![folded, residual],
+        },
+        (ManaCarrier::Split, None) | (ManaCarrier::Whole, _) => folded,
+    }
+}
+
+/// CR 601.2f + CR 118.7: write the settled fold back to the carrier that holds
+/// the unpaid mana.
+/// Only the mana component changes: `fold_activation_cost` touches only
+/// `AbilityCost::Mana` legs, so a `Whole` carrier's non-mana legs are kept, and a
+/// `Split` carrier's non-mana residual in `activation_cost` is not touched.
+fn write_back_settled_activation_cost(
+    pending: &mut PendingCast,
+    order: Option<&[ReductionProvenance]>,
+) {
+    let snapshot = pending
+        .activation_cost_snapshot
+        .as_deref()
+        .expect("a settled carrier is present");
+    let folded = fold_activation_cost(
+        &snapshot.base_cost,
+        snapshot.raise_total,
+        &snapshot.reductions,
+        order,
+    );
+    match snapshot.mana_carrier {
+        ManaCarrier::Whole => pending.activation_cost = Some(folded),
+        ManaCarrier::Split => match folded {
+            AbilityCost::Mana { cost } => pending.cost = cost,
+            // `fold_activation_cost` keeps a `Mana` base a `Mana` cost: every
+            // generic adjuster mutates it in place. Should that ever change,
+            // keep the price rather than drop it: move the folded cost into
+            // the carrier that can express any shape, beside the residual.
+            other => {
+                pending.activation_cost = Some(match pending.activation_cost.take() {
+                    Some(residual) => AbilityCost::Composite {
+                        costs: vec![other, residual],
+                    },
+                    None => other,
+                });
+                pending.cost = ManaCost::NoCost;
+            }
+        },
+    }
+}
+
+/// CR 601.2f + CR 602.2b: resume a target-settlement election. The caster's
+/// order locks the carrier, the fold is written back, and the tail the prompt
+/// was raised from runs. It never re-announces: modes, X and targets are
+/// already on the pending, and their events were emitted before the prompt.
+pub(crate) fn resume_settlement_after_cost_election(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    order: Vec<ReductionProvenance>,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActivationElectionResume, EngineError> {
+    let mut pending = pending.clone();
+    let Some(snapshot) = pending.activation_cost_snapshot.as_deref_mut() else {
+        return Err(EngineError::InvalidAction(
+            "a settlement election must carry its cost snapshot".to_string(),
+        ));
+    };
+    let Some(tail) = snapshot.settlement_tail.take() else {
+        return Err(EngineError::InvalidAction(
+            "a settlement election must name its tail".to_string(),
+        ));
+    };
+    if !matches!(
+        snapshot.lock,
+        ActivationCostLock::Open {
+            point: ActivationCostLockPoint::TargetSettlement
+        }
+    ) {
+        return Err(EngineError::InvalidAction(
+            "this activation's cost is already locked".to_string(),
+        ));
+    }
+    snapshot.lock = ActivationCostLock::Locked {
+        point: ActivationCostLockPoint::TargetSettlement,
+        order: Some(order.clone()),
+    };
+    write_back_settled_activation_cost(&mut pending, Some(&order));
+    Ok(
+        match run_settled_activation_tail(state, player, pending, tail, events) {
+            Ok(waiting_for) => ActivationElectionResume::Continued(Box::new(waiting_for)),
+            Err(_) => ActivationElectionResume::Reversed,
+        },
+    )
+}
+
+/// CR 601.2c + CR 602.2b: an activation settling with no cost carrier at all is
+/// either a loyalty ability (the fast path carries none, and a reduction can't
+/// touch a bare `Loyalty` cost) or a legacy pending restored from before the
+/// carrier existed. A non-loyalty one whose cost may gain a target-gated
+/// modifier can't be priced correctly without the carrier, so it is refused
+/// rather than guessed at. Fail-closed: a producer that forgets the carrier is
+/// caught here instead of dodging the modifier.
+fn refuse_unsnapshotted_target_gated_activation(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+) -> Result<(), EngineError> {
+    let Some(ability_index) = pending.activation_ability_index else {
+        return Ok(());
+    };
+    let Some(ability_def) = activation_ability_definition(state, pending.object_id, ability_index)
+    else {
+        return Ok(());
+    };
+    let is_loyalty = ability_def
+        .cost
+        .as_ref()
+        .is_some_and(crate::types::ability::is_loyalty_ability_cost);
+    if !is_loyalty
+        && may_gain_target_gated_modifiers(state, &ability_def, player, pending.object_id)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "this activation has no cost carrier, so its target-dependent cost can't be determined"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// CR 601.2c + CR 601.2f: a target-reading self rider's amount under `gating`,
+/// or `None` when it doesn't apply.
+fn self_rider_target_gated_delta(
+    state: &GameState,
+    rider: &CostReduction,
+    player: PlayerId,
+    source_id: ObjectId,
+    gating: TargetGating<'_>,
+) -> Option<u32> {
+    match gating {
+        TargetGating::Independent => None,
+        TargetGating::Committed(ability) => {
+            let condition_met = rider.condition.as_ref().is_none_or(|cond| {
+                parsed_condition_satisfied_with_committed_targets(
+                    state, player, source_id, ability, cond,
+                )
+            });
+            condition_met.then(|| {
+                let count = super::quantity::resolve_quantity_with_targets(
+                    state,
+                    &rider.count,
+                    &ability_with_chain_targets(ability),
+                );
+                (rider.amount_per as i32 * count).max(0) as u32
+            })
+        }
+        TargetGating::AnyTargets => Some(if quantity_expr_reads_target_object(&rider.count) {
+            u32::MAX
+        } else {
+            let count = super::quantity::resolve_quantity(state, &rider.count, player, source_id);
+            (rider.amount_per as i32 * count).max(0) as u32
+        }),
+    }
 }
 
 /// CR 601.2f: the generic reduction one activation entry applies.
@@ -26036,6 +27634,7 @@ fn collect_static_activated_ability_cost_modifiers(
     ability_def: &AbilityDefinition,
     player: PlayerId,
     source_id: ObjectId,
+    gating: TargetGating<'_>,
     modifiers: &mut ActivationCostModifiers,
 ) {
     // CR 604.1: presence gate — nothing to do unless a printed ReduceAbilityCost
@@ -26076,6 +27675,7 @@ fn collect_static_activated_ability_cost_modifiers(
         active_keyword,
         ability_is_mana,
         ability_is_loyalty,
+        gating,
     };
 
     // CR 611.3 + CR 601.2f: printed battlefield/command-zone `ReduceAbilityCost`
@@ -26100,7 +27700,7 @@ fn collect_static_activated_ability_cost_modifiers(
             // CR 604.1 + CR 109.5: "you control" in the affected filter anchors on the
             // static's current controller, read live from the battlefield object.
             let ctx = super::filter::FilterContext::from_source(state, static_source.id);
-            if let Some((mode, amount, minimum_mana)) = resolve_one_reduce_ability_cost(
+            if let Some(applied) = resolve_one_reduce_ability_cost(
                 state,
                 &scope,
                 &def.mode,
@@ -26109,7 +27709,13 @@ fn collect_static_activated_ability_cost_modifiers(
                 static_source.controller,
                 &ctx,
             ) {
-                modifiers.push(mode, amount, minimum_mana, provenance, &static_source.name);
+                modifiers.push(
+                    applied.mode,
+                    applied.amount,
+                    applied.minimum_mana,
+                    provenance,
+                    &static_source.name,
+                );
             }
         }
     }
@@ -26139,7 +27745,7 @@ fn collect_static_activated_ability_cost_modifiers(
                 tce.source_id,
                 tce.controller,
             );
-            if let Some((mode, amount, minimum_mana)) = resolve_one_reduce_ability_cost(
+            if let Some(applied) = resolve_one_reduce_ability_cost(
                 state,
                 &scope,
                 reduce_mode,
@@ -26148,6 +27754,8 @@ fn collect_static_activated_ability_cost_modifiers(
                 tce.controller,
                 &ctx,
             ) {
+                let (mode, amount, minimum_mana) =
+                    (applied.mode, applied.amount, applied.minimum_mana);
                 let display_name = state
                     .objects
                     .get(&tce.source_id)
@@ -26170,12 +27778,168 @@ fn collect_static_activated_ability_cost_modifiers(
 
 /// The activating ability's side of every `ReduceAbilityCost` applicability check.
 #[derive(Clone, Copy)]
-struct ActivationCostScope {
+struct ActivationCostScope<'a> {
     ability_source_id: ObjectId,
     player: PlayerId,
     active_keyword: Option<&'static str>,
     ability_is_mana: bool,
     ability_is_loyalty: bool,
+    gating: TargetGating<'a>,
+}
+
+/// One `ReduceAbilityCost` static resolved against an activation.
+struct AppliedAbilityCostModifier {
+    mode: CostModifyMode,
+    amount: u32,
+    minimum_mana: u32,
+}
+
+/// The activating side of a `ReduceAbilityCost` applicability check, for the
+/// activation being priced now or for one recorded earlier this turn. The gates
+/// below read only this, so "does this modifier apply to that activation" is
+/// one predicate for both, and the history check can't drift from the price.
+struct ActivationView<'a> {
+    activator: PlayerId,
+    source: ObjectId,
+    /// `None`: the live source. `Some`: its facts as they were when activated.
+    source_lki: Option<&'a LKISnapshot>,
+    active_keyword: Option<&'static str>,
+    is_mana: bool,
+    is_loyalty: bool,
+}
+
+/// CR 601.2f + CR 118.7 + CR 605.1a + CR 606.1 + CR 602.2: whether a
+/// `ReduceAbilityCost` static's keyword, mana-ability exemption, activator, and
+/// source (`affected`) gates admit `view`. Its `targets` gate is separate,
+/// because a live activation's targets may not be committed yet.
+#[allow(clippy::too_many_arguments)]
+fn reduce_ability_cost_non_target_gates_admit(
+    state: &GameState,
+    view: &ActivationView<'_>,
+    keyword: &str,
+    exemption: ActivationExemption,
+    activator: Option<&PlayerFilter>,
+    affected: Option<&TargetFilter>,
+    static_controller: PlayerId,
+    filter_ctx: &super::filter::FilterContext,
+) -> bool {
+    // CR 601.2f + CR 606.1: match the "activated" blanket arm, a tag-keyed keyword
+    // (power-up, exhaust, …), or the "loyalty" arm against a loyalty ability's cost.
+    let keyword_matches = keyword == "activated"
+        || Some(keyword) == view.active_keyword
+        || (keyword == "loyalty" && view.is_loyalty);
+    if !keyword_matches {
+        return false;
+    }
+    // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"
+    // adjustment (Suppression Field's tax, Zirda's discount).
+    if exemption == ActivationExemption::ManaAbilities && view.is_mana {
+        return false;
+    }
+    // CR 602.2: an activator-scoped static ("abilities you activate" — Zirda, the
+    // Dawnwaker; Fluctuator) keys off WHO is activating the ability, evaluated
+    // relative to the static's controller — NOT who controls the ability's source.
+    // Reuse the activator-permission predicate with the static's controller as the
+    // reference point so "you" resolves to the static controller. `None` leaves the
+    // source/global scope untouched.
+    if let Some(activator) = activator {
+        if !player_may_begin_activating(state, view.activator, static_controller, Some(activator)) {
+            return false;
+        }
+    }
+    // CR 602.2: scope by the source filter against the ability's SOURCE permanent.
+    affected.is_none_or(|filter| match view.source_lki {
+        None => super::filter::matches_target_filter(state, view.source, filter, filter_ctx),
+        Some(lki) => super::filter::matches_target_filter_on_lki_snapshot(
+            state,
+            view.source,
+            lki,
+            filter,
+            filter_ctx,
+        ),
+    })
+}
+
+/// CR 601.2c + CR 115.1: whether any committed target of a recorded activation
+/// matched `filter` as it was when the ability was activated.
+fn recorded_targets_match_filter(
+    state: &GameState,
+    record: &AbilityActivationRecord,
+    filter: &TargetFilter,
+    static_source_id: ObjectId,
+    static_controller: PlayerId,
+) -> bool {
+    let ctx = super::filter::FilterContext::from_source_with_controller(
+        static_source_id,
+        static_controller,
+    );
+    record.targets.iter().any(|fact| match fact {
+        ActivationTargetFact::Object { id, lki } => {
+            super::filter::matches_target_filter_on_lki_snapshot(state, *id, lki, filter, &ctx)
+        }
+        ActivationTargetFact::Player(player) => target_ref_matches_cost_filter(
+            state,
+            static_source_id,
+            static_controller,
+            &TargetRef::Player(*player),
+            filter,
+        ),
+    })
+}
+
+/// CR 611.3a + CR 602.2: "the first activated ability … you activate each
+/// turn …" is a fact about the turn, not about this modifier's source: an
+/// activation made before the source existed, or before it left and returned,
+/// still counts. True when an activation already recorded this turn satisfies
+/// every gate of this modifier (the same gates the price uses), so the
+/// current activation is not the first.
+#[allow(clippy::too_many_arguments)]
+fn earlier_activation_this_turn_qualified(
+    state: &GameState,
+    keyword: &str,
+    exemption: ActivationExemption,
+    activator: Option<&PlayerFilter>,
+    affected: Option<&TargetFilter>,
+    targets: Option<&TargetFilter>,
+    static_source_id: ObjectId,
+    static_controller: PlayerId,
+    filter_ctx: &super::filter::FilterContext,
+) -> bool {
+    state
+        .abilities_activated_this_turn_by_player
+        .values()
+        .flatten()
+        .any(|record| {
+            let view = ActivationView {
+                activator: record.activator,
+                source: record.source,
+                source_lki: Some(&record.source_lki),
+                active_keyword: record
+                    .ability_tag
+                    .map(crate::types::ability::AbilityTag::keyword_str),
+                // The journal holds non-mana activations only.
+                is_mana: false,
+                is_loyalty: record.is_loyalty_ability,
+            };
+            reduce_ability_cost_non_target_gates_admit(
+                state,
+                &view,
+                keyword,
+                exemption,
+                activator,
+                affected,
+                static_controller,
+                filter_ctx,
+            ) && targets.is_none_or(|filter| {
+                recorded_targets_match_filter(
+                    state,
+                    record,
+                    filter,
+                    static_source_id,
+                    static_controller,
+                )
+            })
+        })
 }
 
 /// CR 604.1: presence gate for the transient (duration-scoped) `ReduceAbilityCost`
@@ -26210,19 +27974,20 @@ fn transient_reduce_ability_cost_present(state: &GameState) -> bool {
 /// nothing: [`fold_activation_cost`] owns the arithmetic and its order.
 fn resolve_one_reduce_ability_cost(
     state: &GameState,
-    scope: &ActivationCostScope,
+    scope: &ActivationCostScope<'_>,
     reduce_mode: &StaticMode,
     affected: Option<&TargetFilter>,
     static_source_id: ObjectId,
     static_controller: PlayerId,
     filter_ctx: &super::filter::FilterContext,
-) -> Option<(CostModifyMode, u32, u32)> {
+) -> Option<AppliedAbilityCostModifier> {
     let ActivationCostScope {
         ability_source_id,
         player,
         active_keyword,
         ability_is_mana,
         ability_is_loyalty,
+        gating,
     } = *scope;
     let StaticMode::ReduceAbilityCost {
         mode,
@@ -26232,38 +27997,71 @@ fn resolve_one_reduce_ability_cost(
         dynamic_count,
         exemption,
         activator,
+        targets,
+        frequency,
     } = reduce_mode
     else {
         return None;
     };
-    // CR 601.2f + CR 606.1: match the "activated" blanket arm, a tag-keyed keyword
-    // (power-up, exhaust, …), or the "loyalty" arm against a loyalty ability's cost.
-    let keyword_matches = keyword == "activated"
-        || Some(keyword.as_str()) == active_keyword
-        || (keyword == "loyalty" && ability_is_loyalty);
-    if !keyword_matches || *amount == 0 {
+    if *amount == 0 {
         return None;
     }
-    // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"
-    // adjustment (Suppression Field's tax, Zirda's discount).
-    if *exemption == ActivationExemption::ManaAbilities && ability_is_mana {
+    let view = ActivationView {
+        activator: player,
+        source: ability_source_id,
+        source_lki: None,
+        active_keyword,
+        is_mana: ability_is_mana,
+        is_loyalty: ability_is_loyalty,
+    };
+    if !reduce_ability_cost_non_target_gates_admit(
+        state,
+        &view,
+        keyword,
+        *exemption,
+        activator.as_ref(),
+        affected,
+        static_controller,
+        filter_ctx,
+    ) {
         return None;
     }
-    // CR 602.2: an activator-scoped static ("abilities you activate" — Zirda, the
-    // Dawnwaker; Fluctuator) keys off WHO is activating the ability, evaluated
-    // relative to the static's controller — NOT who controls the ability's source.
-    // Reuse the activator-permission predicate with the static's controller as the
-    // reference point so "you" resolves to the static controller. `None` leaves the
-    // source/global scope untouched.
-    if let Some(activator) = activator {
-        if !player_may_begin_activating(state, player, static_controller, Some(activator)) {
-            return None;
+    // CR 601.2c + CR 602.2b: a `targets` restriction ("that targets a creature
+    // you control") makes the modifier target-gated. It is matched against
+    // committed targets only, with the same predicate target legality uses.
+    match (targets.as_ref(), gating) {
+        (None, TargetGating::Independent) | (Some(_), TargetGating::AnyTargets) => {}
+        (None, TargetGating::Committed(_) | TargetGating::AnyTargets)
+        | (Some(_), TargetGating::Independent) => return None,
+        (Some(filter), TargetGating::Committed(ability)) => {
+            if !selected_targets_match_filter(
+                state,
+                static_source_id,
+                static_controller,
+                ability,
+                filter,
+                false,
+            ) {
+                return None;
+            }
         }
     }
-    // CR 602.2: scope by the source filter against the ability's SOURCE permanent.
-    if affected.is_some_and(|filter| {
-        !super::filter::matches_target_filter(state, ability_source_id, filter, filter_ctx)
-    }) {
+    // CR 611.3a + CR 602.2: a once-per-turn modifier applies only to the
+    // turn's FIRST activation that satisfies all of its gates, whenever that
+    // activation happened relative to the modifier's source.
+    if matches!(frequency, Some(CastFrequency::OncePerTurn))
+        && earlier_activation_this_turn_qualified(
+            state,
+            keyword,
+            *exemption,
+            activator.as_ref(),
+            affected,
+            targets.as_ref(),
+            static_source_id,
+            static_controller,
+            filter_ctx,
+        )
+    {
         return None;
     }
     // CR 601.2f + CR 208.1 + CR 113.7: When `dynamic_count` is present the per-unit
@@ -26283,7 +28081,11 @@ fn resolve_one_reduce_ability_cost(
     // (honoring the optional one-mana floor); `Raise` adds generic mana
     // (Skyseer's Chariot). `Minimum` is not emitted for activated-ability
     // statics, and the collector ignores it.
-    Some((*mode, effective, minimum_mana.unwrap_or(0)))
+    Some(AppliedAbilityCostModifier {
+        mode: *mode,
+        amount: effective,
+        minimum_mana: minimum_mana.unwrap_or(0),
+    })
 }
 
 /// CR 116.2 + CR 118.7a: Reduce (or raise) the generic mana of a special

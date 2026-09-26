@@ -100,6 +100,14 @@ pub enum EngineError {
     StaleAction,
     #[error("Action not allowed: {0}")]
     ActionNotAllowed(String),
+    /// CR 601.2h + CR 733.1: the in-progress activation of `player` can't be
+    /// completed legally (its locked total is unpayable), so the whole
+    /// activation is reversed. Not a rejection: the action boundary turns it
+    /// into `ActionResult::reversed`, restoring the state before the action
+    /// and returning priority. An activation is accepted where its cost locks,
+    /// so there is no earlier acceptance to undo.
+    #[error("Activation reversed: its locked cost can't be paid")]
+    ActivationReversed { player: PlayerId },
 }
 
 /// Converts an engine error into stable client-facing metadata without ever
@@ -113,7 +121,9 @@ pub(crate) fn action_rejection_for_engine_error(
         EngineError::WrongPlayer => ActionRejectionCode::WrongPlayer,
         EngineError::NotYourPriority => ActionRejectionCode::NotYourPriority,
         EngineError::StaleAction => ActionRejectionCode::StaleAction,
-        EngineError::ActionNotAllowed(_) => ActionRejectionCode::ActionNotAllowed,
+        EngineError::ActionNotAllowed(_) | EngineError::ActivationReversed { .. } => {
+            ActionRejectionCode::ActionNotAllowed
+        }
     };
     ActionRejection::from_code(code, related_object_ids)
 }
@@ -1522,6 +1532,10 @@ fn apply_action_boundary_core(
     }
     let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
+        // CR 601.2h + CR 733.1: a typed reversal, restored below like any other.
+        Err(EngineError::ActivationReversed { player }) => {
+            ActionResult::reversed(WaitingFor::Priority { player })
+        }
         Err(err) => {
             lifecycle.discard();
             *state = boundary_snapshot;
@@ -6000,6 +6014,56 @@ fn activation_cost_still_open(state: &GameState, waiting_for: &WaitingFor) -> bo
             crate::types::casting_costs::ActivationCostLock::Open { .. }
         )
     })
+}
+
+/// CR 601.2c + CR 601.2f: the activation (controller, source, ability index)
+/// whose cost lock waits for target settlement, when `action` answers the prompt
+/// it is paused on and may therefore settle it. `None` for a cancel (nothing to
+/// accept) and for the settlement election's answer, whose resume arm runs the
+/// acceptance authority itself.
+fn activation_awaiting_target_settlement(
+    state: &GameState,
+    action: &GameAction,
+) -> Option<(PlayerId, ObjectId, usize)> {
+    if matches!(
+        action,
+        GameAction::CancelCast | GameAction::OrderCostReductions { .. }
+    ) {
+        return None;
+    }
+    let awaiting = |snapshot: Option<&crate::types::casting_costs::ActivationCostSnapshot>| {
+        snapshot.is_some_and(|snapshot| {
+            matches!(
+                snapshot.lock,
+                crate::types::casting_costs::ActivationCostLock::Open {
+                    point: crate::types::casting_costs::ActivationCostLockPoint::TargetSettlement,
+                }
+            )
+        })
+    };
+    let from_pending = |pending: &crate::types::game_state::PendingCast| {
+        awaiting(pending.activation_cost_snapshot.as_deref())
+            .then_some(())
+            .and(pending.activation_ability_index)
+            .map(|index| (pending.ability.controller, pending.object_id, index))
+    };
+    match &state.waiting_for {
+        WaitingFor::OrderCostReductions { .. } => None,
+        WaitingFor::ChooseXValue { pending_cast, .. }
+        | WaitingFor::TargetSelection { pending_cast, .. } => from_pending(pending_cast),
+        WaitingFor::AbilityModeChoice {
+            player,
+            source_id,
+            ability_index: Some(ability_index),
+            activation_cost_snapshot,
+            ..
+        } => awaiting(activation_cost_snapshot.as_deref()).then_some((
+            *player,
+            *source_id,
+            *ability_index,
+        )),
+        _ => state.pending_cast.as_deref().and_then(from_pending),
+    }
 }
 
 /// CR 602.2a + CR 732.2a: the acceptance authority, phase two — record an
@@ -10840,6 +10904,20 @@ fn apply_non_priority_pass_action(
     let skip_deferred_trigger_drain = false;
     let action_for_divergence = action.clone();
 
+    // CR 601.2c + CR 601.2f + CR 602.2: an activation whose cost lock waits for
+    // its targets is accepted where that lock runs, which is inside whichever
+    // action settles the targets (choosing them, choosing modes, announcing X,
+    // dividing among them). The acceptance authority brackets that action: it
+    // opens the manual mana-undo window's close before the action, then records
+    // the loop step once the lock has run, or puts the window back if the
+    // activation is still short of its lock (a later prompt, or its settlement
+    // election, whose resume accepts it instead).
+    let target_settlement_acceptance =
+        activation_awaiting_target_settlement(state, &action).map(|identity| {
+            let cleared = begin_non_mana_activation(state, identity.0);
+            (identity, cleared)
+        });
+
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -15385,6 +15463,14 @@ fn apply_non_priority_pass_action(
             )));
         }
     };
+
+    if let Some(((player, source_id, ability_index), cleared)) = target_settlement_acceptance {
+        if activation_cost_still_open(state, &waiting_for) {
+            restore_non_mana_activation(state, player, cleared);
+        } else {
+            record_non_mana_activation_accepted(state, player, source_id, ability_index);
+        }
+    }
 
     // A shortened shortcut is discharged only by an action the normal reducer
     // accepted. In particular, a rejected cast/land attempt must leave the

@@ -3054,21 +3054,24 @@ pub(crate) fn parse_static_line_inner(
         && nom_primitives::scan_contains(tp.lower, "less to activate")
     {
         // Extract keyword name and amount via nom combinators
-        if let Some(((keyword, amount), remainder)) = nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, kw) = terminated(
-                nom::bytes::complete::take_until(" abilities you activate"),
-                tag(" abilities you activate"),
-            )
-            .parse(i)?;
-            let (i, _) = take_until(" cost ").parse(i)?;
-            let (i, _) = tag(" cost ").parse(i)?;
-            let (i, amt) =
-                nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
-                    .parse(i)?;
-            let (i, _) = tag(" less to activate").parse(i)?;
-            Ok((i, (kw.to_string(), amt)))
-        })
-        .filter(|((keyword, _), _)| !keyword.trim().is_empty())
+        if let Some(((keyword, source, targets, amount), remainder)) =
+            nom_on_lower(tp.original, tp.lower, |i| {
+                let (i, kw) = terminated(
+                    nom::bytes::complete::take_until(" abilities you activate"),
+                    tag(" abilities you activate"),
+                )
+                .parse(i)?;
+                let (i, target_text) = take_until(" cost ").parse(i)?;
+                let (_, (source, targets)) =
+                    split_ability_source_and_target_restriction(target_text)?;
+                let (i, _) = tag(" cost ").parse(i)?;
+                let (i, amt) =
+                    nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
+                        .parse(i)?;
+                let (i, _) = tag(" less to activate").parse(i)?;
+                Ok((i, (kw.to_string(), source, targets, amt)))
+            })
+            .filter(|((keyword, _, _, _), _)| !keyword.trim().is_empty())
         {
             // CR 601.2f: Extract optional "for each [X]" dynamic count clause from remainder.
             let remainder_lower = remainder.to_lowercase();
@@ -3089,19 +3092,106 @@ pub(crate) fn parse_static_line_inner(
             // not who controls the ability's source. Emit the activator axis rather
             // than a `controller(You)` source filter, which mis-scoped abilities on
             // permanents another player controls but this player may activate.
-            return Some(
-                StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                    mode: CostModifyMode::Reduce,
-                    keyword: keyword.trim().to_string(),
-                    amount,
-                    minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
-                    dynamic_count,
-                    exemption: ActivationExemption::None,
-                    activator: Some(PlayerFilter::Controller),
-                })
-                .description(text.to_string()),
-            );
+            // CR 602.2: an "of <sources>" qualifier additionally scopes WHICH
+            // abilities by their source ("of other Equipment").
+            let mut def = StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: keyword.trim().to_string(),
+                amount,
+                minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count,
+                exemption: ActivationExemption::None,
+                activator: Some(PlayerFilter::Controller),
+                targets,
+                frequency: None,
+            })
+            .description(text.to_string());
+            if let Some(source) = source {
+                def = def.affected(source);
+            }
+            return Some(def);
         }
+    }
+
+    // --- "The first activated ability [of <subject>] you activate ... that targets <X> costs {N} less to activate" ---
+    // CR 118.7 + CR 602.2b: once-per-turn activation-cost discount. The
+    // frequency applies to the turn's first QUALIFYING activation (including
+    // any target gate), read from the turn's activation journal (CR 611.3a:
+    // activations made before this source existed count too).
+    //
+    // CR 605.1a: admitted ONLY when the line carries a target restriction. A
+    // mana ability "doesn't require a target", so a target-restricted ability can
+    // never be a mana ability. Without a target restriction a mana ability can be
+    // the turn's first activation (Tezzeret, Betrayer of Flesh's own ruling: the
+    // discount "does not exclude mana abilities"), and the mana-ability path
+    // applies no `ReduceAbilityCost`, so the discount would go unapplied to it: a
+    // misprice. Such lines (Tezzeret) decline here and stay a strict parse
+    // failure until the mana-ability path prices activations.
+    if let Some(((affected, timing, targets, amount), _)) =
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, _) = tag("the first activated ability ").parse(i)?;
+            let (i, subject) = alt((
+                map(
+                    preceded(
+                        tag::<_, _, OracleError<'_>>("of "),
+                        terminated(
+                            take_until::<_, _, OracleError<'_>>(" you activate "),
+                            tag(" you activate "),
+                        ),
+                    ),
+                    Some,
+                ),
+                value(None, tag("you activate ")),
+            ))
+            .parse(i)?;
+            // CR 602.2: an "of <sources>" subject must be consumed whole; one the
+            // grammar can't read declines the line rather than widening the
+            // discount to every activated ability.
+            let affected = subject
+                .map(|subject| parse_ability_source_subject(subject.trim()).map(|(_, f)| f))
+                .transpose()?;
+            let (i, timing) = alt((
+                value(
+                    Some(StaticCondition::DuringYourTurn),
+                    tag("during your turn"),
+                ),
+                value(None, tag("each turn")),
+            ))
+            .parse(i)?;
+            let (i, target_text) = take_until(" costs {").parse(i)?;
+            let (_, targets) = split_bare_ability_target_restriction(target_text)?;
+            let (i, _) = tag(" costs {").parse(i)?;
+            let (i, amount) = nom_primitives::parse_number(i)?;
+            let (i, _) = tag("} less to activate").parse(i)?;
+            Ok((i, (affected, timing, targets, amount)))
+        })
+        .filter(|((_, _, targets, _), _)| targets.is_some())
+    {
+        let mut def = StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount,
+            minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+            dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: Some(PlayerFilter::Controller),
+            targets,
+            // CR 118.7 + CR 602.2b: "the FIRST … you activate [during your turn |
+            // each turn]" — the turn's first qualifying activation, whatever
+            // its source and whenever this static's source entered (CR 611.3a).
+            // The relative clause restricts the counting set, so it is the first
+            // activation that satisfies the target gate, not the first
+            // activation of any kind (Hojo's own ruling).
+            frequency: Some(CastFrequency::OncePerTurn),
+        })
+        .description(text.to_string());
+        if let Some(affected) = affected {
+            def = def.affected(affected);
+        }
+        if let Some(condition) = timing {
+            def = def.condition(condition);
+        }
+        return Some(def);
     }
 
     // --- "<Keyword> abilities of [subject] cost {N} less to activate" ---
@@ -3113,16 +3203,20 @@ pub(crate) fn parse_static_line_inner(
     // through `parse_type_phrase_folding`, which handles the "other" self-exclusion.
     //   - Hulk / Gamma Goliath: "Power-up abilities of other creatures you control…"
     //   - Boom Scholar: "Exhaust abilities of other permanents you control…"
-    if let Some(((keyword, subject, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, keyword) = parse_taggable_ability_keyword(i)?;
-        let (i, _) = tag(" abilities of ").parse(i)?;
-        let (i, subject) = take_until(" cost ").parse(i)?;
-        let (i, _) = tag(" cost ").parse(i)?;
-        let (i, amount) =
-            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
-        let (i, _) = tag(" less to activate").parse(i)?;
-        Ok((i, (keyword, subject.to_string(), amount)))
-    }) {
+    if let Some(((keyword, subject, targets, amount), _)) =
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, keyword) = parse_taggable_ability_keyword(i)?;
+            let (i, _) = tag(" abilities of ").parse(i)?;
+            let (i, subject) = take_until(" cost ").parse(i)?;
+            let (_, (subject, targets)) = split_ability_target_restriction(subject)?;
+            let (i, _) = tag(" cost ").parse(i)?;
+            let (i, amount) =
+                nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
+                    .parse(i)?;
+            let (i, _) = tag(" less to activate").parse(i)?;
+            Ok((i, (keyword, subject.to_string(), targets, amount)))
+        })
+    {
         let (affected, _rest) = parse_type_phrase_folding(&subject);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
@@ -3135,6 +3229,8 @@ pub(crate) fn parse_static_line_inner(
                 // Source-scoped ("abilities of <subject>"): scope is the `affected`
                 // filter below; no activator gate.
                 activator: None,
+                targets,
+                frequency: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -3187,6 +3283,8 @@ pub(crate) fn parse_static_line_inner(
                 // Source-scoped ("<subject>'s <keyword> abilities"): scope is the
                 // `affected` filter below; no activator gate.
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -3243,6 +3341,8 @@ pub(crate) fn parse_static_line_inner(
                 // Source-scoped ("[Enchanted/Equipped] <type>'s activated
                 // abilities"): scope is the `affected` filter below; no activator gate.
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -3261,35 +3361,43 @@ pub(crate) fn parse_static_line_inner(
     // runtime gate matches `keyword == "loyalty"` against a loyalty ability's cost.
     // Combinator: prefix → subject → " cost {N} " → direction. The subject is
     // either the chosen-name source phrase (→ HasChosenName) or a type phrase.
-    if let Some(((amount_n, is_x, mode, subject_filter, dynamic_count, keyword, exemption), _)) =
-        nom_on_lower(tp.original, tp.lower, |i| {
-            // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
-            // this-turn form, which lowers to a `GenericEffect` carrying this same
-            // `ReduceAbilityCost` static) — "<activated|loyalty> abilities of
-            // <subject> cost {N|X} <less|more> to activate".
-            let (i, (keyword, subject, amount_n, is_x, mode)) =
-                super::cost_mod::parse_activated_ability_cost_head(i)?;
-            // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
-            // ("where X is ~'s power", Agatha).
-            let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
-            // CR 605.1a: consume the optional mana-ability carve-out at the
-            // source-scoped grammar boundary, accepting both apostrophe forms.
-            let (i, exemption) =
-                opt(super::shared::parse_mana_ability_exemption_suffix).parse(i)?;
-            Ok((
-                i,
-                (
-                    amount_n,
-                    is_x,
-                    mode,
-                    subject.to_string(),
-                    dynamic_count,
-                    keyword,
-                    exemption,
-                ),
-            ))
-        })
-    {
+    if let Some((
+        (amount_n, is_x, mode, subject_filter, dynamic_count, keyword, exemption, targets),
+        _,
+    )) = nom_on_lower(tp.original, tp.lower, |i| {
+        // CR 601.2f + CR 606.1: shared grammar head (also used by the transient
+        // this-turn form, which lowers to a `GenericEffect` carrying this same
+        // `ReduceAbilityCost` static) — "<activated|loyalty> abilities of
+        // <subject> cost {N|X} <less|more> to activate".
+        let (i, head) = super::cost_mod::parse_activated_ability_cost_head(i)?;
+        let super::cost_mod::ActivatedAbilityCostHead {
+            keyword,
+            subject,
+            targets,
+            amount: amount_n,
+            is_x,
+            mode,
+        } = head;
+        // CR 208.1 + CR 113.7: optional dynamic referent for `{X}`
+        // ("where X is ~'s power", Agatha).
+        let (i, dynamic_count) = opt(parse_where_x_is_self_stat).parse(i)?;
+        // CR 605.1a: consume the optional mana-ability carve-out at the
+        // source-scoped grammar boundary, accepting both apostrophe forms.
+        let (i, exemption) = opt(super::shared::parse_mana_ability_exemption_suffix).parse(i)?;
+        Ok((
+            i,
+            (
+                amount_n,
+                is_x,
+                mode,
+                subject.to_string(),
+                dynamic_count,
+                keyword,
+                exemption,
+                targets,
+            ),
+        ))
+    }) {
         // CR 601.2f: A fixed `{N}` reduces by exactly `N`; a `{X}` reduces by
         // `1 × resolve_quantity(dynamic_count)` (Agatha: X = ~'s power). A bare
         // `{X}` with no recognized referent is unresolvable — leave it for a
@@ -3323,6 +3431,8 @@ pub(crate) fn parse_static_line_inner(
                     // Source-scoped ("Activated/Loyalty abilities of <filter>"):
                     // scope is the `affected` filter below; no activator gate.
                     activator: None,
+                    targets,
+                    frequency: None,
                 })
                 .affected(affected)
                 .description(text.to_string()),
@@ -3350,7 +3460,7 @@ pub(crate) fn parse_static_line_inner(
     // sets `activator = Some(PlayerFilter::Controller)` ("you" = the static's
     // controller) and leaves `affected = None` — the discount keys off who
     // activates the ability, never who controls its source.
-    if let Some(((activator, exemption, amount, mode), _)) =
+    if let Some(((activator, targets, exemption, amount, mode), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
             let (i, (activator, prefix_exempt)) = alt((
                 // CR 602.2: opponent-activator scope — "abilities your opponents
@@ -3386,6 +3496,8 @@ pub(crate) fn parse_static_line_inner(
                 value((None::<PlayerFilter>, false), tag("activated abilities")),
             ))
             .parse(i)?;
+            let (i, target_text) = take_until(" cost {").parse(i)?;
+            let (_, targets) = split_bare_ability_target_restriction(target_text)?;
             let (i, _) = tag(" cost {").parse(i)?;
             let (i, amount) = nom_primitives::parse_number(i)?;
             let (i, _) = tag("} ").parse(i)?;
@@ -3402,7 +3514,7 @@ pub(crate) fn parse_static_line_inner(
             } else {
                 ActivationExemption::None
             };
-            Ok((i, (activator, exemption, amount, mode)))
+            Ok((i, (activator, targets, exemption, amount, mode)))
         })
     {
         // CR 118.7: a one-mana floor only applies to reductions.
@@ -3418,6 +3530,8 @@ pub(crate) fn parse_static_line_inner(
                 dynamic_count: None,
                 exemption,
                 activator,
+                targets,
+                frequency: None,
             })
             .description(text.to_string()),
         );

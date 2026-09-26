@@ -7115,3 +7115,138 @@ mod deck_list_seat_validation_tests {
         );
     }
 }
+
+/// #9248 RT-2's P2P leg: an activation paused at its target-settlement
+/// election (CR 601.2c + CR 601.2f + CR 602.2b) survives the P2P host's own
+/// resume path, not just the persisted-state decoder: the host exports the
+/// trusted envelope, a fresh engine resumes it through
+/// `resume_multiplayer_host_state` (its separate `restore_runtime` hook and
+/// finalization), and the caster's non-default order then locks the same cost,
+/// on the same targets, with the same stack entry and activation journal as a
+/// host that was never interrupted.
+#[cfg(test)]
+mod settlement_election_host_resume_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::TargetRef;
+    use engine::types::game_state::{TrustedGameStateEnvelope, WaitingFor};
+    use engine::types::mana::{ManaColor, ManaUnit};
+    use engine::types::phase::Phase;
+
+    const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+    const GROUNDS: &str = "Activated abilities of creatures you control cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.";
+
+    /// `{3}` under Hojo's unfloored `-2` and a floored `-2`, targeting your own
+    /// creature: the orders lock `{0}` and `{1}`. Paused at that election.
+    fn paused_at_settlement_election() -> (GameState, ObjectId) {
+        let mut s = GameScenario::new_n_player(2, 42);
+        s.at_phase(Phase::PreCombatMain);
+        s.add_artifact_from_oracle(P0, "Training Grounds", GROUNDS);
+        s.add_creature_from_oracle(P0, "Professor Hojo", 2, 2, HOJO);
+        let own = s.add_creature(P0, "Own", 1, 1).id();
+        s.add_creature(P1, "Bear", 2, 2);
+        let src = s
+            .add_creature_from_oracle(P0, "Tapper", 2, 2, "{3}: Tap target creature.")
+            .id();
+        s.with_mana_pool(
+            P0,
+            (0..5)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut state = s.build().state().clone();
+        state.objects.get_mut(&src).unwrap().has_summoning_sickness = false;
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        )
+        .expect("the activation starts");
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            },
+        )
+        .expect("targets settle");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OrderCostReductions { .. }),
+            "reach guard: paused at the settlement election, got {:?}",
+            state.waiting_for
+        );
+        (state, own)
+    }
+
+    /// The costlier order, then priority passes until the activation is on the
+    /// stack and paid. Returns what the comparison reads.
+    fn elect_costlier(state: &mut GameState) -> serde_json::Value {
+        let WaitingFor::OrderCostReductions { outcomes, .. } = state.waiting_for.clone() else {
+            panic!("expected the election, got {:?}", state.waiting_for);
+        };
+        let costly = outcomes
+            .iter()
+            .find(|o| o.locked_cost.mana_value() == 1)
+            .expect("the {1} order");
+        engine::game::engine::apply_as_current(
+            state,
+            GameAction::OrderCostReductions {
+                order: costly.order.clone(),
+                hybrid_announcement: Vec::new(),
+            },
+        )
+        .expect("the election resumes");
+        for _ in 0..4 {
+            if matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+                engine::game::engine::apply_as_current(state, GameAction::PassPriority)
+                    .expect("mana payment");
+            }
+        }
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        serde_json::json!({
+            "pool": state.players[0].mana_pool.total(),
+            "stack": serde_json::to_value(&state.stack).unwrap(),
+            "journal": serde_json::to_value(&state.abilities_activated_this_turn_by_player)
+                .unwrap(),
+        })
+    }
+
+    #[test]
+    fn a_settlement_election_resumed_by_the_p2p_host_prices_like_an_uninterrupted_host() {
+        let (paused, own) = paused_at_settlement_election();
+
+        // The uninterrupted host.
+        let mut uninterrupted = paused.clone();
+        let expected = elect_costlier(&mut uninterrupted);
+        assert_eq!(
+            expected["pool"], 4,
+            "reach guard: the elected {{1}} was paid"
+        );
+        let placed = uninterrupted.stack.back().expect("placed");
+        let engine::types::game_state::StackEntryKind::ActivatedAbility { ability, .. } =
+            &placed.kind
+        else {
+            panic!("an activated ability");
+        };
+        assert_eq!(ability.targets, vec![TargetRef::Object(own)]);
+
+        // The P2P host: export, then resume on a fresh engine.
+        let mut exported = paused.clone();
+        exported.capture_rng_word_pos();
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(exported))
+            .expect("the host exports its state");
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        resume_multiplayer_host_state_inner(&json).expect("the P2P host resumes");
+        let resumed = with_state_mut(elect_costlier).expect("a live game");
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        assert_eq!(
+            resumed, expected,
+            "the resumed host locks and places the same activation"
+        );
+    }
+}

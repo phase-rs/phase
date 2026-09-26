@@ -1018,6 +1018,87 @@ pub(crate) fn proposer_hidden_view(state: &GameState, proposer: PlayerId) -> Gam
 /// Returns a filtered copy of the game state for the given viewer.
 /// Hides all opponents' hand contents and all library contents except where the
 /// viewer is explicitly allowed to see them.
+/// CR 602.2 + CR 601.2c: the activation journal and every in-flight
+/// activation's captured record are engine authority, cleared from every
+/// viewer projection. A record exists only between an activation's
+/// announcement and its placement (the placement authority takes it before the
+/// push), so its carriers are exactly the carriers of an in-flight activation.
+/// Each serialized one is cleared here, explicitly:
+///
+/// - the turn journal (`abilities_activated_this_turn_by_player`);
+/// - `GameState::pending_cast`, and every prompt that carries a `PendingCast`
+///   (`pending_cast_mut`, including a `PayCost` resume and a casting
+///   `CollectEvidenceChoice`);
+/// - a paused cost move (`pending_cost_move_resume`: a cast/activation root, a
+///   sacrifice or mill payment, collected evidence, or a loyalty tail);
+/// - a deferred life-cost payment (`pending_deferred_life_cost_resume`);
+/// - every activated ability on the stack (a second line of defense).
+///
+/// The two resume carriers are also dropped wholesale later in this
+/// projection; clearing their records here keeps the redaction local to one
+/// place. `pending_discard_for_cost` is never serialized. Mana abilities carry
+/// no record at all (they are not journaled).
+fn redact_activation_records(filtered: &mut GameState) {
+    use crate::types::game_state::{
+        CollectEvidenceResume, DeferredLifeCostResume, PendingCast, PendingCostMoveResume,
+        StackEntryKind,
+    };
+    fn clear(pending: &mut PendingCast) {
+        pending.ability.activation_record = None;
+    }
+    filtered.abilities_activated_this_turn_by_player.clear();
+    if let Some(pending) = filtered.pending_cast.as_deref_mut() {
+        clear(pending);
+    }
+    if let Some(pending) = filtered.waiting_for.pending_cast_mut() {
+        clear(pending);
+    }
+    if let Some(resume) = filtered.pending_cost_move_resume.as_mut() {
+        match resume {
+            PendingCostMoveResume::Cast { pending, .. }
+            | PendingCostMoveResume::SacrificeForCost { pending, .. } => {
+                if let Some(pending) = pending.as_deref_mut() {
+                    clear(pending);
+                }
+            }
+            PendingCostMoveResume::ActivationMillPayment { pending, .. } => clear(pending),
+            PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
+                CollectEvidenceResume::Casting { pending_cast, .. } => clear(pending_cast),
+                CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => {}
+            },
+            PendingCostMoveResume::LoyaltyActivation { resolved, .. } => {
+                resolved.activation_record = None;
+            }
+            // Resolution-time payments and non-activation roots: no activation
+            // is in flight in any of these.
+            PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::DelveManaPayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => {}
+        }
+    }
+    if let Some(resume) = filtered.pending_deferred_life_cost_resume.as_mut() {
+        match resume {
+            DeferredLifeCostResume::Cast { pending, .. } => {
+                if let Some(pending) = pending.as_deref_mut() {
+                    clear(pending);
+                }
+            }
+            DeferredLifeCostResume::PayAmount { .. } | DeferredLifeCostResume::ManaRoot { .. } => {}
+        }
+    }
+    for entry in filtered.stack.iter_mut() {
+        if let StackEntryKind::ActivatedAbility { ability, .. } = &mut entry.kind {
+            ability.activation_record = None;
+        }
+    }
+}
+
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
     // This clone is a display snapshot, never rules authority: the ~20 private
@@ -1047,6 +1128,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         pending.activation_trigger_collection = None;
         redact_parent_target_iteration_members(&mut pending.ability);
     }
+    redact_activation_records(&mut filtered);
     redact_waiting_for_iteration_members(&mut filtered.waiting_for);
     filtered = project_paid_cast_cleanup_authority(&filtered);
     // Interaction capability authority is trusted persistence state. Viewer

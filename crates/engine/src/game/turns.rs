@@ -1580,6 +1580,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 118.9 + CR 601.2b + CR 400.7: Reset per-turn once-per-turn
     // CastWithAlternativeCost grant tracking (As Foretold).
     state.alt_cost_grant_permissions_used.clear();
+    // CR 602.2: Reset the per-turn activated-ability journal ("the first
+    // activated ability you activate each turn", Professor Hojo).
+    state.abilities_activated_this_turn_by_player.clear();
     // CR 601.2a: Reset per-turn PlayFromExile source usage (Evelyn-style permissions).
     state.exile_play_permissions_used.clear();
     // CR 601.2a + CR 113.6b: Reset per-turn ExileCastPermission once-per-turn

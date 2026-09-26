@@ -8191,6 +8191,12 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.spells_cast_this_turn_by_player.clear();
     s.spells_cast_this_game.clear();
     s.spells_cast_this_game_by_player.clear();
+    // CR 602.2: the per-turn activation journal is the activation analog of the
+    // cast journal above and is pumped the same way. Its one reader is a "first
+    // activated ability you activate each turn" cost gate, which does not block
+    // repetition: once a turn's first qualifying activation is recorded, every
+    // later row leaves that gate's answer unchanged.
+    s.abilities_activated_this_turn_by_player.clear();
     // CR 400 (zones) / CR 603.6a (ETB) / CR 701.21 (sacrifice) / CR 111 (tokens):
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
@@ -13244,6 +13250,9 @@ mod tests {
             dynamic_count,
             exemption: Default::default(),
             activator: None,
+
+            targets: None,
+            frequency: None,
         };
         assert!(
             !cover_with_static_on_stable(reduce(Some(object_count_ref()))),

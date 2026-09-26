@@ -13984,9 +13984,14 @@ fn try_parse_event(
         /// stack (e.g. Huge Truck "becomes the target of a backup ability").
         BecomesTargetBackupAbility,
         /// CR 115.1a + CR 602.2b: the targeting source is an ability (not a spell)
-        /// on the stack — "becomes the target of an ability [you control]". Loki,
-        /// God of Mischief.
-        BecomesTargetAbility,
+        /// on the stack — "becomes the target of an ability [you control]" (Loki,
+        /// God of Mischief) or, narrowed by kind, "…of an activated ability"
+        /// (Professor Hojo) / "…of a triggered ability". `kind` is the CR 113.3b vs
+        /// CR 113.3c distinction the text names; `None` is the unqualified form,
+        /// which admits both kinds.
+        BecomesTargetAbility {
+            kind: Option<crate::types::ability::StackAbilityKind>,
+        },
         /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: Passive-voice
         /// damage-received event, decomposed into its independent grammatical axes
         /// instead of one variant per cell of their product. Replaces the former
@@ -14300,16 +14305,35 @@ fn try_parse_event(
             value(SimpleEvent::Saddles, tag("saddles a mount")),
         )))
         .or(alt((
-            // CR 115.1a + CR 602.2b: "becomes the target of an ability [you control]".
+            // CR 115.1a + CR 602.2b: "become(s) the target of an ability [you control]".
             // Ability-only source (excludes spells) — distinct from the spell-or-
             // ability arm. Placed in this THIRD `.or(alt(..))` block because the
             // second block is at nom 8.0's 21/21 `alt` tuple-arity ceiling. Loki,
             // God of Mischief. The trailing controller/source clause is validated by
             // the dispatch arm's remaining-empty guard (rejects source-restricted
             // siblings like Skophos Maze-Warden / Agrus Kos).
-            value(
-                SimpleEvent::BecomesTargetAbility,
-                tag("becomes the target of an ability"),
+            //
+            // Composed, not enumerated: the verb number (singular / plural subject)
+            // and the ability kind are independent axes, so each is one `alt`.
+            // CR 113.3b / CR 113.3c: "activated" and "triggered" narrow the source
+            // to that one kind (Professor Hojo reads "…of an activated ability");
+            // the bare "an ability" admits both.
+            map(
+                preceded(
+                    (alt((tag("becomes"), tag("become"))), tag(" the target of ")),
+                    alt((
+                        value(
+                            Some(crate::types::ability::StackAbilityKind::Activated),
+                            tag("an activated ability"),
+                        ),
+                        value(
+                            Some(crate::types::ability::StackAbilityKind::Triggered),
+                            tag("a triggered ability"),
+                        ),
+                        value(None, tag("an ability")),
+                    )),
+                ),
+                |kind| SimpleEvent::BecomesTargetAbility { kind },
             ),
             // CR 702.26c: "phases in" / "phase in" — phasing trigger.
             value(SimpleEvent::PhasesIn, tag("phases in")),
@@ -14408,7 +14432,7 @@ fn try_parse_event(
             // and Agrus Kos ("...of an ability that targets only it...") — instead of
             // silently dropping the restriction and over-firing. Scoped to THIS arm
             // only; the shared spell-or-ability arms are untouched.
-            SimpleEvent::BecomesTargetAbility => {
+            SimpleEvent::BecomesTargetAbility { kind } => {
                 let (controller, tail) = parse_target_source_controller_tail(remaining);
                 if !tail.trim().is_empty() {
                     return None;
@@ -14417,10 +14441,15 @@ fn try_parse_event(
                 // CR 110.1: scope the permanent leaf to the battlefield so a targeted
                 // graveyard/exile card (also a TargetRef::Object) does not fire.
                 set_trigger_subject(&mut def, &battlefield_scope_permanent(subject));
+                // CR 113.3b / CR 113.3c: carry the printed kind so "an activated
+                // ability" does not fire on a triggered ability that targets the
+                // subject. `StackEntryKind::matches_stack_ability_kind` enforces it at
+                // match time, including against the virtual stack projection of an
+                // in-flight activation (`install_virtual_targeting_source`).
                 def.valid_source = Some(TargetFilter::StackAbility {
                     controller,
                     tag: None,
-                    kind: None,
+                    kind,
                 });
             }
             // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10: the channel axis

@@ -1155,6 +1155,44 @@ pub struct CastOccurrence {
     pub turn_journal_index: u32,
 }
 
+/// CR 602.2 + CR 601.2c: one NON-MANA activated ability that was activated this
+/// turn, with the facts a "the first activated ability you activate each turn
+/// that …" modifier (Professor Hojo) needs, captured when the ability was
+/// activated, before any of its cost was paid. The activation analog of
+/// [`SpellCastRecord`]: characteristics are snapshots, never re-read later, so
+/// a target that afterwards changes controller or leaves still qualified or
+/// didn't exactly as it did when the ability was activated.
+///
+/// Mana abilities (CR 605) are not journaled, manual or automatic: every
+/// supported reader is target-gated, and a mana ability has no target (CR
+/// 605.1a). An untargeted "first activated ability" reader that counts mana
+/// abilities (Tezzeret, Betrayer of Flesh) needs mana-ability history first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbilityActivationRecord {
+    pub activator: PlayerId,
+    pub source: ObjectId,
+    /// The source as it was when the ability was activated (for a modifier
+    /// scoped to abilities "of an artifact" and the like).
+    pub source_lki: LKISnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_tag: Option<crate::types::ability::AbilityTag>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_loyalty_ability: bool,
+    /// CR 115.1: the committed targets of the whole chain, empty for an
+    /// untargeted ability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<ActivationTargetFact>,
+}
+
+/// One committed target of an activation, as it was when the ability was
+/// activated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ActivationTargetFact {
+    Player(PlayerId),
+    Object { id: ObjectId, lki: Box<LKISnapshot> },
+}
+
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpellCastRecord {
@@ -19531,6 +19569,23 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub alt_cost_grant_permissions_used: HashSet<ObjectId>,
+    /// CR 602.2 + CR 601.2i: Per-player history of the NON-MANA activated
+    /// abilities activated this turn, in activation order: the activation
+    /// analog of `spells_cast_this_turn_by_player`. Each record is captured
+    /// before the activation's cost is paid and appended only when it is placed
+    /// on the stack, so a "the first activated ability you activate each turn
+    /// …" modifier (CR 611.3a: applied to whatever its text indicates,
+    /// including activations made before the modifier's source existed) reads
+    /// the whole turn. Mana abilities are not journaled (see
+    /// [`AbilityActivationRecord`]). Engine authority, cleared from every
+    /// viewer projection.
+    ///
+    /// Boxed to preserve the `GameState` stack budget (see
+    /// `types/game_state_size.rs`): empty on almost every board.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub abilities_activated_this_turn_by_player:
+        Box<HashMap<PlayerId, im::Vector<AbilityActivationRecord>>>,
     /// CR 601.2a: Tracks once-per-turn `PlayFromExile` permission sources
     /// consumed this turn. Keyed by the granting source's ObjectId.
     #[serde(default)]
@@ -19916,7 +19971,10 @@ declare_game_state! {
     /// CR 401.4: Remaining per-owner library-order batches for a mass
     /// `ChangeZoneAll` instruction paused on `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_mass_library_order_choice: Option<PendingMassLibraryOrderChoice>,
+    /// Boxed to keep `GameState` inside its stack budget
+    /// (`types/game_state_size.rs`): it is populated only between the batches of
+    /// one mass library-order resolution, and inline it cost 328 B.
+    pub pending_mass_library_order_choice: Option<Box<PendingMassLibraryOrderChoice>>,
     /// CR 101.4 + CR 701.23i: Pending private selections for a simultaneous
     /// scoped self-library search. Kept separate from the generic continuation
     /// so the action phase cannot begin before every player has chosen.
@@ -25629,6 +25687,7 @@ impl GameState {
             pending_permanent_type_slot: None,
             hand_cast_free_permissions_used: HashSet::new(),
             alt_cost_grant_permissions_used: HashSet::new(),
+            abilities_activated_this_turn_by_player: Box::default(),
             exile_play_permissions_used: HashSet::new(),
             exile_play_single_use_consumed: HashSet::new(),
             exile_cast_permissions_used: HashSet::new(),
@@ -27907,6 +27966,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_permanent_type_slot: _,
         hand_cast_free_permissions_used: _,
         alt_cost_grant_permissions_used: _,
+        abilities_activated_this_turn_by_player: _,
         exile_play_permissions_used: _,
         exile_play_single_use_consumed: _,
         exile_cast_permissions_used: _,
@@ -28245,6 +28305,8 @@ impl PartialEq for GameState {
             && self.pending_permanent_type_slot == other.pending_permanent_type_slot
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.alt_cost_grant_permissions_used == other.alt_cost_grant_permissions_used
+            && self.abilities_activated_this_turn_by_player
+                == other.abilities_activated_this_turn_by_player
             && self.exile_play_permissions_used == other.exile_play_permissions_used
             && self.exile_play_single_use_consumed == other.exile_play_single_use_consumed
             && self.exile_cast_permissions_used == other.exile_cast_permissions_used

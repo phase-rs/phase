@@ -123,7 +123,7 @@ fn handle_activated_mode_choice(
     let ActivatedModeChoice {
         player,
         source_id,
-        resolved,
+        mut resolved,
         ability_index,
         ability_cost,
         activation_cost_snapshot,
@@ -131,6 +131,13 @@ fn handle_activated_mode_choice(
         mode_abilities,
         indices,
     } = choice;
+    // CR 602.2 + CR 601.2c (capture A, modal): the chosen modes' chain is built
+    // here, after the announcement returned for the mode choice, so its journal
+    // facts are captured now, before any cost is paid. Target settlement adds
+    // the committed targets.
+    resolved.activation_record =
+        casting::capture_activation_record(state, player, source_id, ability_index, &resolved)
+            .map(Box::new);
 
     let target_constraints = target_constraints_from_modal(&modal);
 
@@ -291,7 +298,16 @@ fn handle_activated_mode_choice(
         pending.activation_cost = ability_cost;
         pending.target_constraints = target_constraints;
         pending.distribute = mode_distribute;
-        casting_costs::finish_activated_ability_at_payment_boundary(state, player, pending, events)
+        // CR 601.2f + CR 602.2b: the chosen modes declare no target, so no target
+        // settlement will follow. A lock the announcement deferred (because another
+        // mode could target) runs here instead, where the modes are known.
+        casting::settle_activation_cost(
+            state,
+            player,
+            pending,
+            crate::types::casting_costs::SettledTail::Boundary,
+            events,
+        )
     }
 }
 

@@ -13280,6 +13280,8 @@ fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
                 dynamic_count: None,
                 exemption: crate::types::statics::ActivationExemption::None,
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Subtype("Food".to_string())],
@@ -13436,6 +13438,9 @@ fn transient_activation_cost_reduction_hits_only_controlled_artifact_tokens() {
         dynamic_count: None,
         exemption: crate::types::statics::ActivationExemption::None,
         activator: None,
+
+        targets: None,
+        frequency: None,
     };
     let source_filter = TargetFilter::Typed(TypedFilter {
         type_filters: vec![TypeFilter::Artifact],
@@ -13536,6 +13541,9 @@ fn activated_ability_cost_reduction_mana_exemption_skips_mana_abilities() {
                 dynamic_count: None,
                 exemption: crate::types::statics::ActivationExemption::ManaAbilities,
                 activator: Some(crate::types::ability::PlayerFilter::Controller),
+
+                targets: None,
+                frequency: None,
             }),
         );
 
@@ -13638,6 +13646,9 @@ fn activated_ability_cost_reduction_you_activate_keys_off_activator_not_source_c
             // CR 602.2: activator-scoped to the static's controller ("you"),
             // with no `affected` source filter.
             activator: Some(crate::types::ability::PlayerFilter::Controller),
+
+            targets: None,
+            frequency: None,
         }));
 
     // A permanent P0 controls, carrying an activated ability that ANY player may
@@ -13813,6 +13824,8 @@ fn activated_ability_cost_reduction_respects_minimum_mana_floor() {
                 dynamic_count: None,
                 exemption: crate::types::statics::ActivationExemption::None,
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -41187,6 +41200,8 @@ mod loyalty_gate {
                 dynamic_count: None,
                 exemption: ActivationExemption::None,
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
@@ -41254,6 +41269,9 @@ mod loyalty_gate {
                         dynamic_count: None,
                         exemption: ActivationExemption::None,
                         activator: None,
+
+                        targets: None,
+                        frequency: None,
                     })
                     .affected(TargetFilter::Typed(
                         TypedFilter::new(TypeFilter::Planeswalker)
@@ -41396,6 +41414,8 @@ mod loyalty_gate {
                 dynamic_count: None,
                 exemption: ActivationExemption::None,
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
@@ -50467,6 +50487,9 @@ fn boom_scholar_reduces_other_permanents_exhaust_ability_cost() {
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::permanent()
@@ -50593,6 +50616,9 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         })
         .affected(TargetFilter::HasChosenName)]
         .into();
@@ -50719,6 +50745,9 @@ fn eidolon_of_obstruction_taxes_opponent_loyalty_ability() {
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
@@ -50881,6 +50910,9 @@ fn agatha_dynamic_power_reduces_controlled_creature_ability_cost() {
             }),
             exemption: crate::types::statics::ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
@@ -51151,6 +51183,8 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
                 }),
                 exemption: crate::types::statics::ActivationExemption::None,
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -51695,6 +51729,9 @@ fn plot_special_action_ignores_generic_activated_ability_cost_modifiers() {
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         })
     };
     let doc_axis = || {
@@ -51921,6 +51958,9 @@ fn firion_reduces_self_equip_ability_cost() {
             dynamic_count: None,
             exemption: crate::types::statics::ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         })
         .affected(TargetFilter::SelfRef)]
         .into();
@@ -59398,6 +59438,144 @@ mod unreadable_additional_cost_is_refused_not_free {
     }
 }
 
+/// CR 601.2c + CR 602.2b + CR 115.1: the target-reading classifiers decide
+/// whether an activation's own cost rider has to wait for its committed targets.
+///
+/// One row per class of target read the exhaustive match covers, each beside a
+/// negative of the same shape, so a row can't pass because the classifier says
+/// `true` to everything. The shapes the old allowlist ALREADY caught
+/// (`Power { Target }`, `CountersOn { Target }`) are here too, as positive reach
+/// guards: they prove the rewrite didn't lose what it had.
+#[test]
+fn cost_rider_target_classifiers_cover_every_target_reading_shape() {
+    use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric, ZoneRef};
+
+    let reads = quantity_ref_reads_target_object;
+    let target_player_filter =
+        || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
+    let you_filter = || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+
+    // Already covered before the rewrite (reach guards).
+    assert!(reads(&QuantityRef::Power {
+        scope: ObjectScope::Target
+    }));
+    assert!(reads(&QuantityRef::CountersOn {
+        scope: ObjectScope::Target,
+        counter_type: None
+    }));
+    assert!(!reads(&QuantityRef::Power {
+        scope: ObjectScope::Source
+    }));
+
+    // Newly covered: object scope of the chain root's declared target.
+    assert!(reads(&QuantityRef::Power {
+        scope: ObjectScope::ChainRootTarget
+    }));
+    // A demonstrative back-reference is the effect-context referent, not a declared target.
+    assert!(!reads(&QuantityRef::Power {
+        scope: ObjectScope::Demonstrative
+    }));
+
+    // Newly covered: player-relative reads of the target player.
+    assert!(reads(&QuantityRef::HandSize {
+        player: PlayerScope::Target
+    }));
+    assert!(reads(&QuantityRef::LifeTotal {
+        player: PlayerScope::ParentObjectTargetController
+    }));
+    assert!(!reads(&QuantityRef::HandSize {
+        player: PlayerScope::Controller
+    }));
+
+    // Newly covered: variants named for a target.
+    assert!(reads(&QuantityRef::TargetZoneCardCount {
+        zone: ZoneRef::Graveyard,
+        scope: ControllerRef::TargetPlayer,
+        binding: Default::default(),
+    }));
+    assert!(reads(&QuantityRef::ManaSpentToCast {
+        scope: CastManaObjectScope::AbilityTarget,
+        metric: CastManaSpentMetric::Total,
+    }));
+    assert!(!reads(&QuantityRef::ManaSpentToCast {
+        scope: CastManaObjectScope::SelfObject,
+        metric: CastManaSpentMetric::Total,
+    }));
+
+    // Newly covered: filter-scoped counts over a target-relative filter.
+    assert!(reads(&QuantityRef::ObjectCount {
+        filter: target_player_filter()
+    }));
+    assert!(reads(&QuantityRef::ObjectCount {
+        filter: TargetFilter::ParentTarget
+    }));
+    assert!(!reads(&QuantityRef::ObjectCount {
+        filter: you_filter()
+    }));
+
+    // Nested wrappers are found through `QuantityExpr::any_ref`.
+    let nested = QuantityExpr::Offset {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Target,
+            },
+        }),
+        offset: 1,
+    };
+    assert!(quantity_expr_reads_target_object(&nested));
+
+    // ParsedCondition: newly covered arms, each beside its negative.
+    assert!(parsed_condition_reads_targets(
+        &ParsedCondition::QuantityVsEachOpponent {
+            lhs: QuantityRef::Power {
+                scope: ObjectScope::Target
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityRef::HandSize {
+                player: PlayerScope::Controller
+            },
+        }
+    ));
+    assert!(!parsed_condition_reads_targets(
+        &ParsedCondition::QuantityVsEachOpponent {
+            lhs: QuantityRef::HandSize {
+                player: PlayerScope::Controller
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityRef::HandSize {
+                player: PlayerScope::Controller
+            },
+        }
+    ));
+    assert!(parsed_condition_reads_targets(
+        &ParsedCondition::ControlsCreatureWithKeyword {
+            controller: ControllerRef::TargetPlayer,
+            keyword: crate::types::keywords::Keyword::Flying,
+        }
+    ));
+    assert!(!parsed_condition_reads_targets(
+        &ParsedCondition::ControlsCreatureWithKeyword {
+            controller: ControllerRef::You,
+            keyword: crate::types::keywords::Keyword::Flying,
+        }
+    ));
+    assert!(parsed_condition_reads_targets(
+        &ParsedCondition::PlayerCountAtLeast {
+            filter: PlayerFilter::ParentObjectTargetController,
+            minimum: 1,
+        }
+    ));
+    // Already covered, and still covered through `Not`.
+    assert!(parsed_condition_reads_targets(&ParsedCondition::Not {
+        condition: Box::new(ParsedCondition::SpellTargetsFilter {
+            filter: you_filter()
+        }),
+    }));
+    assert!(!parsed_condition_reads_targets(
+        &ParsedCondition::IsYourTurn
+    ));
+}
+
 /// CR 601.2f + CR 602.2b: the activation fold's default order is the MINIMUM over
 /// every order the caster could elect — the proof `fold_activation_cost` states,
 /// checked exhaustively as a building block over generic-only reductions with
@@ -59704,6 +59882,8 @@ fn activation_totals_survive_saturated_reduction_amounts() {
         },
         raise_total: 0,
         reductions: vec![entry(u32::MAX, 1, 0), entry(2, 0, 1)],
+        mana_carrier: crate::types::casting_costs::ManaCarrier::Whole,
+        settlement_tail: None,
         lock: crate::types::casting_costs::ActivationCostLock::Open {
             point: Default::default(),
         },
@@ -59714,6 +59894,84 @@ fn activation_totals_survive_saturated_reduction_amounts() {
         .map(|o| o.locked_cost.mana_value())
         .collect();
     assert_eq!(offered, vec![0, 1]);
+}
+
+/// CR 118.3 + CR 601.2c: the activation-cost visitor on its walk. O5's shape
+/// (optional slots, the empty completion legal but unaffordable) is `Payable`
+/// with a witness that is NOT the empty completion; a tiny budget answers
+/// `Undecided` having charged exactly that budget.
+#[test]
+fn activation_cost_visitor_finds_a_non_empty_witness_and_stops_at_its_budget() {
+    use crate::game::ability_utils::WorkBudget;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::mana::{ManaColor, ManaUnit};
+
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let hojo = s
+        .add_creature_from_oracle(
+            P0,
+            "Professor Hojo",
+            2,
+            2,
+            "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.",
+        )
+        .id();
+    for i in 0..6 {
+        s.add_creature(P1, &format!("Theirs {i}"), 1, 1);
+    }
+    let src = s
+        .add_artifact_from_oracle(P0, "Tapper", "{3}: Tap up to three target creatures.")
+        .id();
+    s.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaColor::Blue.into(),
+            ObjectId(0),
+            false,
+            Vec::new(),
+        )],
+    );
+    let runner = s.build();
+    let state = runner.state();
+    let ability_def = activation_ability_definition(state, src, 0).unwrap();
+    let base = ability_def.cost.clone().unwrap();
+    let independent =
+        collect_activation_cost_modifiers(state, &ability_def, P0, src, TargetGating::Independent);
+
+    let mut unlimited = WorkBudget::unlimited();
+    let (verdict, witness) = activation_cost_feasibility_search_with_witness(
+        state,
+        &ability_def,
+        P0,
+        src,
+        0,
+        &base,
+        &independent,
+        &mut unlimited,
+    );
+    assert_eq!(verdict, ActivationCostFeasibility::Payable);
+    let witness = witness.expect("a payable walk has a witness");
+    assert!(
+        witness.contains(&Some(TargetRef::Object(hojo))),
+        "the witness includes the qualifying creature, not the empty completion: {witness:?}"
+    );
+
+    let mut tiny = WorkBudget::new(3);
+    let (verdict, _) = activation_cost_feasibility_search_with_witness(
+        state,
+        &ability_def,
+        P0,
+        src,
+        0,
+        &base,
+        &independent,
+        &mut tiny,
+    );
+    assert_eq!(verdict, ActivationCostFeasibility::Undecided);
+    assert_eq!(tiny.charged_total(), 3, "charged == budget");
+    assert_eq!(tiny.refused().iter().sum::<u32>(), 1, "one refusal");
 }
 
 /// CR 601.2b + CR 601.2f: the X lock acts on an `XAnnounced` carrier ONLY. A
@@ -59754,6 +60012,8 @@ fn the_x_lock_passes_through_a_carrier_deferred_to_another_point() {
                 display_name: "reducer".to_string(),
                 minimum_mana: 0,
             }],
+            mana_carrier: crate::types::casting_costs::ManaCarrier::Whole,
+            settlement_tail: None,
             lock: ActivationCostLock::Open { point },
         };
         let mut ability = ResolvedAbility::new(
@@ -59834,4 +60094,196 @@ fn an_open_lock_round_trips_its_point() {
             lock
         );
     }
+}
+
+/// Every transport (WASM `to_js`, the WebSocket server, Tauri, the P2P host's
+/// export) carries the activation cost carrier through `serde_json`. This pins
+/// each value #9248 adds through that one layer: both mana carriers, both
+/// settlement tails, and the target-settlement lock point on an open and a
+/// locked carrier.
+#[test]
+fn activation_cost_snapshot_round_trips_every_target_settlement_value() {
+    use crate::types::casting_costs::{ActivationCostLockPoint, ManaCarrier, SettledTail};
+    let base = ActivationCostSnapshot {
+        base_cost: AbilityCost::Mana {
+            cost: ManaCost::generic(3),
+        },
+        raise_total: 2,
+        reductions: Vec::new(),
+        mana_carrier: ManaCarrier::Whole,
+        settlement_tail: None,
+        lock: ActivationCostLock::Open {
+            point: ActivationCostLockPoint::TargetSettlement,
+        },
+    };
+    let mut cases = Vec::new();
+    for mana_carrier in [ManaCarrier::Whole, ManaCarrier::Split] {
+        for settlement_tail in [
+            None,
+            Some(SettledTail::SurfaceThenBoundary),
+            Some(SettledTail::Boundary),
+        ] {
+            for lock in [
+                ActivationCostLock::Open {
+                    point: ActivationCostLockPoint::TargetSettlement,
+                },
+                ActivationCostLock::Locked {
+                    point: ActivationCostLockPoint::TargetSettlement,
+                    order: None,
+                },
+            ] {
+                cases.push(ActivationCostSnapshot {
+                    mana_carrier,
+                    settlement_tail,
+                    lock,
+                    ..base.clone()
+                });
+            }
+        }
+    }
+    assert_eq!(cases.len(), 12);
+    for snapshot in cases {
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let back: ActivationCostSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, snapshot, "{json}");
+    }
+    // The defaults are omitted, so a pre-#9248 carrier is byte-identical.
+    let json = serde_json::to_value(base.clone()).unwrap();
+    for absent in ["mana_carrier", "settlement_tail"] {
+        assert!(
+            json.get(absent).is_none(),
+            "{absent} omitted when default: {json}"
+        );
+    }
+}
+
+/// CR 602.2 + CR 601.2c: a journal row round-trips through the shared serde
+/// layer with both target shapes and both ability flags.
+#[test]
+fn an_activation_journal_row_round_trips() {
+    use crate::types::game_state::{AbilityActivationRecord, ActivationTargetFact};
+    let mut state = GameState::new_two_player(42);
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Journal Source".to_string(),
+        Zone::Battlefield,
+    );
+    let target = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(1),
+        "Journal Target".to_string(),
+        Zone::Battlefield,
+    );
+    let row = AbilityActivationRecord {
+        activator: PlayerId(0),
+        source,
+        source_lki: state.objects[&source].snapshot_public_characteristics(),
+        ability_tag: Some(crate::types::ability::AbilityTag::Boast),
+        is_loyalty_ability: true,
+        targets: vec![
+            ActivationTargetFact::Player(PlayerId(1)),
+            ActivationTargetFact::Object {
+                id: target,
+                lki: Box::new(state.objects[&target].snapshot_public_characteristics()),
+            },
+        ],
+    };
+    let json = serde_json::to_string(&row).unwrap();
+    let back: AbilityActivationRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, row, "{json}");
+}
+
+/// CR 102.2 + CR 102.3 + CR 800.4a: "each opponent" is each opponent still in
+/// the game. Both per-opponent evaluators, the target-free one and the one
+/// that prices a rider with the committed targets, skip a player who left.
+#[test]
+fn quantity_vs_each_opponent_skips_a_player_who_left_the_game() {
+    let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 7);
+    for (player, cards) in [(0u8, 2usize), (1, 1), (2, 5)] {
+        for i in 0..cards {
+            create_object(
+                &mut state,
+                CardId(100 + u64::from(player) * 10 + i as u64),
+                PlayerId(player),
+                format!("Card {player}/{i}"),
+                Zone::Hand,
+            );
+        }
+    }
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Source".to_string(),
+        Zone::Battlefield,
+    );
+    let bear = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(1),
+        "Bear".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let bear = state.objects.get_mut(&bear).unwrap();
+        bear.card_types.core_types.push(CoreType::Creature);
+        bear.power = Some(3);
+        bear.toughness = Some(3);
+    }
+    let your_hand = QuantityRef::HandSize {
+        player: PlayerScope::Controller,
+    };
+    let their_hand = QuantityRef::HandSize {
+        player: PlayerScope::ScopedPlayer,
+    };
+    let target_free = ParsedCondition::QuantityVsEachOpponent {
+        lhs: your_hand,
+        comparator: Comparator::GT,
+        rhs: their_hand.clone(),
+    };
+    let target_reading = ParsedCondition::QuantityVsEachOpponent {
+        lhs: QuantityRef::Power {
+            scope: ObjectScope::Target,
+        },
+        comparator: Comparator::GT,
+        rhs: their_hand,
+    };
+    let mut ability = ResolvedAbility::new(
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+        vec![TargetRef::Object(bear)],
+        source,
+        PlayerId(0),
+    );
+    ability.ability_index = Some(0);
+    let evaluate = |state: &GameState| {
+        (
+            restrictions::evaluate_condition(state, PlayerId(0), source, &target_free),
+            parsed_condition_satisfied_with_committed_targets(
+                state,
+                PlayerId(0),
+                source,
+                &ability,
+                &target_reading,
+            ),
+        )
+    };
+    assert_eq!(
+        evaluate(&state),
+        (false, false),
+        "reach guard: P2's five cards beat both left-hand sides"
+    );
+    state.players[2].is_eliminated = true;
+    assert_eq!(
+        evaluate(&state),
+        (true, true),
+        "P2 left the game, so only P1's one card is compared"
+    );
 }

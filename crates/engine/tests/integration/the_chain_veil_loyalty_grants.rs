@@ -206,6 +206,8 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         modal: None,
         mode_abilities: vec![],
         parent_target_missing_reason: None,
+        activation_cost_reduction: None,
+        activation_record: None,
     }
 }
 

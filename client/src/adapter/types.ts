@@ -2084,6 +2084,10 @@ export interface ActivationCostSnapshot {
   base_cost: SerializedAbilityCost;
   raise_total?: number;
   reductions?: CostReductionEntry[];
+  // Which pending field holds the unpaid mana while the lock waits for targets.
+  mana_carrier?: "Whole" | "Split";
+  // Set only while a target-settlement election prompt is outstanding.
+  settlement_tail?: "SurfaceThenBoundary" | "Boundary";
   lock:
     | { type: "Open"; data: { point?: ActivationCostLockPoint } }
     | {
@@ -2092,7 +2096,7 @@ export interface ActivationCostSnapshot {
       };
 }
 
-export type ActivationCostLockPoint = "Announcement" | "XAnnounced";
+export type ActivationCostLockPoint = "Announcement" | "XAnnounced" | "TargetSettlement";
 
 /// CR 601.2b + CR 601.2f: the caster's announced nonhybrid equivalents and the
 /// order their reductions are applied in, as one recorded election.

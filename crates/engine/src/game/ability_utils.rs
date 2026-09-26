@@ -153,6 +153,7 @@ pub fn build_resolved_from_def_with_targets(
         ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
     resolved.context.face_down_in_exile = def.face_down_in_exile;
     resolved.context.ability_tag = def.ability_tag;
+    resolved.activation_cost_reduction = def.cost_reduction.clone();
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }
@@ -7979,7 +7980,365 @@ fn legal_targets_for_slot_with_specs(
     .collect()
 }
 
+/// The five units of work in the target-completion walk. The walk charges each
+/// one to its [`WorkBudget`] immediately before performing it, and performs it
+/// only when that charge succeeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WalkOp {
+    /// Entering one walk frame: the root call and every recursion.
+    RecursiveEntry = 0,
+    /// Taking an optional slot's skip branch (CR 115.6).
+    OptionalSkip = 1,
+    /// Computing one slot's legal candidates.
+    CandidateGeneration = 2,
+    /// Validating a partial assignment extended by one candidate.
+    PrefixValidation = 3,
+    /// Validating a complete assignment before offering it to the visitor.
+    LeafValidation = 4,
+}
+
+impl WalkOp {
+    pub const COUNT: usize = 5;
+    pub const ALL: [WalkOp; WalkOp::COUNT] = [
+        WalkOp::RecursiveEntry,
+        WalkOp::OptionalSkip,
+        WalkOp::CandidateGeneration,
+        WalkOp::PrefixValidation,
+        WalkOp::LeafValidation,
+    ];
+}
+
+/// The walk's per-operation counters, captured by the charge that latched a
+/// [`WorkBudget`]. A walk that stops at its latch leaves every one unchanged.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalkCountersAtLatch {
+    pub work: [u32; WalkOp::COUNT],
+    pub charged: [u32; WalkOp::COUNT],
+    pub refused: [u32; WalkOp::COUNT],
+}
+
+/// A hard bound on the work one target-completion walk may perform.
+///
+/// `charge` succeeds while fewer than `limit` charges have succeeded. The
+/// first refused charge latches `exhausted`; its caller returns at once, and
+/// every enclosing frame checks the latch before charging again, so an
+/// exhausted walk records exactly one refusal and performs no further work.
+#[derive(Clone, Debug)]
+pub struct WorkBudget {
+    limit: u32,
+    charged_total: u32,
+    charged: [u32; WalkOp::COUNT],
+    refused: [u32; WalkOp::COUNT],
+    exhausted: bool,
+    #[cfg(feature = "test-support")]
+    latch_snapshot: Option<WalkCountersAtLatch>,
+}
+
+impl WorkBudget {
+    pub fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            charged_total: 0,
+            charged: [0; WalkOp::COUNT],
+            refused: [0; WalkOp::COUNT],
+            exhausted: false,
+            #[cfg(feature = "test-support")]
+            latch_snapshot: None,
+        }
+    }
+
+    /// The budget for a walk whose answer must be exact at any size: the
+    /// existence walk behind target legality, which has always been unbounded.
+    pub fn unlimited() -> Self {
+        Self::new(u32::MAX)
+    }
+
+    /// Pays for one `op`. Returns `false`, and latches, once `limit` charges
+    /// have already succeeded.
+    pub fn charge(&mut self, op: WalkOp) -> bool {
+        if self.charged_total < self.limit {
+            self.charged_total += 1;
+            self.charged[op as usize] += 1;
+            return true;
+        }
+        self.refused[op as usize] += 1;
+        self.exhausted = true;
+        #[cfg(feature = "test-support")]
+        if self.latch_snapshot.is_none() {
+            self.latch_snapshot = Some(WalkCountersAtLatch {
+                work: crate::game::perf_counters::completion_walk_work_snapshot().per_op,
+                charged: self.charged,
+                refused: self.refused,
+            });
+        }
+        false
+    }
+
+    pub fn limit(&self) -> u32 {
+        self.limit
+    }
+
+    pub fn charged_total(&self) -> u32 {
+        self.charged_total
+    }
+
+    pub fn charged(&self) -> [u32; WalkOp::COUNT] {
+        self.charged
+    }
+
+    pub fn refused(&self) -> [u32; WalkOp::COUNT] {
+        self.refused
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn latch_snapshot(&self) -> Option<WalkCountersAtLatch> {
+        self.latch_snapshot
+    }
+}
+
+/// Decides which complete, legal target assignments a walk accepts.
+pub trait CompletionVisitor {
+    /// Offered each complete assignment that passed validation. Returning
+    /// `true` accepts it and ends the walk.
+    fn accept(&mut self, selected_slots: &[Option<TargetRef>]) -> bool;
+
+    /// CR 115.6: when every remaining slot is optional, the walk first offers
+    /// the completion that leaves them all empty. A visitor for which a legal
+    /// assignment can still be refused (for example, one that must also be
+    /// affordable) returns `true` so the walk goes on to the non-empty
+    /// completions instead of stopping at that refusal.
+    fn explores_past_refused_empty_completion(&self) -> bool {
+        false
+    }
+}
+
+/// The result of one target-completion walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalkOutcome {
+    /// The visitor accepted a legal completion.
+    Accepted,
+    /// The walk finished: the visitor accepted no legal completion.
+    Rejected,
+    /// The budget ran out first, so the walk answers neither way.
+    BudgetExhausted,
+}
+
+/// CR 601.2c + CR 115.1: target legality asks only whether SOME legal
+/// assignment exists, so every legal completion is acceptable.
+struct ExistenceVisitor;
+
+impl CompletionVisitor for ExistenceVisitor {
+    fn accept(&mut self, _selected_slots: &[Option<TargetRef>]) -> bool {
+        true
+    }
+}
+
+/// Walks the legal completions of a target assignment from the root, offering
+/// each to `visitor` until it accepts one or `budget` runs out.
+pub fn walk_target_completions<V: CompletionVisitor>(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    visitor: &mut V,
+    budget: &mut WorkBudget,
+) -> WalkOutcome {
+    let specs = target_slot_specs(state, ability);
+    TargetCompletionWalk {
+        state,
+        ability,
+        specs: &specs,
+        target_slots,
+        constraints,
+        visitor,
+        budget,
+    }
+    .frame(0, &[], false)
+}
+
+struct TargetCompletionWalk<'a, V> {
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+    specs: &'a [TargetSlotSpec],
+    target_slots: &'a [TargetSelectionSlot],
+    constraints: &'a [TargetSelectionConstraint],
+    visitor: &'a mut V,
+    budget: &'a mut WorkBudget,
+}
+
+impl<V: CompletionVisitor> TargetCompletionWalk<'_, V> {
+    /// One frame of the walk at slot `index`. `empty_remainder_refused` is set
+    /// only on the skip branch below a refused all-empty completion, where
+    /// every completion still reachable by skipping is that same assignment.
+    fn frame(
+        &mut self,
+        index: usize,
+        selected_slots: &[Option<TargetRef>],
+        mut empty_remainder_refused: bool,
+    ) -> WalkOutcome {
+        if !self.budget.charge(WalkOp::RecursiveEntry) {
+            return WalkOutcome::BudgetExhausted;
+        }
+        record_walk_work(WalkOp::RecursiveEntry);
+        let target_slots = self.target_slots;
+        if index == target_slots.len() {
+            if empty_remainder_refused {
+                return WalkOutcome::Rejected;
+            }
+            return self.leaf(selected_slots);
+        }
+        if !empty_remainder_refused && target_slots[index..].iter().all(|slot| slot.optional) {
+            let mut completed_slots = selected_slots.to_vec();
+            completed_slots.resize(target_slots.len(), None);
+            match self.leaf(&completed_slots) {
+                WalkOutcome::Rejected if self.visitor.explores_past_refused_empty_completion() => {
+                    empty_remainder_refused = true;
+                }
+                outcome => return outcome,
+            }
+        }
+
+        if target_slots[index].optional {
+            if !self.budget.charge(WalkOp::OptionalSkip) {
+                return WalkOutcome::BudgetExhausted;
+            }
+            record_walk_work(WalkOp::OptionalSkip);
+            let mut skipped_slots = selected_slots.to_vec();
+            skipped_slots.push(None);
+            let outcome = self.frame(index + 1, &skipped_slots, empty_remainder_refused);
+            if self.budget.is_exhausted() {
+                return WalkOutcome::BudgetExhausted;
+            }
+            if outcome == WalkOutcome::Accepted {
+                return WalkOutcome::Accepted;
+            }
+        }
+
+        if !self.budget.charge(WalkOp::CandidateGeneration) {
+            return WalkOutcome::BudgetExhausted;
+        }
+        record_walk_work(WalkOp::CandidateGeneration);
+        let candidates = legal_targets_for_spec_slot(
+            self.state,
+            self.ability,
+            self.specs,
+            target_slots,
+            index,
+            selected_slots,
+        );
+        for target in candidates {
+            if !self.budget.charge(WalkOp::PrefixValidation) {
+                return WalkOutcome::BudgetExhausted;
+            }
+            record_walk_work(WalkOp::PrefixValidation);
+            let mut next_slots = selected_slots.to_vec();
+            next_slots.push(Some(target));
+            if validate_selected_slots_with_specs(
+                self.state,
+                self.ability,
+                self.specs,
+                target_slots,
+                &next_slots,
+                self.constraints,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let outcome = self.frame(index + 1, &next_slots, false);
+            if self.budget.is_exhausted() {
+                return WalkOutcome::BudgetExhausted;
+            }
+            if outcome == WalkOutcome::Accepted {
+                return WalkOutcome::Accepted;
+            }
+        }
+        WalkOutcome::Rejected
+    }
+
+    fn leaf(&mut self, completed_slots: &[Option<TargetRef>]) -> WalkOutcome {
+        if !self.budget.charge(WalkOp::LeafValidation) {
+            return WalkOutcome::BudgetExhausted;
+        }
+        record_walk_work(WalkOp::LeafValidation);
+        if validate_selected_slots_with_specs(
+            self.state,
+            self.ability,
+            self.specs,
+            self.target_slots,
+            completed_slots,
+            self.constraints,
+        )
+        .is_err()
+        {
+            return WalkOutcome::Rejected;
+        }
+        if self.visitor.accept(completed_slots) {
+            WalkOutcome::Accepted
+        } else {
+            WalkOutcome::Rejected
+        }
+    }
+}
+
+#[inline]
+fn record_walk_work(_op: WalkOp) {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_completion_walk_work(_op);
+}
+
 fn has_legal_completion_with_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &[TargetSlotSpec],
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    index: usize,
+    selected_slots: &[Option<TargetRef>],
+) -> bool {
+    let mut budget = WorkBudget::unlimited();
+    let found = TargetCompletionWalk {
+        state,
+        ability,
+        specs,
+        target_slots,
+        constraints,
+        visitor: &mut ExistenceVisitor,
+        budget: &mut budget,
+    }
+    .frame(index, selected_slots, false)
+        == WalkOutcome::Accepted;
+    // X3: every unit-test walk is checked against the pre-visitor body, so the
+    // existence visitor provably keeps upstream's exact answers.
+    #[cfg(test)]
+    {
+        let reference = has_legal_completion_with_specs_reference(
+            state,
+            ability,
+            specs,
+            target_slots,
+            constraints,
+            index,
+            selected_slots,
+        );
+        tests::record_existence_walk_differential();
+        assert_eq!(
+            found, reference,
+            "the existence visitor diverged from the pre-visitor completion walk"
+        );
+    }
+    found
+}
+
+/// The completion walk as it stood before the visitor refactor, kept only as
+/// the differential oracle for [`has_legal_completion_with_specs`].
+#[cfg(test)]
+fn has_legal_completion_with_specs_reference(
     state: &GameState,
     ability: &ResolvedAbility,
     specs: &[TargetSlotSpec],
@@ -8017,7 +8376,7 @@ fn has_legal_completion_with_specs(
     if slot.optional {
         let mut skipped_slots = selected_slots.to_vec();
         skipped_slots.push(None);
-        if has_legal_completion_with_specs(
+        if has_legal_completion_with_specs_reference(
             state,
             ability,
             specs,
@@ -8044,7 +8403,7 @@ fn has_legal_completion_with_specs(
                 constraints,
             )
             .is_ok()
-                && has_legal_completion_with_specs(
+                && has_legal_completion_with_specs_reference(
                     state,
                     ability,
                     specs,
@@ -22575,5 +22934,414 @@ mod tests {
             slots[0].legal_targets.contains(&TargetRef::Object(land)),
             "Non-damage Any target slot must include land"
         );
+    }
+
+    thread_local! {
+        static EXISTENCE_WALK_DIFFERENTIALS: std::cell::Cell<u64> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn record_existence_walk_differential() {
+        EXISTENCE_WALK_DIFFERENTIALS.with(|count| count.set(count.get() + 1));
+    }
+
+    /// A board of vanilla creatures, `p0` controlled by player 0 and `p1` by
+    /// player 1, in that order.
+    fn completion_walk_board(p0: usize, p1: usize) -> (GameState, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(42);
+        let mut creatures = Vec::new();
+        for (index, owner) in std::iter::repeat_n(PlayerId(0), p0)
+            .chain(std::iter::repeat_n(PlayerId(1), p1))
+            .enumerate()
+        {
+            let id = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(index as u64),
+                owner,
+                format!("Creature {index}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            creatures.push(id);
+        }
+        (state, creatures)
+    }
+
+    /// "Tap between `min` and `max` target creatures" from an off-board source.
+    fn completion_walk_ability(min: usize, max: usize) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+            vec![],
+            ObjectId(9_999),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::fixed(min, max));
+        ability
+    }
+
+    /// A test visitor that accepts only assignments containing `required`
+    /// (every assignment when `None`, none when `refuse_all`), and records the
+    /// assignment it accepted.
+    struct TestVisitor {
+        required: Option<TargetRef>,
+        refuse_all: bool,
+        explores: bool,
+        witness: Option<Vec<Option<TargetRef>>>,
+    }
+
+    impl TestVisitor {
+        fn requiring(target: ObjectId) -> Self {
+            Self {
+                required: Some(TargetRef::Object(target)),
+                refuse_all: false,
+                explores: true,
+                witness: None,
+            }
+        }
+
+        fn accepting_all() -> Self {
+            Self {
+                required: None,
+                refuse_all: false,
+                explores: true,
+                witness: None,
+            }
+        }
+
+        fn refusing_all() -> Self {
+            Self {
+                required: None,
+                refuse_all: true,
+                explores: true,
+                witness: None,
+            }
+        }
+
+        fn wants(&self, selected_slots: &[Option<TargetRef>]) -> bool {
+            !self.refuse_all
+                && self
+                    .required
+                    .as_ref()
+                    .is_none_or(|required| selected_slots.iter().flatten().any(|t| t == required))
+        }
+    }
+
+    impl CompletionVisitor for TestVisitor {
+        fn accept(&mut self, selected_slots: &[Option<TargetRef>]) -> bool {
+            let accepted = self.wants(selected_slots);
+            if accepted {
+                self.witness = Some(selected_slots.to_vec());
+            }
+            accepted
+        }
+
+        fn explores_past_refused_empty_completion(&self) -> bool {
+            self.explores
+        }
+    }
+
+    /// The oracle: enumerate every assignment (each slot's legal targets, plus
+    /// empty when optional), keep the ones that validate as complete, and ask
+    /// whether the visitor wants any of them.
+    fn brute_force_accepts(
+        state: &GameState,
+        ability: &ResolvedAbility,
+        slots: &[TargetSelectionSlot],
+        constraints: &[TargetSelectionConstraint],
+        visitor: &TestVisitor,
+    ) -> bool {
+        let mut assignments: Vec<Vec<Option<TargetRef>>> = vec![Vec::new()];
+        for slot in slots {
+            let choices: Vec<Option<TargetRef>> = slot
+                .legal_targets
+                .iter()
+                .cloned()
+                .map(Some)
+                .chain(slot.optional.then_some(None))
+                .collect();
+            assignments = assignments
+                .into_iter()
+                .flat_map(|prefix| {
+                    choices.iter().map(move |choice| {
+                        let mut next = prefix.clone();
+                        next.push(choice.clone());
+                        next
+                    })
+                })
+                .collect();
+        }
+        assignments.iter().any(|assignment| {
+            validate_selected_slots_for_ability(state, ability, slots, assignment, constraints)
+                .is_ok()
+                && visitor.wants(assignment)
+        })
+    }
+
+    /// Runs one walk from a fresh work counter, returning the outcome, the
+    /// budget, and the work performed per operation.
+    fn run_completion_walk(
+        state: &GameState,
+        ability: &ResolvedAbility,
+        slots: &[TargetSelectionSlot],
+        constraints: &[TargetSelectionConstraint],
+        visitor: &mut TestVisitor,
+        limit: u32,
+    ) -> (WalkOutcome, WorkBudget, [u32; WalkOp::COUNT]) {
+        crate::game::perf_counters::reset();
+        let mut budget = WorkBudget::new(limit);
+        let outcome =
+            walk_target_completions(state, ability, slots, constraints, visitor, &mut budget);
+        let work = crate::game::perf_counters::completion_walk_work_snapshot().per_op;
+        (outcome, budget, work)
+    }
+
+    /// The invariants every walk keeps, exhausted or not: each unit of work was
+    /// paid for and each paid charge did its work, per operation; the charge
+    /// total never passes the limit; and refusals happen only at exhaustion.
+    fn assert_walk_accounting(
+        outcome: WalkOutcome,
+        budget: &WorkBudget,
+        work: [u32; WalkOp::COUNT],
+    ) {
+        for op in WalkOp::ALL {
+            assert_eq!(
+                work[op as usize],
+                budget.charged()[op as usize],
+                "work performed must equal successful charges for {op:?}"
+            );
+        }
+        assert!(budget.charged_total() <= budget.limit());
+        assert_eq!(budget.charged_total(), budget.charged().iter().sum::<u32>());
+        let refusals: u32 = budget.refused().iter().sum();
+        if outcome == WalkOutcome::BudgetExhausted {
+            assert!(budget.is_exhausted());
+            assert_eq!(budget.charged_total(), budget.limit(), "charged == budget");
+            assert_eq!(refusals, 1, "exactly one refusal per exhausted walk");
+            let latch = budget
+                .latch_snapshot()
+                .expect("an exhausted walk records its latch");
+            assert_eq!(latch.work, work, "no work after the latch");
+            assert_eq!(latch.charged, budget.charged(), "no charge after the latch");
+            assert_eq!(
+                latch.refused,
+                budget.refused(),
+                "no refusal after the latch"
+            );
+        } else {
+            assert!(!budget.is_exhausted());
+            assert_eq!(refusals, 0, "a walk that finished refused nothing");
+            assert!(budget.latch_snapshot().is_none());
+        }
+    }
+
+    /// X3 reach guard: target legality really runs through the differential.
+    #[test]
+    fn existence_walk_is_checked_against_the_pre_visitor_walk() {
+        let (state, _) = completion_walk_board(2, 1);
+        let ability = completion_walk_ability(2, 2);
+        let slots = build_target_slots(&state, &ability).unwrap();
+        let before = EXISTENCE_WALK_DIFFERENTIALS.with(std::cell::Cell::get);
+        assert!(has_legal_target_assignment_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[TargetSelectionConstraint::DifferentObjectControllers],
+        ));
+        assert!(
+            EXISTENCE_WALK_DIFFERENTIALS.with(std::cell::Cell::get) > before,
+            "the existence walk must be compared with its reference"
+        );
+    }
+
+    /// Known answers on small boards, then every visitor against the
+    /// brute-force oracle: the walk must give the RIGHT answer, not just stop.
+    #[test]
+    fn completion_walk_agrees_with_brute_force_on_small_boards() {
+        let (state, creatures) = completion_walk_board(3, 2);
+        let (p0_a, p1_a) = (creatures[0], creatures[3]);
+        let differ = [TargetSelectionConstraint::DifferentObjectControllers];
+
+        // Known Accepted: two targets with different controllers, one of them
+        // player 0's first creature.
+        let ability = completion_walk_ability(2, 2);
+        let slots = build_target_slots(&state, &ability).unwrap();
+        let mut visitor = TestVisitor::requiring(p0_a);
+        let (outcome, budget, work) =
+            run_completion_walk(&state, &ability, &slots, &differ, &mut visitor, u32::MAX);
+        assert_eq!(outcome, WalkOutcome::Accepted);
+        let witness = visitor.witness.expect("an accepted walk has a witness");
+        assert!(witness.contains(&Some(TargetRef::Object(p0_a))));
+        assert!(witness.contains(&Some(TargetRef::Object(p1_a))));
+        assert_walk_accounting(outcome, &budget, work);
+
+        // Known Rejected: three targets, all with different controllers, on a
+        // two-player board.
+        let ability = completion_walk_ability(3, 3);
+        let slots = build_target_slots(&state, &ability).unwrap();
+        let mut visitor = TestVisitor::accepting_all();
+        let (outcome, budget, work) =
+            run_completion_walk(&state, &ability, &slots, &differ, &mut visitor, u32::MAX);
+        assert_eq!(outcome, WalkOutcome::Rejected);
+        assert_walk_accounting(outcome, &budget, work);
+
+        // Known Rejected: a refusing visitor on an all-optional run explores
+        // everything and still accepts nothing.
+        let ability = completion_walk_ability(0, 2);
+        let slots = build_target_slots(&state, &ability).unwrap();
+        let mut visitor = TestVisitor::refusing_all();
+        let (outcome, budget, work) =
+            run_completion_walk(&state, &ability, &slots, &[], &mut visitor, u32::MAX);
+        assert_eq!(outcome, WalkOutcome::Rejected);
+        assert_walk_accounting(outcome, &budget, work);
+
+        // The sweep.
+        let mut cases = 0;
+        for (min, max) in [(1, 1), (2, 2), (1, 2), (0, 2), (0, 3), (3, 3)] {
+            let ability = completion_walk_ability(min, max);
+            let slots = build_target_slots(&state, &ability).unwrap();
+            for constraints in [&[][..], &differ[..]] {
+                let visitors = creatures
+                    .iter()
+                    .map(|&id| TestVisitor::requiring(id))
+                    .chain([TestVisitor::accepting_all(), TestVisitor::refusing_all()]);
+                for mut visitor in visitors {
+                    let expected =
+                        brute_force_accepts(&state, &ability, &slots, constraints, &visitor);
+                    let (outcome, budget, work) = run_completion_walk(
+                        &state,
+                        &ability,
+                        &slots,
+                        constraints,
+                        &mut visitor,
+                        u32::MAX,
+                    );
+                    assert_eq!(
+                        outcome,
+                        if expected {
+                            WalkOutcome::Accepted
+                        } else {
+                            WalkOutcome::Rejected
+                        },
+                        "{min}..={max} targets, constraints {constraints:?}"
+                    );
+                    if let Some(witness) = &visitor.witness {
+                        assert!(visitor.wants(witness));
+                        validate_selected_slots_for_ability(
+                            &state,
+                            &ability,
+                            &slots,
+                            witness,
+                            constraints,
+                        )
+                        .expect("the witness is a legal assignment");
+                    }
+                    assert_walk_accounting(outcome, &budget, work);
+                    cases += 1;
+                }
+            }
+        }
+        assert_eq!(cases, 6 * 2 * 7);
+    }
+
+    /// W1 (the O5 shape with a test visitor): three optional slots, and the
+    /// only acceptable assignment contains one specific creature, so the empty
+    /// completion is legal but refused. The walk must go past it, and every
+    /// operation must run and be paid for.
+    #[test]
+    fn completion_walk_explores_past_a_refused_empty_completion_and_pays_for_every_operation() {
+        let (state, creatures) = completion_walk_board(4, 0);
+        let wanted = creatures[3];
+        let ability = completion_walk_ability(0, 3);
+        let slots = build_target_slots(&state, &ability).unwrap();
+        assert!(slots.iter().all(|slot| slot.optional));
+        let mut visitor = TestVisitor::requiring(wanted);
+        let (outcome, budget, work) =
+            run_completion_walk(&state, &ability, &slots, &[], &mut visitor, u32::MAX);
+        assert_eq!(outcome, WalkOutcome::Accepted);
+        let witness = visitor.witness.expect("an accepted walk has a witness");
+        assert!(witness.contains(&Some(TargetRef::Object(wanted))));
+        for op in WalkOp::ALL {
+            assert!(work[op as usize] > 0, "{op:?} must run on this board");
+        }
+        assert_walk_accounting(outcome, &budget, work);
+    }
+
+    /// W2: two mandatory slots under a cross-slot constraint that rejects
+    /// same-controller prefixes.
+    #[test]
+    fn completion_walk_pays_for_rejected_prefixes() {
+        let (state, creatures) = completion_walk_board(3, 1);
+        let ability = completion_walk_ability(2, 2);
+        let slots = build_target_slots(&state, &ability).unwrap();
+        let mut visitor = TestVisitor::requiring(creatures[3]);
+        let (outcome, budget, work) = run_completion_walk(
+            &state,
+            &ability,
+            &slots,
+            &[TargetSelectionConstraint::DifferentObjectControllers],
+            &mut visitor,
+            u32::MAX,
+        );
+        assert_eq!(outcome, WalkOutcome::Accepted);
+        // With no optional slot, every frame past the root is a prefix that
+        // validated, so validations beyond that count were rejections.
+        let passing_prefixes = work[WalkOp::RecursiveEntry as usize] - 1;
+        assert!(
+            work[WalkOp::PrefixValidation as usize] > passing_prefixes,
+            "some same-controller prefix must be rejected"
+        );
+        assert_eq!(work[WalkOp::OptionalSkip as usize], 0);
+        assert_walk_accounting(outcome, &budget, work);
+    }
+
+    /// Exhaustion: at every budget from 0 up to past the full walk's cost, an
+    /// exhausted walk charges exactly its budget, refuses exactly once, and does
+    /// nothing after the latch; a budget that suffices gives the unbounded answer.
+    #[test]
+    fn completion_walk_exhaustion_charges_exactly_the_budget_and_then_stops() {
+        let (state, _) = completion_walk_board(6, 0);
+        let ability = completion_walk_ability(0, 3);
+        let slots = build_target_slots(&state, &ability).unwrap();
+        let (full_outcome, full_budget, _) = run_completion_walk(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &mut TestVisitor::refusing_all(),
+            u32::MAX,
+        );
+        assert_eq!(full_outcome, WalkOutcome::Rejected);
+        let full_cost = full_budget.charged_total();
+        assert!(full_cost > 50, "the full walk must be long enough to cut");
+
+        let mut exhausted = 0;
+        for limit in 0..=full_cost + 1 {
+            let (outcome, budget, work) = run_completion_walk(
+                &state,
+                &ability,
+                &slots,
+                &[],
+                &mut TestVisitor::refusing_all(),
+                limit,
+            );
+            if limit < full_cost {
+                assert_eq!(outcome, WalkOutcome::BudgetExhausted, "limit {limit}");
+                exhausted += 1;
+            } else {
+                assert_eq!(outcome, WalkOutcome::Rejected, "limit {limit}");
+            }
+            assert_walk_accounting(outcome, &budget, work);
+        }
+        assert_eq!(exhausted, full_cost);
     }
 }
