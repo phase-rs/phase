@@ -1062,6 +1062,172 @@ mod tests {
         assert_eq!(state.players[0].energy, 0);
     }
 
+    /// CR 118.3 + CR 601.2h: A later failed life component rolls back the
+    /// earlier component and its event. A Composite is one atomic payment,
+    /// not a sequence of committed partial payments.
+    #[test]
+    fn resolution_composite_life_payment_is_atomic_on_failure() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 10;
+        let mut ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 6 },
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 6 },
+                    },
+                ],
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut rider = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        rider.condition = Some(AbilityCondition::effect_performed());
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+        ability.sub_ability = Some(Box::new(rider));
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].life, 10);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged {
+                player_id: PlayerId(0),
+                amount: -6,
+                ..
+            }
+        )));
+    }
+
+    /// CR 107.14 + CR 118.3: Atomicity applies to non-life resources as well.
+    #[test]
+    fn resolution_composite_energy_payment_is_atomic_on_failure() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 3;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PayEnergy {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                    },
+                    AbilityCost::PayEnergy {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                    },
+                ],
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].energy, 3);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: -2,
+            }
+        )));
+    }
+
+    /// CR 117 + CR 118.3: Nested Composites inherit the same atomic payment
+    /// boundary; an inner failure cannot leak the outer prefix.
+    #[test]
+    fn resolution_nested_composite_payment_is_atomic_on_failure() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 10;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 6 },
+                    },
+                    AbilityCost::Composite {
+                        costs: vec![AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 6 },
+                        }],
+                    },
+                ],
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].life, 10);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged {
+                player_id: PlayerId(0),
+                amount: -6,
+                ..
+            }
+        )));
+    }
+
+    /// CR 118.3: Atomicity must not reject a payable Composite. The same two
+    /// life components succeed when the payer has 13 life, leaving one.
+    #[test]
+    fn resolution_composite_life_payment_succeeds_when_fully_payable() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 13;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 6 },
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 6 },
+                    },
+                ],
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].life, 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::LifeChanged {
+                        player_id: PlayerId(0),
+                        amount: -6,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
     /// CR 107.14: `AbilityCost::PayEnergy` carries a `QuantityExpr` amount.
     /// A `Fixed` amount deducts when affordable and trips
     /// `cost_payment_failed_flag` when the payer lacks enough energy — the

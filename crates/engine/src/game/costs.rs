@@ -933,6 +933,17 @@ fn pay_ability_cost_inner(
             }
         },
         AbilityCost::Composite { costs } => {
+            // CR 601.2h + CR 118.3: A resolution-time Composite is an atomic
+            // payment within this invocation. Deterministic prefixes are
+            // normally rejected by the sequential pre-flight above, but a
+            // replacement/runtime check can still return `Failed` after a
+            // prefix has been applied. Keep a local snapshot for that
+            // same-action failure; a `Paused` outcome returns before this
+            // rollback path and deliberately crosses the existing
+            // GameAction/WaitingFor continuation boundary.
+            let mut resolution_snapshot =
+                matches!(scope, PaymentScope::Resolution { .. }).then(|| state.clone());
+            let event_start = events.len();
             let enclosing_suffix = enclosing_composite_suffix(cost, resume_cost);
             for (index, sub_cost) in costs.iter().enumerate() {
                 let prior_waiting_for = state.waiting_for.clone();
@@ -942,7 +953,7 @@ fn pay_ability_cost_inner(
                     &enclosing_suffix,
                 )
                 .expect("a composite component always has an unpaid suffix");
-                let outcome = pay_ability_cost_inner(
+                let outcome = match pay_ability_cost_inner(
                     state,
                     player,
                     source_id,
@@ -950,7 +961,16 @@ fn pay_ability_cost_inner(
                     events,
                     scope,
                     matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
-                )?;
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        if let Some(snapshot) = resolution_snapshot.take() {
+                            *state = snapshot;
+                            events.truncate(event_start);
+                        }
+                        return Err(error);
+                    }
+                };
                 match outcome {
                     PaymentOutcome::Paid => {
                         // CR 118.12: Some resolution-time sub-costs acquire a
@@ -992,11 +1012,17 @@ fn pay_ability_cost_inner(
                             ),
                         });
                     }
-                    // CR 601.2h: Partial payments are not allowed; resolution-
-                    // scope callers pre-gate the whole composite via
-                    // `can_pay`, so a mid-composite `Failed` propagates without
-                    // committing the remaining sub-costs.
-                    failed @ PaymentOutcome::Failed { .. } => return Ok(failed),
+                    // CR 601.2h: Partial payments are not allowed. Roll back
+                    // the same-invocation prefix before propagating failure;
+                    // the caller then maps `Failed` to the resolution failure
+                    // channel without leaving payment-event residue.
+                    failed @ PaymentOutcome::Failed { .. } => {
+                        if let Some(snapshot) = resolution_snapshot.take() {
+                            *state = snapshot;
+                            events.truncate(event_start);
+                        }
+                        return Ok(failed);
+                    }
                 }
             }
         }
@@ -1938,7 +1964,10 @@ pub(crate) fn can_pay(
             // is now the correct verdict.
             true
         }
-        PaymentScope::Resolution { ability, .. } => can_pay_resolution(state, payer, cost, ability),
+        PaymentScope::Resolution {
+            ability,
+            cost_move_root,
+        } => can_pay_resolution(state, payer, cost, ability, *cost_move_root),
     }
 }
 
@@ -2277,6 +2306,51 @@ pub(crate) fn resolution_cost_includes_impossible_event(
     }
 }
 
+/// CR 118.3 + CR 118.12: simulate a resolution-time Composite's components in
+/// payment order so repeated resource costs see the mutations from earlier
+/// components. A pause is a continuation boundary, not a failed dry run.
+fn can_pay_resolution_composite(
+    state: &GameState,
+    payer: PlayerId,
+    costs: &[AbilityCost],
+    ability: &ResolvedAbility,
+    cost_move_root: ResolutionCostMoveRoot,
+) -> bool {
+    // CR 601.2h + CR 118.3: Composite affordability must observe the same
+    // resource consumption order as live payment. A leaf-by-leaf predicate on
+    // the original state over-approximates repeated resource costs (for
+    // example, two six-life legs on ten life). Simulate the sequence on a
+    // throwaway state so every successful leg consumes resources for the next
+    // leg, while preserving the live state's pause boundary.
+    let mut simulated = state.clone();
+    let mut simulated_events = Vec::new();
+    let scope = PaymentScope::Resolution {
+        ability,
+        cost_move_root,
+    };
+
+    for sub_cost in costs {
+        match pay_ability_cost_inner(
+            &mut simulated,
+            payer,
+            ability.source_id,
+            sub_cost,
+            &mut simulated_events,
+            &scope,
+            None,
+        ) {
+            Ok(PaymentOutcome::Paid) => {}
+            // A choice/replacement is a real continuation boundary. The
+            // current architecture intentionally commits the paid prefix and
+            // resumes the unpaid suffix in a later GameAction; do not pretend
+            // a dry run can inspect components beyond that pause.
+            Ok(PaymentOutcome::Paused { .. }) => return true,
+            Ok(PaymentOutcome::Failed { .. }) | Err(_) => return false,
+        }
+    }
+    true
+}
+
 /// CR 118.3 + CR 118.12: resolution-time payability. A player can't pay a cost
 /// without the resources to pay it fully; used as the `Composite` pre-flight so
 /// the resolver never commits a sub-cost before discovering a later sub-cost is
@@ -2291,6 +2365,7 @@ fn can_pay_resolution(
     payer: PlayerId,
     cost: &AbilityCost,
     ability: &ResolvedAbility,
+    cost_move_root: ResolutionCostMoveRoot,
 ) -> bool {
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
     match cost {
@@ -2431,16 +2506,18 @@ fn can_pay_resolution(
                 .fixed_count()
                 .is_some_and(|count| eligible.len() >= count as usize)
         }
-        // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable.
-        AbilityCost::Composite { costs } => costs
-            .iter()
-            .all(|cost| can_pay_resolution(state, payer, cost, ability)),
+        // CR 117 + CR 118.3: Composite affordability follows the sequential
+        // resource-consumption model used by the executor, not independent
+        // checks against the unchanged original state.
+        AbilityCost::Composite { costs } => {
+            can_pay_resolution_composite(state, payer, costs, ability, cost_move_root)
+        }
         // CR 118.12a: Disjunctive — payable iff any sub-cost is payable. The
         // choice is made interactively via `UnlessPaymentChooseCost`; the
         // unconditional pre-flight check only needs at least one branch.
         AbilityCost::OneOf { costs } => costs
             .iter()
-            .any(|cost| can_pay_resolution(state, payer, cost, ability)),
+            .any(|cost| can_pay_resolution(state, payer, cost, ability, cost_move_root)),
         // CR 118.3 + CR 104.3d: no RESOURCE limit on giving yourself counters — the
         // ten-or-more poison loss condition is a state-based action, not a
         // payment-time affordability gate.
@@ -4305,7 +4382,13 @@ mod tests {
         );
 
         assert!(
-            can_pay_resolution(&scenario.state, P0, &x_sentinel, &ability),
+            can_pay_resolution(
+                &scenario.state,
+                P0,
+                &x_sentinel,
+                &ability,
+                ResolutionCostMoveRoot::EffectPayCost,
+            ),
             "CR 107.3a: X=0 is a legal announcement, so an X-sentinel resolution \
              tap cost is payable with no eligible creatures"
         );
@@ -4321,6 +4404,7 @@ mod tests {
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                 },
                 &ability,
+                ResolutionCostMoveRoot::EffectPayCost,
             ),
             "CR 601.2h: a fixed `count: 1` tap cost is NOT payable with zero eligible creatures"
         );
