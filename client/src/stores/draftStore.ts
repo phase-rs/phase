@@ -926,6 +926,12 @@ function arraysEqual(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function validPersistedStage(run: DraftRunState, draftId: string): boolean {
+  return run.activeMatch === undefined
+    || (typeof run.activeMatch === "object" && run.activeMatch !== null
+      && isCoherentUnresolvedDraftStage(run, draftId, run.activeMatch.gameId));
+}
+
 function validRun(run: DraftRunState, draftId: string, setCode: string): boolean {
   return (run.format === "single" || run.format === "bo3" || run.format === "run")
     && Array.isArray(run.results)
@@ -939,9 +945,7 @@ function validRun(run: DraftRunState, draftId: string, setCode: string): boolean
     && run.usedBotSeats.length > 0
     && run.usedBotSeats.every((seat) => Number.isInteger(seat) && seat > 0)
     && (setCode !== "custom-cube" || Array.isArray(run.booster_pack_pool))
-    && (run.activeMatch === undefined
-      || (typeof run.activeMatch === "object" && run.activeMatch !== null
-        && isCoherentUnresolvedDraftStage(run, draftId, run.activeMatch.gameId)));
+    && validPersistedStage(run, draftId);
 }
 
 /** Transport identity for a submitted, unresolved match. The run is the authority. */
@@ -1235,6 +1239,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       });
       return { status: "resumed", draftId: meta.id };
     };
+    if (run && !validPersistedStage(run, meta.id)) {
+      return unavailable("Saved draft run is unavailable");
+    }
     let saved: Awaited<ReturnType<typeof loadQuickDraftSession>>;
     try {
       saved = await loadQuickDraftSession(meta.id);
@@ -1755,8 +1762,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         : await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
       if (!fresh()) return;
       const durableRun = withBoosterPackPool(savedRun, boosterPackPool);
-      if (runOnly && (!validDifficulty(state.difficulty)
-        || !validRun(durableRun, state.draftId, state.selectedSet))) {
+      if (!validPersistedStage(durableRun, state.draftId)
+        || (runOnly && (!validDifficulty(state.difficulty)
+          || !validRun(durableRun, state.draftId, state.selectedSet)))) {
         throw new Error("Saved draft run is unavailable");
       }
       const playerDeck = runOnly ? durableRun.playerDeck

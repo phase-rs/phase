@@ -1066,6 +1066,67 @@ describe("draft store workspace authority", () => {
     localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
   });
 
+  it.each([null, false])("refuses persisted malformed activeMatch %s with a restored full session", async (activeMatch) => {
+    vi.useRealTimers();
+    const draftId = `full-malformed-stage-${String(activeMatch)}`;
+    const run: DraftRunState = { format: "run", results: [], playerDeck: ["Player"],
+      opponentDeck: ["Opponent"], usedBotSeats: [1] };
+    const malformedRun = { ...run, activeMatch } as unknown as DraftRunState;
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "TST", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, malformedRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue({
+      sessionJson: "saved session", mainDeck: ["Player"], landCounts: {},
+      poolSortMode: "color", poolPanelOpen: true, workspace: null,
+    });
+    wasm.import_draft_session.mockReturnValue(view([card("player", "Player")]));
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+    });
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null, adapter: null });
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
+    expect(persistence.saveDraftRun).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    // A genuinely absent stage in the same full-session path may launch.
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(wasm.import_draft_session).toHaveBeenCalledWith("saved session", 2);
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: run, phase: "playing" });
+    expect(useDraftStore.getState().adapter).not.toBeNull();
+    expect(useDraftStore.getState().workspaceState).not.toBeNull();
+
+    await actualPersistence.saveDraftRun(draftId, malformedRun);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
+    expect(wasm.get_bot_deck).not.toHaveBeenCalled();
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(wasm.get_bot_deck).toHaveBeenCalled();
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, run: expect.objectContaining({ activeMatch: expect.objectContaining({ draftId }) }),
+    }));
+    expect(navigate).toHaveBeenCalledOnce();
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
   it("refuses a persisted stage owned by another draft on resume and launch", async () => {
     vi.useRealTimers();
     const draftId = "stage-owner";
@@ -1177,6 +1238,8 @@ describe("draft store workspace authority", () => {
   });
 
   it("routes_resume_suggestions_and_submit_through_workspace_installation", async () => {
+    // This drafting-session case has no durable run, regardless of earlier launch fixtures.
+    persistence.loadDraftRun.mockReset().mockResolvedValue(null);
     const savedWorkspace = {
       ...createDraftWorkspaceState(),
       placements: {
