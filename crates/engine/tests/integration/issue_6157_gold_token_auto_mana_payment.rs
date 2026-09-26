@@ -358,8 +358,7 @@ fn check_instant_only_mana_ability_cannot_pay_for_cast() {
             source_id: led,
             ability_index,
         })
-        .err()
-        .expect("Diamond cannot activate during mana payment");
+        .expect_err("Diamond cannot activate during mana payment");
     assert!(
         matches!(error, engine::game::engine::EngineError::ActionNotAllowed(ref message)
             if message == "Activation restriction not satisfied: AsInstant"),
