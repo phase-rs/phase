@@ -444,15 +444,13 @@ pub fn resolve_change_speed(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Comparator, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetRef,
+        Comparator, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetRef,
     };
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::ObjectId;
 
     #[test]
     fn player_attribute_starting_life_threshold_binds_each_speed_recipient() {
-        use crate::types::ability::RoundingMode;
-
         // CR 103.4 + CR 904.5 + CR 119.1: P1 has a 40-life baseline;
         // both hero seats have a 20-life baseline.
         let mut format = FormatConfig::archenemy();

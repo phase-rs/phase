@@ -9207,6 +9207,7 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::events::{GameEvent, PlayerActionKind};
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         DamageRecord, ExileLink, ExileLinkKind, ManaSpentSourceSnapshot, ZoneChangeRecord,
     };
@@ -11915,8 +11916,6 @@ mod tests {
 
     #[test]
     fn starting_life_source_preview_requires_a_bound_player() {
-        use crate::types::format::FormatConfig;
-
         let mut state = GameState::new(FormatConfig::archenemy(), 4, 0);
         let source = create_object(
             &mut state,

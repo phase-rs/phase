@@ -3003,11 +3003,12 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        DamageChannel, Duration, FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
-        TypeFilter, TypedFilter,
+        DamageChannel, Duration, FilterProp, ObjectScope, PlayerRelation, PlayerScope,
+        QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -3016,9 +3017,6 @@ mod tests {
     /// CR 103.4 + CR 904.5 + CR 119.1: P1 is the archenemy with a 40-life
     /// baseline, while P0 and P2 are heroes with 20-life baselines.
     fn archenemy_player_attribute_fixture() -> (GameState, PlayerFilter) {
-        use crate::types::ability::{PlayerRelation, PlayerScope, RoundingMode};
-        use crate::types::format::FormatConfig;
-
         let mut format = FormatConfig::archenemy();
         format.archenemy_player = Some(PlayerId(1));
         let mut state = GameState::new(format, 3, 42);

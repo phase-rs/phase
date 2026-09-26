@@ -20541,10 +20541,10 @@ mod tests {
         ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
         DamageChannel, DelayedTriggerCondition, Duration, EffectKind, EffectScope, FilterProp,
         ManaSpendPermission, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
-        PlayerScope, PtValue, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementDefinition, SpellContext, StaticDefinition, SubAbilityLink, TapStateChange,
-        TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
-        UnlessPayModifier, UntilCondition, ZoneOwner,
+        PlayerRelation, PlayerScope, PtValue, QuantityExpr, QuantityModification, QuantityRef,
+        ReplacementDefinition, RoundingMode, SpellContext, StaticDefinition, SubAbilityLink,
+        TapStateChange, TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition,
+        TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -21800,11 +21800,6 @@ mod tests {
 
     #[test]
     fn player_attribute_threshold_binds_starting_life_to_candidate() {
-        use crate::types::ability::{
-            Comparator, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef,
-            RoundingMode,
-        };
-
         let mut format = crate::types::format::FormatConfig::archenemy();
         format.archenemy_player = Some(PlayerId(1));
         let mut state = GameState::new(format, 3, 42);

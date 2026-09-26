@@ -16470,9 +16470,11 @@ pub mod tests {
         TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::events::{GameEvent, ManaTapState};
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         DamageRecord, DeferredLifeCostResume, DelayedTrigger, DistributionUnit, GameState,
         LayersDirty, LoopDetectionMode, NamedChoiceSourceBinding, PendingCast,
@@ -16501,9 +16503,6 @@ pub mod tests {
     /// half of a hero's 20 (so those gated instructions do not happen).
     #[test]
     fn cecil_trigger_resolution_uses_archenemy_or_hero_starting_life() {
-        use crate::types::card::LayoutKind;
-        use crate::types::format::FormatConfig;
-
         const ORACLE: &str = "Whenever ~ deals damage, you lose that much life. Then if your life total is less than or equal to half your starting life total, untap ~ and transform it.";
         let trigger =
             crate::parser::oracle_trigger::parse_trigger_line(ORACLE, "Cecil, Dark Knight");
