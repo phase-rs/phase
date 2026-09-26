@@ -14143,7 +14143,6 @@ pub fn handle_surge_cost_choice_with_payment_mode(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    use crate::types::actions::AlternativeCastDecision;
     match decision {
         AlternativeCastDecision::Alternative => {
             let option = casting_variant_choice_set(state, player, object_id, None)
