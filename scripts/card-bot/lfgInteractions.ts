@@ -55,6 +55,7 @@ const THREAD_CLOSE_DELAY_MS = 1000;
 /** Discord caps autocomplete at 25 choices, each name at 100 chars. */
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 const MAX_CHOICE_NAME_LENGTH = 100;
+const MAX_DESCRIPTION_LENGTH = 500;
 
 /** A reply only the invoker sees. */
 function ephemeral(content: string): Response {
@@ -101,6 +102,11 @@ export async function lfgCommand(i: CommandInteraction, deps: LfgDeps): Promise<
   const format = findFormat(stringOption(options, "format") ?? "");
   if (format === undefined) return ephemeral("Unknown format.");
 
+  const description = stringOption(options, "description")?.trim() || null;
+  if (description !== null && description.length > MAX_DESCRIPTION_LENGTH) {
+    return ephemeral(`Description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer.`);
+  }
+
   const cap = seatCap(format, mode);
   const seats = integerOption(options, "seats") ?? defaultSeats(format, mode);
   if (seats < format.min_players || seats > cap) {
@@ -130,7 +136,7 @@ export async function lfgCommand(i: CommandInteraction, deps: LfgDeps): Promise<
   }
 
   const result = deps.store.create(
-    { guildId, creatorId: userId, format, seats, mode, build, server },
+    { guildId, creatorId: userId, format, seats, mode, build, server, description },
     deps.now(),
   );
   if (result.kind === "refused") return ephemeral(refusalText(result.reason, format));

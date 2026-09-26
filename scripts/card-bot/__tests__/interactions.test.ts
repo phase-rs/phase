@@ -186,6 +186,33 @@ describe("/lfg command (T-cmd)", () => {
     expect(created()[0]).toMatchObject({ kind: "created", lfg: { seats: 4, mode: "p2p", build: "preview", server: null } });
   });
 
+  test("a Commander description appears in the post and stays on later updates", async () => {
+    const d = deps(await cache());
+    const created = spyCreates(d);
+    const res = await body(lfgCommand(command([
+      opt("format", "Commander"),
+      opt("description", "  Bracket 3; upgraded precons welcome  "),
+    ]), d));
+    expect(res.data.embeds?.[0].description).toContain("**Details**\nBracket 3; upgraded precons welcome");
+    const result = created()[0];
+    if (result.kind !== "created") throw new Error("expected created LFG");
+    expect(result.lfg.description).toBe("Bracket 3; upgraded precons welcome");
+    const updated = await body(click(d, "join", result.lfg.id, "222"));
+    expect(updated.data.embeds?.[0].description).toContain("**Details**\nBracket 3; upgraded precons welcome");
+  });
+
+  test("an overlong description is refused before creating a game", async () => {
+    const d = deps(await cache());
+    const created = spyCreates(d);
+    const res = await body(lfgCommand(command([
+      opt("format", "Commander"),
+      opt("description", "x".repeat(501)),
+    ]), d));
+    expect(res.data.flags).toBe(MessageFlags.EPHEMERAL);
+    expect(res.data.content).toContain("500 characters or fewer");
+    expect(created()).toHaveLength(0);
+  });
+
   // [name, cache, options, the refusal's own text]
   const refusals: [string, () => Promise<ServerCache>, InteractionOption[], string][] = [
     [

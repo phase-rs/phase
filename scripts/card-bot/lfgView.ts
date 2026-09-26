@@ -103,7 +103,14 @@ function descriptionLines(lfg: Lfg): string[] {
       : `Dedicated server: ${lfg.server.name}`;
   const siteLine = `Site: ${lfg.build} (${new URL(BUILD_ENDPOINTS[lfg.build].site).host})`;
   const seatLines = lfg.seated.map((id) => (id === lfg.creatorId ? `<@${id}> (host)` : `<@${id}>`));
-  return [modeLine, siteLine, "", `**Players ${lfg.seated.length}/${lfg.seats}**`, ...seatLines];
+  return [
+    modeLine,
+    siteLine,
+    ...(lfg.description === null ? [] : ["", `**Details**\n${lfg.description}`]),
+    "",
+    `**Players ${lfg.seated.length}/${lfg.seats}**`,
+    ...seatLines,
+  ];
 }
 
 /** The public post. The room code never appears in it. */

@@ -34,6 +34,7 @@ function lfg(overrides: Partial<Lfg> = {}): Lfg {
     mode: "p2p",
     build: "release",
     server: null,
+    description: null,
     state: "ready",
     code: CODE,
     touchedMs: 0,
@@ -256,6 +257,15 @@ describe("custom_id", () => {
 });
 
 describe("public post", () => {
+  test("shows optional game details on open and ready posts", () => {
+    const details = "Bracket 3 — bring upgraded precons";
+    for (const state of ["open", "ready"] as const) {
+      const post = renderLfg(lfg({ state, description: details }));
+      expect(post.embeds[0].description).toContain(`**Details**\n${details}`);
+    }
+    expect(renderLfg(lfg()).embeds[0].description).not.toContain("**Details**");
+  });
+
   test("a ready post never contains the code, lists every seat, and has no fields", () => {
     const l = lfg();
     const post = renderLfg(l);
