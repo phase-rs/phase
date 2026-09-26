@@ -196,8 +196,9 @@ pub(crate) mod zones;
 pub(crate) mod test_fixtures;
 
 pub use bracket_estimate::{
-    estimate_bracket, AxisReading, BracketAxis, BracketCheck, BracketCheckOutcome, BracketCoverage,
-    BracketEstimate, CommanderBracketTier, EstimateConfidence, FloorRule, FloorRuleSource,
+    estimate_bracket, estimate_bracket_for_request, AxisReading, BracketAxis, BracketCheck,
+    BracketCheckOutcome, BracketCoverage, BracketEstimate, BracketEstimateRequest,
+    CommanderBracketTier, DeclarationVerdict, EstimateConfidence, FloorRule, FloorRuleSource,
 };
 // Plumbing: read-only re-export of the X-affordability authority
 // (`max_x_value`) and the cost-leg extractor that feeds it

@@ -31,13 +31,13 @@ use engine::game::preview::{
 use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_format_gate};
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
+    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket_for_request,
     evaluate_deck_compatibility, filter_state_for_viewer, is_brawl_commander_eligible,
     is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
     rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
-    validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
-    PlayerDeckList, ReplayPlayer,
+    validate_name_deck_for_format_full, BracketEstimate, BracketEstimateRequest,
+    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::DebugAction;
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
@@ -1392,23 +1392,24 @@ pub fn companion_candidates_js(request: JsValue) -> Result<JsValue, JsValue> {
     })
 }
 
-/// Estimates a Commander deck's bracket without touching `GAME_STATE`.
-/// Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
-/// deck has no commander or the card database is not loaded.
+/// Estimates a Commander deck's bracket and reconciles an optional declared
+/// tier without touching `GAME_STATE`. Reads `CARD_DB` for bracket signals.
+/// Returns `null` (via serde) when the deck has no commander or the card
+/// database is not loaded.
 #[wasm_bindgen]
-pub fn estimate_bracket_for_deck(deck_js: JsValue) -> Result<JsValue, JsError> {
-    let deck: PlayerDeckList = serde_wasm_bindgen::from_value(deck_js)
-        .map_err(|e| JsError::new(&format!("invalid deck: {e}")))?;
-    let result = estimate_bracket_inner(&deck);
+pub fn estimate_bracket_for_deck(request_js: JsValue) -> Result<JsValue, JsError> {
+    let request: BracketEstimateRequest = serde_wasm_bindgen::from_value(request_js)
+        .map_err(|e| JsError::new(&format!("invalid bracket estimate request: {e}")))?;
+    let result = estimate_bracket_inner(&request);
     Ok(to_js(&result))
 }
 
 /// Pure helper, exposed for native-side tests. Reads `CARD_DB` thread-local.
-fn estimate_bracket_inner(deck: &PlayerDeckList) -> Option<BracketEstimate> {
+fn estimate_bracket_inner(request: &BracketEstimateRequest) -> Option<BracketEstimate> {
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let db = db.as_ref()?;
-        estimate_bracket(deck, db)
+        estimate_bracket_for_request(request, db)
     })
 }
 
@@ -3670,12 +3671,11 @@ pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
 mod bracket_estimate_tests {
     use super::*;
     use engine::database::{BracketLists, CardDatabase};
-    use engine::game::bracket_estimate::CommanderBracketTier;
+    use engine::game::bracket_estimate::{BracketAxis, CommanderBracketTier, DeclarationVerdict};
     use engine::game::deck_loading::PlayerDeckList;
 
-    #[test]
-    fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
-        let db = CardDatabase::from_json_str(
+    fn db_with_one_game_changer() -> CardDatabase {
+        CardDatabase::from_json_str(
             r#"{
                 "smothering tithe": {
                     "name": "Smothering Tithe",
@@ -3701,7 +3701,12 @@ mod bracket_estimate_tests {
             }"#,
         )
         .unwrap()
-        .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap());
+        .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap())
+    }
+
+    #[test]
+    fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
+        let db = db_with_one_game_changer();
         CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let deck = PlayerDeckList {
@@ -3710,7 +3715,11 @@ mod bracket_estimate_tests {
             sideboard: vec![],
             ..Default::default()
         };
-        let result = estimate_bracket_inner(&deck);
+        let request = BracketEstimateRequest {
+            deck,
+            declared_tier: None,
+        };
+        let result = estimate_bracket_inner(&request);
         let est = result.expect("estimate present");
         assert_eq!(est.tier, CommanderBracketTier::Upgraded);
 
@@ -3727,7 +3736,37 @@ mod bracket_estimate_tests {
             sideboard: vec![],
             ..Default::default()
         };
-        assert!(estimate_bracket_inner(&deck).is_none());
+        let request = BracketEstimateRequest {
+            deck,
+            declared_tier: None,
+        };
+        assert!(estimate_bracket_inner(&request).is_none());
+    }
+
+    #[test]
+    fn estimate_bracket_inner_reconciles_declared_tier() {
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+        let request = BracketEstimateRequest {
+            deck: PlayerDeckList {
+                commander: vec!["Atraxa, Praetors' Voice".into()],
+                main_deck: vec!["Smothering Tithe".into()],
+                ..Default::default()
+            },
+            declared_tier: Some(CommanderBracketTier::Core),
+        };
+
+        let estimate = estimate_bracket_inner(&request).expect("estimate present");
+        assert_eq!(
+            estimate.declaration,
+            Some(DeclarationVerdict::BelowFloor {
+                floor: CommanderBracketTier::Upgraded,
+                raised_by: vec![BracketAxis::GameChangers],
+            })
+        );
+
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
     }
 }
 

@@ -272,6 +272,95 @@ pub struct BracketEstimate {
     pub coverage: BracketCoverage,
     /// `BracketLists.version`, passed through from the export pipeline.
     pub data_version: String,
+    /// `None` when the request carried no declaration. Nested `Option` is
+    /// avoided by keeping presence-of-a-declaration in the `Option` and the
+    /// verdict in the enum: `Undeclared` is the absence of an INPUT, not a
+    /// verdict on one, and putting it inside `DeclarationVerdict` would mix
+    /// two abstraction layers in one enum (CLAUDE.md, "Separate abstraction
+    /// layers in enum design").
+    #[serde(default)]
+    pub declaration: Option<DeclarationVerdict>,
+}
+
+/// How a player's declared bracket relates to the floor the deck's contents
+/// establish.
+///
+/// Bracket policy is **not** part of the Comprehensive Rules — it is WotC's
+/// Commander Format Panel guidance, so no rules annotation applies (see the
+/// module header). WotC state the constraint three times: the brackets are
+/// "a tool to guide pregame conversations—not an ultimate arbiter of who can
+/// play against whom" (Commander Brackets Beta Update, 2026-02-09), they are
+/// "an entirely optional way to help matchmake your Commander games" (live
+/// format page), and "Rule Zero still exists" (Introducing Commander Brackets
+/// Beta, 2025-02-11).
+///
+/// The engine therefore makes exactly one claim: whether a declaration sits
+/// strictly BELOW the floor the deck's contents establish. It never claims a
+/// declaration above the floor is wrong — `estimate_bracket` returns a floor,
+/// and everything above it is the player's to declare. In particular a `Cedh`
+/// declaration over an `Optimized` floor is `AtOrAboveFloor`: `decide_tier`
+/// never returns `Cedh`, pinned by `estimator_never_returns_cedh`, so B5 is
+/// unreachable by design and comparing for equality warns every correctly
+/// declared cEDH deck.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeclarationVerdict {
+    /// The declaration is at or above the derived floor. Nothing to report.
+    AtOrAboveFloor,
+    /// The declaration is strictly below the floor the deck's contents
+    /// establish. `raised_by` names the axes that established that floor, in
+    /// `BracketAxis` declaration order; the caller reads their card evidence
+    /// out of the estimate's own per-axis reading rather than duplicating it
+    /// here, so there is exactly one name alphabet on the wire.
+    BelowFloor {
+        floor: CommanderBracketTier,
+        raised_by: Vec<BracketAxis>,
+    },
+}
+
+/// One bracket-estimate request: a decklist plus, optionally, the bracket its
+/// owner declared.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BracketEstimateRequest {
+    pub deck: PlayerDeckList,
+    /// `None` means UNDECLARED — not `Core`.
+    ///
+    /// Deliberately NOT read from `PlayerDeckList::bracket_tier`
+    /// (`game/deck_loading.rs`): that field is `#[serde(default)]` over a
+    /// `CommanderBracketTier` whose `Default` is `Core`, so a request that
+    /// simply omits a declaration would arrive as an explicit `Core`
+    /// declaration and every undeclared deck with a floor above Core would
+    /// report `BelowFloor`.
+    #[serde(default)]
+    pub declared_tier: Option<CommanderBracketTier>,
+}
+
+/// Reconciles a declared bracket against a computed estimate.
+///
+/// Ordering goes through [`CommanderBracketTier::as_u8`] — the enum derives
+/// `PartialEq, Eq, Hash` but deliberately **not** `Ord`, so a `<` on the
+/// variants would not compile and must not be added just to make this read
+/// nicer.
+pub fn reconcile(declared: CommanderBracketTier, estimate: &BracketEstimate) -> DeclarationVerdict {
+    if declared.as_u8() >= estimate.tier.as_u8() {
+        return DeclarationVerdict::AtOrAboveFloor;
+    }
+    DeclarationVerdict::BelowFloor {
+        floor: estimate.tier,
+        raised_by: floor_raising_axes(estimate),
+    }
+}
+
+fn floor_raising_axes(estimate: &BracketEstimate) -> Vec<BracketAxis> {
+    estimate
+        .checks
+        .iter()
+        .filter(|check| {
+            check.outcome == BracketCheckOutcome::Fired
+                && check.floor.as_u8() == estimate.tier.as_u8()
+        })
+        .map(|check| check.axis)
+        .collect()
 }
 
 /// Returns `None` when the deck has no commander.
@@ -356,7 +445,21 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
             confidence,
         },
         data_version: db.bracket_lists.version.clone(),
+        declaration: None,
     })
+}
+
+/// Estimate a deck's bracket and, when the request carries a declaration,
+/// reconcile it. Pure: no game state, no I/O, no randomness, no floats.
+pub fn estimate_bracket_for_request(
+    request: &BracketEstimateRequest,
+    db: &CardDatabase,
+) -> Option<BracketEstimate> {
+    let mut estimate = estimate_bracket(&request.deck, db)?;
+    estimate.declaration = request
+        .declared_tier
+        .map(|declared| reconcile(declared, &estimate));
+    Some(estimate)
 }
 
 /// Smallest `d >= 0` that makes the rule fire, or `None` if additions cannot.
@@ -715,6 +818,124 @@ mod tests {
             e.tier,
             CommanderBracketTier::Optimized,
             "estimator caps at B4"
+        );
+    }
+
+    #[test]
+    fn cedh_declaration_over_optimized_floor_is_at_or_above() {
+        let signals = BracketSignals {
+            game_changer: true,
+            mass_land_denial: true,
+            extra_turn: true,
+            efficient_tutor: true,
+        };
+        let entries: Vec<(String, BracketSignals)> = (0..40)
+            .map(|index| (format!("Card{index}"), signals))
+            .collect();
+        let entry_refs: Vec<(&str, BracketSignals)> = entries
+            .iter()
+            .map(|(name, signals)| (name.as_str(), *signals))
+            .collect();
+        let db = db_with_signals(&entry_refs);
+        let main = entries.iter().map(|(name, _)| name.as_str()).collect();
+        let estimate = estimate_bracket(&deck(vec!["Cmdr"], main), &db).unwrap();
+
+        assert_eq!(
+            reconcile(CommanderBracketTier::Cedh, &estimate),
+            DeclarationVerdict::AtOrAboveFloor
+        );
+    }
+
+    #[test]
+    fn declaration_equal_to_floor_is_at_or_above() {
+        let db = db_with_signals(&[(
+            "Smothering Tithe",
+            BracketSignals {
+                game_changer: true,
+                ..Default::default()
+            },
+        )]);
+        let estimate =
+            estimate_bracket(&deck(vec!["Cmdr"], vec!["Smothering Tithe"]), &db).unwrap();
+
+        assert_eq!(estimate.tier, CommanderBracketTier::Upgraded);
+        assert_eq!(
+            reconcile(CommanderBracketTier::Upgraded, &estimate),
+            DeclarationVerdict::AtOrAboveFloor
+        );
+    }
+
+    #[test]
+    fn declaration_below_floor_reports_floor_and_axes() {
+        let db = db_with_signals(&[(
+            "Armageddon",
+            BracketSignals {
+                mass_land_denial: true,
+                ..Default::default()
+            },
+        )]);
+        let estimate = estimate_bracket(&deck(vec!["Cmdr"], vec!["Armageddon"]), &db).unwrap();
+
+        assert_eq!(
+            reconcile(CommanderBracketTier::Core, &estimate),
+            DeclarationVerdict::BelowFloor {
+                floor: CommanderBracketTier::Optimized,
+                raised_by: vec![BracketAxis::MassLandDenial],
+            }
+        );
+    }
+
+    #[test]
+    fn declaration_above_floor_is_at_or_above() {
+        let estimate =
+            estimate_bracket(&deck(vec!["Cmdr"], vec!["Forest"]), &db_with_signals(&[])).unwrap();
+
+        assert_eq!(estimate.tier, CommanderBracketTier::Core);
+        assert_eq!(
+            reconcile(CommanderBracketTier::Optimized, &estimate),
+            DeclarationVerdict::AtOrAboveFloor
+        );
+    }
+
+    #[test]
+    fn undeclared_request_yields_no_verdict() {
+        let request = BracketEstimateRequest {
+            deck: deck(vec!["Cmdr"], vec!["Forest"]),
+            declared_tier: None,
+        };
+        let estimate = estimate_bracket_for_request(&request, &db_with_signals(&[])).unwrap();
+
+        assert_eq!(estimate.declaration, None);
+    }
+
+    #[test]
+    fn request_missing_declared_tier_deserializes_to_none_not_core() {
+        let request: BracketEstimateRequest =
+            serde_json::from_str(r#"{"deck":{"main_deck":[],"commander":["Cmdr"]}}"#).unwrap();
+        let bare_deck: PlayerDeckList =
+            serde_json::from_str(r#"{"main_deck":[],"commander":["Cmdr"]}"#).unwrap();
+
+        assert_eq!(request.declared_tier, None);
+        assert_eq!(bare_deck.bracket_tier, CommanderBracketTier::Core);
+    }
+
+    #[test]
+    fn verdict_wire_shape_is_internally_tagged() {
+        assert_eq!(
+            serde_json::to_value(DeclarationVerdict::AtOrAboveFloor).unwrap(),
+            serde_json::json!({ "kind": "at_or_above_floor" })
+        );
+        assert_eq!(
+            serde_json::to_value(DeclarationVerdict::BelowFloor {
+                floor: CommanderBracketTier::Optimized,
+                raised_by: vec![BracketAxis::MassLandDenial],
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "below_floor",
+                "floor": "optimized",
+                "raised_by": ["mass_land_denial"],
+            })
         );
     }
 
@@ -1102,6 +1323,7 @@ mod tests {
             serde_json::json!({ "kind": "clear", "cards_until_fired": 3 })
         );
         assert_eq!(value["coverage"]["confidence"], "partial");
+        assert_eq!(value["declaration"], serde_json::Value::Null);
         let complete = estimate_bracket(
             &deck(vec!["Known Commander"], vec!["Forest"]),
             &db_with_known_faces(),

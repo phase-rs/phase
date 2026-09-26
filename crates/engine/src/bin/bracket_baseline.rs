@@ -481,6 +481,7 @@ mod tests {
                         confidence: EstimateConfidence::Complete,
                     },
                     data_version: "test".to_string(),
+                    declaration: None,
                 },
             },
         }
