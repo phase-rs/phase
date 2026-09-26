@@ -49,8 +49,8 @@ pub fn suggest_deck(
     // own deck.
     // CR 407.3: classify drafted faces before commander designation, colour
     // choice, scoring, and fixing lands. Preserve instance order and copies.
-    // Direct callers without a database retain their unclassified proposal;
-    // the bot admission entry refuses that absence before calling us.
+    // Without a database, ordinary set-backed bots retain an unclassified
+    // proposal; the final game gate validates every submitted card name.
     let eligible_pool = card_db.map(|db| {
         pool.iter()
             .filter(|card| {
@@ -77,9 +77,9 @@ pub fn suggest_deck(
     // ((1) >=60 cards, (2) any number of same-named cards, (3) the Commander
     // Masters partner grant), and none of them is 903.5c.
     //
-    // `get_bot_deck_inner` refuses a missing database for every draft kind.
-    // The `None` arm remains a total answer for direct non-bot callers: without
-    // a face there is no commander eligibility or colour identity to judge.
+    // `get_bot_deck_inner` refuses a missing database for Commander Draft and
+    // Cube. Without a face there is no commander eligibility or colour identity
+    // to judge.
     let (commander, identity): (Vec<String>, Option<HashSet<ManaColor>>) =
         match (commanders_required, card_db) {
             (0, _) | (_, None) => (Vec::new(), None),

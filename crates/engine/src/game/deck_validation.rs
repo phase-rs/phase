@@ -752,25 +752,13 @@ fn printed_in_any_set(db: &CardDatabase, name: &str, sets: &[SetCode]) -> bool {
     })
 }
 
-/// CR 100.2b + CR 100.5: Limited's resolved format rules set its minimum
-/// main-deck size. Every name in the deck's slots must resolve before the
-/// engine can load the exact deck that was admitted.
-fn evaluate_limited(
-    db: &CardDatabase,
-    request: &DeckCompatibilityRequest,
-    unknown_cards: &BTreeSet<String>,
-    format_rules: &FormatConfig,
-) -> CompatibilityCheck {
+/// Every name in a Limited deck must resolve before game admission.
+/// A draft session applies its configured minimum at submission; this
+/// generic gate has no session provenance from which to recover that minimum.
+fn evaluate_limited(unknown_cards: &BTreeSet<String>) -> CompatibilityCheck {
     let mut reasons = Vec::new();
     if !unknown_cards.is_empty() {
         reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
-    }
-    let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
-    if !format_rules.deck_size.accepts(total_cards) {
-        reasons.push(format!(
-            "Limited deck must have {} cards (found {total_cards})",
-            format_rules.deck_size.requirement_phrase()
-        ));
     }
     CompatibilityCheck {
         compatible: reasons.is_empty(),
@@ -2682,7 +2670,7 @@ fn evaluate_selected_format_summary(
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => QuickCheckResult::compatible(),
         GameFormat::Limited => {
             let unknown_cards = collect_unknown_cards(db, request);
-            let check = evaluate_limited(db, request, &unknown_cards, &format_rules);
+            let check = evaluate_limited(&unknown_cards);
             QuickCheckResult {
                 reason: check.reasons.into_iter().next(),
                 unknown_cards,
@@ -3209,7 +3197,7 @@ fn evaluate_selected_format(
         }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => true,
         GameFormat::Limited => {
-            let check = evaluate_limited(db, request, unknown_cards, &format_rules);
+            let check = evaluate_limited(unknown_cards);
             if !check.compatible {
                 reasons.extend(check.reasons);
             }

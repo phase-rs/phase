@@ -7045,21 +7045,27 @@ mod deck_list_seat_validation_tests {
     }
 
     #[test]
-    fn limited_initializer_seat_validation_rejects_short_and_unresolved_decks() {
+    fn limited_initializer_seat_validation_accepts_known_short_decks_and_rejects_unresolved() {
         let db = test_db();
         assert!(db.get_face_by_name("Forest").is_some());
         let legal = PlayerDeckList {
             main_deck: std::iter::repeat_n("Forest".to_string(), 40).collect(),
             ..Default::default()
         };
-        let short = PlayerDeckList {
+        let short_39 = PlayerDeckList {
             main_deck: std::iter::repeat_n("Forest".to_string(), 39).collect(),
+            ..Default::default()
+        };
+        let custom_20 = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 20).collect(),
             ..Default::default()
         };
         let mut unknown_main = legal.clone();
         unknown_main.main_deck[0] = "Unknown Limited Probe".to_string();
         let mut unknown_side = legal.clone();
         unknown_side.sideboard = vec!["Unknown Limited Probe".to_string()];
+        let mut unknown_20 = custom_20.clone();
+        unknown_20.main_deck[0] = "Unknown Limited Probe".to_string();
         let check = |player, opponent| {
             validate_deck_list_seats(
                 &db,
@@ -7071,15 +7077,25 @@ mod deck_list_seat_validation_tests {
         };
 
         assert_eq!(check(legal.clone(), legal.clone()), None);
+        assert_eq!(check(short_39.clone(), legal.clone()), None);
+        assert_eq!(check(legal.clone(), short_39), None);
+        assert_eq!(check(custom_20.clone(), legal.clone()), None);
+        assert_eq!(check(legal.clone(), custom_20), None);
         for (seat, player, opponent, reason) in [
-            ("Player", short.clone(), legal.clone(), "at least 40"),
+            ("Player", unknown_20.clone(), legal.clone(), "Unknown cards"),
             (
                 "Player",
                 unknown_main.clone(),
                 legal.clone(),
                 "Unknown cards",
             ),
-            ("AI opponent", legal.clone(), short, "at least 40"),
+            (
+                "Player",
+                unknown_side.clone(),
+                legal.clone(),
+                "Unknown cards",
+            ),
+            ("AI opponent", legal.clone(), unknown_20, "Unknown cards"),
             ("AI opponent", legal.clone(), unknown_main, "Unknown cards"),
             ("AI opponent", legal.clone(), unknown_side, "Unknown cards"),
         ] {
