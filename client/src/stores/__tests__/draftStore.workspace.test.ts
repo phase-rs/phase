@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import ts from "typescript";
+import i18n from "i18next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DraftEngineOperationLease,
@@ -220,6 +221,143 @@ describe("draft store workspace authority", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  describe("localized draft failures", () => {
+    let previousLanguage: string;
+    let previousGermanDraft: Record<string, unknown> | undefined;
+    const messages = {
+      run: {
+        resumeUnavailable: "DE: Entwurf nicht verfügbar",
+        startUnavailable: "DE: Partie konnte nicht starten",
+        runComplete: "DE: Lauf abgeschlossen",
+      },
+      limitedDeck: {
+        compatibilityUnavailable: "DE: Prüfung nicht verfügbar",
+        validationTitle: "DE: Deck benötigt Aufmerksamkeit",
+      },
+    };
+    const validRun = (): DraftRunState => ({
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"], usedBotSeats: [1],
+    });
+
+    beforeEach(async () => {
+      previousLanguage = i18n.language;
+      previousGermanDraft = i18n.hasResourceBundle("de", "draft")
+        ? structuredClone(i18n.getResourceBundle("de", "draft")) : undefined;
+      i18n.addResourceBundle("de", "draft", messages, true, true);
+      await i18n.changeLanguage("de");
+    });
+
+    afterEach(async () => {
+      i18n.removeResourceBundle("de", "draft");
+      if (previousGermanDraft) i18n.addResourceBundle("de", "draft", previousGermanDraft);
+      await i18n.changeLanguage(previousLanguage);
+    });
+
+    it.each(["missing run", "invalid run", "missing session", "storage error"])(
+      "localizes resume %s and retains raw storage errors", async (failure) => {
+        persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+          id: "localized", setCode: "TST", difficulty: 2, kind: "Quick",
+          phase: failure === "missing session" ? "drafting" : "playing",
+        });
+        persistence.loadDraftRun.mockResolvedValue(failure === "invalid run"
+          ? { ...validRun(), draft_set_codes: null } : null);
+        persistence.loadQuickDraftSession.mockResolvedValue(null);
+        if (failure === "storage error") persistence.loadDraftRun.mockRejectedValueOnce(new Error("IDB original cause"));
+        expect(await useDraftStore.getState().resumeDraft()).toEqual({
+          status: "unavailable", draftId: "localized",
+          reason: failure === "storage error" ? "IDB original cause" : messages.run.resumeUnavailable,
+        });
+        expect(persistence.loadDraftRun).toHaveBeenCalledWith("localized");
+        if (failure === "missing session") expect(persistence.loadQuickDraftSession).toHaveBeenCalledWith("localized");
+        expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+        expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+        persistence.loadDraftRun.mockResolvedValue(validRun());
+        expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "localized" });
+        await useDraftStore.getState().launchNextMatch(vi.fn());
+        expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(["invalid", "missing", "ambiguous", "complete", "conflict"])(
+      "localizes %s next-match failure and permits the coherent sibling", async (failure) => {
+        const run = validRun();
+        useDraftStore.setState({ draftId: "localized", selectedSet: "TST", runState: run, runFormat: "run" });
+        const badRun = failure === "invalid" ? { ...run, draft_set_codes: null }
+          : failure === "ambiguous" ? { ...run, usedBotSeats: [1, 4] }
+          : failure === "complete" ? { ...run, format: "single", results: [{ gameId: "done", result: "win" }] }
+          : failure === "conflict" ? { ...run, format: "single" }
+          : null;
+        persistence.loadDraftRun.mockResolvedValue(badRun);
+        const navigate = vi.fn();
+        await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow(
+          failure === "complete" ? messages.run.runComplete
+            : failure === "conflict" ? messages.run.startUnavailable : messages.run.resumeUnavailable,
+        );
+        expect(persistence.loadDraftRun).toHaveBeenCalledWith("localized");
+        expect(formatGate.evaluate).not.toHaveBeenCalled();
+        expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+        expect(navigate).not.toHaveBeenCalled();
+        persistence.loadDraftRun.mockResolvedValue(run);
+        await useDraftStore.getState().launchNextMatch(navigate);
+        expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+        expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+        expect(navigate).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(["initial", "run-only"] as const)("localizes %s gate failures for both seats and preserves engine reasons", async (entry) => {
+      if (entry === "initial") {
+        await startLaunchWithBotSeats([1]);
+        wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+      } else {
+        const run = validRun();
+        useDraftStore.setState({ draftId: "localized", selectedSet: "TST", runState: run, runFormat: "run" });
+        persistence.loadDraftRun.mockResolvedValue(run);
+      }
+      const navigate = vi.fn();
+      const launch = () => entry === "initial"
+        ? useDraftStore.getState().launchMatch(navigate) : useDraftStore.getState().launchNextMatch(navigate);
+      for (const opponent of [false, true]) {
+        for (const failure of ["malformed", "empty rejection", "empty reason", "engine reason"]) {
+          formatGate.evaluate.mockClear();
+          formatGate.evaluate.mockImplementation(async (request) => {
+            if (((request as { main_deck: string[] }).main_deck[0] === "Opponent") !== opponent) {
+              return { compatible: true, reasons: [] };
+            }
+            if (failure === "malformed") return {} as { compatible: boolean; reasons: string[] };
+            if (failure === "empty rejection") throw new Error("");
+            return { compatible: false, reasons: failure === "empty reason" ? [""] : ["engine original cause"] };
+          });
+          await expect(launch()).rejects.toThrow(failure === "engine reason" ? "engine original cause"
+            : failure === "empty reason" ? messages.limitedDeck.validationTitle : messages.limitedDeck.compatibilityUnavailable);
+          expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+          expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+          expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+          expect(navigate).not.toHaveBeenCalled();
+        }
+      }
+      formatGate.evaluate.mockResolvedValue({ compatible: true, reasons: [] });
+      await launch();
+      expect(entry === "initial" ? persistence.publishInitialDraftMatch : persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+      expect(navigate).toHaveBeenCalledOnce();
+    });
+
+    it("preserves both raw launch and save causes under another locale", async () => {
+      await startLaunchWithBotSeats([1]);
+      wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+      formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: ["engine original cause"] });
+      persistence.persistQuickDraftSnapshot.mockRejectedValueOnce(new Error("storage original cause"));
+      await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toEqual(
+        new Error("engine original cause\nstorage original cause"),
+      );
+      expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+      expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce();
+      expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+      await useDraftStore.getState().launchMatch(vi.fn());
+      expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    });
   });
 
   it("keeps_the_chosen_bot_difficulty_through_start_and_reset", async () => {
@@ -1006,7 +1144,7 @@ describe("draft store workspace authority", () => {
     persistence.loadQuickDraftSession.mockResolvedValue(null);
     const outcome = await useDraftStore.getState().resumeDraft();
     expect(outcome).toEqual({ status: "unavailable", draftId: "invalid-difficulty",
-      reason: "Saved draft run is unavailable" });
+      reason: "This draft run is unavailable. End Run to draft again." });
     expect(useDraftStore.getState().draftId).toBe("invalid-difficulty");
     expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
     expect(formatGate.evaluate).not.toHaveBeenCalled();
@@ -1104,7 +1242,7 @@ describe("draft store workspace authority", () => {
     persistence.loadQuickDraftSession.mockResolvedValue(null);
 
     expect(await useDraftStore.getState().resumeDraft()).toEqual({
-      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
     });
     expect(persistence.loadDraftRun).toHaveBeenCalledWith(draftId);
     expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null });
@@ -1118,7 +1256,7 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState().runState).toEqual(run);
     await actualPersistence.saveDraftRun(draftId, malformedRun);
     const navigate = vi.fn();
-    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
     expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
     expect(formatGate.evaluate).not.toHaveBeenCalled();
     expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
@@ -1160,7 +1298,7 @@ describe("draft store workspace authority", () => {
     wasm.import_draft_session.mockReturnValue(view([card("player", "Player")]));
 
     expect(await useDraftStore.getState().resumeDraft()).toEqual({
-      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
     });
     expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null, adapter: null });
     expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
@@ -1177,7 +1315,7 @@ describe("draft store workspace authority", () => {
 
     await actualPersistence.saveDraftRun(draftId, malformedRun);
     const navigate = vi.fn();
-    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
     expect(await actualPersistence.loadDraftRun(draftId)).toEqual(malformedRun);
     expect(wasm.get_bot_deck).not.toHaveBeenCalled();
     expect(formatGate.evaluate).not.toHaveBeenCalled();
@@ -1222,7 +1360,7 @@ describe("draft store workspace authority", () => {
     wasm.booster_pack_pool_for_game.mockReturnValue([]);
 
     expect(await useDraftStore.getState().resumeDraft()).toEqual({
-      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
     });
     expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null, adapter: null });
     expect(wasm.import_draft_session).not.toHaveBeenCalled();
@@ -1241,7 +1379,7 @@ describe("draft store workspace authority", () => {
     const navigate = vi.fn();
 
     await actualPersistence.saveDraftRun(draftId, emptyRun);
-    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
     expect(formatGate.evaluate).not.toHaveBeenCalled();
     expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
 
@@ -1295,7 +1433,7 @@ describe("draft store workspace authority", () => {
     persistence.loadQuickDraftSession.mockResolvedValue(null);
 
     expect(await useDraftStore.getState().resumeDraft()).toEqual({
-      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
     });
     expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null });
     expect(await actualPersistence.loadDraftRun(draftId)).toEqual(emptyGameRun);
@@ -1307,7 +1445,7 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
     await actualPersistence.saveDraftRun(draftId, emptyGameRun);
     const navigate = vi.fn();
-    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
     expect(await actualPersistence.loadDraftRun(draftId)).toEqual(emptyGameRun);
     expect(formatGate.evaluate).not.toHaveBeenCalled();
     expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
@@ -1351,7 +1489,7 @@ describe("draft store workspace authority", () => {
     persistence.loadQuickDraftSession.mockResolvedValue(null);
 
     expect(await useDraftStore.getState().resumeDraft()).toEqual({
-      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+      status: "unavailable", draftId, reason: "This draft run is unavailable. End Run to draft again.",
     });
     expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null });
     expect(await actualPersistence.loadDraftRun(draftId)).toEqual(wrongOwnerRun);
@@ -1363,7 +1501,7 @@ describe("draft store workspace authority", () => {
     expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
     await actualPersistence.saveDraftRun(draftId, wrongOwnerRun);
     const navigate = vi.fn();
-    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
     expect(await actualPersistence.loadDraftRun(draftId)).toEqual(wrongOwnerRun);
     expect(formatGate.evaluate).not.toHaveBeenCalled();
     expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
@@ -1392,7 +1530,7 @@ describe("draft store workspace authority", () => {
     expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
     useDraftStore.getState().setDifficulty(Number.NaN);
     const navigate = vi.fn();
-    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
     expect(formatGate.evaluate).not.toHaveBeenCalled();
     expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
@@ -2248,7 +2386,7 @@ describe("draft store workspace authority", () => {
       expect(useDraftStore.getState().view).toEqual(imported);
       expect(useDraftStore.getState().runState?.booster_pack_pool).toEqual(expected);
     } else {
-      expect(outcome).toEqual({ status: "unavailable", draftId: "legacy", reason: "Saved draft run is unavailable" });
+      expect(outcome).toEqual({ status: "unavailable", draftId: "legacy", reason: "This draft run is unavailable. End Run to draft again." });
       expect(useDraftStore.getState().runState).toBeNull();
     }
     expect(persistence.saveDraftRun).toHaveBeenCalledTimes(saves);
@@ -2522,7 +2660,7 @@ describe("draft store workspace authority", () => {
       persistence.publishInitialDraftMatch.mockClear();
       await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toThrow(
         failure === "transport" ? "gate transport failed"
-          : failure === "malformed" ? "Deck format validation is unavailable" : "player rejected",
+          : failure === "malformed" ? "Deck compatibility is unavailable right now — try again before submitting." : "player rejected",
       );
       expect(wasm.get_bot_deck).toHaveBeenCalledOnce();
       expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
@@ -2888,7 +3026,7 @@ describe("draft store workspace authority", () => {
     persistence.persistQuickDraftSnapshot.mockRejectedValueOnce(new Error("disk unavailable"));
     formatGate.evaluate.mockResolvedValueOnce({ compatible: false, reasons: ["engine rejected"] });
     await expect(useDraftStore.getState().launchMatch(vi.fn())).rejects.toThrow(
-      "engine rejected; format choice could not be saved: disk unavailable",
+      "engine rejected\ndisk unavailable",
     );
     expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
   });
@@ -3306,7 +3444,7 @@ describe("draft store workspace authority", () => {
     persistence.loadQuickDraftSession.mockResolvedValue(null);
     expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: "ambiguous" });
     const navigate = vi.fn();
-    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
     expect(formatGate.evaluate).not.toHaveBeenCalled();
     expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
     expect(persistence.saveDraftRun).not.toHaveBeenCalled();
@@ -3339,7 +3477,7 @@ describe("draft store workspace authority", () => {
     expect((await useDraftStore.getState().resumeDraft()).status).toBe("resumed");
     const navigate = vi.fn();
     persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: codes });
-    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("This draft run is unavailable. End Run to draft again.");
     expect(formatGate.evaluate).not.toHaveBeenCalled();
     expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
     persistence.loadDraftRun.mockResolvedValue({ ...run, draft_set_codes: [] });

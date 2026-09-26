@@ -85,7 +85,10 @@ const captured = vi.hoisted(() => ({
 const arrivingPreferences = vi.hoisted(() => vi.fn());
 
 vi.mock("@wasm/draft", () => wasm);
-vi.mock("../../services/quickDraftPersistence", () => persistence);
+vi.mock("../../services/quickDraftPersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/quickDraftPersistence")>(),
+  ...persistence,
+}));
 vi.mock("../../adapter/wasm-adapter", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../adapter/wasm-adapter")>(),
   getSharedAdapter: () => ({ evaluateDeckFormatGate: formatGate.evaluate }),

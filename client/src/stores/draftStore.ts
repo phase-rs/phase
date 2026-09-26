@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import i18n from "i18next";
 
 export const DRAFT_DECK_SESSION_KEY = "phase:draft-deck";
 
@@ -1020,7 +1021,7 @@ function unresolvedStageMatches(
 }
 
 function draftSetCodes(run: DraftRunState | null, view: DraftPlayerView | null): string[] {
-  if (run && !validRunAuthority(run)) throw new Error("Saved draft run is unavailable");
+  if (run && !validRunAuthority(run)) throw new Error(i18n.t("draft:run.resumeUnavailable"));
   return [...(run?.draft_set_codes ?? view?.draft_set_codes ?? [])];
 }
 
@@ -1075,15 +1076,15 @@ async function evaluateLimitedDeck(
   });
   if (result === null || typeof result !== "object"
     || typeof (result as FormatGateVerdict).compatible !== "boolean") {
-    throw new Error("Deck format validation is unavailable");
+    throw new Error(i18n.t("draft:limitedDeck.compatibilityUnavailable"));
   }
   return result as FormatGateVerdict;
 }
 
-function gateReason(verdict: FormatGateVerdict, seat: "player" | "opponent"): string | null {
+function gateReason(verdict: FormatGateVerdict): string | null {
   if (verdict.compatible === true) return null;
   return verdict.reasons?.find((reason) => typeof reason === "string" && reason.length > 0)
-    ?? `${seat === "player" ? "Your" : "Opponent"} deck is not legal in Limited`;
+    ?? i18n.t("draft:limitedDeck.validationTitle");
 }
 
 async function preflightMatchPayload(
@@ -1095,12 +1096,12 @@ async function preflightMatchPayload(
     evaluateLimitedDeck(payload.player, draftSetCodes, selectedMatchType),
     evaluateLimitedDeck(payload.opponent, draftSetCodes, selectedMatchType),
   ]);
-  for (const [index, result] of results.entries()) {
+  for (const result of results) {
     if (result.status === "rejected") {
       const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
-      throw new Error(message || "Deck format validation is unavailable");
+      throw new Error(message || i18n.t("draft:limitedDeck.compatibilityUnavailable"));
     }
-    const reason = gateReason(result.value, index === 0 ? "player" : "opponent");
+    const reason = gateReason(result.value);
     if (reason) throw new Error(reason);
   }
 }
@@ -1130,7 +1131,7 @@ async function selectViableOpponent(
 ): Promise<{ botSeat: number; opponentDeck: string[] }> {
   const player = { main_deck: [...playerDeck], sideboard: [], commander: [] };
   let playerAccepted = false;
-  let lastOpponentReason = "No eligible bot opponent is available";
+  let lastOpponentReason = i18n.t("draft:run.startUnavailable");
 
   for (const botSeat of orderedBotSeats(usedSeats, view)) {
     if (!fresh()) throw new Error("Stale draft match launch");
@@ -1156,16 +1157,16 @@ async function selectViableOpponent(
       if (!fresh()) throw new Error("Stale draft match launch");
       if (playerResult.status === "rejected") {
         const message = playerResult.reason instanceof Error ? playerResult.reason.message : String(playerResult.reason);
-        throw new Error(message || "Deck format validation is unavailable");
+        throw new Error(message || i18n.t("draft:limitedDeck.compatibilityUnavailable"));
       }
       if (opponentResult.status === "rejected") {
         const message = opponentResult.reason instanceof Error ? opponentResult.reason.message : String(opponentResult.reason);
-        throw new Error(message || "Deck format validation is unavailable");
+        throw new Error(message || i18n.t("draft:limitedDeck.compatibilityUnavailable"));
       }
-      const playerReason = gateReason(playerResult.value, "player");
+      const playerReason = gateReason(playerResult.value);
       if (playerReason) throw new Error(playerReason);
       playerAccepted = true;
-      const opponentReason = gateReason(opponentResult.value, "opponent");
+      const opponentReason = gateReason(opponentResult.value);
       if (opponentReason) {
         lastOpponentReason = opponentReason;
         continue;
@@ -1173,7 +1174,7 @@ async function selectViableOpponent(
     } else {
       const verdict = await evaluateLimitedDeck(opponent, draftSetCodes, selectedMatchType);
       if (!fresh()) throw new Error("Stale draft match launch");
-      const opponentReason = gateReason(verdict, "opponent");
+      const opponentReason = gateReason(verdict);
       if (opponentReason) {
         lastOpponentReason = opponentReason;
         continue;
@@ -1272,11 +1273,11 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     }
     if (lifecycle !== lifecycleGeneration) return { status: "none" };
     const submitted = meta.phase === "playing" || meta.phase === "complete" || !!run;
-    if (submitted && !run) return unavailable("Missing durable draft run");
+    if (submitted && !run) return unavailable(i18n.t("draft:run.resumeUnavailable"));
     const installRunOnly = (): DraftResumeOutcome => {
-      if (!run || lifecycle !== lifecycleGeneration) return unavailable("Missing durable draft run");
+      if (!run || lifecycle !== lifecycleGeneration) return unavailable(i18n.t("draft:run.resumeUnavailable"));
       if (!validDifficulty(meta.difficulty) || !validRun(run, meta.id, meta.setCode)) {
-        return unavailable("Saved draft run is unavailable");
+        return unavailable(i18n.t("draft:run.resumeUnavailable"));
       }
       set({
         draftId: meta.id, adapter: null, view: null, workspaceState: null,
@@ -1289,7 +1290,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     // A historical Cube run may acquire its source from the restored adapter,
     // but its submitted decks and other durable fields must already be sound.
     if (run && !validRunFields(run, meta.id)) {
-      return unavailable("Saved draft run is unavailable");
+      return unavailable(i18n.t("draft:run.resumeUnavailable"));
     }
     let saved: Awaited<ReturnType<typeof loadQuickDraftSession>>;
     try {
@@ -1297,7 +1298,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     } catch (error) {
       return submitted ? installRunOnly() : unavailable(error instanceof Error ? error.message : String(error));
     }
-    if (!saved) return submitted ? installRunOnly() : unavailable("Saved draft session is unavailable");
+    if (!saved) return submitted ? installRunOnly() : unavailable(i18n.t("draft:run.resumeUnavailable"));
     try {
       const database = await prepareCardDatabase();
       const adapter = new DraftAdapter();
@@ -1315,7 +1316,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (run) {
         const upgraded = withBoosterPackPool(run, restored.boosterPackPool, view, meta.id);
         if (!validRun(upgraded, meta.id, meta.setCode)) {
-          return unavailable("Saved draft run is unavailable");
+          return unavailable(i18n.t("draft:run.resumeUnavailable"));
         }
         if (upgraded !== run) {
           await saveDraftRun(meta.id, upgraded);
@@ -1580,7 +1581,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         draftSetCodes(state.runState, state.view),
         "Bo1",
       );
-      const reason = gateReason(verdict, "player");
+      const reason = gateReason(verdict);
       if (reason) throw new Error(reason);
       if (!fresh()) throw new Error("Stale draft deck submission");
       const view = await withDraftEngineOperation((lease) => {
@@ -1655,7 +1656,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       let sessionJson: string | null = null;
       if (durableRun) {
         if (!unresolvedStageMatches(durableRun, state.draftId, selectedRunFormat, playerDeck)
-          || durableRun.results.length !== 0) throw new Error("Conflicting staged draft match");
+          || durableRun.results.length !== 0) throw new Error(i18n.t("draft:run.startUnavailable"));
         const boosterPackPool = await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
         if (!fresh()) throw new Error("Stale draft match launch");
         run = withBoosterPackPool(durableRun, boosterPackPool, state.view, state.draftId);
@@ -1750,9 +1751,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           }
         } catch (saveError) {
           const cause = launchError instanceof Error ? launchError.message
-            : launchError === null ? "Draft match launch stopped" : String(launchError);
+            : launchError === null ? i18n.t("draft:run.startUnavailable") : String(launchError);
           const saveReason = saveError instanceof Error ? saveError.message : String(saveError);
-          launchError = new Error(`${cause}; format choice could not be saved: ${saveReason}`);
+          launchError = new Error(`${cause}\n${saveReason}`);
           launchFailed = true;
         }
       }
@@ -1798,7 +1799,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     const state = get();
     if (!state.draftId || !state.selectedSet || (!state.adapter && !state.runState)) {
       retireExclusive(token);
-      throw new Error("Draft run is unavailable");
+      throw new Error(i18n.t("draft:run.resumeUnavailable"));
     }
     const runOnly = !state.adapter || !state.view || !state.workspaceState;
     const lifecycle = lifecycleGeneration;
@@ -1812,29 +1813,29 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       && get().runFormat === selectedRunFormat;
     try {
       const savedRun = await loadDraftRun(state.draftId);
-      if (!savedRun) throw new Error("Missing durable draft run");
+      if (!savedRun) throw new Error(i18n.t("draft:run.resumeUnavailable"));
       const boosterPackPool = runOnly ? undefined
         : await withDraftEngineOperation((lease) => lease.boosterPackPoolForGame());
       if (!fresh()) return;
       const durableRun = withBoosterPackPool(savedRun, boosterPackPool, state.view, state.draftId);
       if (!validRun(durableRun, state.draftId, state.selectedSet)
         || (runOnly && !validDifficulty(state.difficulty))) {
-        throw new Error("Saved draft run is unavailable");
+        throw new Error(i18n.t("draft:run.resumeUnavailable"));
       }
       const codes = draftSetCodes(durableRun, state.view);
       const playerDeck = runOnly ? durableRun.playerDeck
         : projectDeckNames(state.workspaceState!, state.view!.pool);
-      if (draftRunPhase(durableRun) === "complete") throw new Error("Draft run is complete");
-      if (durableRun.format !== selectedRunFormat) throw new Error("Conflicting staged draft match");
+      if (draftRunPhase(durableRun) === "complete") throw new Error(i18n.t("draft:run.runComplete"));
+      if (durableRun.format !== selectedRunFormat) throw new Error(i18n.t("draft:run.startUnavailable"));
       let run = durableRun;
       let saveRun = durableRun !== savedRun;
       if (durableRun.activeMatch) {
         if (!unresolvedStageMatches(durableRun, state.draftId, selectedRunFormat, playerDeck)) {
-          throw new Error("Conflicting staged draft match");
+          throw new Error(i18n.t("draft:run.startUnavailable"));
         }
       } else {
         const retainedSeat = resolveDraftRunOpponentSeat(durableRun, state.draftId);
-        if (runOnly && retainedSeat === undefined) throw new Error("Saved draft run is unavailable");
+        if (runOnly && retainedSeat === undefined) throw new Error(i18n.t("draft:run.resumeUnavailable"));
         const { botSeat, opponentDeck } = runOnly
           ? { botSeat: retainedSeat!, opponentDeck: durableRun.opponentDeck }
           : await selectViableOpponent(
