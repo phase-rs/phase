@@ -164,6 +164,8 @@ const WARBREAK_TRUMPETER: &str = "Morph {X}{X}{R} (You may cast this card face d
                                   cost.)\nWhen this creature is turned face up, create X 1/1 red \
                                   Goblin creature tokens.";
 
+/// CR 304.5 + CR 702.37e: priority-only mana cannot fund the morph payment.
+/// CR 702.37f: the paid X remains bound to the face-up trigger.
 #[test]
 fn instant_only_mana_does_not_pay_warbreak_morph_x() {
     std::thread::Builder::new()

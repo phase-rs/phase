@@ -12766,7 +12766,7 @@ fn auto_tap_mana_sources_inner(
         );
         &available_buf
     };
-    // CR 605.1 + CR 605.3a: Do not auto-activate instant-only mana while paying a cost.
+    // CR 304.5 + CR 605.3a: Do not auto-activate instant-only mana while paying a cost.
     let allowed = |option: &ManaSourceOption| {
         option.ability_index.is_none_or(|index| {
             state

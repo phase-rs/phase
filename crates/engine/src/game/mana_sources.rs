@@ -1974,7 +1974,7 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
 /// CR 117.1d + CR 601.2g: Maximum net mana this permanent could contribute via
 /// **any** mana ability the controller could currently activate, including
 /// non-tap-cost mana abilities (Sacrifice — KCI, Phyrexian Altar, Ashnod's
-/// Altar; Discard — Lion's Eye Diamond; Pay Life; etc.).
+/// Altar; unrestricted discard costs; Pay Life; etc.).
 ///
 /// Unlike [`max_mana_yield`], this is NOT restricted to abilities that include
 /// `{T}` in their cost. It exists so the castability gate
@@ -1999,7 +1999,7 @@ fn mana_ability_allowed_for_payment(
     object_id: ObjectId,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
-    // CR 605.1 + CR 605.3a: Mana classification does not override printed timing limits.
+    // CR 304.5 + CR 605.1: Mana classification does not override printed timing limits.
     if ability
         .activation_restrictions
         .contains(&ActivationRestriction::AsInstant)
@@ -2105,7 +2105,7 @@ pub(crate) fn feasible_mana_capacity(
 
 /// CR 117.1d + CR 601.2g: True when cost payment can involve a currently
 /// activatable non-tap mana ability that auto-tap cannot choose for the player
-/// (Treasure/Spawn/KCI-style sacrifice mana, Lion's Eye Diamond discard mana,
+/// (Treasure/Spawn/KCI-style sacrifice mana, unrestricted discard mana,
 /// pay-life mana abilities, etc.).
 pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
     state: &GameState,
@@ -2548,7 +2548,7 @@ fn assign_profiles_to_shards(
 
 /// CR 117.1d + CR 601.2g: Whether residual mana shards could be paid by
 /// activating currently legal mana abilities (non-tap sources like Vivi
-/// Ornitier's {0} combination mana, Lion's Eye Diamond, etc.).
+/// Ornitier's {0} combination mana, unrestricted discard mana, etc.).
 ///
 /// Returns `(covered, consumed_pips)` where `consumed_pips` is the total mana
 /// produced by activations used for shard coverage — callers must subtract

@@ -937,11 +937,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    #[cfg(unix)]
+    use super::sync_parent_dir;
     use super::{
         bootstrap_missing_data, bootstrap_missing_data_with_key, hold_unusable_file,
         identity_from_markers, load_data_file_with_key, lock_data_dir_blocking, missing_data_files,
         open_data_lock, parse_manifest_data, resolve_manifest, restore_held_copy, retire_held_copy,
-        sync_parent_dir, verify_manifest_signature, verify_sha256, write_verified_data_file,
+        verify_manifest_signature, verify_sha256, write_verified_data_file,
         write_verified_data_file_blocking, BootstrapOptions, ChannelIdentity, CARD_DATA_FILE,
         DRAFT_POOLS_FILE, REQUIRED_DATA_FILES,
     };

@@ -1091,7 +1091,7 @@ fn activation_restriction_applies(
                     gates,
                 )
         }
-        // CR 117.1b + CR 605.3a: This printed restriction limits mana activation to priority.
+        // CR 304.5 + CR 605.3a: This printed restriction limits mana activation to priority.
         ActivationRestriction::AsInstant => {
             matches!(state.waiting_for, crate::types::WaitingFor::Priority { player: holder } if holder == player)
                 && state.pending_cast.is_none()
