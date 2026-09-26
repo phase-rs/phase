@@ -1,10 +1,13 @@
 use engine::ai_support::legal_actions_full;
 use engine::game::casting::can_activate_ability_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{AbilityCost, PlayerScope, QuantityExpr, QuantityRef, RoundingMode};
+use engine::types::ability::{
+    AbilityCost, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -15,6 +18,8 @@ const BETRAYAL: &str =
 const LURKING_EVIL: &str =
     "Pay half your life, rounded up: This enchantment becomes a 4/4 Phyrexian Horror creature with flying.";
 const CONFLUENCE: &str = "{T}, Pay 1 life: Add one mana of any color.";
+const COMPOSITE_LURKING_EVIL: &str =
+    "{B}{B}, Pay half your life, rounded up: This enchantment becomes a 4/4 Phyrexian Horror creature with flying.";
 
 fn assert_half_life_cost(cost: &AbilityCost) {
     let AbilityCost::Composite { costs } = cost else {
@@ -127,6 +132,47 @@ fn targeted_half_life_locks_before_mana_abilities() {
 }
 
 #[test]
+fn targeted_pending_cost_is_fixed_before_first_mana_ability() {
+    let (mut runner, source, lands, target, _) = betrayal_board(7, false);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("activation reaches target announcement");
+    let WaitingFor::TargetSelection { pending_cast, .. } = &mut runner.state_mut().waiting_for
+    else {
+        panic!("expected target selection before mana payment");
+    };
+    assert_half_life_cost(pending_cast.activation_cost.as_ref().unwrap());
+    pending_cast.payment_mode = CastPaymentMode::Manual;
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .expect("target choice reaches manual mana window");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert_eq!(runner.state().players[P0.0 as usize].life, 7);
+    assert!(lands.iter().all(|id| !runner.state().objects[id].tapped));
+    assert!(matches!(
+        runner
+            .state()
+            .pending_cast
+            .as_ref()
+            .unwrap()
+            .activation_cost
+            .as_ref(),
+        Some(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 4 }
+        })
+    ));
+}
+
+#[test]
 fn targeted_half_life_uses_same_amount_with_prefloated_mana() {
     let (mut runner, source, lands, target, other) = betrayal_board(7, true);
     let outcome = runner.activate(source, 0).target_object(target).resolve();
@@ -210,6 +256,65 @@ fn untargeted_half_life_pays_rounded_amount() {
             .iter()
             .any(|event| matches!(event, GameEvent::StackResolved { .. })));
     }
+}
+
+#[test]
+fn untargeted_composite_half_life_locks_before_two_mana_abilities() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 7);
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Half-Life Enchantment", COMPOSITE_LURKING_EVIL)
+        .id();
+    let lands = [
+        scenario
+            .add_land_from_oracle(P0, "Mana Confluence", CONFLUENCE)
+            .id(),
+        scenario
+            .add_land_from_oracle(P0, "Mana Confluence", CONFLUENCE)
+            .id(),
+    ];
+    let mut runner = scenario.build();
+    assert_half_life_cost(
+        runner.state().objects[&source].abilities[0]
+            .cost
+            .as_ref()
+            .unwrap(),
+    );
+    let outcome = runner.activate(source, 0).resolve();
+    assert_eq!(outcome.state().players[P0.0 as usize].life, 1);
+    assert!(lands.iter().all(|id| outcome.state().objects[id].tapped));
+    let added: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ManaAdded {
+                mana_type: ManaType::Black,
+                source_id,
+                ..
+            } => Some(*source_id),
+            _ => None,
+        })
+        .collect();
+    assert!(added.contains(&lands[0]) && added.contains(&lands[1]));
+    let losses: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *player_id == P0 && *amount < 0 => Some(*amount),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(losses, vec![-1, -1, -4]);
+    assert!(outcome
+        .events()
+        .iter()
+        .any(|event| matches!(event, GameEvent::StackPushed { .. })));
+    assert!(outcome
+        .events()
+        .iter()
+        .any(|event| matches!(event, GameEvent::StackResolved { .. })));
 }
 
 #[test]
