@@ -81,6 +81,7 @@ fn fire_cast_trigger(
         controller: caster,
         object_id: ObjectId(9000),
         cast_mana_value: None,
+        incarnation: None,
     });
     let parsed = parse_oracle_text(
         ORACLE,
