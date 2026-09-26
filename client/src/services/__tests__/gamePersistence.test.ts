@@ -23,6 +23,7 @@ import {
   clearGame,
   clearGameStrict,
   loadGame,
+  loadGameStrict,
   loadCheckpoints,
   loadP2PHostSession,
   migratePersistedGameState,
@@ -85,40 +86,93 @@ describe("game persistence", () => {
 
   it("deletes the three exact game records in order before clearing matching active metadata", async () => {
     saveActiveGame({ id: "target", mode: "ai", difficulty: "Medium" });
-    const keys = [GAME_KEY_PREFIX + "target", GAME_CHECKPOINTS_PREFIX + "target", "phase-p2p-host:target"];
+    const keys = [GAME_CHECKPOINTS_PREFIX + "target", "phase-p2p-host:target", GAME_KEY_PREFIX + "target"];
+    const records = new Map<string, unknown>(keys.map((key) => [key, fixtureState()]));
+    vi.mocked(idbGet).mockImplementation(async (key) => records.get(String(key)));
     const releases: Array<() => void> = [];
     let settled = false;
-    vi.mocked(idbGet).mockRejectedValueOnce(new Error("reads are unavailable"));
-    vi.mocked(idbDel).mockImplementation(() => new Promise((resolve) => { releases.push(() => resolve()); }));
+    vi.mocked(idbDel).mockImplementation((key) => new Promise((resolve) => {
+      releases.push(() => { records.delete(String(key)); resolve(); });
+    }));
     const pending = clearGameStrict("target");
     void pending.then(() => { settled = true; });
     for (let index = 0; index < keys.length; index += 1) {
       expect(idbDel).toHaveBeenCalledTimes(index + 1);
       expect(idbDel).toHaveBeenNthCalledWith(index + 1, keys[index], expect.anything());
       expect(localStorage.getItem(ACTIVE_GAME_KEY)).not.toBeNull();
+      expect(records.has(keys[2])).toBe(true);
       expect(settled).toBe(false);
       releases[index]();
       await Promise.resolve();
     }
     await pending;
     expect(localStorage.getItem(ACTIVE_GAME_KEY)).toBeNull();
+    expect(keys.every((key) => !records.has(key))).toBe(true);
     const calls = vi.mocked(idbDel).mock.calls;
     expect(calls[0][1]).toBe(calls[1][1]);
     expect(calls[1][1]).toBe(calls[2][1]);
     expect(calls.map(([key]) => key)).toEqual(keys);
   });
 
-  it.each([0, 1, 2])("propagates deletion failure at game record index %i", async (failedIndex) => {
+  it.each([0, 1, 2])("retains the game sentinel after delete index %i rejects, then retries safely", async (failedIndex) => {
     saveActiveGame({ id: "target", mode: "ai", difficulty: "Medium" });
+    const keys = [GAME_CHECKPOINTS_PREFIX + "target", "phase-p2p-host:target", GAME_KEY_PREFIX + "target"];
+    const otherKeys = keys.map((key) => key.replace("target", "other"));
+    const snapshot = fixtureState();
+    const records = new Map<string, unknown>([
+      [keys[0], [snapshot]], [keys[1], { roomCode: "ABCDE" }], [keys[2], snapshot],
+      [otherKeys[0], [snapshot]], [otherKeys[1], { roomCode: "OTHER" }], [otherKeys[2], snapshot],
+    ]);
+    vi.mocked(idbGet).mockImplementation(async (key) => records.get(String(key)));
     const original = new Error(`delete ${failedIndex} failed`);
-    vi.mocked(idbDel).mockImplementation((_key) => {
-      if (vi.mocked(idbDel).mock.calls.length === failedIndex + 1) return Promise.reject(original);
-      return Promise.resolve();
+    let rejectAt: number | null = failedIndex;
+    vi.mocked(idbDel).mockImplementation(async (key) => {
+      const index = vi.mocked(idbDel).mock.calls.length - 1;
+      if (index === rejectAt) throw original; // rejected IDB transaction did not commit
+      records.delete(String(key));
     });
     await expect(clearGameStrict("target")).rejects.toBe(original);
-    expect(idbDel).toHaveBeenCalledTimes(failedIndex + 1);
+    expect(vi.mocked(idbDel).mock.calls.map(([key]) => key)).toEqual(keys.slice(0, failedIndex + 1));
+    const calls = vi.mocked(idbDel).mock.calls;
+    expect(calls.every(([, store]) => store === calls[0][1])).toBe(true);
+    expect(records.has(keys[2])).toBe(true);
+    expect(records.has(keys[0])).toBe(failedIndex === 0);
+    expect(records.has(keys[1])).toBe(failedIndex < 2);
     expect(localStorage.getItem(ACTIVE_GAME_KEY)).not.toBeNull();
-    expect(vi.mocked(idbDel).mock.calls.every(([key]) => String(key).endsWith("target"))).toBe(true);
+    await expect(loadGameStrict("target")).resolves.toEqual(snapshot);
+    expect(idbGet).toHaveBeenLastCalledWith(keys[2], calls[0][1]);
+    rejectAt = null;
+    vi.mocked(idbDel).mockClear();
+    await clearGameStrict("target");
+    expect(vi.mocked(idbDel).mock.calls.map(([key]) => key)).toEqual(keys);
+    expect(keys.every((key) => !records.has(key))).toBe(true);
+    expect(otherKeys.every((key) => records.has(key))).toBe(true);
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).toBeNull();
+    await expect(loadGameStrict("target")).resolves.toBeNull();
+  });
+
+  it("propagates a strict read error and distinguishes missing from migrated state", async () => {
+    const original = new Error("IndexedDB read failed");
+    vi.mocked(idbGet).mockRejectedValueOnce(original);
+    await expect(loadGameStrict("target")).rejects.toBe(original);
+    expect(idbGet).toHaveBeenLastCalledWith(GAME_KEY_PREFIX + "target", expect.anything());
+    vi.mocked(idbGet).mockResolvedValueOnce(undefined);
+    await expect(loadGameStrict("target")).resolves.toBeNull();
+    vi.mocked(idbGet).mockResolvedValueOnce(null as never);
+    await expect(loadGameStrict("target")).rejects.toThrow(TypeError);
+    const state = fixtureState();
+    state.format_config = {
+      ...state.format_config,
+      format: "CommanderDraft",
+      deck_size: 60 as never,
+    } as FormatConfig;
+    vi.mocked(idbGet).mockResolvedValueOnce(state);
+    await expect(loadGameStrict("target")).resolves.toMatchObject({
+      format_config: { deck_size: { type: "Minimum", data: 60 } },
+    });
+    expect((state.format_config as unknown as { deck_size: unknown }).deck_size).toBe(60);
+    vi.mocked(idbGet).mockRejectedValueOnce(original);
+    await expect(loadGame("target")).resolves.toBeNull();
   });
 
   it("keeps other active metadata and preserves best-effort cleanup and failed-read behavior", async () => {

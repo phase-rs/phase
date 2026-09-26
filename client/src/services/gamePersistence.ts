@@ -285,6 +285,12 @@ export async function loadGame(gameId: string): Promise<PersistedGameState | nul
   }
 }
 
+/** Read a saved game without interpreting an IndexedDB failure as absence. */
+export async function loadGameStrict(gameId: string): Promise<PersistedGameState | null> {
+  const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
+  return state === undefined ? null : migratePersistedGameState(state);
+}
+
 export async function clearGame(gameId: string): Promise<void> {
   try {
     await del(GAME_KEY_PREFIX + gameId, getGameStore());
@@ -303,9 +309,9 @@ export async function clearGame(gameId: string): Promise<void> {
 /** Remove every game-scoped record before reusing a game ID for a fresh start. */
 export async function clearGameStrict(gameId: string): Promise<void> {
   const store = getGameStore();
-  await del(GAME_KEY_PREFIX + gameId, store);
   await del(GAME_CHECKPOINTS_PREFIX + gameId, store);
   await del(P2P_HOST_KEY_PREFIX + gameId, store);
+  await del(GAME_KEY_PREFIX + gameId, store);
   const active = loadActiveGame();
   if (active?.id === gameId) {
     clearActiveGame();

@@ -49,7 +49,7 @@ import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
-import { clearGameStrict } from "../services/gamePersistence";
+import { clearGameStrict, loadGameStrict } from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
@@ -1575,14 +1575,9 @@ export function GameProvider({
       }
       let savedState;
       try {
-        savedState = await loadGame(gameId);
+        savedState = await (soloDraft ? loadGameStrict(gameId) : loadGame(gameId));
       } catch (error) {
         if (cancelled) return;
-        if (soloDraft) {
-          if (draftDeckRaw !== null) await startDraftDeck(draftDeckRaw);
-          else await startExactDraftStage();
-          return;
-        }
         reportDraftError(error);
         return;
       }
