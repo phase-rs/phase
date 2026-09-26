@@ -5,7 +5,8 @@
 //! SHIPPED (0-Unimplemented + discriminating runtime/derived assertion that
 //! flips on revert):
 //!   - Laughing Jasper Flint — "Creatures you control but don't own are
-//!     Mercenaries in addition to their other types" (LT-F type-grant). Two
+//!     Mercenaries in addition to their other types" (LT-F type-grant; its
+//!     upkeep cast line is an honest gap, see its test). Two
 //!     parser arms: a generic consonant+y → "-ies" plural rule in `parse_subtype`
 //!     ("Mercenaries" → "Mercenary"), and a "<creatures you control> but don't
 //!     own" negated-ownership qualifier in the static dispatch arm.
@@ -105,13 +106,23 @@ fn assert_zero_unimplemented_kw(
 
 const LJF_ORACLE: &str = "Creatures you control but don't own are Mercenaries in addition to their other types.\nAt the beginning of your upkeep, exile the top X cards of target opponent's library, where X is the number of outlaws you control. Until end of turn, you may cast spells from among those cards, and mana of any type can be spent to cast those spells.";
 
+/// The type-grant line is fully supported. The upkeep line's "you may cast
+/// spells from among those cards, and mana of any type can be spent to cast
+/// those spells" lowers as ONE clause to the standalone mana-spend concession:
+/// the cast grant is not recognized (#9213), and an effect-granted concession
+/// reaches no payment, so it is exactly one honest gap rather than an inert
+/// static claiming support (CR 609.4b).
 #[test]
-fn laughing_jasper_flint_zero_unimplemented() {
-    assert_zero_unimplemented(
-        LJF_ORACLE,
-        "Laughing Jasper Flint",
-        &["Legendary".to_string(), "Creature".to_string()],
-        &["Goblin".to_string(), "Mercenary".to_string()],
+fn laughing_jasper_flint_type_grant_zero_unimplemented_upkeep_line_one_gap() {
+    let types = ["Legendary".to_string(), "Creature".to_string()];
+    let subtypes = ["Goblin".to_string(), "Mercenary".to_string()];
+    let (type_grant, upkeep) = LJF_ORACLE.split_once('\n').expect("two lines");
+    assert_zero_unimplemented(type_grant, "Laughing Jasper Flint", &types, &subtypes);
+    let dbg = parsed_debug(upkeep, "Laughing Jasper Flint", &types, &subtypes);
+    assert_eq!(dbg.matches("Unimplemented").count(), 1, "{dbg}");
+    assert!(
+        dbg.contains("\"standalone_mana_spend_concession\""),
+        "{dbg}"
     );
 }
 

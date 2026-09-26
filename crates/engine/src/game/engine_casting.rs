@@ -109,6 +109,31 @@ pub(super) fn handle_defiler_payment(
     )
 }
 
+/// CR 601.2f + CR 602.2b: Apply the caster's elected reduction order to an
+/// ACTIVATION. The order is validated as a strict permutation of the prompt's
+/// reductions (a malformed election is `InvalidAction` with the prompt left
+/// live); a valid one either continues the activation or reverses it.
+pub(super) fn resume_activation_cost_election(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: &PendingCast,
+    reductions: &[crate::types::casting_costs::CostReductionEntry],
+    order: &[usize],
+    hybrid_announcement: &[crate::types::mana::ManaCostShard],
+    events: &mut Vec<GameEvent>,
+) -> Result<casting::ActivationElectionResume, EngineError> {
+    // An activation cost has no hybrid symbol any reduction could announce
+    // (CR 118.7a: its reductions are generic-only), so the announcement axis is
+    // empty and only the order is elected.
+    casting::validate_cost_reduction_election(order, hybrid_announcement, reductions, &[])
+        .map_err(EngineError::InvalidAction)?;
+    let order = order
+        .iter()
+        .map(|&index| reductions[index].provenance)
+        .collect();
+    casting::resume_activation_after_cost_election(state, player, pending_cast, order, events)
+}
+
 /// CR 601.2b + CR 601.2f: Apply the caster's elected cost-determination choices.
 pub(super) fn handle_order_cost_reductions(
     state: &mut GameState,

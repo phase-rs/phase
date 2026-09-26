@@ -6739,9 +6739,15 @@ pub(crate) fn parse_mana_value_suffix(
     }
 
     let (rest, _) = parse_suffix_subject_head(trimmed).ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("mana value ")
-        .parse(rest)
-        .ok()?;
+    // CR 202.3: "converted mana cost" is mana value under its former name, still
+    // printed in unmodernized Oracle text (M'Odo, the Gnarled Oracle; Underdark
+    // Beholder). Accepting it here keeps their bound instead of dropping it.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("mana value "),
+        tag("converted mana cost "),
+    ))
+    .parse(rest)
+    .ok()?;
 
     // CR 202.3 + CR 120.3: Dynamic comparisons referencing the triggering event.
     // "that damage" → `EventContextAmount` (damage amount captured at trigger).

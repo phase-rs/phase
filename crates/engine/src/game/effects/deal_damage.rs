@@ -183,6 +183,25 @@ fn resolve_effect_recipients(
     // Tier C exclusion list warns about (its 14 Controller/Owner-only cards are
     // additionally denied pins upstream, so this can only ever fail safe).
     if !ability.targets.is_empty() {
+        // CR 115.1 + CR 601.2c (MED1): a separately announced quantity slot
+        // serves the magnitude, not receipt — the count-source takes no
+        // damage. Absolute announced index, so the exclusion composes with the
+        // positional `[1..]` split below (never the other way round, per the
+        // pin-ordering rule there). `None` for every shape without a separate
+        // player-typed quantity slot, leaving all existing callers unchanged.
+        let excluded = crate::game::ability_utils::quantity_slot_player_ordinal(
+            &ability.targets,
+            Some(ability),
+        )
+        .and_then(|ordinal| {
+            ability
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| matches!(target, TargetRef::Player(_)))
+                .nth(ordinal)
+                .map(|(index, _)| index)
+        });
         if skip_first_target && ability.targets.len() > 1 {
             // The positional split runs on the RAW list and the pin filter is
             // applied AFTER it — never the other way round. `[1..]` encodes slot
@@ -192,14 +211,18 @@ fn resolve_effect_recipients(
             // to this file's own positional convention.
             return ability.targets[1..]
                 .iter()
-                .filter(|target| match target {
-                    TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
-                    TargetRef::Player(_) => true,
+                .enumerate()
+                .filter(|(offset, target)| {
+                    Some(offset + 1) != excluded
+                        && match target {
+                            TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
+                            TargetRef::Player(_) => true,
+                        }
                 })
-                .cloned()
+                .map(|(_, target)| target.clone())
                 .collect();
         }
-        return ability.live_object_targets(state);
+        return ability.live_object_targets_excluding(state, excluded);
     }
     match target_filter {
         TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
@@ -1345,35 +1368,9 @@ pub fn resolve(
     }
 
     // CR 120.3: Determine damage source.
-    let mut ctx = match damage_source {
-        // CR 120.1 + CR 608.2b: "Target creature deals damage..." — the chosen
-        // subject is the damage source, not the ability source. No subject
-        // means no damage at all; there is deliberately NO fallback to the
-        // spell here, because attributing the damage to the spell would let a
-        // clause whose subject is gone still deal it.
-        Some(DamageSource::Target) => match target_damage_source(state, ability) {
-            Some(ctx) => ctx,
-            None => {
-                no_damage_source_resolved(ability, events);
-                return Ok(());
-            }
-        },
-        // "That creature/permanent deals damage..." inside a triggered ability
-        // binds the damage source to the triggering event object.
-        Some(DamageSource::TriggeringSource) => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_source_from_event)
-            .and_then(|id| DamageContext::from_source(state, id))
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        None => DamageContext::from_source(state, ability.source_id)
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        // CR 120.1: multi-source per-power damage is dispatched to
-        // `resolve_each_target_power_damage` above (each source has its own
-        // `DamageContext`), so this single-source `ctx` match is never reached.
-        Some(DamageSource::EachTarget) => {
-            unreachable!("EachTarget handled by resolve_each_target_power_damage")
-        }
+    let Some(mut ctx) = single_damage_source(state, ability, damage_source) else {
+        no_damage_source_resolved(ability, events);
+        return Ok(());
     };
 
     // CR 120.4a + CR 608.2c: attach the active excess-redirect rider parsed onto
@@ -1395,23 +1392,7 @@ pub fn resolve(
     //
     // Other implicit-target filters (`Controller`) keep the pre-existing
     // "fall back when targets are empty" semantic.
-    let effective_targets = if matches!(target_filter, TargetFilter::EventTarget) {
-        // CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style non-target damage
-        // uses the exact object or player recipient carried by the triggering
-        // DamageDealt event. This is intentionally DealDamage-local; generic
-        // EventTarget filter resolution remains object-only.
-        match state.current_trigger_event.as_ref() {
-            Some(GameEvent::DamageDealt { target, .. }) => vec![target.clone()],
-            _ => Vec::new(),
-        }
-    } else {
-        resolve_effect_recipients(
-            state,
-            ability,
-            target_filter,
-            matches!(damage_source, Some(DamageSource::Target)),
-        )
-    };
+    let effective_targets = damage_recipients(state, ability);
 
     // CR 601.2d: If the caster distributed damage among targets at cast time,
     // apply per-target amounts from ability.distribution instead of uniform damage.
@@ -1500,6 +1481,129 @@ pub fn resolve_post_replacement(
     Ok(())
 }
 
+/// CR 120.2b: the object that deals a single-source `DealDamage` node's damage,
+/// or `None` where no object deals it.
+fn single_damage_source(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    damage_source: Option<DamageSource>,
+) -> Option<DamageContext> {
+    match damage_source {
+        // CR 120.1 + CR 608.2b: "Target creature deals damage..." — the chosen
+        // subject is the damage source, not the ability source. No subject
+        // means no damage at all; there is deliberately NO fallback to the
+        // spell here, because attributing the damage to the spell would let a
+        // clause whose subject is gone still deal it.
+        Some(DamageSource::Target) => target_damage_source(state, ability),
+        // "That creature/permanent deals damage..." inside a triggered ability
+        // binds the damage source to the triggering event object.
+        Some(DamageSource::TriggeringSource) => Some(
+            state
+                .current_trigger_event
+                .as_ref()
+                .and_then(crate::game::targeting::extract_source_from_event)
+                .and_then(|id| DamageContext::from_source(state, id))
+                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        ),
+        None => Some(
+            DamageContext::from_source(state, ability.source_id)
+                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        ),
+        // CR 120.1: multi-source per-power damage is dispatched to
+        // `resolve_each_target_power_damage` (each source has its own
+        // `DamageContext`) before a single source is asked for.
+        Some(DamageSource::EachTarget) => {
+            unreachable!("EachTarget handled by resolve_each_target_power_damage")
+        }
+    }
+}
+
+/// CR 120.2b: the objects that may deal a `DealDamage` node's damage: the one
+/// `resolve` binds for a single-source node, and every source target of a
+/// multi-source one. Shared with `stack_reach`, which proposes the node's
+/// damage events from them.
+pub(super) fn damage_sources(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    let Effect::DealDamage {
+        damage_source,
+        target: target_filter,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    if matches!(damage_source, Some(DamageSource::EachTarget)) {
+        return each_target_damage_split(state, ability, target_filter)
+            .map(|(_, sources)| sources)
+            .unwrap_or_default();
+    }
+    single_damage_source(state, ability, *damage_source)
+        .map(|ctx| ctx.source_id)
+        .into_iter()
+        .collect()
+}
+
+/// CR 120.3: the recipients of a `DealDamage` node. Shared by `resolve` and
+/// `stack_reach`, so a pending node is read with the resolver's own binding.
+pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let Effect::DealDamage {
+        damage_source,
+        target: target_filter,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    if matches!(damage_source, Some(DamageSource::EachTarget)) {
+        return each_target_damage_split(state, ability, target_filter)
+            .map(|(recipient, _)| vec![recipient])
+            .unwrap_or_default();
+    }
+    if matches!(target_filter, TargetFilter::EventTarget) {
+        // CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style non-target damage
+        // uses the exact object or player recipient carried by the triggering
+        // DamageDealt event. This is intentionally DealDamage-local; generic
+        // EventTarget filter resolution remains object-only.
+        return match state.current_trigger_event.as_ref() {
+            Some(GameEvent::DamageDealt { target, .. }) => vec![target.clone()],
+            _ => Vec::new(),
+        };
+    }
+    resolve_effect_recipients(
+        state,
+        ability,
+        target_filter,
+        matches!(damage_source, Some(DamageSource::Target)),
+    )
+}
+
+/// CR 120.1: a multi-source damage node's `(recipient, sources)`, or `None`
+/// when no target was chosen.
+fn each_target_damage_split(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<(TargetRef, Vec<ObjectId>)> {
+    // Partition the object targets into sources (all but the last) and the
+    // shared recipient (the last object target). A non-object implicit recipient
+    // (e.g. "deal damage to <player>") is resolved via `player_context_target`.
+    let object_targets: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+
+    if let Some(player_recipient) = player_context_target(state, ability, target_filter) {
+        // CR 120.3a: implicit/context player recipient (damage to a player
+        // causes life loss) — every object target is a source.
+        return Some((player_recipient, object_targets));
+    }
+    let (last, sources) = object_targets.split_last()?;
+    Some((TargetRef::Object(*last), sources.to_vec()))
+}
+
 /// CR 120.1 + CR 601.2c + CR 208.1 + CR 608.2: Resolve "each [of N target
 /// creatures] deals damage equal to their power to <recipient>"
 /// (`DamageSource::EachTarget`).
@@ -1547,34 +1651,17 @@ fn resolve_each_target_power_damage(
         _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
     };
 
-    // Partition the object targets into sources (all but the last) and the
-    // shared recipient (the last object target). A non-object implicit recipient
-    // (e.g. "deal damage to <player>") is resolved via `player_context_target`.
-    let object_targets: Vec<ObjectId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        .collect();
-
-    let (recipient, source_ids): (TargetRef, &[ObjectId]) =
-        if let Some(player_recipient) = player_context_target(state, ability, target_filter) {
-            // CR 120.3a: implicit/context player recipient (damage to a player
-            // causes life loss) — every object target is a source.
-            (player_recipient, object_targets.as_slice())
-        } else if let Some((last, sources)) = object_targets.split_last() {
-            (TargetRef::Object(*last), sources)
-        } else {
-            // No targets chosen ("up to N" with zero chosen) — nothing happens.
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-                subject: None,
-            });
-            return Ok(());
-        };
+    let Some((recipient, source_ids)) = each_target_damage_split(state, ability, target_filter)
+    else {
+        // No targets chosen ("up to N" with zero chosen) — nothing happens.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    };
+    let source_ids = source_ids.as_slice();
 
     // CR 608.2 + CR 208.1: read every source's own power up front, before any
     // damage is marked, so the simultaneous batch reads the pre-batch power for
@@ -2108,19 +2195,27 @@ fn collect_matching_players(
                     // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
                     // whose [scalar attr] [comparator] [value]" — candidate
                     // satisfies both `relation` and the per-candidate scalar
-                    // comparison. `attr` is read directly off `p`; `value` is
-                    // the controller-relative threshold, resolved once.
+                    // comparison. `attr` is read for `p`; `value`
+                    // keeps the source controller and binds this candidate.
                     PlayerFilter::PlayerAttribute {
                         ref relation,
                         ref attr,
                         ref comparator,
                         ref value,
                     } => {
-                        let threshold = crate::game::quantity::resolve_quantity(
+                        let threshold = crate::game::quantity::resolve_quantity_with_ctx(
                             state,
                             value,
                             source_controller,
-                            source_id,
+                            crate::game::quantity::QuantityContext {
+                                entering: None,
+                                source: source_id,
+                                trigger_source: None,
+                                recipient: None,
+                                scoped_player: Some(p.id),
+                                damage_source: None,
+                                event_amount: None,
+                            },
                         );
                         crate::game::players::matches_relation(
                             state,
@@ -2375,19 +2470,27 @@ pub fn resolve_each_player(
                     // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
                     // whose [scalar attr] [comparator] [value]" — candidate
                     // satisfies both `relation` and the per-candidate scalar
-                    // comparison. `attr` is read directly off `p`; `value` is
-                    // the controller-relative threshold, resolved once.
+                    // comparison. `attr` is read for `p`; `value`
+                    // keeps the ability controller and binds this candidate.
                     PlayerFilter::PlayerAttribute {
                         relation,
                         attr,
                         comparator,
                         value,
                     } => {
-                        let threshold = crate::game::quantity::resolve_quantity(
+                        let threshold = crate::game::quantity::resolve_quantity_with_ctx(
                             state,
                             value,
                             ability.controller,
-                            ability.source_id,
+                            crate::game::quantity::QuantityContext {
+                                entering: None,
+                                source: ability.source_id,
+                                trigger_source: None,
+                                recipient: None,
+                                scoped_player: Some(p.id),
+                                damage_source: None,
+                                event_amount: None,
+                            },
                         );
                         crate::game::players::matches_relation(
                             state,
@@ -2900,15 +3003,85 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        DamageChannel, Duration, FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
-        TypeFilter, TypedFilter,
+        DamageChannel, Duration, FilterProp, ObjectScope, PlayerRelation, PlayerScope,
+        QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 103.4 + CR 904.5 + CR 119.1: P1 is the archenemy with a 40-life
+    /// baseline, while P0 and P2 are heroes with 20-life baselines.
+    fn archenemy_player_attribute_fixture() -> (GameState, PlayerFilter) {
+        let mut format = FormatConfig::archenemy();
+        format.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(format, 3, 42);
+        state.players[1].life = 15;
+        state.players[2].life = 15;
+        let filter = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::LT,
+            value: Box::new(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Down,
+            }),
+        };
+        (state, filter)
+    }
+
+    #[test]
+    fn damage_all_player_population_uses_each_candidates_starting_life() {
+        let (mut state, filter) = archenemy_player_attribute_fixture();
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                player_filter: Some(filter),
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.players[1].life, 14, "archenemy is below half of 40");
+        assert_eq!(state.players[2].life, 15, "hero is above half of 20");
+    }
+
+    #[test]
+    fn damage_each_player_uses_each_candidates_starting_life() {
+        let (mut state, filter) = archenemy_player_attribute_fixture();
+        let ability = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: filter,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_player(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.players[1].life, 14, "archenemy is below half of 40");
+        assert_eq!(state.players[2].life, 15, "hero is above half of 20");
+    }
 
     fn make_ability(num_dmg: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
         ResolvedAbility::new(

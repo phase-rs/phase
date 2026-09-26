@@ -675,6 +675,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         // source self-exiles mid-activation and returns with the same ObjectId,
         // so the material links must survive its battlefield exit for the
         // returned permanent to still read what it was crafted with.
+        // CR 406.3: `HideawayLookable` links are preserved because a look outlives
+        // its source; their live rule stops admitting once the source is gone.
         // CR 607.2a + CR 400.7: `TrackedBySource` links are preserved when the
         // source leaves the battlefield TO EXILE. A source that self-exiles
         // (typically as its own activation cost — Mechtitan Core: "Exile this
@@ -695,6 +697,7 @@ pub(crate) fn apply_zone_exit_cleanup(
                         | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch { .. }
                         | crate::types::game_state::ExileLinkKind::Haunt
                         | crate::types::game_state::ExileLinkKind::CraftMaterial
+                        | crate::types::game_state::ExileLinkKind::HideawayLookable { .. }
                 )
                 || (source_exits_to_exile
                     && matches!(
@@ -2040,7 +2043,8 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
 /// is_some()` branch). Every `ExileLinkKind` is kind-agnostically readable via
 /// `ExiledBySource` (`HideawayLookable`'s and `CraftMaterial`'s own doc
 /// comments say so explicitly) and the LIVE lookup
-/// (`players::linked_exile_cards_for_source`) does not filter by kind either —
+/// (`players::linked_exile_cards_for_source`) reads the same
+/// `exile_links::live_links_for_source` accessor —
 /// this snapshot must match that surface exactly, or a card whose "play the
 /// exiled card" clause resolves via a TRIGGERED ability (Fight Rigging's
 /// begin-of-combat trigger, as opposed to Windbrisk Heights' activated
@@ -2055,10 +2059,7 @@ pub(crate) fn capture_linked_exile_snapshot(
         return Vec::new();
     }
 
-    state
-        .exile_links
-        .iter()
-        .filter(|link| link.source_id == source_id)
+    crate::game::exile_links::live_links_for_source(state, source_id)
         .filter_map(|link| {
             state.objects.get(&link.exiled_id).and_then(|obj| {
                 (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {

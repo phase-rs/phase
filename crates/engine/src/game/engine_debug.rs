@@ -727,11 +727,10 @@ pub fn apply_debug_action(
     // A genuine no-op for all non-declaration waiting states.
     super::combat::refresh_combat_declaration_waiting_for(state);
 
-    Ok(ActionResult {
-        events: std::mem::take(events),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: vec![],
-    })
+    Ok(ActionResult::applied(
+        std::mem::take(events),
+        state.waiting_for.clone(),
+    ))
 }
 
 /// CR 122.1: Apply a final debug-selected player-counter delta through the
@@ -856,11 +855,7 @@ pub fn route_debug_create_to_battlefield(
         let req = crate::game::zone_pipeline::ZoneMoveRequest::debug(object_id, Zone::Battlefield);
         crate::game::zone_pipeline::move_object(state, req, &mut events);
         crate::game::layers::mark_layers_full(state);
-        return ActionResult {
-            events,
-            waiting_for: state.waiting_for.clone(),
-            log_entries: vec![],
-        };
+        return ActionResult::applied(events, state.waiting_for.clone());
     }
 
     if state
@@ -872,11 +867,7 @@ pub fn route_debug_create_to_battlefield(
     }
 
     enter_battlefield_with_etb(state, object_id, attach_to, &mut events);
-    ActionResult {
-        events,
-        waiting_for: state.waiting_for.clone(),
-        log_entries: vec![],
-    }
+    ActionResult::applied(events, state.waiting_for.clone())
 }
 
 /// CR 614.12 + CR 603.6a: Move an existing object onto the battlefield through
@@ -1042,11 +1033,7 @@ fn route_debug_token_to_battlefield(
                         event,
                     });
                     state.waiting_for = waiting_for;
-                    return ActionResult {
-                        events,
-                        waiting_for: state.waiting_for.clone(),
-                        log_entries: vec![],
-                    };
+                    return ActionResult::applied(events, state.waiting_for.clone());
                 }
             }
             if super::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
@@ -1066,11 +1053,7 @@ fn route_debug_token_to_battlefield(
         }
     }
 
-    ActionResult {
-        events,
-        waiting_for: state.waiting_for.clone(),
-        log_entries: vec![],
-    }
+    ActionResult::applied(events, state.waiting_for.clone())
 }
 
 /// Bind a debug card request to its complete printed characteristics before a
@@ -1124,11 +1107,7 @@ pub fn create_debug_cards(
     let debug_action = request.as_debug_action();
     preflight_debug_action(state, request.actor, &debug_action)?;
     if request.count == 0 {
-        return Ok(ActionResult {
-            events: vec![],
-            waiting_for: state.waiting_for.clone(),
-            log_entries: vec![],
-        });
+        return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
     }
     let description = debug_action.describe(state);
     let before = state.clone();
@@ -1170,11 +1149,7 @@ pub fn create_debug_cards(
                 events.extend(entry.events);
             }
         }
-        ActionResult {
-            events,
-            waiting_for: state.waiting_for.clone(),
-            log_entries: vec![],
-        }
+        ActionResult::applied(events, state.waiting_for.clone())
     } else {
         drain_debug_card_entries(
             state,
@@ -1188,11 +1163,7 @@ pub fn create_debug_cards(
             },
             &mut events,
         );
-        ActionResult {
-            events,
-            waiting_for: state.waiting_for.clone(),
-            log_entries: vec![],
-        }
+        ActionResult::applied(events, state.waiting_for.clone())
     };
     result.events.push(GameEvent::DebugActionUsed {
         player_id: actor,

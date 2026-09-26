@@ -8767,6 +8767,31 @@ fn static_life_more_than_starting_conditional() {
 }
 
 #[test]
+fn static_elenda_additional_buff_uses_life_above_starting_condition() {
+    let def = parse_static_line(
+        "Elenda gets an additional +5/+5 as long as your life total is at least ten greater than your starting life total.",
+    )
+    .expect("Elenda's conditional additional buff must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeAboveStarting,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 10 },
+        })
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 5 }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 5 }));
+}
+
+#[test]
 fn static_devotion_condition() {
     use crate::types::mana::ManaColor;
     // CR 110.4b: "less than five" → Not(DevotionGE { threshold: 5 })
@@ -17026,7 +17051,7 @@ fn static_for_each_opponent_below_half_starting_life_is_dynamic_anya() {
                         inner,
                     } if matches!(
                         inner.as_ref(),
-                        QuantityExpr::Ref { qty: QuantityRef::StartingLifeTotal }
+                        QuantityExpr::Ref { qty: QuantityRef::StartingLifeTotal { player: PlayerScope::ScopedPlayer } }
                     )
                 ),
                 "threshold must be half (rounded down) their starting life, got {value:?}"
@@ -17034,6 +17059,50 @@ fn static_for_each_opponent_below_half_starting_life_is_dynamic_anya() {
         }
         other => panic!("expected PlayerAttribute filter, got {other:?}"),
     }
+
+    // Anya's second clause uses the same candidate-relative "an opponent"
+    // threshold. Keeping this explicit prevents it from regressing to the
+    // controller's starting-life baseline while the first clause remains
+    // candidate-relative.
+    let indestructible = parse_static_line(
+        "As long as an opponent's life total is less than half their starting life total, Anya has indestructible.",
+    )
+    .expect("Anya indestructible condition must parse");
+    assert!(matches!(
+        indestructible.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount { filter }
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }) if matches!(
+            &filter,
+            PlayerFilter::PlayerAttribute {
+                relation: crate::types::ability::PlayerRelation::Opponent,
+                attr,
+                comparator: Comparator::LT,
+                value,
+            } if matches!(
+                attr.as_ref(),
+                QuantityRef::LifeTotal { player: PlayerScope::ScopedPlayer }
+            ) && matches!(
+                value.as_ref(),
+                QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Down,
+                    inner,
+                } if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::ScopedPlayer
+                        }
+                    }
+                )
+            )
+        )
+    ));
 }
 
 /// Helper: the dynamic-power `QuantityExpr` from a static line's first
@@ -24163,6 +24232,47 @@ fn parser_shape_evelyn_collection_counter_play_permission_static_is_not_unimplem
     assert_eq!(def.mode, StaticMode::LinkedCollectionCounterPlayPermission);
 }
 
+/// CR 609.4b + CR 118.14: the collection-counter grant carries Evelyn's printed
+/// any-COLOR concession. A broader "mana of any type" spelling is declined and
+/// stays an honest gap — never a grant that would pay `{C}` the card does not
+/// allow. The printed line is the positive half.
+#[test]
+fn evelyn_collection_counter_any_type_variant_remains_an_honest_gap() {
+    let printed = "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were mana of any color to cast it.";
+    let broader = "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and mana of any type can be spent to cast that spell.";
+    let parse = |text| {
+        crate::parser::oracle::parse_oracle_text(
+            text,
+            "Evelyn, the Covetous",
+            &[],
+            &["Creature".to_string()],
+            &["Vampire".to_string(), "Rogue".to_string()],
+        )
+    };
+    let actual = parse(printed);
+    assert_eq!(actual.statics.len(), 1, "{actual:#?}");
+    assert_eq!(
+        actual.statics[0].mode,
+        StaticMode::LinkedCollectionCounterPlayPermission
+    );
+
+    assert!(parse_static_line(broader).is_none());
+    let unsupported = parse(broader);
+    assert!(unsupported.statics.is_empty(), "{unsupported:#?}");
+    assert!(
+        !unsupported.abilities.is_empty(),
+        "expected an explicit gap: {unsupported:#?}"
+    );
+    for ability in &unsupported.abilities {
+        for node in std::iter::successors(Some(ability), |node| node.sub_ability.as_deref()) {
+            assert!(
+                matches!(node.effect.as_ref(), Effect::Unimplemented { .. }),
+                "the declined concession must not produce another permission: {node:#?}"
+            );
+        }
+    }
+}
+
 // CR 609.4b: Mycosynth Lattice / Mycosynthwave — "Players may spend mana as
 // though it were mana of any color" grants the board-wide any-color concession to
 // every player (affected: TargetFilter::Player, which the runtime scopes to all
@@ -24177,6 +24287,7 @@ fn static_players_may_spend_mana_as_any_color() {
         StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: crate::types::ability::ManaSpendPermission::AnyColor,
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::Player));
@@ -24191,6 +24302,7 @@ fn static_you_may_spend_mana_as_any_color_still_parses() {
         StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: crate::types::ability::ManaSpendPermission::AnyColor,
         }
     );
 }
@@ -36765,7 +36877,10 @@ fn weathered_sentinels_line_is_consumed_by_the_non_attached_static_production() 
     let lower = P3_WEATHERED_SENTINELS_L2.to_lowercase();
     let tp = TextPair::new(P3_WEATHERED_SENTINELS_L2, &lower);
     let def = super::evasion::parse_can_attack_despite_defender(&tp, P3_WEATHERED_SENTINELS_L2)
-        .expect("C3.1: production (b) itself must consume this line, not a shadowing branch");
+        .expect(
+            "production (b) — `parse_can_attack_despite_defender` — must parse the \
+             Weathered Sentinels line directly",
+        );
     assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(
@@ -37000,7 +37115,9 @@ fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() 
     assert_eq!(
         crate::game::coverage::card_face_gaps(&ok_face),
         Vec::<String>::new(),
-        "the anchored class must be GREEN — Phase 1's C1.5 labelling is FINAL"
+        "a RECOGNIZED anchored class must report NO coverage gap — the gap signal \
+         comes from the unenforceable marker, not from `CanAttackWithDefender` \
+         being unsupported in the registry"
     );
 }
 

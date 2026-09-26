@@ -27,10 +27,11 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
-    ControllerRef, CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate,
-    PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
-    ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    ControllerRef, CountBinding, CountScope, DamageChannel, DamageKindFilter, DevotionColors,
+    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+    SubtypeExclusion, TargetFilter, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -301,7 +302,7 @@ pub fn parse_max_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// The inner expression is any quantity this module can recognize — either a
 /// standard [`parse_quantity_ref`] (e.g. `"its power"`, `"your life total"`) or
 /// a possessive reference resolved against the current target (e.g.
-/// `"their library"` → `TargetZoneCardCount { zone: Library }`). The parser
+/// `"their library"` → `TargetZoneCardCount { zone: Library, scope: TargetPlayer, binding: Anaphoric }`). The parser
 /// accepts an optional `, rounded up` / `, rounded down` / `, round up` /
 /// `, round down` suffix. If absent, the expression defaults to
 /// [`RoundingMode::Down`] as a safe fallback — CR 107.1a requires Oracle text
@@ -382,7 +383,7 @@ fn parse_half_rounded_inner(input: &str) -> OracleResult<'_, QuantityExpr> {
 ///
 /// | Possessive | Quantity | Maps to |
 /// |------------|----------|---------|
-/// | "their"    | library/hand/graveyard | `TargetZoneCardCount { zone }` |
+/// | "their"    | library/hand/graveyard | `TargetZoneCardCount { zone, scope: TargetPlayer, binding: Anaphoric }` |
 /// | "their"    | life total / life      | `TargetLifeTotal` |
 /// | "his or her" | life total / life    | `TargetLifeTotal` |
 /// | "your"     | library/hand/graveyard | `ZoneCardCount` (Controller scope) |
@@ -413,18 +414,24 @@ fn parse_their_tail(input: &str) -> OracleResult<'_, QuantityRef> {
         value(
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Library,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("library"),
         ),
         value(
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("hand"),
         ),
         value(
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Graveyard,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("graveyard"),
         ),
@@ -535,7 +542,11 @@ fn parse_cards_in_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> 
     let (rest, _) = tag("the cards in ").parse(input)?;
     alt((
         map(preceded(tag("their "), parse_zone_ref_singular), |zone| {
-            QuantityRef::TargetZoneCardCount { zone }
+            QuantityRef::TargetZoneCardCount {
+                zone,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
+            }
         }),
         map(preceded(tag("your "), parse_zone_ref_singular), |zone| {
             QuantityRef::ZoneCardCount {
@@ -2582,7 +2593,11 @@ fn parse_number_of_cards_in_target_zone(input: &str) -> OracleResult<'_, Quantit
     let (rest, _) = tag("cards in ").parse(input)?;
     let (rest, _) = alt((tag("their "), tag("that player's "))).parse(rest)?;
     map(parse_zone_ref_singular, |zone| {
-        QuantityRef::TargetZoneCardCount { zone }
+        QuantityRef::TargetZoneCardCount {
+            zone,
+            scope: ControllerRef::TargetPlayer,
+            binding: CountBinding::Anaphoric,
+        }
     })
     .parse(rest)
 }
@@ -2602,15 +2617,59 @@ fn parse_number_of_cards_in_all_players_hands(input: &str) -> OracleResult<'_, Q
     ))
 }
 
-/// CR 115.1 + CR 115.7: Parse "target opponent's <zone>" / "target player's <zone>"
-/// possessive into a `TargetZoneCardCount`. Used as a target-bound branch of
-/// `parse_zone_card_count` for "card in target opponent's hand" expressions
-/// (Jeska's Will mode 1). Does not consume the leading "card in " — the caller
-/// has already stripped that prefix and is positioned at the possessive.
+/// CR 115.1: Parse "target opponent's <zone>" / "target player's <zone>"
+/// possessive into a `TargetZoneCardCount`, preserving which announced player
+/// the count reads via the `scope` legality axis (`TargetOpponent` /
+/// `TargetPlayer` — runtime-read-identical, slot-legality-distinct). Used as
+/// a target-bound branch of `parse_zone_card_count` for "card in target
+/// opponent's hand" expressions (Jeska's Will mode 1). Does not consume the
+/// leading "card in " — the caller has already stripped that prefix and is
+/// positioned at the possessive.
 fn parse_target_player_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = alt((tag("target opponent's "), tag("target player's "))).parse(input)?;
+    let (rest, scope) = alt((
+        value(ControllerRef::TargetOpponent, tag("target opponent's ")),
+        value(ControllerRef::TargetPlayer, tag("target player's ")),
+    ))
+    .parse(input)?;
     let (rest, zone) = parse_zone_ref_singular(rest)?;
-    Ok((rest, QuantityRef::TargetZoneCardCount { zone }))
+    Ok((
+        rest,
+        QuantityRef::TargetZoneCardCount {
+            zone,
+            scope,
+            binding: CountBinding::Explicit,
+        },
+    ))
+}
+
+/// CR 115.1: the target possessive's restriction survives
+/// lowering — "target opponent's ..." scopes to the announced opponent,
+/// "target player's ..." to any announced player. Runtime resolution is
+/// identical for both; only the companion slot's legality differs.
+#[test]
+fn target_player_possessive_zone_preserves_opponent_vs_player_scope() {
+    let (rest, opponent_qty) =
+        parse_target_player_possessive_zone("target opponent's hand").unwrap();
+    assert_eq!(rest, "");
+    assert_eq!(
+        opponent_qty,
+        QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Hand,
+            scope: crate::types::ability::ControllerRef::TargetOpponent,
+            binding: CountBinding::Explicit,
+        }
+    );
+    let (rest, player_qty) =
+        parse_target_player_possessive_zone("target player's graveyard").unwrap();
+    assert_eq!(rest, "");
+    assert_eq!(
+        player_qty,
+        QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Graveyard,
+            scope: crate::types::ability::ControllerRef::TargetPlayer,
+            binding: CountBinding::Explicit,
+        }
+    );
 }
 
 /// CR 303.4m + CR 613.4c: Parse recipient-relative hand counts such as
@@ -3437,15 +3496,50 @@ fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, Quantit
     Ok((rest, QuantityRef::PlayerCount { filter }))
 }
 
+/// CR 119.3 (+ CR 601.2f for the cost reductions): "for each 1 life … this
+/// turn" counts the life each player lost or gained this turn, not the number
+/// of objects or a single triggering event.
+/// The phrase tables `parse_life_lost_ref` / `parse_life_gained_ref` are not
+/// reused here: they also accept the duration-stripped "life you lost", which
+/// after "1 " is `parse_for_each_one_life_changed`'s event-scoped class. This
+/// grammar requires the literal "this turn", so it never claims that class.
+fn parse_for_each_one_life_changed_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("1 life "), tag("one life "))).parse(input)?;
+    let (rest, player) = alt((
+        value(
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Sum,
+            },
+            tag("your opponents have "),
+        ),
+        value(PlayerScope::Controller, tag("you ")),
+    ))
+    .parse(rest)?;
+    alt((
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: player.clone(),
+            },
+            tag("lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeGainedThisTurn { player },
+            tag("gained this turn"),
+        ),
+    ))
+    .parse(rest)
+}
+
 /// CR 119.3 + CR 603.2c: "1 life you gained" / "1 life you lost" — the per-1
 /// multiplier in a "for each 1 life you gained/lost" clause on a
 /// `Whenever you gain/lose life` trigger. The triggering `GameEvent::LifeChanged`
 /// carries the gained/lost magnitude, which `EventContextAmount` resolves via
 /// `extract_amount_from_event` (`game/targeting.rs`: `LifeChanged` => `amount.abs()`).
 /// The leading "1 "/"one " disambiguates from the duration class "life you
-/// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`, which has no
-/// "1 ") and from Blood Tyrant's "1 life lost or gained this way" (no "you";
-/// handled by the `TrackedSetSize` "this way" block).
+/// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`), whose
+/// "for each 1 life ... this turn" form `parse_for_each_one_life_changed_this_turn`
+/// claims first, and from Blood Tyrant's "1 life lost or gained this way" (no
+/// "you"; handled by the `TrackedSetSize` "this way" block).
 fn parse_for_each_one_life_changed(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((tag("1 life you "), tag("one life you "))).parse(input)?;
     value(
@@ -4003,16 +4097,23 @@ fn parse_life_gained_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// CR 103.4: Parse "your/their starting life total". Format-global constant —
-/// "their" is grammatically anaphoric to "a player" but resolves identically.
+/// CR 103.4: Parse "your/their starting life total". "Their" is scoped to
+/// the candidate player; "your" remains bound to the ability controller.
 fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    value(
-        QuantityRef::StartingLifeTotal,
-        alt((
+    alt((
+        value(
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            },
             tag::<_, _, OracleError<'_>>("your starting life total"),
+        ),
+        value(
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            },
             tag("their starting life total"),
-        )),
-    )
+        ),
+    ))
     .parse(input)
 }
 
@@ -4978,7 +5079,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_recipient_attack_count,
         parse_for_each_spells_before_triggering_spell,
         alt((
-            parse_for_each_one_life_changed,
+            alt((
+                parse_for_each_one_life_changed_this_turn,
+                parse_for_each_one_life_changed,
+            )),
             alt((
                 parse_for_each_opponents_life_change,
                 parse_lost_game_player_count,
@@ -6866,6 +6970,7 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_quantity::parse_for_each_clause;
     use crate::types::ability::{
         AggregateFunction, ControllerRef, FilterProp, ObjectProperty, PlayerFilter, QuantityRef,
         SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
@@ -8669,6 +8774,50 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 119.3: "for each 1 life … this turn" (and its spelled-out "one life"
+    /// form) is the per-player life history, not the triggering event's amount.
+    #[test]
+    fn parse_for_each_one_life_changed_this_turn_reads_life_history() {
+        let opponents = PlayerScope::Opponent {
+            aggregate: AggregateFunction::Sum,
+        };
+        for prefix in ["1", "one"] {
+            for (tail, expected) in [
+                (
+                    "life your opponents have lost this turn",
+                    QuantityRef::LifeLostThisTurn {
+                        player: opponents.clone(),
+                    },
+                ),
+                (
+                    "life your opponents have gained this turn",
+                    QuantityRef::LifeGainedThisTurn {
+                        player: opponents.clone(),
+                    },
+                ),
+                (
+                    "life you lost this turn",
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                ),
+                (
+                    "life you gained this turn",
+                    QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                ),
+            ] {
+                let clause = format!("{prefix} {tail}");
+                assert_eq!(
+                    parse_for_each_clause(&clause),
+                    Some(expected),
+                    "{clause:?} must read this turn's life history",
+                );
+            }
+        }
+    }
+
     #[test]
     fn parse_for_each_other_attacking_goblin_via_type_phrase_fallback() {
         let qty = crate::parser::oracle_quantity::parse_for_each_clause("other attacking Goblin")
@@ -9251,7 +9400,12 @@ mod tests {
     #[test]
     fn test_parse_their_starting_life_total() {
         let (rest, q) = parse_quantity_ref("their starting life total").unwrap();
-        assert_eq!(q, QuantityRef::StartingLifeTotal);
+        assert_eq!(
+            q,
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -10032,6 +10186,8 @@ mod tests {
             q,
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");
@@ -10044,6 +10200,8 @@ mod tests {
             q,
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");
@@ -12043,6 +12201,8 @@ mod tests {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Library,
+                        scope: crate::types::ability::ControllerRef::TargetPlayer,
+                        binding: CountBinding::Anaphoric,
                     },
                 }),
                 divisor: 2,
@@ -12178,6 +12338,8 @@ mod tests {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Library,
+                        scope: crate::types::ability::ControllerRef::TargetPlayer,
+                        binding: CountBinding::Anaphoric,
                     },
                 }),
                 divisor: 2,
@@ -12222,6 +12384,8 @@ mod tests {
             q,
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");

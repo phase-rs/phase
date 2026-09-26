@@ -1993,7 +1993,11 @@ impl GameSession {
                 .map_err(SessionActionError::Rejected)?,
         };
         if let Some(snapshot) = pre_action_state {
-            self.push_takeback_state(player, snapshot);
+            // A reversed activation (CR 602.2b + CR 601.2h) restored the state
+            // from before the action: it is not a takeback point.
+            if result.disposition.is_applied() {
+                self.push_takeback_state(player, snapshot);
+            }
         }
 
         info!(
@@ -2113,7 +2117,9 @@ impl GameSession {
         let applied = submit_interaction_with_rejection(&mut self.state, player, submission)
             .map_err(SessionActionError::Rejected)?;
 
-        if !applied.action.is_actor_scoped_preference() {
+        // A reversed activation (CR 602.2b + CR 601.2h) restored the state from
+        // before the action: it is not a takeback point.
+        if !applied.action.is_actor_scoped_preference() && applied.result.disposition.is_applied() {
             self.push_takeback_state(player, pre_action_state);
         }
 
@@ -4475,6 +4481,128 @@ mod tests {
             "approved takeback should restore the pre-action waiting_for"
         );
         assert!(session.pending_takeback.is_none());
+    }
+
+    /// CR 602.2b + CR 601.2h: an activation reversed at its cost election is not
+    /// a takeback point. The session's newest takeback entry stays the state
+    /// from before the activation — which the reversal restored — so "undo my
+    /// last action" can never jump back into the dead prompt.
+    #[test]
+    fn a_reversed_activation_records_no_takeback_point() {
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr,
+            StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        let reducer = |amount: u32, minimum_mana: Option<u32>| {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        };
+        // −2 (floor two) then −3 on {5} locks {0}; the reverse locks {2}, which
+        // one floating mana cannot pay.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Floored reducer", 1, 1)
+            .with_static_definition(reducer(2, Some(2)));
+        scenario
+            .add_creature(P0, "Unfloored reducer", 1, 1)
+            .with_static_definition(reducer(3, None));
+        let source = scenario
+            .add_creature(P0, "Activator", 2, 2)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(5),
+                }),
+            )
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let runner = scenario.build();
+
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = runner.state().clone();
+        let ability_index = session.state.objects[&source]
+            .abilities
+            .iter()
+            .position(|a| matches!(a.kind, AbilityKind::Activated))
+            .unwrap();
+
+        session
+            .handle_action(
+                &token0,
+                GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index,
+                },
+            )
+            .expect("the activation reaches its election");
+        let costly = match &session.state.waiting_for {
+            WaitingFor::OrderCostReductions { outcomes, .. } => {
+                assert_eq!(outcomes.len(), 2, "the order must be observable");
+                outcomes[1].order.clone()
+            }
+            other => panic!("expected the cost election, got {other:?}"),
+        };
+        let depth_at_prompt = session.takeback_history.len();
+        let pre_activation = session
+            .takeback_history
+            .back()
+            .map(|(_, state)| state.clone())
+            .expect("the activation itself is a takeback point");
+
+        session
+            .handle_action(
+                &token0,
+                GameAction::OrderCostReductions {
+                    order: costly,
+                    hybrid_announcement: Vec::new(),
+                },
+            )
+            .expect("a legal election is not an error");
+        assert!(
+            matches!(session.state.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "the unpayable election reversed the activation, got {:?}",
+            session.state.waiting_for
+        );
+        assert!(session.state.stack.is_empty(), "nothing reached the stack");
+        assert_eq!(
+            session.takeback_history.len(),
+            depth_at_prompt,
+            "a reversal must not add a takeback point"
+        );
+        assert_eq!(
+            session.takeback_history.back().map(|(_, state)| state),
+            Some(&pre_activation),
+            "the newest takeback point is still the pre-activation state"
+        );
     }
 
     /// A takeback restores a live shortcut offer through the same rekeying

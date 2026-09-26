@@ -138,7 +138,13 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
     });
     const gameState = makeState(
       [source, hidden],
-      [{ exiled_id: 2, source_id: 1, kind: "HideawayLookable" }],
+      [
+        {
+          exiled_id: 2,
+          source_id: 1,
+          kind: { HideawayLookable: { grant: "SourceController", lookers: [1], source_incarnation: 0 } },
+        },
+      ],
     );
 
     useGameStore.setState({
@@ -179,7 +185,13 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
     });
     const gameState = makeState(
       [source, hidden],
-      [{ exiled_id: 2, source_id: 1, kind: "HideawayLookable" }],
+      [
+        {
+          exiled_id: 2,
+          source_id: 1,
+          kind: { HideawayLookable: { grant: "SourceController", lookers: [0], source_incarnation: 0 } },
+        },
+      ],
     );
 
     useGameStore.setState({
@@ -303,7 +315,13 @@ describe("ZoneViewer exile face-down visibility (issue #2889)", () => {
     });
     const gameState = makeState(
       [source, hidden],
-      [{ exiled_id: 2, source_id: 1, kind: "HideawayLookable" }],
+      [
+        {
+          exiled_id: 2,
+          source_id: 1,
+          kind: { HideawayLookable: { grant: "SourceController", lookers: [1], source_incarnation: 0 } },
+        },
+      ],
     );
 
     useGameStore.setState({

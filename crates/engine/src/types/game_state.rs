@@ -2417,14 +2417,21 @@ pub enum ExileLinkKind {
     /// permanent (`source_id`). Like `TrackedBySource` it tracks the card so the
     /// companion "you may play the exiled card" ability (`TargetFilter::
     /// ExiledBySource`, which is kind-agnostic) can later find it — but it
-    /// additionally grants a *look-permission*: the player who controls the
-    /// exiling permanent "may look at this card in the exile zone". Visibility
-    /// keys the controller's face-down look-through on this kind specifically, so
+    /// additionally grants a *look-permission* to the players its `grant` and
+    /// `lookers` admit. Visibility keys the face-down look-through on this kind
+    /// specifically, so
     /// plain `TrackedBySource` face-down exiles that grant no such permission
     /// (Bomat Courier's "(You can't look at it.)", Necropotence, Asmodeus) stay
-    /// redacted. Pruned on exile-exit / source-exit like `Cipher` (not an
-    /// `UntilSourceLeaves` link, so no automatic return).
-    HideawayLookable,
+    /// redacted. Pruned on exile-exit only (CR 406.3: the look outlives its
+    /// source); not an `UntilSourceLeaves` link, so no automatic return.
+    HideawayLookable {
+        grant: LookGrant,
+        /// CR 406.3: every player allowed to look since the link was created or
+        /// the card was last part of a shuffled pile.
+        lookers: BTreeSet<PlayerId>,
+        /// CR 400.7: the incarnation of the source that made this link.
+        source_incarnation: u64,
+    },
     /// CR 702.167c: Craft material — the card (`exiled_id`) was exiled to pay the
     /// craft activation cost of the permanent (`source_id`) that returns to the
     /// battlefield transformed. "An ability of a permanent may refer to the
@@ -2437,6 +2444,17 @@ pub enum ExileLinkKind {
     /// `ExiledBySource` / `CardsExiledBySource` consumers; pruned only when a
     /// material itself leaves exile (`zones.rs` exile-exit).
     CraftMaterial,
+}
+
+/// CR 406.3 + CR 702.75a: whom a face-down exile look link's live rule admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LookGrant {
+    /// CR 702.75a: the controller of the exiling permanent while it is the same
+    /// object (the link's `source_incarnation`) that exiled the card.
+    SourceController,
+    /// CR 406.3: the player instructed to look at the card and exile it face
+    /// down; admitted at creation and carried by the latch alone.
+    Player { player: PlayerId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6239,6 +6257,11 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+        /// CR 608.2h: When `emit_reveal_until_resolved` is `Some`, carries the
+        /// single-hit event snapshot so the downstream anaphoric referent ("that card's mana value")
+        /// resolves even across replacement/as-enters pauses.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_until_hit_snapshot: Option<Box<crate::types::events::EventObjectSnapshot>>,
         /// CR 608.2c + CR 701.62a: a paused manifest-dread entry's
         /// chosen object. The completion drain publishes it as the chain's
         /// fresh tracked set — only once the entry has actually finished
@@ -7117,6 +7140,14 @@ pub struct PendingCast {
     /// default governs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_reduction_election: Option<crate::types::casting_costs::CostReductionElection>,
+    /// CR 601.2f + CR 602.2b: the ACTIVATION cost-modifier carrier — every
+    /// modifier that applied to this activation, captured once at its fold,
+    /// and whether its total is locked. Present on every activation that has
+    /// passed its fold; `None` for spells, the mana-free loyalty fast path,
+    /// and pendings that predate it. Its presence is also what marks a
+    /// `WaitingFor::OrderCostReductions` prompt as an activation election.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
     /// CR 601.2h: Random cost elements are paid after every nonrandom element.
@@ -7778,6 +7809,7 @@ impl PendingCast {
             declared_mana_additions: Vec::new(),
             accepted_cost_reductions: Vec::new(),
             cost_reduction_election: None,
+            activation_cost_snapshot: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,
@@ -7817,6 +7849,23 @@ impl PendingCast {
     pub fn with_payment_mode(mut self, payment_mode: CastPaymentMode) -> Self {
         self.payment_mode = payment_mode;
         self
+    }
+
+    /// CR 602.2b: the root of an in-flight ACTIVATED ability. Every activation
+    /// root is built here, so each one must name its cost-modifier carrier
+    /// (`None` only for the mana-free loyalty fast path and legacy callers) —
+    /// the carrier cannot be silently dropped by a fresh root.
+    pub fn for_activation(
+        source_id: ObjectId,
+        ability: ResolvedAbility,
+        cost: ManaCost,
+        ability_index: usize,
+        activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
+    ) -> Self {
+        let mut pending = Self::new(source_id, CardId(0), ability, cost);
+        pending.activation_ability_index = Some(ability_index);
+        pending.activation_cost_snapshot = activation_cost_snapshot;
+        pending
     }
 
     /// Starts the trigger transaction for an announced, target-bearing
@@ -9403,6 +9452,11 @@ pub enum AlternativeCastKeyword {
     /// the stack (CR 708.4) and resolves to a face-down permanent. Maps to
     /// `CastingVariant::FaceDown`.
     FaceDown,
+    /// CR 702.117a: Surge alternative cost paid from hand, available only if the
+    /// caster or a teammate has cast another spell this turn. A pure cost
+    /// substitution; the surge provenance is recorded at resolution (stack.rs) so
+    /// "if its surge cost was paid" intervening-ifs (Reckless Bushwhacker) can read it.
+    Surge,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -13284,6 +13338,23 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_cast: Option<ObjectId>,
     },
+    /// CR 701.20a + CR 608.2d: In a `RevealUntil` resolution where cards are
+    /// put on the bottom of their owner's library "in any order" (`DigRestOrder::PlayerChoice`),
+    /// the controller announces the order for the revealed cards. The response is
+    /// `GameAction::SelectCards { cards }` carrying a permutation of `cards`;
+    /// the engine places them on the library bottom in that submitted order.
+    /// Raised only when 2+ cards are bottomed — a single card has no ordering choice.
+    RevealUntilBottomOrder {
+        player: PlayerId,
+        source_id: ObjectId,
+        cards: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        clear_markers: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emit_reveal_until_resolved: Option<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_until_hit_snapshot: Option<Box<EventObjectSnapshot>>,
+    },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
     /// rest on the bottom in any order (Susan Foreman).
@@ -14090,6 +14161,12 @@ pub enum WaitingFor {
         /// CR 602.2a: Announce → choose modes → choose targets → pay costs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ability_cost: Option<AbilityCost>,
+        /// CR 601.2f + CR 602.2b: for activated abilities, the activation's
+        /// cost-modifier carrier. This variant holds an in-flight activation
+        /// without a `PendingCast`, so the carrier rides here until mode
+        /// selection builds one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
         /// Mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
         /// CR 700.2: Engine computes which modes have been previously chosen; frontend uses this to disable them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -14525,6 +14602,8 @@ pub enum WaitingFor {
         enters_attacking: bool,
         revealed_misses: Vec<ObjectId>,
         rest_destination: Zone,
+        #[serde(default)]
+        rest_order: DigRestOrder,
     },
     /// CR 107.1c + CR 608.2c: After one iteration of a "you may repeat this
     /// process any number of times" effect resolves, the controller chooses
@@ -15608,6 +15687,7 @@ impl WaitingFor {
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
+            WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -15770,6 +15850,7 @@ impl WaitingFor {
             | WaitingFor::ScryChoice { player, .. }
             | WaitingFor::RippleRevealChoice { player, .. }
             | WaitingFor::RippleBottomOrder { player, .. }
+            | WaitingFor::RevealUntilBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -16225,10 +16306,10 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
-                // CR 702.60a: the Ripple bottom-order response is a free
-                // permutation of the offered pile — the candidate enumerator
-                // only lists {identity}, so `apply()` is the real validator.
+                // CR 702.60a + CR 401.4: the bottom-order response is a
+                // permutation of the offered pile, verified by `apply()`.
                 | WaitingFor::RippleBottomOrder { .. }
+                | WaitingFor::RevealUntilBottomOrder { .. }
         )
     }
 
@@ -16694,6 +16775,62 @@ pub struct ActionResult {
     pub waiting_for: WaitingFor,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub log_entries: Vec<super::log::GameLogEntry>,
+    /// Whether the action happened or ended an in-progress activation that
+    /// could not be completed. Omitted when `Applied`, so every ordinary result
+    /// serializes exactly as it did before the field existed.
+    #[serde(default, skip_serializing_if = "ActionDisposition::is_applied")]
+    pub disposition: ActionDisposition,
+}
+
+impl ActionResult {
+    /// An ordinary result: the action happened. Every ordinary path builds its
+    /// result here, so none can end up `Reversed` by accident.
+    pub fn applied(events: Vec<GameEvent>, waiting_for: WaitingFor) -> Self {
+        Self {
+            events,
+            waiting_for,
+            log_entries: Vec::new(),
+            disposition: ActionDisposition::Applied,
+        }
+    }
+
+    pub fn with_log_entries(mut self, log_entries: Vec<super::log::GameLogEntry>) -> Self {
+        self.log_entries = log_entries;
+        self
+    }
+
+    /// CR 602.2b + CR 601.2h: the action ended an in-progress activation that
+    /// could not be completed. The action boundary restores the state from
+    /// before the action and applies only `waiting_for`; the result carries no
+    /// events and is not a history entry.
+    pub fn reversed(waiting_for: WaitingFor) -> Self {
+        Self {
+            events: Vec::new(),
+            waiting_for,
+            log_entries: Vec::new(),
+            disposition: ActionDisposition::Reversed,
+        }
+    }
+}
+
+/// Whether an action happened (the ordinary case) or reversed an activation
+/// that could not be completed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActionDisposition {
+    #[default]
+    Applied,
+    /// CR 602.2b + CR 601.2h: "Unpayable costs can't be paid." An activation
+    /// whose elected total cannot be paid is reversed to the state before it
+    /// began. The action boundary restored its pre-action snapshot, applied only
+    /// the reversal, ran no auto-pass, and committed no lifecycle facts; it is
+    /// not recorded as a takeback point.
+    Reversed,
+}
+
+impl ActionDisposition {
+    pub fn is_applied(&self) -> bool {
+        matches!(self, Self::Applied)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19564,7 +19701,7 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
-    /// CR 508.6 + CR 514.2: For each player, the defending players they declared
+    /// CR 508.6: For each player, the defending players they declared
     /// attackers against during that player's MOST RECENT completed turn.
     /// Snapshotted from `attacked_defenders_this_turn` at cleanup
     /// (`execute_cleanup`), keyed by the ending active player, overwriting so a
@@ -28395,6 +28532,7 @@ mod resolved_information_tests {
                 matched_disposition: RevealUntilDisposition::RevealOnly,
                 kept_destination: Zone::Library,
                 rest_destination: Zone::Library,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
                 enter_tapped: EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
@@ -36857,6 +36995,7 @@ mod tests {
                 declared_mana_additions: Vec::new(),
                 accepted_cost_reductions: Vec::new(),
                 cost_reduction_election: None,
+                activation_cost_snapshot: None,
                 activation_cost: None,
                 deferred_random_discard_cost: None,
                 activation_ability_index: None,
@@ -37132,6 +37271,7 @@ mod tests {
             is_activated: true,
             ability_index: Some(0),
             ability_cost: None,
+            activation_cost_snapshot: None,
             unavailable_modes: vec![],
         }));
         variants.push(Box::new(WaitingFor::PayCost {
@@ -37300,6 +37440,7 @@ mod tests {
             declared_mana_additions: Vec::new(),
             accepted_cost_reductions: Vec::new(),
             cost_reduction_election: None,
+            activation_cost_snapshot: None,
             activation_cost: None,
             deferred_random_discard_cost: None,
             activation_ability_index: None,
@@ -37446,13 +37587,12 @@ mod tests {
 
     #[test]
     fn action_result_contains_events_and_waiting_for() {
-        let result = ActionResult {
-            events: vec![GameEvent::GameStarted],
-            waiting_for: WaitingFor::Priority {
+        let result = ActionResult::applied(
+            vec![GameEvent::GameStarted],
+            WaitingFor::Priority {
                 player: PlayerId(0),
             },
-            log_entries: vec![],
-        };
+        );
         assert_eq!(result.events.len(), 1);
     }
 

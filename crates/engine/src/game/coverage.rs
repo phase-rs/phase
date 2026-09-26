@@ -210,7 +210,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the spell-filtered `Some` shape (Vizier of the Menagerie) carries
             // an unbounded filter value space, so coverage support lives here.
             // Runtime enforcement is in
-            // casting.rs::player_can_spend_as_any_color_for_optional_spell.
+            // casting.rs::player_mana_spend_permission_for_optional_spell.
             | StaticMode::SpendManaAsAnyColor { .. }
             // CR 121.6: CantDraw carries `who` (controller vs all_players) —
             // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.
@@ -1520,7 +1520,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("cards in graveyard ({})", fmt_player_scope(player))
         }
         QuantityRef::LifeAboveStarting => "life above starting".into(),
-        QuantityRef::StartingLifeTotal => "starting life total".into(),
+        QuantityRef::StartingLifeTotal { .. } => "starting life total".into(),
         QuantityRef::TriggeringDiscoverValue => "the triggering discover's value".into(),
         QuantityRef::TriggeringScryLookCount => {
             "the number of cards looked at while scrying this way".into()
@@ -9678,7 +9678,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::UnspentMana { .. } => ("UnspentMana", Handled),
         QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
-        QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
+        QuantityRef::StartingLifeTotal { .. } => ("StartingLifeTotal", Handled),
         QuantityRef::TriggeringDiscoverValue => ("TriggeringDiscoverValue", Handled),
         QuantityRef::TriggeringScryLookCount => ("TriggeringScryLookCount", Handled),
         QuantityRef::TriggeringScryBottomCount => ("TriggeringScryBottomCount", Handled),
@@ -10131,7 +10131,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsHarnessed => ("SourceIsHarnessed", Handled),
         // SourceAttachedToCreature resolved by `layers::evaluate_condition`
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
-        // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
+        // SourceMatchesFilter resolved by layers::evaluate_condition.
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
         // CR 401.1 + CR 401.5: top-of-library gate, resolved by
         // layers::evaluate_condition_with_context against the controller's library top.
@@ -18191,6 +18191,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     fn target_zone_card_count_quantity_feature_is_marked_handled() {
         let (name, support) = quantity_ref_feature(&QuantityRef::TargetZoneCardCount {
             zone: ZoneRef::Library,
+            scope: ControllerRef::TargetPlayer,
+            binding: crate::types::ability::CountBinding::Explicit,
         });
 
         assert_eq!(name, "TargetZoneCardCount");
@@ -18198,6 +18200,17 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             support,
             FeatureSupport::Handled,
             "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
+        );
+    }
+
+    #[test]
+    fn starting_life_total_quantity_feature_is_marked_handled() {
+        assert_eq!(
+            quantity_ref_feature(&QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            }),
+            ("StartingLifeTotal", FeatureSupport::Handled),
+            "starting-life totals resolve through the selected player's format topology"
         );
     }
 
