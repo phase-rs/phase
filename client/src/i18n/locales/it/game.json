@@ -1797,6 +1797,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Metti il resto in fondo",
+      "subtitle_one": "Metti {{count}} carta rivelata in fondo al tuo grimorio",
+      "subtitle_other": "Metti {{count}} carte rivelate in fondo al tuo grimorio in qualsiasi ordine",
+      "hint": "Trascina per riordinare · la posizione 1 va in cima a questa pila",
+      "moveLeft": "Sposta a sinistra",
+      "moveRight": "Sposta a destra"
     }
   },
   "specializeColor": {

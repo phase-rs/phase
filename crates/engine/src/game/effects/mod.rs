@@ -2306,6 +2306,10 @@ pub(crate) fn parent_referent_context_from_events(
         return Some(snapshot);
     }
 
+    if let Some(snapshot) = reveal_until_object_context_from_events(events) {
+        return Some(snapshot);
+    }
+
     if let Some(snapshot) = revealed_object_context_from_events(state, events) {
         return Some(snapshot);
     }
@@ -2538,6 +2542,47 @@ fn stack_pushed_object_context_from_events(
     });
     let first = pushed.next()?;
     pushed.next().is_none().then_some(first)
+}
+
+/// CR 608.2c + CR 701.20a: A `RevealUntil` instruction that stopped on a single
+/// matching card introduces that card as the referent for downstream anaphoric
+/// pronouns ("that card's mana value", Erratic Mutation). Captured from
+/// `EffectResolved`'s subject snapshot.
+fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObjectSnapshot> {
+    let mut hits = events.iter().filter_map(|event| match event {
+        GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            subject: Some(subject),
+            ..
+        } => Some(CostPaidObjectSnapshot {
+            object_id: subject.identity.object_id,
+            lki: LKISnapshot {
+                name: subject.name.clone(),
+                token_image_ref: None,
+                power: subject.power,
+                toughness: subject.toughness,
+                base_power: subject.base_power,
+                base_toughness: subject.base_toughness,
+                mana_value: subject.mana_value,
+                controller: subject.controller,
+                owner: subject.owner,
+                card_types: subject.core_types.clone(),
+                subtypes: subject.subtypes.clone(),
+                supertypes: subject.supertypes.clone(),
+                keywords: subject.keywords.clone(),
+                colors: subject.colors.clone(),
+                chosen_attributes: Vec::new(),
+                counters: subject.counters.clone(),
+                tapped: subject.tapped,
+                is_suspected: subject.is_suspected,
+                attachments: Vec::new(),
+            },
+            incarnation: subject.identity.incarnation,
+        }),
+        _ => None,
+    });
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
 }
 
 /// CR 608.2c + CR 608.2h + CR 701.20b: A `reveal` instruction introduces an
@@ -3707,6 +3752,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
                 ..
             }
             | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
             | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::Cascade { .. },
@@ -3868,7 +3914,20 @@ pub(crate) fn optional_decline_branch(
     if let Some(branch) = ability.else_ability.as_deref() {
         return Some(Cow::Borrowed(branch));
     }
-    let sub = ability.sub_ability.as_deref()?;
+    let mut sub = ability.sub_ability.as_deref()?;
+    // CR 608.2c: an unconditional `ContinuationStep` is a resolution step of the
+    // declined instruction itself (Choice of Fortunes' "shuffle them into your
+    // library" = move, then shuffle), so it is skipped with that instruction and
+    // the decline is decided at the next printed node — an "if you do" gate or
+    // the next instruction. A `SequentialSibling`, a conditioned node, or a node
+    // with its own decline branch stops the walk.
+    while sub.sub_link == SubAbilityLink::ContinuationStep
+        && sub.condition.is_none()
+        && sub.else_ability.is_none()
+        && !should_resolve_subability_on_optional_decline(sub)
+    {
+        sub = sub.sub_ability.as_deref()?;
+    }
     let selected = should_resolve_subability_on_optional_decline(sub)
         || (sub.sub_link == SubAbilityLink::SequentialSibling
             && !sub_ability_is_reflexive(sub)
@@ -5574,8 +5633,11 @@ fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
 
 fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
-        Effect::CastFromZone { target, .. } => Some(target),
-        Effect::PutAtLibraryPosition { target, .. } => Some(target),
+        Effect::CastFromZone { target, .. }
+        | Effect::PutAtLibraryPosition { target, .. }
+        | Effect::ChangeZone { target, .. }
+        | Effect::Transform { target, .. }
+        | Effect::Reveal { target, .. } => Some(target),
         _ => None,
     }
 }
@@ -5590,13 +5652,20 @@ fn inject_last_revealed_targets(
         // CR 701.20e + CR 608.2c: In an immediate look-then-act chain, an exact
         // `ParentTarget` names the object produced by the parent look even though
         // looking does not move it or create an ordinary target. Bind that one
-        // sentinel through the existing look ledger. Composed filters remain
-        // intact so their concrete restrictions are still evaluated.
-        let filter = if matches!(filter, TargetFilter::ParentTarget) {
-            &TargetFilter::LastRevealed
-        } else {
-            filter
-        };
+        // sentinel through the existing look/reveal ledger across all zones
+        // (library look-then-cast for Planetarium, exile reveal-then-move for
+        // Clone Shell). Composed filters remain intact so their concrete
+        // restrictions are still evaluated.
+        if matches!(filter, TargetFilter::ParentTarget) {
+            return crate::game::filter::last_revealed_ids_matching(
+                state,
+                &TargetFilter::LastRevealed,
+                &ctx,
+            )
+            .into_iter()
+            .map(TargetRef::Object)
+            .collect();
+        }
         return crate::game::filter::last_revealed_library_ids_matching(state, filter, &ctx)
             .into_iter()
             .map(TargetRef::Object)
@@ -8450,6 +8519,10 @@ fn affected_objects_from_events(
                 // to that zone makes a downstream "from among the milled cards"
                 // sub-ability resolve against exactly the milled cards.
                 Effect::Mill { destination, .. } => Some(*destination),
+                // Seek: the sought cards land in the Seek's destination, so a
+                // downstream "them" names exactly those cards (Choice of
+                // Fortunes' "shuffle them into your library").
+                Effect::Seek { destination, .. } => Some(*destination),
                 // CR 701.20a + CR 608.2f: The kept card lands in `kept_destination`; scope the
                 // tracked set to that zone so downstream TrackedSet consumers (e.g. IC's
                 // ChangeZoneAll{Exile→Battlefield}) see only the kept card, not the rest pile.
@@ -17324,6 +17397,9 @@ fn resolve_chain_body(
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
             && effect_writes_last_revealed_ids(&ability.effect)
+            && (target_filter_for_last_revealed_sub(&sub.effect).is_some()
+                || effect_consumes_parent_object_referent(&sub.effect)
+                || has_member_driven_repeat(sub.as_ref()))
             // CR 701.21a: Sacrifice resolves its own battlefield-scoped eligible
             // pool — injecting library card IDs from a look-only Dig (e.g.
             // Birthing Ritual) would route through effect_object_targets and
@@ -28055,6 +28131,7 @@ mod tests {
             matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Exile,
             rest_destination: Zone::Library,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -28133,6 +28210,7 @@ mod tests {
             matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,

@@ -22973,6 +22973,27 @@ enum ActivationStructuralEligibility {
     WrongZone(Zone),
 }
 
+/// CR 113.6b: True when an activation-restriction condition states `zone` as a
+/// zone the ability functions from — "Activate only if ~ is in your graveyard"
+/// (Carrionette), "… is on the battlefield or in the command zone" (M'Odo, the
+/// Gnarled Oracle), "… is suspended" (Greater Gargadon: exile plus a time
+/// counter). A disjunction states each of its zones; a conjunction states the
+/// zone its source-zone conjunct names. The remaining conjuncts are ordinary
+/// mutable restrictions, enforced later by the restriction gate.
+fn restriction_condition_states_activation_zone(
+    condition: &crate::types::ability::ParsedCondition,
+    zone: Zone,
+) -> bool {
+    use crate::types::ability::ParsedCondition;
+    match condition {
+        ParsedCondition::SourceInZone { zone: stated } => *stated == zone,
+        ParsedCondition::Or { conditions } | ParsedCondition::And { conditions } => conditions
+            .iter()
+            .any(|c| restriction_condition_states_activation_zone(c, zone)),
+        _ => false,
+    }
+}
+
 /// CR 113.6 + CR 113.6b + CR 602.2: Classifies the immutable source-zone and activator
 /// prerequisites shared by activation legality and pre-cast payoff discovery.
 /// This deliberately runs before mutable restrictions, targets, and costs: a
@@ -23003,9 +23024,18 @@ fn activation_structural_eligibility(
         return ActivationStructuralEligibility::NinjutsuFamily;
     }
     // CR 113.6 + CR 113.6b: activated abilities default to functioning only
-    // on the battlefield unless their definition names another activation zone.
+    // on the battlefield unless their definition names another activation zone
+    // or their printed restriction states the zone the source is in.
+    let restriction_states_source_zone = ability_def.activation_restrictions.iter().any(|r| {
+        matches!(
+            r,
+            crate::types::ability::ActivationRestriction::RequiresCondition {
+                condition: Some(condition),
+            } if restriction_condition_states_activation_zone(condition, obj.zone)
+        )
+    });
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
-    if obj.zone != required_zone {
+    if obj.zone != required_zone && !restriction_states_source_zone {
         return ActivationStructuralEligibility::WrongZone(required_zone);
     }
     ActivationStructuralEligibility::Eligible

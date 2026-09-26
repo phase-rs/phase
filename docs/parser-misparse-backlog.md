@@ -2782,7 +2782,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 7. Wrong / dropped zone parameters on zone-change effect  (209 cards)
+### 7. Wrong / dropped zone parameters on zone-change effect  (208 cards)
 
 **Signature.** ChangeZone/ChangeZoneAll/Dig uses the wrong origin/destination zone, drops a count, inverts hand↔library, defaults origin to Exile, or omits a graveyard/owner-library routing.
 
@@ -2840,7 +2840,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Enlistment Officer
 - Eon Frolicker
 - Erratic Explosion
-- Erratic Mutation
 - Estrid, the Masked
 - Every Hope Shall Vanish
 - Explore the Vastlands

@@ -25940,6 +25940,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             matched_disposition: RevealUntilDisposition::RevealOnly,
             kept_destination: Zone::Exile,
             rest_destination: Zone::Library,
+            rest_order: DigRestOrder::Preserve,
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -40476,6 +40477,65 @@ fn reveal_until_puts_those_cards_to_graveyard() {
     );
 }
 
+/// CR 701.20a: Treasure Hunt — "then put all cards revealed this way into your hand."
+/// The entire revealed pile goes to hand (kept_destination=Hand, rest_destination=Hand).
+#[test]
+fn reveal_until_put_all_cards_revealed_this_way_into_hand() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a nonland card, then put all cards revealed this way into your hand.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Hand);
+    assert_eq!(*rest_destination, Zone::Hand);
+}
+
+/// CR 701.20a: Goblin Charbelcher tail — "Put the revealed cards on the bottom of your library in any order."
+/// Both matching and non-matching cards go to the library bottom.
+#[test]
+fn reveal_until_put_the_revealed_cards_on_bottom_of_library() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a land card. Put the revealed cards on the bottom of your library in any order.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Library);
+    assert_eq!(*rest_destination, Zone::Library);
+}
+
+/// CR 701.20a: All revealed cards into exile.
+#[test]
+fn reveal_until_put_all_cards_revealed_this_way_into_exile() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a land card, then put all cards revealed this way into exile.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Exile);
+    assert_eq!(*rest_destination, Zone::Exile);
+}
+
 /// CR 701.20a: Polymorph end-to-end — "Its controller reveals cards from
 /// the top of their library until they reveal a creature card. The player
 /// puts that card onto the battlefield, then shuffles all other cards
@@ -40574,6 +40634,7 @@ fn reveal_until_ring_goes_south_land_cards_to_battlefield_tapped() {
                 filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                 kept_destination: Zone::Battlefield,
                 rest_destination: Zone::Library,
+                rest_order: crate::types::ability::DigRestOrder::Random,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 ..
@@ -41337,6 +41398,173 @@ fn reveal_until_rest_pile_after_intervening_damage_is_absorbed() {
         "rest-pile placement must be absorbed by RevealUntil, not emitted as {:?}",
         damage.sub_ability
     );
+}
+
+/// CR 701.20a + CR 608.2c + CR 401.4: Erratic Mutation has a pump instruction between
+/// the RevealUntil and "Put all cards revealed this way on the bottom of your library in any order."
+/// The entire revealed pile (matching nonland card + preceding lands) goes to the bottom of the library
+/// (kept_destination=Library, rest_destination=Library); CR 401.4 lets its owner arrange that pile.
+/// The placement clause must be absorbed into
+/// RevealUntil, NOT emitted as a trailing PutAtLibraryPosition sibling that prompts for a second target.
+#[test]
+fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
+    let def = parse_effect_chain(
+        "Choose target creature. Reveal cards from the top of your library until you reveal a nonland card. \
+         That creature gets +X/-X until end of turn, where X is that card's mana value. \
+         Put all cards revealed this way on the bottom of your library in any order.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::TargetOnly { ref target } = *def.effect else {
+        panic!("expected TargetOnly head, got {:?}", def.effect);
+    };
+    assert_eq!(*target, TargetFilter::Typed(TypedFilter::creature()));
+
+    let reveal = def
+        .sub_ability
+        .as_ref()
+        .expect("TargetOnly head must chain into RevealUntil");
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*reveal.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", reveal.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Library);
+    assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+
+    let pump = reveal
+        .sub_ability
+        .as_ref()
+        .expect("RevealUntil must chain into pump");
+    let Effect::Pump {
+        target: ref pump_target,
+        power,
+        toughness,
+        ..
+    } = &*pump.effect
+    else {
+        panic!("expected Pump, got {:?}", pump.effect);
+    };
+    assert_eq!(*pump_target, TargetFilter::ParentTarget);
+    assert_eq!(
+        *power,
+        PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            }
+        })
+    );
+    assert_eq!(
+        *toughness,
+        PtValue::Quantity(QuantityExpr::Multiply {
+            factor: -1,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Demonstrative,
+                }
+            }),
+        })
+    );
+    assert!(
+        pump.sub_ability.is_none(),
+        "all-revealed-cards placement must be absorbed by RevealUntil, not emitted as {:?}",
+        pump.sub_ability
+    );
+}
+
+/// CR 701.24a: A trailing shuffle instruction after RevealUntil must be emitted
+/// as a distinct Effect::Shuffle, not swallowed into PutRest (The Crimson Avenger,
+/// Underdark Beholder).
+#[test]
+fn reveal_until_followed_by_shuffle_emits_distinct_shuffle() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a nonland card. \
+         Cast that card without paying its mana cost. Then shuffle your library.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil { .. } = &*def.effect else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    let cast = def
+        .sub_ability
+        .as_ref()
+        .expect("RevealUntil must chain into Cast");
+    let shuffle = cast
+        .sub_ability
+        .as_ref()
+        .expect("Cast must chain into Shuffle");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "expected trailing Effect::Shuffle, got {:?}",
+        shuffle.effect
+    );
+}
+
+/// CR 401.4: unspecified order gives the owner a choice only for library placement.
+#[test]
+fn reveal_until_all_cards_unspecified_order_matches_destination() {
+    for (placement, destination, expected_order) in [
+        (
+            "on the bottom of your library",
+            Zone::Library,
+            DigRestOrder::PlayerChoice,
+        ),
+        (
+            "into your library",
+            Zone::Library,
+            DigRestOrder::PlayerChoice,
+        ),
+        ("into your hand", Zone::Hand, DigRestOrder::Preserve),
+        (
+            "into your graveyard",
+            Zone::Graveyard,
+            DigRestOrder::Preserve,
+        ),
+        ("into exile", Zone::Exile, DigRestOrder::Preserve),
+    ] {
+        let def = parse_effect_chain(
+            &format!("Reveal cards from the top of your library until you reveal a nonland card. Put all cards revealed this way {placement}."),
+            AbilityKind::Spell,
+        );
+        let Effect::RevealUntil {
+            kept_destination,
+            rest_destination,
+            rest_order,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected RevealUntil for {placement}, got {:?}", def.effect);
+        };
+        assert_eq!(*kept_destination, destination, "{placement}");
+        assert_eq!(*rest_destination, destination, "{placement}");
+        assert_eq!(*rest_order, expected_order, "{placement}");
+    }
+}
+
+/// CR 701.20a: All cards revealed on the bottom in a random order.
+#[test]
+fn reveal_until_all_cards_revealed_this_way_random_order() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a nonland card. Put all cards revealed this way on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Library);
+    assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*rest_order, DigRestOrder::Random);
 }
 
 /// CR 701.20a: "reveal until you reveal X nonland cards, where X is the
@@ -73526,4 +73754,89 @@ fn adjacent_defender_grammars_keep_their_own_parse_on_the_effect_side() {
         static_abilities[0].condition, None,
         "no interposed class is printed here, so the permission stays unconditioned"
     );
+}
+
+/// CR 701.20a + CR 202.3: a reveal-until type list that shares ONE "card" head
+/// noun ("an instant, sorcery, or enchantment card with converted mana cost less
+/// than N" — Underdark Beholder; "a creature or land card with mana value 3 or
+/// less") applies the post-noun qualifier to every disjunct. A list of distinct
+/// card phrases (An Unearthly Child) keeps each disjunct's own filter.
+#[test]
+fn reveal_until_shared_card_qualifier_constrains_every_disjunct() {
+    fn disjuncts(filter: TargetFilter) -> Vec<TypedFilter> {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected a disjunctive filter, got {filter:?}");
+        };
+        filters
+            .into_iter()
+            .map(|f| match f {
+                TargetFilter::Typed(typed) => typed,
+                other => panic!("expected typed disjuncts, got {other:?}"),
+            })
+            .collect()
+    }
+
+    let beholder = disjuncts(build_reveal_until_filter(
+        "instant, sorcery, or enchantment card with converted mana cost less than the number of eyestalk counters on ~",
+    ));
+    assert_eq!(
+        beholder
+            .iter()
+            .map(|t| t.type_filters.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![TypeFilter::Instant],
+            vec![TypeFilter::Sorcery],
+            vec![TypeFilter::Enchantment]
+        ]
+    );
+    let bound = &beholder[2].properties;
+    assert!(
+        bound.iter().any(|p| matches!(
+            p,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                ..
+            }
+        )),
+        "the enchantment disjunct carries the mana-value bound, got {bound:?}"
+    );
+    for typed in &beholder {
+        assert_eq!(&typed.properties, bound, "shared qualifier on {typed:?}");
+    }
+
+    let two_types = disjuncts(build_reveal_until_filter(
+        "creature or land card with mana value 3 or less",
+    ));
+    let three_or_less = FilterProp::Cmc {
+        comparator: Comparator::LE,
+        value: QuantityExpr::Fixed { value: 3 },
+    };
+    assert_eq!(two_types.len(), 2);
+    for typed in &two_types {
+        assert_eq!(typed.properties, vec![three_or_less.clone()], "{typed:?}");
+    }
+
+    // Distinct card phrases: the "with doctor's companion" qualifier belongs to
+    // its own disjunct only.
+    let child = disjuncts(build_reveal_until_filter(
+        "doctor card, a card with doctor's companion, or a vehicle card",
+    ));
+    assert_eq!(child.len(), 3);
+    assert_ne!(child[0].properties, child[1].properties);
+    assert_ne!(child[2].properties, child[1].properties);
+
+    // No "or": a comma list of adjectives on ONE card (Plargg, Dean of Chaos)
+    // is a single conjunctive filter, never a disjunction.
+    let plargg = build_reveal_until_filter("nonlegendary, nonland card with mana value 3 or less");
+    let TargetFilter::Typed(plargg) = plargg else {
+        panic!("expected one conjunctive typed filter, got {plargg:?}");
+    };
+    assert!(
+        plargg
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+        "{plargg:?}"
+    );
+    assert!(plargg.properties.contains(&three_or_less), "{plargg:?}");
 }

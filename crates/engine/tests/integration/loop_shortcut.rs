@@ -5115,8 +5115,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 138,
-        "`WaitingFor` has 138 variants at this tip, read off the `syn` parse. This number is \
+        total, 139,
+        "`WaitingFor` has 139 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5162,6 +5162,15 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // from the `filter_state_for_viewer` redaction loop: the spell is already announced and every
     // snapshotted reduction comes from a face-up battlefield permanent, so the prompt carries no
     // private information — the same reasoning that leaves `OrderTriggers` unredacted.
+    // 137 ⇒ 138 is ADJUDICATED: CR 401.4's library-order choice added
+    // `RevealUntilBottomOrder { player, source_id, cards, clear_markers, emit_reveal_until_resolved, reveal_until_hit_snapshot }`.
+    // Measured, not inferred: holds no `DecisionTemplate` (resolution-choice prompt handled in
+    // `engine_resolution_choices`), so the carrier assertion is unchanged. It is also explicitly
+    // included in `accepts_freeform_card_order` and carries public card identifiers.
+    // 138 ⇒ 139 is ADJUDICATED: CR 701.71a's Empower Jace choice (CR 608.2d) added
+    // `EmpowerJaceChoice { player, source_id, valid_targets }`. Measured, not inferred from the
+    // diff: that body holds NO `DecisionTemplate` (zero matches), so it is not a third carrier and
+    // the carrier assertion below is unchanged by it.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(

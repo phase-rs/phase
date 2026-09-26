@@ -484,6 +484,89 @@ fn parse_reveal_until_conditional_kept(input: &str) -> OracleResult<'_, Continua
     ))
 }
 
+/// CR 701.20a: Parse a whole-clause continuation moving all cards revealed by
+/// an earlier `RevealUntil` to a single destination zone.
+///
+/// Handles:
+/// - "puts those cards into their graveyard"
+/// - "put those cards into your graveyard"
+/// - "put all cards revealed this way on the bottom of your library in any order"
+/// - "put all cards revealed this way on the bottom of your library in a random order"
+/// - "put all cards revealed this way into your hand"
+/// - "put all cards revealed this way into exile"
+/// - "put the revealed cards on the bottom of your library in any order"
+fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, ContinuationAst> {
+    type E<'a> = OracleError<'a>;
+    let (input, _) = opt(alt((tag::<_, _, E>("then "), tag("and ")))).parse(input)?;
+    let (input, _) = alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, E>("those cards"),
+        tag("all cards revealed this way"),
+        tag("all cards revealed in this way"),
+        tag("the revealed cards"),
+    ))
+    .parse(input)?;
+    let (input, destination) = alt((
+        value(
+            Zone::Graveyard,
+            alt((
+                tag::<_, _, E>(" into your graveyard"),
+                tag(" into their graveyard"),
+                tag(" into their owners' graveyards"),
+                tag(" into its owner's graveyard"),
+            )),
+        ),
+        value(
+            Zone::Hand,
+            alt((tag::<_, _, E>(" into your hand"), tag(" into their hand"))),
+        ),
+        value(
+            Zone::Exile,
+            alt((tag::<_, _, E>(" into exile"), tag(" in exile"))),
+        ),
+        value(
+            Zone::Library,
+            alt((
+                tag::<_, _, E>(" on the bottom of your library"),
+                tag(" on the bottom of their library"),
+                tag(" on the bottom of its owner's library"),
+                tag(" on the bottom of their owner's library"),
+                tag(" on the bottom of their owners' libraries"),
+                tag(" into your library"),
+                tag(" into their library"),
+                tag(" into its owner's library"),
+            )),
+        ),
+    ))
+    .parse(input)?;
+    let (input, rest_order) = opt(alt((
+        value(
+            crate::types::ability::DigRestOrder::PlayerChoice,
+            tag::<_, _, E>(" in any order"),
+        ),
+        value(
+            crate::types::ability::DigRestOrder::Random,
+            tag(" in a random order"),
+        ),
+    )))
+    .parse(input)?;
+    // CR 401.4: absent randomization, the owner orders cards placed together in a library.
+    let rest_order = rest_order.unwrap_or(if destination == Zone::Library {
+        DigRestOrder::PlayerChoice
+    } else {
+        DigRestOrder::Preserve
+    });
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((
+        input,
+        ContinuationAst::RevealUntilAllToZone {
+            destination,
+            rest_order,
+        },
+    ))
+}
+
 /// CR 701.20a: Detect the rest-pile zone in a `RevealUntil` continuation
 /// chunk. The "rest" subject may be phrased as "the rest" / "all other cards
 /// revealed this way" / "the other cards" — and may be governed by an
@@ -533,6 +616,26 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
     // "in any order", "shuffles ... into their library", and the bare
     // "and the rest" with no zone phrase.
     Some(Zone::Library)
+}
+
+/// CR 401.4 + CR 608.2c: Detect both rest-pile zone and rest ordering for RevealUntil.
+fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRestOrder) {
+    let rest_zone = parse_reveal_until_rest_zone(lower);
+    let rest_order = if nom_primitives::scan_contains(lower, "in a random order")
+        || nom_primitives::scan_contains(lower, "shuffle ")
+        || nom_primitives::scan_contains(lower, "shuffles ")
+    {
+        DigRestOrder::Random
+    } else if nom_primitives::scan_contains(lower, "in any order")
+        || rest_zone == Some(Zone::Library)
+    {
+        // CR 401.4: without an explicit randomization instruction, the owner
+        // chooses the order of cards placed together at a library position.
+        DigRestOrder::PlayerChoice
+    } else {
+        DigRestOrder::Preserve
+    };
+    (rest_zone, rest_order)
 }
 
 /// Whole-line dig continuation "put the rest on the bottom of your library
@@ -5675,6 +5778,7 @@ pub(super) fn apply_clause_continuation(
             enters_attacking: attacking,
             any_number,
             rest_destination: rest_dest,
+            rest_order: rest_ord,
             enters_under,
             optional_decline,
         } => {
@@ -5686,6 +5790,7 @@ pub(super) fn apply_clause_continuation(
                 enter_tapped,
                 enters_attacking,
                 rest_destination,
+                rest_order,
                 kept_optional_to,
                 matched_disposition,
                 enters_under: effect_enters_under,
@@ -5707,6 +5812,8 @@ pub(super) fn apply_clause_continuation(
                     if let Some(rest) = rest_dest {
                         *rest_destination = rest;
                     }
+                    *rest_order = rest_ord;
+                    *effect_enters_under = enters_under;
                     return;
                 }
                 match optional_decline {
@@ -5739,6 +5846,7 @@ pub(super) fn apply_clause_continuation(
                 if let Some(rest) = rest_dest {
                     *rest_destination = rest;
                 }
+                *rest_order = rest_ord;
                 *effect_enters_under = enters_under;
             }
         }
@@ -5754,20 +5862,31 @@ pub(super) fn apply_clause_continuation(
                 *grant_extra_turn_after = true;
             }
         }
-        // CR 701.20a: "puts those cards into [zone]" — both the matching card and
-        // the non-matching cards go to the same zone.
-        ContinuationAst::RevealUntilAllToZone { destination } => {
-            let Some(previous) = defs.last_mut() else {
-                return;
-            };
-            if let Effect::RevealUntil {
-                kept_destination,
-                rest_destination,
-                ..
-            } = &mut *previous.effect
-            {
-                *kept_destination = destination;
-                *rest_destination = destination;
+        // CR 701.20a: "puts those cards into [zone]" / "put all cards revealed this way
+        // into [zone]" — both the matching card and the non-matching cards go to the
+        // same zone. Resolves back to the nearest DigOrRevealUntil antecedent via env
+        // so that intervening transparent instructions (such as Pump on Erratic Mutation
+        // or DealDamage on Explosive Revelation) do not block destination patching.
+        ContinuationAst::RevealUntilAllToZone {
+            destination,
+            rest_order,
+        } => {
+            let target_idx = env
+                .resolve(
+                    defs,
+                    super::assembly::AntecedentSelector::LastWithRole(
+                        super::assembly::AntecedentRole::DigOrRevealUntil,
+                    ),
+                    None,
+                    super::assembly::OnMiss::Ignore,
+                )
+                .or_else(|| defs.len().checked_sub(1));
+            if let Some(target_idx) = target_idx {
+                patch_reveal_until_all_to_zone_recursively(
+                    &mut defs[target_idx],
+                    destination,
+                    rest_order,
+                );
             }
         }
         // CR 202.3 + CR 608.2c: "If its mana value is <comparator> <dynamic
@@ -6068,14 +6187,46 @@ fn patch_rest_destination_recursively(
             *dig_rest_order = rest_order;
         }
         Effect::RevealUntil {
-            rest_destination, ..
+            rest_destination,
+            rest_order: effect_rest_order,
+            ..
         } => {
             *rest_destination = destination;
+            *effect_rest_order = rest_order;
         }
         _ => {}
     }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        patch_rest_destination_recursively(sub, destination, reorder_all, rest_order);
+    }
     if let Some(else_def) = def.else_ability.as_deref_mut() {
         patch_rest_destination_recursively(else_def, destination, reorder_all, rest_order);
+    }
+}
+
+/// Recursively patch `kept_destination`, `rest_destination`, and `rest_order` on RevealUntil effects
+/// reachable from `def` via `sub_ability` or `else_ability`.
+fn patch_reveal_until_all_to_zone_recursively(
+    def: &mut AbilityDefinition,
+    destination: Zone,
+    rest_order: crate::types::ability::DigRestOrder,
+) {
+    if let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        rest_order: effect_rest_order,
+        ..
+    } = &mut *def.effect
+    {
+        *kept_destination = destination;
+        *rest_destination = destination;
+        *effect_rest_order = rest_order;
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        patch_reveal_until_all_to_zone_recursively(sub, destination, rest_order);
+    }
+    if let Some(else_def) = def.else_ability.as_deref_mut() {
+        patch_reveal_until_all_to_zone_recursively(else_def, destination, rest_order);
     }
 }
 
@@ -7947,7 +8098,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 } else {
                     (Zone::Hand, false, false)
                 };
-            let rest_destination = parse_reveal_until_rest_zone(&lower);
+            let (rest_destination, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
             // "under your control" stamps the controller of the kept cards; absent
             // the clause they enter under the revealing player's control by default.
             // Mirrors the singular "put that card" arm so the set-disposition path
@@ -7963,6 +8114,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 enters_attacking,
                 any_number: true,
                 rest_destination,
+                rest_order,
                 enters_under,
                 optional_decline: None,
             })
@@ -7999,7 +8151,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                     // Default "into your hand"
                     (Zone::Hand, false, false)
                 };
-            let rest = parse_reveal_until_rest_zone(&lower);
+            let (rest, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
             // CR 701.20a + CR 608.2c: "you may put that card onto the battlefield"
             // makes the kept destination a controller choice. The decline zone is
             // the explicit "if you don't, put it into your hand" (→ Hand) or the
@@ -8025,6 +8177,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 enters_attacking,
                 any_number: false,
                 rest_destination: rest,
+                rest_order,
                 enters_under,
                 optional_decline,
             })
@@ -8032,33 +8185,20 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // CR 701.20a: "put the rest" / "the rest on the bottom" / "put the revealed cards"
         // after RevealUntil — overrides rest_destination. The "the rest" without "put"
         // occurs when split_clause_sequence splits "put X and the rest" on "and".
-        // Also recognizes:
-        //   • "shuffles ... revealed this way into <possessive> library" (Polymorph,
-        //     Transmogrify) — the engine's existing rest=Library destination already
-        //     random-orders, satisfying the shuffle semantics.
-        //   • Third-person "puts" verb form (Polymorph chain).
-        // CR 701.20a: "puts those cards into [zone]" / "put those cards into [zone]"
-        // after RevealUntil — the entire revealed pile (matching card + everything
-        // revealed before it) goes to the same zone. Checked before the PutRest arm
-        // because "those cards" is a distinct semantic from "the rest" and must
-        // override both kept_destination and rest_destination. Used by Balustrade
-        // Spy, Consuming Aberration, Destroy the Evidence, Undercity Informer.
+        // Also recognizes the third-person "puts" verb form (Polymorph chain).
+        // CR 701.20a: "puts those cards into [zone]" / "put all cards revealed this way
+        // into [zone]" after RevealUntil — the entire revealed pile (matching card +
+        // everything revealed before it) goes to the same zone. Checked before the PutRest
+        // arm because "those cards" / "all cards revealed this way" is a distinct
+        // semantic from "the rest" and must override both kept_destination and rest_destination.
+        // Used by Balustrade Spy, Consuming Aberration, Destroy the Evidence, Undercity
+        // Informer, Erratic Mutation.
         Effect::RevealUntil { .. }
-            if nom_primitives::scan_contains(&lower, "puts those cards")
-                || nom_primitives::scan_contains(&lower, "put those cards") =>
+            if parse_reveal_until_all_to_zone_continuation(lower.trim()).is_ok() =>
         {
-            let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
-                || nom_primitives::scan_contains(&lower, "into their graveyard")
-            {
-                Zone::Graveyard
-            } else if nom_primitives::scan_contains(&lower, "into exile")
-                || nom_primitives::scan_contains(&lower, "on the bottom")
-            {
-                Zone::Library
-            } else {
-                Zone::Graveyard
-            };
-            Some(ContinuationAst::RevealUntilAllToZone { destination })
+            parse_reveal_until_all_to_zone_continuation(lower.trim())
+                .ok()
+                .map(|(_, cont)| cont)
         }
         //   • "put the revealed cards" / "put them back" after RevealUntil — the
         //     revealed pile's destination override for the non-matching cards only.
@@ -8074,17 +8214,16 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 || nom_primitives::scan_contains(&lower, "put the revealed cards")
                 || nom_primitives::scan_contains(&lower, "put them back")
                 || nom_primitives::scan_contains(&lower, "all other cards revealed this way")
-                || nom_primitives::scan_contains(&lower, "other cards revealed this way")
-                || (nom_primitives::scan_contains(&lower, "shuffle")
-                    && nom_primitives::scan_contains(&lower, "library")) =>
+                || nom_primitives::scan_contains(&lower, "other cards revealed this way") =>
         {
-            // Delegate to the shared rest-zone matcher so the kept-card and
-            // standalone-rest arms recognize the same destination phrases.
-            let destination = parse_reveal_until_rest_zone(&lower).unwrap_or(Zone::Library);
+            // Delegate to the shared rest-zone/order matcher so the kept-card and
+            // standalone-rest arms recognize the same destination and ordering
+            // phrases ("in a random order" / "in any order", CR 401.4).
+            let (destination, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
             Some(ContinuationAst::PutRest {
-                destination,
+                destination: destination.unwrap_or(Zone::Library),
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order,
             })
         }
         // "create a ... token and suspect it" → chain suspect on last created token
@@ -9190,6 +9329,42 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    // CR 401.4: unspecified library placement preserves the owner's choice;
+    // explicit randomization and non-library destinations retain their modes.
+    #[test]
+    fn reveal_until_rest_order_distinguishes_default_from_randomization() {
+        for (text, expected) in [
+            (
+                "put the rest on the bottom of your library",
+                DigRestOrder::PlayerChoice,
+            ),
+            (
+                "put the rest on the bottom of your library in any order",
+                DigRestOrder::PlayerChoice,
+            ),
+            (
+                "put the rest on the bottom of your library in a random order",
+                DigRestOrder::Random,
+            ),
+            ("shuffle the rest into your library", DigRestOrder::Random),
+            (
+                "that player shuffles the rest into their library",
+                DigRestOrder::Random,
+            ),
+            (
+                "and the rest on the bottom of your library",
+                DigRestOrder::PlayerChoice,
+            ),
+            ("put the rest into your graveyard", DigRestOrder::Preserve),
+        ] {
+            assert_eq!(
+                parse_reveal_until_rest_zone_and_order(text).1,
+                expected,
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn face_down_pile_is_dig_lookback_transparent() {
@@ -11137,6 +11312,7 @@ mod tests {
             matched_disposition: RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
+            rest_order: crate::types::ability::DigRestOrder::Random,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -11154,10 +11330,11 @@ mod tests {
                 Some(ContinuationAst::RevealUntilKept {
                     destination: Zone::Battlefield,
                     enter_tapped: true,
+                    rest_order: crate::types::ability::DigRestOrder::Random,
                     ..
                 })
             ),
-            "expected RevealUntilKept to battlefield tapped, got {result:?}"
+            "expected RevealUntilKept to battlefield tapped with random rest order, got {result:?}"
         );
     }
 

@@ -538,6 +538,11 @@ pub(crate) enum ContinuationAst {
         /// "put that card …" form (`KeepEach`).
         any_number: bool,
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c + CR 701.20a: Rest-pile ordering. Defaults to
+        /// `Random` for library rest piles under CR 701.20a, or `PlayerChoice`
+        /// when "in any order" is specified.
+        #[serde(default)]
+        rest_order: crate::types::ability::DigRestOrder,
         /// CR 110.2a: "under your control" on the kept-card clause.
         enters_under: Option<ControllerRef>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
@@ -554,7 +559,14 @@ pub(crate) enum ContinuationAst {
     /// `rest_destination`. Used by cards like Balustrade Spy, Consuming Aberration,
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
-    RevealUntilAllToZone { destination: Zone },
+    RevealUntilAllToZone {
+        destination: Zone,
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::DigRestOrder::is_preserve"
+        )]
+        rest_order: crate::types::ability::DigRestOrder,
+    },
     /// CR 202.3 + CR 608.2c: "If its mana value is <comparator> <dynamic
     /// quantity>, put it onto <zone>[. Otherwise, put it into <zone>]." after
     /// RevealUntil — a card-property branch on the hit card's own mana value

@@ -1840,6 +1840,14 @@
       "subtitle_one": "置く：{{count}} 公開済み カード 上 一番下 の あなたの ライブラリー",
       "subtitle_other": "置く：{{count}} 公開済み カード 上 一番下 の あなたの ライブラリー, 中 いずれか 順序",
       "hint": "ドラッグして並べ替え · 位置1がこの束の一番上になる"
+    },
+    "revealUntilBottom": {
+      "title": "残りを一番下に並べる",
+      "subtitle_one": "公開したカード{{count}}枚をあなたのライブラリーの一番下に置く",
+      "subtitle_other": "公開したカード{{count}}枚を好きな順番であなたのライブラリーの一番下に置く",
+      "hint": "ドラッグして並べ替え · 位置1がこの束の一番上になる",
+      "moveLeft": "左へ移動",
+      "moveRight": "右へ移動"
     }
   },
   "specializeColor": {

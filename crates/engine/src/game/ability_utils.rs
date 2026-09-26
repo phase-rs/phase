@@ -17797,6 +17797,7 @@ mod tests {
                 matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
                 kept_destination: Zone::Battlefield,
                 rest_destination: Zone::Graveyard,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 kept_optional_to: None,

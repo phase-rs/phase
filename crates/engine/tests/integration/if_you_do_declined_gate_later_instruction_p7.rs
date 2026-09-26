@@ -30,7 +30,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -609,7 +609,7 @@ fn assert_no_maximum_hand_size_emblem(runner: &GameRunner) {
 }
 
 /// J-2g: declined, there is no shuffle and no second seek, and the player still
-/// gets the "no maximum hand size" emblem.
+/// gets the "no maximum hand size" emblem while leaving the first two sought cards in hand.
 #[test]
 fn choice_of_fortunes_declined_still_creates_the_emblem() {
     let (runner, events) = choice_of_fortunes(false);
@@ -618,23 +618,109 @@ fn choice_of_fortunes_declined_still_creates_the_emblem() {
         vec![EffectKind::Seek, EffectKind::CreateEmblem]
     );
     assert_no_maximum_hand_size_emblem(&runner);
+
+    // Declined path leaves the two sought cards in hand
+    let p0_hand = &runner.state().players[P0.0 as usize].hand;
+    assert_eq!(p0_hand.len(), 2, "P0 hand should retain the 2 sought cards");
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "no shuffle event on declined path"
+    );
 }
 
-/// J-2g′: accepted, every instruction happens. GREEN AT BASE: reach guard of
-/// J-2g; preservation only.
+/// J-2g′: accepted — CR 608.2c + CR 701.24c: "You may shuffle them into your
+/// library" moves BOTH cards the first seek put into hand back into the library
+/// and shuffles it, and only then does "If you do, seek two cards" run.
 #[test]
 fn choice_of_fortunes_accepted_seeks_twice_and_creates_the_emblem() {
     let (runner, events) = choice_of_fortunes(true);
-    assert_eq!(
-        resolved(&events),
-        vec![
-            EffectKind::Seek,
-            EffectKind::Shuffle,
-            EffectKind::Seek,
-            EffectKind::CreateEmblem
-        ]
-    );
     assert_no_maximum_hand_size_emblem(&runner);
+
+    let moves = |from: Zone, to: Zone| -> Vec<(usize, ObjectId)> {
+        events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(f),
+                    to: t,
+                    ..
+                } if *f == from && *t == to => Some((index, *object_id)),
+                _ => None,
+            })
+            .collect()
+    };
+    let sought = moves(Zone::Library, Zone::Hand);
+    assert_eq!(sought.len(), 4, "two seeks of two cards each: {events:?}");
+    let (first_seek, second_seek) = sought.split_at(2);
+
+    // Both first-seek cards leave the hand for the library.
+    let returned = moves(Zone::Hand, Zone::Library);
+    let mut returned_ids: Vec<ObjectId> = returned.iter().map(|(_, id)| *id).collect();
+    let mut first_ids: Vec<ObjectId> = first_seek.iter().map(|(_, id)| *id).collect();
+    returned_ids.sort();
+    first_ids.sort();
+    assert_eq!(
+        returned_ids, first_ids,
+        "exactly the two first-seek cards return to the library"
+    );
+    assert!(
+        !returned_ids
+            .iter()
+            .any(|id| runner.state().objects[id].name == "Choice of Fortunes"),
+        "the resolving spell is never the moved object"
+    );
+
+    // Then P0's library is shuffled, then the second seek runs.
+    let last_return = returned.iter().map(|(index, _)| *index).max().unwrap();
+    let shuffle = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P0
+            )
+        })
+        .expect("P0's library is shuffled");
+    assert!(last_return < shuffle, "the cards move before the shuffle");
+    // CR 701.24a: one shuffle for the whole set, not one per moved card.
+    let shuffles = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(shuffles, 1, "{events:?}");
+    assert!(
+        second_seek.iter().all(|(index, _)| shuffle < *index),
+        "the second seek runs after the shuffle"
+    );
+
+    // Final state: the second seek's two cards are the hand; the library holds
+    // the other four of the six.
+    let state = runner.state();
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 2);
+    assert_eq!(state.players[P0.0 as usize].library.len(), 4);
+    for (_, id) in second_seek {
+        assert_eq!(state.objects[id].zone, Zone::Hand);
+    }
 }
 
 /// J-3 (a): declined, the gate's doubling is skipped, and both later

@@ -1285,11 +1285,13 @@ pub fn candidate_actions_broad_with_probe(
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
-        // CR 702.60a: the Ripple bottom-order response is a full permutation of
-        // the uncast revealed pile. `select_cards_variants` yields the identity
-        // ordering (+ a couple of variants); `apply()` validates any permutation.
-        WaitingFor::RippleBottomOrder { player, cards, .. } => {
-            select_cards_variants(*player, cards, Some(cards.len()))
+        // CR 702.60a + CR 608.2d + CR 401.4: the bottom-order response is a full
+        // permutation of the revealed pile. The owner of those cards may arrange
+        // them in any order (CR 401.4). `bounded_select_card_permutations` yields
+        // bounded permutations (identity, reverse, and variants up to output cap).
+        WaitingFor::RippleBottomOrder { player, cards, .. }
+        | WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+            bounded_select_card_permutations(*player, cards)
         }
         WaitingFor::ArrangePlanarDeckTopChoice {
             player,
@@ -5296,6 +5298,26 @@ fn bounded_select_card_candidates(
         .collect()
 }
 
+/// CR 401.4 + CR 608.2d + CR 702.60a: The bottom-order response is a full
+/// permutation of the revealed pile. The owner of those cards may arrange them
+/// in any order (CR 401.4). `bounded_select_card_permutations` yields bounded
+/// permutations (identity, alternate permutations, and reverse up to output cap).
+fn bounded_select_card_permutations(
+    player: PlayerId,
+    cards: &[crate::types::identifiers::ObjectId],
+) -> Vec<CandidateAction> {
+    bounded_permutations(cards, SELECTION_CANDIDATE_CAP)
+        .into_iter()
+        .map(|permutation| {
+            candidate(
+                GameAction::SelectCards { cards: permutation },
+                TacticalClass::Selection,
+                Some(player),
+            )
+        })
+        .collect()
+}
+
 fn remove_counter_cost_distribution_candidate(
     state: &GameState,
     player: PlayerId,
@@ -6027,6 +6049,70 @@ fn push_object_combo(
     let key: Vec<u64> = combo.iter().map(|id| id.0).collect();
     if seen.insert(key) {
         output.push(combo);
+    }
+}
+
+/// CR 401.4: Generates permutations of `items` bounded by `output_cap`.
+///
+/// Identity order is always emitted first. For pools up to `SELECTION_POOL_CAP`,
+/// recursive backtracking yields up to `output_cap` permutations (all 24 at len 4,
+/// 64 of 120 at len 5), ensuring reverse is included. For larger pools, factorial
+/// blowup is avoided by providing the identity and reverse orders.
+fn bounded_permutations(
+    items: &[crate::types::identifiers::ObjectId],
+    output_cap: usize,
+) -> Vec<Vec<crate::types::identifiers::ObjectId>> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    if items.len() == 1 {
+        return vec![items.to_vec()];
+    }
+    if items.len() > SELECTION_POOL_CAP {
+        let mut reverse = items.to_vec();
+        reverse.reverse();
+        return vec![items.to_vec(), reverse];
+    }
+    let mut output = Vec::new();
+    let mut current = Vec::with_capacity(items.len());
+    let mut used = vec![false; items.len()];
+    permute_objects_into(items, &mut current, &mut used, &mut output, output_cap);
+    let reverse: Vec<_> = items.iter().rev().copied().collect();
+    if !output.contains(&reverse) {
+        if output.len() >= output_cap {
+            output.pop();
+        }
+        output.push(reverse);
+    }
+    output
+}
+
+fn permute_objects_into(
+    items: &[crate::types::identifiers::ObjectId],
+    current: &mut Vec<crate::types::identifiers::ObjectId>,
+    used: &mut [bool],
+    out: &mut Vec<Vec<crate::types::identifiers::ObjectId>>,
+    cap: usize,
+) {
+    if out.len() >= cap {
+        return;
+    }
+    if current.len() == items.len() {
+        out.push(current.clone());
+        return;
+    }
+    for (i, &item) in items.iter().enumerate() {
+        if used[i] {
+            continue;
+        }
+        used[i] = true;
+        current.push(item);
+        permute_objects_into(items, current, used, out, cap);
+        current.pop();
+        used[i] = false;
+        if out.len() >= cap {
+            break;
+        }
     }
 }
 
@@ -9358,5 +9444,36 @@ mod tests {
             crate::ai_support::legal_actions(&declared).contains(&GameAction::DeclineShortcut),
             "the decline stays legal on both arms, which is what keeps the pair one axis apart"
         );
+    }
+
+    /// CR 401.4 + CR 608.2d: for RevealUntilBottomOrder and RippleBottomOrder, the owner
+    /// may arrange cards in any order. The AI must be able to offer alternate permutations
+    /// (e.g. [B, A] for [A, B]), not only the identity combination [A, B].
+    #[test]
+    fn reveal_until_bottom_order_ai_candidates_include_alternate_permutations() {
+        let mut state = GameState::new_two_player(42);
+        let a = ObjectId(10);
+        let b = ObjectId(20);
+        state.waiting_for = WaitingFor::RevealUntilBottomOrder {
+            player: PlayerId(0),
+            source_id: ObjectId(100),
+            cards: vec![a, b],
+            clear_markers: Vec::new(),
+            emit_reveal_until_resolved: None,
+            reveal_until_hit_snapshot: None,
+        };
+
+        let actions = candidate_actions_broad(&state);
+        let permutations: Vec<Vec<ObjectId>> = actions
+            .into_iter()
+            .filter_map(|cand| match cand.action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(permutations.len(), 2);
+        assert_eq!(permutations[0], vec![a, b]);
+        assert_eq!(permutations[1], vec![b, a]);
     }
 }

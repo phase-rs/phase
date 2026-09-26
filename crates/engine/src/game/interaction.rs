@@ -233,6 +233,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -526,6 +527,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
@@ -4160,7 +4162,8 @@ fn selection_projection(
             selectable_cards, ..
         } => selectable_cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
-        WaitingFor::RippleBottomOrder { cards, .. } => cards.len(),
+        WaitingFor::RippleBottomOrder { cards, .. }
+        | WaitingFor::RevealUntilBottomOrder { cards, .. } => cards.len(),
         _ => 0,
     };
     if candidate_count > MAX_INTERACTION_LIST_LEN {
@@ -4475,6 +4478,9 @@ fn selection_projection(
         // CR 702.60a + CR 608.2d: the controller submits a full permutation of
         // the uncast revealed pile as its bottom-placement order.
         WaitingFor::RippleBottomOrder {
+            cards, source_id, ..
+        }
+        | WaitingFor::RevealUntilBottomOrder {
             cards, source_id, ..
         } => Some(SelectionProjection {
             object_ids: cards.clone(),

@@ -31068,3 +31068,531 @@ fn gate_refused_keeper_cards_keep_their_base_routing() {
         );
     }
 }
+
+// --- RevealUntil pile-disposition / rest-shuffle regressions (PR #8929) ---
+// Every card text below is the printed Oracle text from MTGJSON AtomicCards.
+
+/// Effects of `def`'s `sub_ability` chain, head first.
+fn reveal_chain_defs(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    std::iter::successors(Some(def), |d| d.sub_ability.as_deref()).collect()
+}
+
+fn reveal_until_rest_order(defs: &[&AbilityDefinition]) -> crate::types::ability::DigRestOrder {
+    defs.iter()
+        .find_map(|d| match &*d.effect {
+            Effect::RevealUntil { rest_order, .. } => Some(*rest_order),
+            _ => None,
+        })
+        .expect("chain must contain a RevealUntil")
+}
+
+/// CR 701.24c + CR 608.2c: "then shuffle the rest into your library" lowers to
+/// a whole-library `Shuffle`, and the trailing "If that creature is a Demon"
+/// rider is kept after it (Aspiring Champion).
+#[test]
+fn aspiring_champion_keeps_demon_rider_after_rest_shuffle() {
+    let result = parse(
+        "Ruinous Ascension — When this creature deals combat damage to a player, sacrifice it. If you do, reveal cards from the top of your library until you reveal a creature card. Put that card onto the battlefield, then shuffle the rest into your library. If that creature is a Demon, it deals damage equal to its power to each opponent.",
+        "Aspiring Champion",
+        &[],
+        &["Creature"],
+        &["Human", "Rogue"],
+    );
+    let execute = result.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must have an execute chain");
+    let defs = reveal_chain_defs(execute);
+    let effects: Vec<&Effect> = defs.iter().map(|d| &*d.effect).collect();
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::Sacrifice { .. },
+                Effect::RevealUntil {
+                    kept_destination: Zone::Battlefield,
+                    rest_destination: Zone::Library,
+                    ..
+                },
+                Effect::Shuffle {
+                    target: TargetFilter::Controller
+                },
+                Effect::DamageEachPlayer { .. },
+            ]
+        ),
+        "expected Sacrifice → RevealUntil → Shuffle → DamageEachPlayer, got {effects:?}"
+    );
+    assert!(
+        matches!(
+            defs[3].condition,
+            Some(AbilityCondition::TargetMatchesFilter { .. })
+        ),
+        "the damage rider stays gated on the revealed creature being a Demon, got {:?}",
+        defs[3].condition
+    );
+}
+
+/// CR 701.24c: Selvala's Stampede keeps the optional hand-to-battlefield put
+/// for each free vote after the rest pile is shuffled into the library.
+#[test]
+fn selvalas_stampede_keeps_free_vote_put_after_rest_shuffle() {
+    let result = parse(
+        "Council's dilemma — Starting with you, each player votes for wild or free. Reveal cards from the top of your library until you reveal a creature card for each wild vote. Put those creature cards onto the battlefield, then shuffle the rest into your library. You may put a permanent card from your hand onto the battlefield for each free vote.",
+        "Selvala's Stampede",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let defs = reveal_chain_defs(&result.abilities[0]);
+    let shuffle_idx = defs
+        .iter()
+        .position(|d| {
+            matches!(
+                &*d.effect,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("expected a rest Shuffle, got {defs:?}"));
+    let put = defs
+        .get(shuffle_idx + 1)
+        .unwrap_or_else(|| panic!("expected the free-vote put after the Shuffle, got {defs:?}"));
+    assert!(
+        matches!(
+            &*put.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ) && put.optional,
+        "expected optional hand → battlefield ChangeZone, got {put:?}"
+    );
+}
+
+/// CR 608.2c: an unparsed selection ("Choose one of the revealed creature
+/// cards") sits between the reveal and "put it onto the battlefield under your
+/// control". The pile-disposition lookback must not reach past it, so the
+/// battlefield move and the other-cards-to-graveyard instruction both survive
+/// as their own effects (Dance, Pathetic Marionette).
+#[test]
+fn dance_pathetic_marionette_keeps_battlefield_move_across_unparsed_choice() {
+    let result = parse(
+        "When you set this scheme in motion, each opponent reveals cards from the top of their library until they reveal a creature card. Choose one of the revealed creature cards and put it onto the battlefield under your control. Put all other cards revealed this way into their owners' graveyards.",
+        "Dance, Pathetic Marionette",
+        &[],
+        &["Scheme"],
+        &[],
+    );
+    let execute = result.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must have an execute chain");
+    let defs = reveal_chain_defs(execute);
+    let effects: Vec<&Effect> = defs.iter().map(|d| &*d.effect).collect();
+    assert!(
+        matches!(effects[0], Effect::RevealUntil { .. }),
+        "expected RevealUntil head, got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                enters_under: Some(ControllerRef::You),
+                ..
+            }
+        )),
+        "the chosen creature's battlefield move under your control must survive, got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::ChangeZoneAll {
+                destination: Zone::Graveyard,
+                ..
+            }
+        )),
+        "the other revealed cards' graveyard move must survive, got {effects:?}"
+    );
+}
+
+/// CR 701.24c + CR 608.2c: a subject-elided "then shuffles the rest into their
+/// library" shuffles the revealing player's library (the exiled creature's
+/// controller), not the caster's (Transmogrify, Blessed Reincarnation).
+#[test]
+fn reveal_until_third_person_rest_shuffle_binds_revealing_player() {
+    for (name, text) in [
+        (
+            "Transmogrify",
+            "Exile target creature. That creature's controller reveals cards from the top of their library until they reveal a creature card. That player puts that card onto the battlefield, then shuffles the rest into their library.",
+        ),
+        (
+            "Blessed Reincarnation",
+            "Exile target creature an opponent controls. That player reveals cards from the top of their library until a creature card is revealed. The player puts that card onto the battlefield, then shuffles the rest into their library.",
+        ),
+    ] {
+        let result = parse(text, name, &[], &["Instant"], &[]);
+        let defs = reveal_chain_defs(&result.abilities[0]);
+        assert!(
+            !def_chain_has_unimplemented(&result.abilities[0]),
+            "{name} must parse fully, got {defs:?}"
+        );
+        let effects: Vec<&Effect> = defs.iter().map(|d| &*d.effect).collect();
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        ..
+                    },
+                    Effect::RevealUntil {
+                        player: TargetFilter::ParentTargetController,
+                        kept_destination: Zone::Battlefield,
+                        ..
+                    },
+                    Effect::Shuffle {
+                        target: TargetFilter::ParentTargetController
+                    },
+                ]
+            ),
+            "{name}: expected exile → reveal → revealing player's shuffle, got {effects:?}"
+        );
+    }
+}
+
+/// CR 401.4: a rest clause separated from its reveal by parsed instructions
+/// keeps its printed ordering — "in a random order" randomizes (Sibylline
+/// Soothsayer) and "in any order" is the owner's choice (Fathom Trawl).
+#[test]
+fn reveal_until_rest_clause_after_intervening_instruction_keeps_printed_order() {
+    use crate::types::ability::DigRestOrder;
+    let sibylline = parse(
+        "Temporal Foresight — When this creature enters, reveal cards from the top of your library until you reveal a nonland card with mana value 3 or greater. Exile that card with three time counters on it. If it doesn't have suspend, it gains suspend. Put the rest of the revealed cards on the bottom of your library in a random order.",
+        "Sibylline Soothsayer",
+        &[],
+        &["Creature"],
+        &["Human", "Wizard"],
+    );
+    let execute = sibylline.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger must have an execute chain");
+    assert_eq!(
+        reveal_until_rest_order(&reveal_chain_defs(execute)),
+        DigRestOrder::Random
+    );
+
+    let fathom_trawl = parse(
+        "Reveal cards from the top of your library until you reveal three nonland cards. Put the nonland cards revealed this way into your hand, then put the rest of the revealed cards on the bottom of your library in any order.",
+        "Fathom Trawl",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(
+        reveal_until_rest_order(&reveal_chain_defs(&fathom_trawl.abilities[0])),
+        DigRestOrder::PlayerChoice
+    );
+}
+
+/// CR 614.6: in a draw replacement, "they draw a card" / "they mill a card"
+/// name the replaced draw's player — only card-movement slots bind to the
+/// revealed card (Chains of Mephistopheles).
+#[test]
+fn draw_replacement_player_slots_keep_player_referent() {
+    let result = parse(
+        "If a player would draw a card except the first one they draw in each of their draw steps, that player discards a card instead. If the player discards a card this way, they draw a card. If the player doesn't discard a card this way, they mill a card.",
+        "Chains of Mephistopheles",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let execute = result.replacements[0]
+        .execute
+        .as_deref()
+        .expect("replacement must have an execute chain");
+    for def in reveal_chain_defs(execute) {
+        match &*def.effect {
+            Effect::Draw { target, .. } | Effect::Mill { target, .. } => assert_ne!(
+                target,
+                &TargetFilter::LastRevealed,
+                "a player slot must not bind to the revealed card"
+            ),
+            _ => {}
+        }
+    }
+}
+
+/// CR 701.24c + CR 608.2c: Divergent Transformations contains an unmodelled per-creature
+/// resolution loop ("For each of those creatures, its controller reveals... then shuffles the rest...").
+/// The trailing shuffle must NOT be greedily absorbed as an unscoped controller shuffle;
+/// it must preserve the `unparsed_quantity` marker until the full class is implemented.
+#[test]
+fn divergent_transformations_retains_unparsed_quantity_marker_without_shuffle() {
+    let dt = parse(
+        "Undaunted (This spell costs {1} less to cast for each opponent.)\nExile two target creatures. For each of those creatures, its controller reveals cards from the top of their library until they reveal a creature card, puts that card onto the battlefield, then shuffles the rest into their library.",
+        "Divergent Transformations",
+        &[crate::types::keywords::Keyword::Undaunted],
+        &["Instant"],
+        &[],
+    );
+    let defs = reveal_chain_defs(&dt.abilities[0]);
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::Unimplemented { name, .. } if name == "unparsed_quantity"
+        )),
+        "Divergent Transformations must retain the unparsed_quantity marker, got {defs:?}"
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Shuffle { .. })),
+        "Divergent Transformations must not emit an unmodelled Shuffle, got {defs:?}"
+    );
+}
+
+/// CR 701.24c + CR 608.2c: a subject-elided "then shuffles the rest into their
+/// library" names a rest pile only its antecedent defines. After an
+/// exile-until (Wand of Wonder: the exiled misses) or a hand choice
+/// (Worldpurge: the unchosen hand cards) that pile is NOT in the library, so a
+/// bare `Shuffle` would silently drop the move. Both keep the explicit
+/// `shuffle` gap until the rest-pile move is represented.
+#[test]
+fn third_person_rest_shuffle_without_library_rest_pile_stays_an_explicit_gap() {
+    for (name, oracle, types) in [
+        (
+            "Wand of Wonder",
+            "{4}, {T}: Roll a d20. Each opponent exiles cards from the top of their library until they exile an instant or sorcery card, then shuffles the rest into their library. You may cast up to X instant and/or sorcery spells from among cards exiled this way without paying their mana costs.\n1—9 | X is one.\n10—19 | X is two.\n20 | X is three.",
+            "Artifact",
+        ),
+        (
+            "Worldpurge",
+            "Return all permanents to their owners' hands. Each player chooses up to seven cards in their hand, then shuffles the rest into their library. Each player loses all unspent mana.",
+            "Sorcery",
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], &[types], &[]);
+        let defs = reveal_chain_defs(&parsed.abilities[0]);
+        assert!(
+            defs.iter().any(|d| matches!(
+                &*d.effect,
+                Effect::Unimplemented { name, description: Some(text) }
+                    if name == "shuffle" && text.contains("shuffles the rest")
+            )),
+            "{name} must keep the explicit `shuffle` gap, got {defs:?}"
+        );
+        assert!(
+            !defs
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::Shuffle { .. })),
+            "{name} must not claim a bare library Shuffle, got {defs:?}"
+        );
+    }
+}
+
+/// Printed Oracle text of M'Odo, the Gnarled Oracle (MTGJSON AtomicCards / Scryfall).
+const M_ODO_ORACLE: &str = "Eminence — {X}, Discard a card: Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if M'Odo, the Gnarled Oracle is on the battlefield or in the command zone.";
+
+/// CR 113.6b + CR 701.20a + CR 202.3 + CR 701.24c: M'Odo's printed Eminence
+/// ability parses clause by clause — `{X}` plus a discard cost; the TARGET
+/// player's reveal-until whose hit is a creature card with mana value X or less
+/// ("converted mana cost" is its unmodernized name), entering under the
+/// activator's control; that player's rest-shuffle; and the zone restriction
+/// "on the battlefield or in the command zone". No clause is left as a gap.
+#[test]
+fn m_odo_the_gnarled_oracle_parses_its_printed_eminence_ability() {
+    let parsed = parse(
+        M_ODO_ORACLE,
+        "M'Odo, the Gnarled Oracle",
+        &[],
+        &["Creature"],
+        &["Zombie", "Elf", "Wizard"],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:#?}", parsed.abilities);
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    // Cost: {X}, Discard a card.
+    let Some(AbilityCost::Composite { costs }) = &ability.cost else {
+        panic!(
+            "expected a composite {{X}} + discard cost, got {:?}",
+            ability.cost
+        );
+    };
+    assert!(
+        costs.iter().any(|c| matches!(
+            c,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { shards, generic: 0 },
+            } if shards == &vec![ManaCostShard::X]
+        )),
+        "cost must include {{X}}, got {costs:?}"
+    );
+    assert!(
+        costs.iter().any(|c| matches!(
+            c,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                ..
+            }
+        )),
+        "cost must include discarding one card, got {costs:?}"
+    );
+
+    // Effect: target player reveals until a creature card with MV <= X; the hit
+    // enters under the activator's control; the rest return to that library.
+    let Effect::RevealUntil {
+        player,
+        filter,
+        kept_destination,
+        rest_destination,
+        enters_under,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", ability.effect);
+    };
+    assert_eq!(*player, TargetFilter::Player);
+    assert_eq!(*kept_destination, Zone::Battlefield);
+    assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*enters_under, Some(ControllerRef::You));
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a typed creature filter, got {filter:?}");
+    };
+    assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+    assert!(
+        typed.properties.contains(&FilterProp::Cmc {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                },
+            },
+        }),
+        "the converted-mana-cost bound must survive as Cmc <= X, got {typed:?}"
+    );
+
+    // "then that player shuffles the rest into their library" — the revealing
+    // (targeted) player's library, not the activator's.
+    let sub = ability.sub_ability.as_deref().expect("rest-shuffle clause");
+    assert_eq!(
+        *sub.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetController
+        }
+    );
+    assert!(sub.sub_ability.is_none(), "no trailing gap: {sub:?}");
+
+    // Restriction: "on the battlefield or in the command zone".
+    assert_eq!(
+        ability.activation_restrictions,
+        vec![ActivationRestriction::RequiresCondition {
+            condition: Some(ParsedCondition::Or {
+                conditions: vec![
+                    ParsedCondition::SourceInZone {
+                        zone: Zone::Battlefield
+                    },
+                    ParsedCondition::SourceInZone {
+                        zone: Zone::Command
+                    },
+                ],
+            }),
+        }]
+    );
+}
+
+/// CR 608.2c + CR 701.24c: Choice of Fortunes — "Seek two cards. You may shuffle
+/// them into your library. If you do, seek two cards." The optional instruction
+/// moves the WHOLE sought set (the chain tracked set Seek publishes) into the
+/// library with one terminal shuffle; "If you do" gates the second seek.
+#[test]
+fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
+    let parsed = parse(
+        "Seek two cards. You may shuffle them into your library. If you do, seek two cards.\nYou have no maximum hand size for the rest of the game.",
+        "Choice of Fortunes",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let head = &parsed.abilities[0];
+    assert!(matches!(
+        &*head.effect,
+        Effect::Seek {
+            destination: Zone::Hand,
+            ..
+        }
+    ));
+    let optional = head.sub_ability.as_deref().expect("optional move");
+    assert!(optional.optional);
+    assert_eq!(
+        *optional.effect,
+        Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0)
+            },
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+        }
+    );
+    let shuffle = optional.sub_ability.as_deref().expect("terminal shuffle");
+    assert_eq!(
+        *shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::Controller
+        }
+    );
+    assert_eq!(shuffle.sub_link, SubAbilityLink::ContinuationStep);
+    let gated = shuffle.sub_ability.as_deref().expect("if-you-do seek");
+    assert!(matches!(&*gated.effect, Effect::Seek { .. }));
+    assert!(gated
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed));
+}
+
+/// CR 400.3 + CR 701.24c: an owner subject ("the owners of those cards" / "those
+/// permanents' owners") before "shuffle them into their libraries" moves the
+/// declared objects into their owners' libraries — not a bare shuffle.
+#[test]
+fn owner_subject_shuffle_them_into_their_libraries_moves_the_objects() {
+    let parsed = parse(
+        "Choose up to three target cards in graveyards. The owners of those cards shuffle them into their libraries. You gain 2 life.",
+        "Turn the Earth",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let defs = reveal_chain_defs(&parsed.abilities[0]);
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                owner_library: true,
+                ..
+            }
+        )),
+        "expected an owner-library move, got {defs:?}"
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Unimplemented { .. })),
+        "{defs:?}"
+    );
+}
