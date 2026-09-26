@@ -151,6 +151,7 @@ pub fn guard_client_message_before_dispatch(
             draft_metadata,
             ranked,
             booster_pack_pool,
+            requested_code,
             ..
         } => {
             guard_create_game_settings_inbound(CreateGameSettingsInbound {
@@ -163,6 +164,7 @@ pub fn guard_client_message_before_dispatch(
                 room_name: room_name.as_deref(),
                 host_peer_id: host_peer_id.as_deref(),
                 draft_metadata: draft_metadata.as_ref(),
+                requested_code: requested_code.as_deref(),
             })?;
             guard_create_ai_seats(ai_seats, *player_count)?;
             guard_booster_pack_pool(booster_pack_pool, *ranked)
@@ -277,9 +279,11 @@ pub fn guard_client_message_before_dispatch(
             code,
             role: _,
             token,
+            rotation_nonce,
         } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
             code,
             token,
+            rotation_nonce,
         }),
         ClientMessage::CreateDraftWithSettings {
             display_name,
@@ -435,6 +439,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             room_name,
             host_peer_id,
             draft_metadata,
+            requested_code,
             ..
         } => guard_create_game_settings_inbound(CreateGameSettingsInbound {
             deck,
@@ -446,6 +451,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             room_name: room_name.as_deref(),
             host_peer_id: host_peer_id.as_deref(),
             draft_metadata: draft_metadata.as_ref(),
+            requested_code: requested_code.as_deref(),
         }),
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -549,9 +555,11 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             code,
             role: _,
             token,
+            rotation_nonce,
         } => validate_renew_tournament_credential_fields(RenewTournamentCredentialFields {
             code,
             token,
+            rotation_nonce,
         }),
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
@@ -668,10 +676,12 @@ mod tests {
     }
 
     /// A settings-create frame as the dispatch guard sees it: a two-seat duel
-    /// that passes every other bound, varying only `ranked` and the pool.
+    /// that passes every other bound, varying only `ranked`, the pool and the
+    /// requested room code.
     fn create_game_with_settings(
         ranked: bool,
         booster_pack_pool: Option<Vec<String>>,
+        requested_code: Option<&str>,
     ) -> ClientMessage {
         ClientMessage::CreateGameWithSettings {
             deck: crate::protocol::DeckData {
@@ -691,8 +701,28 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked,
+            requested_code: requested_code.map(str::to_string),
             booster_pack_pool,
         }
+    }
+
+    /// Both native dispatch guards carry the requested-code shape rule, in
+    /// either server mode.
+    #[test]
+    fn dispatch_guards_refuse_a_malformed_requested_code() {
+        let malformed = create_game_with_settings(false, None, Some("ab12cd"));
+        let valid = create_game_with_settings(false, None, Some("AB12CD"));
+        for mode in [ServerMode::Full, ServerMode::LobbyOnly] {
+            let err = guard_client_message_before_dispatch(&malformed, mode).unwrap_err();
+            assert!(err.contains("requested_code"), "{mode:?}: {err}");
+            assert!(
+                guard_client_message_before_dispatch(&valid, mode).is_ok(),
+                "{mode:?}"
+            );
+        }
+        let err = guard_broker_projection_inbound(&malformed).unwrap_err();
+        assert!(err.contains("requested_code"), "{err}");
+        assert!(guard_broker_projection_inbound(&valid).is_ok());
     }
 
     /// A rated game must not let its creator choose every card a pack opener
@@ -706,19 +736,19 @@ mod tests {
     fn dispatch_guard_refuses_a_booster_pack_pool_on_a_ranked_game() {
         for pool in [vec!["Cube Card".to_string()], Vec::new()] {
             let err = guard_client_message_before_dispatch(
-                &create_game_with_settings(true, Some(pool.clone())),
+                &create_game_with_settings(true, Some(pool.clone()), None),
                 ServerMode::Full,
             )
             .unwrap_err();
             assert!(err.contains("booster_pack_pool"), "{pool:?}: {err}");
             assert!(guard_client_message_before_dispatch(
-                &create_game_with_settings(false, Some(pool)),
+                &create_game_with_settings(false, Some(pool), None),
                 ServerMode::Full,
             )
             .is_ok());
         }
         assert!(guard_client_message_before_dispatch(
-            &create_game_with_settings(true, None),
+            &create_game_with_settings(true, None, None),
             ServerMode::Full,
         )
         .is_ok());
@@ -1018,6 +1048,7 @@ mod tests {
                     code: "TOUR01".into(),
                     role: TournamentRole::Organizer,
                     token: long_token,
+                    rotation_nonce: "n".into(),
                 },
             ),
             (
@@ -1026,6 +1057,7 @@ mod tests {
                     code: long_code,
                     role: TournamentRole::Player,
                     token: "tok".into(),
+                    rotation_nonce: "n".into(),
                 },
             ),
         ]
@@ -1077,11 +1109,13 @@ mod tests {
                 code: "TOUR01".into(),
                 role: TournamentRole::Organizer,
                 token: "tok".into(),
+                rotation_nonce: "nonce".into(),
             },
             ClientMessage::RenewTournamentCredential {
                 code: "TOUR01".into(),
                 role: TournamentRole::Player,
                 token: "tok".into(),
+                rotation_nonce: String::new(),
             },
         ]
     }

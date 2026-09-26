@@ -26,7 +26,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
-    ConvokeMode, GameState, ManaChoice, ManaChoicePrompt, PendingCast, WaitingFor,
+    CastingVariantFace, ConvokeMode, GameState, ManaChoice, ManaChoicePrompt, PendingCast,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -607,6 +608,27 @@ impl GameScenario {
         obj.toughness = Some(toughness);
         obj.base_power = Some(power);
         obj.base_toughness = Some(toughness);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
+    /// Add a land card to a player's exile. Returns a `CardBuilder` for fluent
+    /// chaining. Used to stage land-play permissions from exile.
+    pub fn add_land_to_exile(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Exile,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
 
         CardBuilder {
             state: &mut self.state,
@@ -1316,6 +1338,17 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// Add the Snow supertype (CR 205.4a: supertypes are printed before card types;
+    /// CR 205.4g: any permanent with the supertype "snow" is a snow permanent).
+    pub fn as_snow(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.supertypes.contains(&Supertype::Snow) {
+            obj.card_types.supertypes.push(Supertype::Snow);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     // --- Special modifiers ---
 
     /// CR 903.3: Mark this object as its owner's commander IN PLACE, without
@@ -1386,6 +1419,14 @@ impl<'a> CardBuilder<'a> {
         let color = crate::game::printed_cards::derive_colors_from_mana_cost(&cost);
         obj.color = color.clone();
         obj.base_color = color;
+        self
+    }
+
+    /// Set the color and base color of this card (CR 105.1).
+    pub fn with_color(&mut self, colors: Vec<crate::types::mana::ManaColor>) -> &mut Self {
+        let obj = self.obj();
+        obj.color = colors.clone();
+        obj.base_color = colors;
         self
     }
 
@@ -1993,6 +2034,7 @@ impl GameRunner {
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
+            WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -2013,6 +2055,7 @@ impl GameRunner {
             WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
+            WaitingFor::OrderCostReductions { .. } => "OrderCostReductions",
             WaitingFor::CastOffer {
                 kind: CastOfferKind::Adventure { .. },
                 ..
@@ -2234,6 +2277,7 @@ pub struct SpellCast<'a> {
     alternative_cast: Option<AlternativeCastDecision>,
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
+    casting_variant_face: Option<CastingVariantFace>,
     free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
@@ -2262,6 +2306,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast: None,
             adventure_creature: None,
             casting_variant: None,
+            casting_variant_face: None,
             free_cast: false,
             modes: None,
             x: None,
@@ -2328,6 +2373,18 @@ impl<'a> SpellCast<'a> {
     /// surfaces a variant choice without an explicit test intent.
     pub fn casting_variant(mut self, variant: CastingVariant) -> Self {
         self.casting_variant = Some(variant);
+        self
+    }
+
+    /// Choose an exact `(variant, face)` casting tuple. Required for a Fuse
+    /// pair's two independently castable normal halves.
+    pub fn casting_variant_face(
+        mut self,
+        variant: CastingVariant,
+        face: CastingVariantFace,
+    ) -> Self {
+        self.casting_variant = Some(variant);
+        self.casting_variant_face = Some(face);
         self
     }
 
@@ -2481,6 +2538,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast,
             adventure_creature,
             casting_variant,
+            casting_variant_face,
             free_cast,
             modes,
             x,
@@ -2611,15 +2669,22 @@ impl<'a> SpellCast<'a> {
                                  .casting_variant(..) was declared — declare the intended cast variant"
                             )
                         });
-                        options
+                        let matching: Vec<_> = options
                             .iter()
-                            .position(|option| option.variant == variant)
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "SpellCast could not find requested cast variant {:?} in options {:?}",
-                                    variant, options
-                                )
+                            .enumerate()
+                            .filter_map(|(index, option)| {
+                                (option.variant == variant
+                                    && casting_variant_face.is_none_or(|face| option.face == face))
+                                .then_some(index)
                             })
+                            .collect();
+                        if matching.len() != 1 {
+                            panic!(
+                                "SpellCast .casting_variant({variant:?}) is ambiguous in options {:?}; use .casting_variant_face(variant, face)",
+                                options
+                            );
+                        }
+                        matching[0]
                     };
                     selected_casting_variant = Some(options[index].clone());
                     act_collect(
@@ -2924,6 +2989,18 @@ impl<'a> CastCommit<'a> {
     /// cast surfaced that prompt.
     pub fn selected_casting_variant(&self) -> Option<&CastingVariantChoiceOption> {
         self.selected_casting_variant.as_ref()
+    }
+
+    /// Accept optional ("you may") effects/costs during resolution (CR 608.2d).
+    pub fn accept_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Accept;
+        self
+    }
+
+    /// Decline optional ("you may") effects/costs during resolution.
+    pub fn decline_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Decline;
+        self
     }
 
     /// Resolve the committed spell and return the usual behavior delta.

@@ -51,6 +51,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "OptionalCostChoice",
     "ActivationCostOneOfChoice",
     "DefilerPayment",
+    // CR 601.2f: caster-elected cost-reduction ordering
+    // (CostReductionOrderModal).
+    "OrderCostReductions",
     "ModeChoice",
     "AbilityModeChoice",
     "ModalFaceChoice",
@@ -125,6 +128,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // CR 701.4a: behold a [quality] — single-pick from a mixed-zone candidate
     // list (BeholdChoiceModal, rendered via CardChoiceModal).
     "BeholdChoice",
+    // CR 701.71a: empower Jace N — single-pick among the controller's Jace
+    // planeswalker tokens (EmpowerJaceChoiceModal, rendered via CardChoiceModal).
+    "EmpowerJaceChoice",
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
@@ -273,6 +279,8 @@ export function waitingForReason(
       return { key: "status.reason.discarding" };
     case "OrderTriggers":
       return { key: "status.reason.orderingTriggers" };
+    case "OrderCostReductions":
+      return { key: "status.reason.orderingCostReductions" };
     case "Priority": {
       // CR 117: the priority window. The engine-provided stack depth and phase
       // tell us what kind of window this is — purely descriptive labeling.

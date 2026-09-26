@@ -563,9 +563,9 @@ fn optional_decline_search_ordering_outcomes(
         return vec![incoming];
     };
     incoming.selected_targets_bound = incoming.selected_targets_bound
-        && super::can_inherit_parent_targets(branch)
+        && super::can_inherit_parent_targets(&branch)
         && super::effect_refs_parent_target(&branch.effect);
-    search_ordering_outcomes(branch, incoming)
+    search_ordering_outcomes(&branch, incoming)
 }
 
 fn continue_search_ordering(
@@ -1979,17 +1979,25 @@ mod tests {
             AbilityKind::Spell,
         );
         let resolved = build_resolved_from_def(&ability, ObjectId(100), PlayerId(0));
+        assert!(
+            resolved
+                .sub_ability
+                .as_ref()
+                .is_some_and(|sub| sub.context.face_down_in_exile.is_face_down()),
+            "the resolved exile continuation must retain typed concealment"
+        );
 
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
         assert!(matches!(state.waiting_for, WaitingFor::SearchChoice { .. }));
 
-        apply(
+        let selection_result = apply(
             &mut state,
             PlayerId(0),
             GameAction::SelectCards { cards: vec![found] },
         )
         .unwrap();
+        events.extend(selection_result.events);
 
         assert!(
             !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
@@ -1997,6 +2005,277 @@ mod tests {
         );
         assert_eq!(state.objects[&found].zone, Zone::Hand);
         assert!(state.players[0].hand.contains(&found));
+
+        let concealed_exile = events.iter().find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found => Some(record),
+            _ => None,
+        });
+        assert!(
+            concealed_exile.is_some_and(|record| record
+                .trigger_source_context
+                .as_ref()
+                .is_some_and(|context| context.face_down)),
+            "Beseech's library-to-exile record must retain event-time concealment"
+        );
+        assert!(state
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|record| record.object_id == found && record.to_zone == Zone::Exile)
+            .and_then(|record| record.trigger_source_context.as_ref())
+            .is_some_and(|context| context.face_down));
+        let owner_events =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let opponent_events =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(owner_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found
+                && record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.face_down)
+        )));
+        assert!(!opponent_events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
+    }
+
+    /// CR 701.23a + CR 406.3: a caster searching an opponent's library is the
+    /// only player who learns the selected card when the continuation exiles it
+    /// face down. The library owner and a third-party spectator must receive
+    /// neither the hidden-search witness nor the identity-bearing zone record.
+    #[test]
+    fn cross_owner_search_library_face_down_exile_is_visible_only_to_searcher() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::types::ability::{AbilityKind, ControllerRef, Effect};
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let found = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(1),
+            "Opponent Hidden Creature".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&found).unwrap().card_types.core_types = vec![CoreType::Creature];
+
+        let mut exile_step = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(105),
+            PlayerId(0),
+        );
+        exile_step.context.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
+        let search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(105),
+            PlayerId(0),
+        )
+        .kind(AbilityKind::Spell)
+        .sub_ability(exile_step);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                ref cards,
+                ..
+            } if cards.as_slice() == [found]
+        ));
+
+        let selection = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .unwrap();
+        events.extend(selection.events);
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(state.objects[&found].face_down);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                audience,
+                ..
+            } if audience == &[PlayerId(0)]
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record,
+            } if *object_id == found
+                && record
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.face_down)
+        )));
+
+        let searcher_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let owner_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        let spectator_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(2));
+        assert!(searcher_view
+            .iter()
+            .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
+        for view in [&owner_view, &spectator_view] {
+            assert!(!view
+                .iter()
+                .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+            assert!(!view.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == found
+            )));
+        }
+    }
+
+    /// CR 701.23a + CR 406.3: the search-result continuation keeps its
+    /// face-down exile intent when the selected card comes from a non-library
+    /// source zone. The searcher may identify the card; other viewers must not.
+    #[test]
+    fn multizone_search_face_down_exile_is_visible_only_to_searcher() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let found = create_object(
+            &mut state,
+            CardId(106),
+            PlayerId(0),
+            "Hidden Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let ability = parse_effect_chain(
+            "search your graveyard, hand, and/or library for a card, then exile it face down",
+            AbilityKind::Spell,
+        );
+        let resolved = build_resolved_from_def(&ability, ObjectId(107), PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                ref cards,
+                ..
+            } if cards.as_slice() == [found]
+        ));
+
+        let selection = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .unwrap();
+        events.extend(selection.events);
+
+        assert_eq!(state.objects[&found].zone, Zone::Exile);
+        assert!(state.objects[&found].face_down);
+
+        let searcher_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(0));
+        let opponent_view =
+            crate::game::visibility::filter_events_for_viewer(&events, &state, PlayerId(1));
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed {
+                searcher: PlayerId(0),
+                audience,
+                ..
+            } if audience == &[PlayerId(0)]
+        )));
+        let opponent_state = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        assert_ne!(opponent_state.objects[&found].name, "Hidden Hand Card");
+        assert!(searcher_view.iter().any(|event| matches!(
+            event,
+            GameEvent::HiddenSearchViewed { cards, .. }
+                if cards.iter().any(|card| card.current_face.name == "Hidden Hand Card")
+        )));
+        assert!(!opponent_view
+            .iter()
+            .any(|event| matches!(event, GameEvent::HiddenSearchViewed { .. })));
+        assert!(!opponent_view.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Hand),
+                to: Zone::Exile,
+                ..
+            } if *object_id == found
+        )));
     }
 
     #[test]

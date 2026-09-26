@@ -1,6 +1,37 @@
 {
   "entries": [
     {
+      "id": 212,
+      "date": "2026-09-21",
+      "title": "Cost reductions follow your choices",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "localization",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Tiered Final Fantasy spells now work as printed: Fire/Ice/Thunder Magic, Cloud’s and Tifa’s Limit Breaks, and Restoration Magic recognize their modal additional-cost tiers\n• Japanese is now a supported UI language, with localized card names, printings, artwork, and offline image packs\n\n🛠️ Cards That Now Work Right\n• Morophon and the wider \"colored mana only\" cost-reduction class no longer eats generic mana; when several reductions or hybrid mana choices produce different legal totals, you choose the result\n• Bogardan Phoenix returns with a death counter when it should, and Rent Is Due now takes the correct \"otherwise\" branch\n• Maestros Ascendancy, Wickerfolk Indomitable, Drake Familiar, Coin of Fate, Guardian Project, and Promise of Loyalty now follow their printed choices, costs, targets, and conditions\n• \"Your graveyard\" permissions remain tied to the card owner, while effects that refer to a chosen target set or to a named player keep the right object and player through resolution\n\n⚔️ Combat & Gameplay\n• Commander-zone cards keep every legal choice, even while the AI still follows its existing policy\n• Creatures with a force-block requirement keep that requirement when the named attacker joins combat later, and the AI now attacks correctly into Propaganda-style combat taxes when it can pay them\n• Effects ending a game also release any temporary control of another player, preventing stalled post-game decisions\n\n🖥️ Interface\n• Winston Draft piles now appear as tidy stacked columns, and incoming draft cards no longer pile into the board’s first column\n• Commander Draft sends the drafted set to deck validation, keeping set-specific deck rules intact\n\n🌍 Localization\n• Localized card names and artwork resolve correctly across supported languages, including Japanese\n\n🤖 AI\n• The AI evaluates combat taxes as part of its attack decision instead of refusing legal attacks against them\n\n🌐 Multiplayer\n• P2P guests recover cleanly when setup disconnects, lobby seats are renumbered, or a frame cannot be delivered; a disconnected guest’s native seat can be reused\n• Server games no longer share one global lock, so a slow game’s action, AI search, or save does not stall unrelated games\n• Starting an online game binds both players’ mulligan decisions reliably",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1551699032324440125"
+    },
+    {
+      "id": 211,
+      "date": "2026-09-18",
+      "title": "Winston Draft joins the table",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Winston Draft is now available, with local, bot-filled, and online draft-pod play\n• Feral Ghoul, Brass Knuckles, Zenos yae Galvus, Shelinda, Yevon Acolyte, Agent Frank Horrigan, and Willie Lumpkin, Postman join the playable card pool\n• Replicate now makes the correct copy for every additional payment, and older custom formats can use their historical Wish and legend-rule scopes\n\n🛠️ Cards That Now Work Right\n• Brass Knuckles and Balan grant double strike only while the printed number of Equipment are attached\n• Harm’s Way and the wider damage-redirection class preserve the chosen damage source and recipient; Dismantle carries counters to the replacement artifact as printed\n• Ohran Viper, Lowland Basilisk, Thicket Basilisk, and granted Basilisk abilities now destroy the creature they damaged at end of combat, without affecting a blinked replacement\n• Acorn Catapult makes its Squirrel token, Chittering Rats puts a target opponent’s card back on top, and Fractalize and Reflections of Littjara resolve their printed choices correctly\n• Combat and target conditions now retain the relevant player and object across effects, repairing Sea Monster, Electrostatic Bolt, Promise of Loyalty, Karazikar, Goblin Furrier, Indentured Oaf, and the wider \"any number of targets\" class\n• Paying a compound activation cost now honors its chosen branch, while spells cast from another zone retain the face and cost you selected through resolution\n\n⚔️ Combat & Gameplay\n• Attachments fall off symmetrically when either the attachment or its host leaves the battlefield\n• Effects that care about a player’s counter total, a unique leader, a chosen target set, or a source’s dealt damage now keep that information through the full ability chain\n• Started effects tied to a counter stop at the correct point after that counter changes\n\n🖥️ Interface\n• Follow-up prompts in chained abilities show the printed ability text, making choices such as Isochron Scepter’s copied-spell cast clear\n• Life totals now change with damage animation impact instead of jumping after the animation finishes\n• Draft pods prefill your host or join name from your saved multiplayer identity\n\n🤖 AI\n• AI players crack untapped fetchlands on their own turn when a valid land remains in the library, while preserving sensible timing for tapped fetchlands and sacrifice tutors\n\n🌐 Multiplayer\n• Tournament credentials rotate without interrupting an active session\n• Multiplayer state updates send opponents’ registered decks only to the player sideboarding, reducing bandwidth and keeping decklists private",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1550733762319482962"
+    },
+    {
       "id": 210,
       "date": "2026-09-13",
       "title": "Inkshield makes Inklings",

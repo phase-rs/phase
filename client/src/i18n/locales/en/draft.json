@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "winstonTitle": "Winston Draft",
     "commanderTitle": "Commander Draft",
     "subtitle": "Here's how it works",
     "startDrafting": "Start Drafting",
@@ -21,7 +22,11 @@
       "minimumDeckCards_one": "{{count, number}} card",
       "minimumDeckCards_few": "{{count, number}} cards",
       "minimumDeckCards_many": "{{count, number}} cards",
-      "minimumDeckCards_other": "{{count, number}} cards"
+      "minimumDeckCards_other": "{{count, number}} cards",
+      "pilesDealt_one": "{{count, number}} one-card pile",
+      "pilesDealt_few": "{{count, number}} one-card piles",
+      "pilesDealt_many": "{{count, number}} one-card piles",
+      "pilesDealt_other": "{{count, number}} one-card piles"
     },
     "packPassing_one": "This draft has one pack round, so the passing direction does not alternate",
     "packPassing_few": "The passing direction alternates each round",
@@ -38,6 +43,13 @@
       "step2": "Open {{packs}}; each pack contains {{cardsPerPack}} — pick one, pass the rest",
       "step2Mixed": "Open {{packs}} of mixed sizes, in this order: {{packSizes, list}} — pick one, pass the rest",
       "step4": "After drafting, build a deck of at least {{minimumDeckCards}} and play tournament matches"
+    },
+    "winston": {
+      "step2": "Every player's {{packs}} are opened without anyone looking, and every card is shuffled together into one face-down stack",
+      "step2Mixed": "Every player's {{packs}} of mixed sizes, in this order: {{packSizes, list}}, are opened without anyone looking and shuffled together into one face-down stack",
+      "step3": "{{piles}} are dealt off the top. On your turn, look at the first pile: take it, or decline it and move to the next",
+      "step4": "Declining puts the top card of the stack onto the pile you refused. Decline every pile and you take the top card of the stack instead, sight unseen",
+      "step5": "Turns alternate until no cards are left; then build a deck of at least {{minimumDeckCards}} and play tournament matches"
     },
     "commander": {
       "step2": "Open {{packs}}; each pack contains {{cardsPerPack}} — pick two cards, pass the rest",
@@ -79,6 +91,13 @@
     "label": "Pick Timer",
     "seconds": "{{count}}s"
   },
+  "pickStatus": {
+    "Pending": "Picking",
+    "Picked": "Picked",
+    "Waiting": "Waiting",
+    "TimedOut": "Timed out",
+    "NotDrafting": "Not drafting"
+  },
   "scoreBadge": {
     "label": "Score: {{count}} wins"
   },
@@ -92,7 +111,11 @@
     "activePackCount_one": "{{count}} pack at {{player}}",
     "activePackCount_few": "{{count}} packs at {{player}}",
     "activePackCount_many": "{{count}} packs at {{player}}",
-    "activePackCount_other": "{{count}} packs at {{player}}"
+    "activePackCount_other": "{{count}} packs at {{player}}",
+    "draftedCardCount_one": "{{count}} card drafted by {{player}}",
+    "draftedCardCount_few": "{{count}} cards drafted by {{player}}",
+    "draftedCardCount_many": "{{count}} cards drafted by {{player}}",
+    "draftedCardCount_other": "{{count}} cards drafted by {{player}}"
   },
   "setSelector": {
     "botDifficulty": "Bot Difficulty",
@@ -160,6 +183,7 @@
     "packProgress": "Pack {{current}} of {{total}}",
     "openPack": "Open pack",
     "openPackArt": "Open pack artwork",
+    "openAllPacks": "Open all packs",
     "pulls": "Your pulls",
     "nextPack": "Next pack",
     "viewPool": "View your pool",
@@ -374,6 +398,10 @@
       "title": "Commander Draft",
       "description": "Draft two cards at a time in a pod, build a 60-card Commander deck, then play one multiplayer game."
     },
+    "winstonDraft": {
+      "title": "Winston Draft",
+      "description": "Two players share one face-down stack across three piles — take a pile or decline it, then build and play."
+    },
     "podInProgress": "Pod Draft in Progress",
     "guestPodInProgress": "Joined Pod Ready to Reconnect",
     "podLabel": "{{kind}} Pod",
@@ -523,6 +551,8 @@
     "kindSealedDesc": "Open six packs directly into each player's pool, then build a best-of-one tournament deck.",
     "kindCommanderDraft": "Commander",
     "kindCommanderDraftDesc": "Each player drafts two cards at a time and builds a 60-card Commander deck, then the pod plays one multiplayer game.",
+    "kindWinston": "Winston",
+    "kindWinstonDesc": "Two to four players draft one shared face-down stack through three piles: on your turn, look at a pile and take it or decline and add a card to it.",
     "tournamentFormat": "Tournament Format",
     "tournamentSwiss": "Swiss",
     "tournamentSwissDesc": "Everyone keeps playing through three rounds, even after a loss.",
@@ -550,7 +580,20 @@
     "tabs": {
       "set": "Set",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Couldn't reach the lobby to list this pod. Turn off “$t(draft:podSetup.listInLobby)” to host by room code.",
+    "listingHostNameTooLong": "To list this pod in the lobby, use a display name of at most {{max}} characters.",
+    "listingRoomNameTooLong": "To list this pod in the lobby, use a room name of at most {{max}} characters.",
+    "listingCubeNameTooLong": "To list this pod in the lobby, use a cube name of at most {{max}} characters.",
+    "listingPasswordTooLong": "To list this pod in the lobby, use a shorter password.",
+    "listInLobby": "List in lobby",
+    "listingSeatLimit": "Lobby listing supports pods of up to {{max}} players.",
+    "setPassword": "Set password",
+    "passwordPlaceholder": "Pod password",
+    "roomName": "Room Name",
+    "optional": "(optional)",
+    "roomNameHelp": "Shown to players browsing the lobby.",
+    "roomNamePlaceholder": "e.g. Friday Night Cube"
   },
   "podPhaseView": {
     "tournamentPairings": "Tournament Pairings",
@@ -622,6 +665,53 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "winston": {
+    "heading": "Winston draft",
+    "yourTurn": "Your turn — pile {{index}}",
+    "otherSeatTurn": "{{name}} is deciding",
+    "seatFallback": "Seat {{index}}",
+    "turnHint": "Take the pile, or decline it. Declining puts one card from the main stack onto that pile and moves you to the next one; decline the last pile and you draw the top card of the main stack instead.",
+    "mainStackRemaining_one": "{{count, number}} card face down in the main stack",
+    "mainStackRemaining_few": "{{count, number}} cards face down in the main stack",
+    "mainStackRemaining_many": "{{count, number}} cards face down in the main stack",
+    "mainStackRemaining_other": "{{count, number}} cards face down in the main stack",
+    "cardsLeft_one": "{{count, number}} card left in the draft",
+    "cardsLeft_few": "{{count, number}} cards left in the draft",
+    "cardsLeft_many": "{{count, number}} cards left in the draft",
+    "cardsLeft_other": "{{count, number}} cards left in the draft",
+    "stackShare": "Share of the cards left in the draft that are still face down in the main stack",
+    "pileLabel": "Pile {{index}}",
+    "pileTotal_one": "{{count, number}} card",
+    "pileTotal_few": "{{count, number}} cards",
+    "pileTotal_many": "{{count, number}} cards",
+    "pileTotal_other": "{{count, number}} cards",
+    "pileFaceDown": "Face down",
+    "deciding": "Deciding on this pile",
+    "hiddenPiles": "The piles stay face down until it is your turn.",
+    "take": "Take",
+    "takeAria": "Take pile {{index}}",
+    "decline": "Decline",
+    "declineAria": "Decline pile {{index}}",
+    "spreadPile": "Spread out pile {{index}}",
+    "stackPile": "Stack up pile {{index}}",
+    "refusal": {
+      "PileNotActive": "You are not deciding on this pile.",
+      "PileEmpty": "This pile is empty, so there is nothing to take.",
+      "NoGuaranteedCard": "Declining can no longer leave you a card this turn, so taking this pile is your only legal move."
+    },
+    "refusalUnpublished": "The draft published no verdict for this decision.",
+    "playFirstChooser": "{{name}} chooses who plays first in the games after the draft.",
+    "scale": "Pile scale",
+    "scaleDecrease": "Decrease pile scale",
+    "scaleReset": "Reset pile scale",
+    "scaleIncrease": "Increase pile scale",
+    "faceDownStack_one": "{{count, number}} card face down",
+    "faceDownStack_few": "{{count, number}} cards face down",
+    "faceDownStack_many": "{{count, number}} cards face down",
+    "faceDownStack_other": "{{count, number}} cards face down",
+    "forcedDraw": "You declined every pile, so you drew {{name}} off the top of the main stack.",
+    "forcedDrawLabel": "Drawn from the main stack"
   },
   "lobby": {
     "title": "Draft Pod Lobby",

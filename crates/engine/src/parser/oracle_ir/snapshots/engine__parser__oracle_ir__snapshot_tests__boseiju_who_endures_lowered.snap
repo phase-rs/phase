@@ -181,6 +181,9 @@ expression: "&lowered"
         "condition": null,
         "optional_targeting": false,
         "optional": true,
+        "optional_player": {
+          "type": "ParentTargetController"
+        },
         "forward_result": false,
         "sub_link": "SequentialSibling"
       },

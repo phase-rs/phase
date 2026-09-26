@@ -21,7 +21,7 @@ Ordinary mode is the default and produces a full single plan via the Process bel
 
 Output contract: a **phase charter**, not a plan.
 
-- **Input mapping (three shapes):** a *draft plan*, with whatever findings have accumulated (the initial gate firing on a fresh draft carries none; mid-loop and plan-loop T4 firings carry the round history) → derive the charter from the draft. A *review-clean plan* (scope-freeze or pre-existing-clean firing) → **partition, not re-plan**: carve the converged content into phases; nothing is rewritten, so the split does not invalidate the reviewed artifact. A *review-clean plan with landed candidates* (impl-loop T4) → derive phase 1 from the stabilized current candidate and partition the remainder.
+- **Input mapping (three shapes):** T4-derived decomposition requires explicit resumption after the orchestrator's stop; T1/T2 proactive decomposition remains subject to the shared run limits. A *draft plan*, with whatever findings have accumulated (the initial gate firing on a fresh draft carries none; mid-loop and plan-loop T4 firings carry the round history) → derive the charter from the draft. A *review-clean plan* (scope-freeze or pre-existing-clean firing) → **partition, not re-plan**: carve the converged content into phases; nothing is rewritten, so the split does not invalidate the reviewed artifact. A *review-clean plan with landed candidates* (impl-loop T4) → derive phase 1 from the stabilized current candidate and partition the remainder.
 - **Step survival (enumerated):** Step 0 (premise verification) survives — a fabricated premise poisons every phase. Step 1 (identify applicable skills) survives — the checklist inventory informs unit boundaries and seams. Step 2 (analogous trace) survives — it informs seam choice. Step 3 (read every file) survives, scoped to the files the charter's phases will touch. Steps 4 and 5 (the architectural sections and the step-by-step plan) are replaced by the charter output contract below — they apply later, to each phase plan in phase-plan mode.
 - **Charter output contract:** linearly ordered phases; per phase, a goal statement, a **scope rule** — the subsystems and anchor paths the phase owns, as literal paths or directories, **no globs** (T2 directory expansion and the orchestrator's `SCOPE_PATHS` materialization consume concrete paths), with the standing inclusion classes `/engine-implementer` defines (compiler-forced sites, shared registration files, comment-only edits) implied rather than enumerated; the orchestrator materializes the list at scope-freeze — the **claims the phase must establish** where it depends on how the code behaves today (a defect live at base, a path unreachable, a gate observing an outcome), each named with the measurement that buys it and never stated as fact — the charter is a contract about sequencing and acceptance, not a snapshot of the code; a verification plan (a phase's discriminating test may be written `DEFERRED(phase n)` naming the landing phase when it structurally cannot exist until a consumer phase lands — the defining property of a dependency seam; that phase's interim verification is structural: green tree, existing suites, unit-level assertions), and a **deferral list** — everything the full task needs that the phase intentionally omits, attributed to the phase that will land it; seam notes (shared files such as `effects/mod.rs`, surfaces held green via strict-failure tags); and a recursive check that no individual phase itself trips the T1∧T2 phase-fit conjunction defined in `/engine-implementer`.
 - **Feasibility exit:** if no green-tree seam exists, report that instead of a charter — name every candidate split point and show why each leaves the tree non-compiling or tests red.
@@ -76,7 +76,9 @@ Find the existing feature most similar to what you're implementing. Trace it end
 
 Before proposing changes, read every file you plan to modify. Understand existing patterns, abstractions, and conventions in each.
 
-### Step 3.5: Probe it — measure, don't trace
+### Step 3.5: Probe design-relevant uncertainties
+
+For each probe, name the design decision its result could change and prefer existing tests, fixtures, commands or supported tool APIs. Small probes and ordinary regression fixtures are in scope; a new verification framework is not implied by an engine task. Honor the caller's execution constraints. In the engine-implementer pipeline, use the supplied original task and scope/attempt history and obey its [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits), including pre-measurement design corrections. If evidence requires machinery beyond those bounds, return the missing evidence to the orchestrator. Standalone planning has the same task boundary without inventing pipeline counters.
 
 Steps 2 and 3 tell you what the code *looks like*. Only a probe that compiles and runs tells you what it
 *does*. For a rules engine this intricate, plans built by tracing repeatedly encode plausible-but-wrong
@@ -115,9 +117,8 @@ worktree's absolute path; never build in a checkout another process (e.g. Tilt) 
 activity behind any active implementation executor on a shared worktree — read-only discovery may run
 concurrently. Never put a scratch target dir on tmpfs. Keep one isolated target dir per worktree and
 *reuse* it across probes — deleting it between runs buys nothing and re-imposes the full dependency
-rebuild that talks planners out of probing in the first place. Because that isolation exists,
-target-directory lock contention is not a reason to withhold builds: if you catch yourself writing "do
-not run cargo" into a brief, name the isolated target dir instead. Shared `CARGO_HOME` registry/package-
+rebuild that talks planners out of probing in the first place. Isolation does not override a caller's no-build constraint or authorize new tooling; if a required probe cannot run within those constraints,
+report the missing evidence. Shared `CARGO_HOME` registry/package-
 cache locks are a separate lock domain that target-dir isolation doesn't touch, and can still delay a
 build. Capacity is the one thing isolation cannot fix — a fresh target dir costs disk rather than saving
 it — so a genuinely full or saturated box is worth naming, and worth probing once it clears.

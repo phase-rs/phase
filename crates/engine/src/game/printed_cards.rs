@@ -19,6 +19,7 @@ use crate::types::ability_visit::{
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef, PrintedLoyalty};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
+use crate::types::format::GameFormat;
 use crate::types::game_state::{GameState, MeldPairRecord};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -1062,10 +1063,11 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
 // `Effect::Conjure` (digital-only, no CR entry) creates a card from outside the
 // game (`game/effects/conjure.rs`). The handler resolves the conjured face from
 // `GameState::card_face_registry`, which previously held *every* card face in the
-// database — a full-DB clone on each game init. To avoid that allocation spike,
-// `rehydrate_game_from_card_db` now scopes the registry to exactly the faces a
-// game can reach as Conjure targets: the transitive closure of conjure names
-// over the seed faces present in the game (objects + deck pools).
+// database — a full-DB clone on each game init. `rehydrate_game_from_card_db` now
+// scopes the registry to the transitive closure of outside-the-game names over the
+// seed faces present in the game (objects + deck pools), by two legs: meld results
+// always, and conjure targets and spellbook faces only when the game's format
+// admits digital-only cards (`GameFormat::admits_digital_only_cards`).
 //
 // These wrappers yield every conjure name reachable from a `CardFace`. The
 // traversal itself lives in `crate::types::ability_visit`, which owns the
@@ -1082,8 +1084,28 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
 // `types::ability_visit` module doc.
 // ---------------------------------------------------------------------------
 
-/// Collect every conjure name reachable from a single card face's ability set.
-fn collect_conjure_names_from_face(face: &CardFace, out: &mut Vec<String>) {
+/// Outside-the-game card names a game's faces can reach, split by what kind of
+/// card can produce them. The meld leg is paper (CR 701.42); the digital leg
+/// exists only on Arena-only cards.
+#[derive(Default)]
+struct OutsideGameSeeds {
+    meld: Vec<String>,
+    digital: Vec<String>,
+}
+
+impl OutsideGameSeeds {
+    /// Move into `out` the seed legs a game in `format` can actually reach.
+    fn drain_admitted_by(self, format: GameFormat, out: &mut Vec<String>) {
+        out.extend(self.meld);
+        if format.admits_digital_only_cards() {
+            out.extend(self.digital);
+        }
+    }
+}
+
+/// Collect every outside-the-game name reachable from a single card face's
+/// ability set.
+fn collect_conjure_names_from_face(face: &CardFace, out: &mut OutsideGameSeeds) {
     for ability in &face.abilities {
         walk_ability_def(ability, out);
     }
@@ -1098,12 +1120,12 @@ fn collect_conjure_names_from_face(face: &CardFace, out: &mut Vec<String>) {
     }
     // Alchemy spellbook: every card a spellbook draft can produce must be in the
     // registry to be instantiable by the conjure path.
-    out.extend(face.metadata.spellbook.iter().cloned());
+    out.digital.extend(face.metadata.spellbook.iter().cloned());
 }
 
 /// The conjure/meld name extraction that `visit_effect` used to inline. Split
 /// out so the traversal itself is reusable (see `types::ability_visit`).
-fn collect_conjure_names(effect: &Effect, out: &mut Vec<String>) {
+fn collect_conjure_names(effect: &Effect, out: &mut OutsideGameSeeds) {
     match effect {
         Effect::Conjure { cards, .. } => {
             // Only named-conjure has a static card name to seed into the face
@@ -1111,7 +1133,7 @@ fn collect_conjure_names(effect: &Effect, out: &mut Vec<String>) {
             // travels on the referenced object), so there is nothing to preload.
             for conjure_card in cards {
                 if let ConjureSource::Named { name } = &conjure_card.source {
-                    out.push(name.clone());
+                    out.digital.push(name.clone());
                 }
             }
         }
@@ -1121,33 +1143,33 @@ fn collect_conjure_names(effect: &Effect, out: &mut Vec<String>) {
         // `card_face_registry`. `source` and `partner` are live battlefield
         // objects the resolver finds by printed identity — they need no registry
         // seeding.
-        Effect::Meld { result, .. } => out.push(result.clone()),
+        Effect::Meld { result, .. } => out.meld.push(result.clone()),
         _ => {}
     }
 }
 
-fn walk_ability_def(def: &AbilityDefinition, out: &mut Vec<String>) {
+fn walk_ability_def(def: &AbilityDefinition, out: &mut OutsideGameSeeds) {
     let _ = visit_ability_def(def, &mut |effect| {
         collect_conjure_names(effect, out);
         ControlFlow::Continue(())
     });
 }
 
-fn walk_trigger(trigger: &TriggerDefinition, out: &mut Vec<String>) {
+fn walk_trigger(trigger: &TriggerDefinition, out: &mut OutsideGameSeeds) {
     let _ = visit_trigger(trigger, &mut |effect| {
         collect_conjure_names(effect, out);
         ControlFlow::Continue(())
     });
 }
 
-fn walk_replacement(replacement: &ReplacementDefinition, out: &mut Vec<String>) {
+fn walk_replacement(replacement: &ReplacementDefinition, out: &mut OutsideGameSeeds) {
     let _ = visit_replacement(replacement, &mut |effect| {
         collect_conjure_names(effect, out);
         ControlFlow::Continue(())
     });
 }
 
-fn walk_static(static_def: &StaticDefinition, out: &mut Vec<String>) {
+fn walk_static(static_def: &StaticDefinition, out: &mut OutsideGameSeeds) {
     let _ = visit_static(static_def, &mut |effect| {
         collect_conjure_names(effect, out);
         ControlFlow::Continue(())
@@ -1155,23 +1177,23 @@ fn walk_static(static_def: &StaticDefinition, out: &mut Vec<String>) {
 }
 
 #[cfg(test)]
-fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
+fn walk_effect(effect: &Effect, out: &mut OutsideGameSeeds) {
     let _ = visit_effect(effect, &mut |e| {
         collect_conjure_names(e, out);
         ControlFlow::Continue(())
     });
 }
 
-/// Collect every conjure name seeded by the faces present in the game: each
-/// object's printed face (resolved via the database) plus every deck-pool face
-/// (carried inline as `DeckEntry.card`).
+/// Collect every outside-the-game name seeded by the faces present in the game:
+/// each object's printed face (resolved via the database) plus every deck-pool
+/// face (carried inline as `DeckEntry.card`).
 ///
 /// Boundary: only printed faces are seeds. A sourceless object (a token or
 /// emblem with no `printed_ref`) whose granted ability conjures would not seed
 /// its target. No current card hits this; revisit if a printed-faceless
 /// conjure source is ever added.
-fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
+fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> OutsideGameSeeds {
+    let mut names = OutsideGameSeeds::default();
 
     for object in state.objects.values() {
         if let Some(printed_ref) = &object.printed_ref {
@@ -1202,16 +1224,21 @@ fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> Vec<Strin
     names
 }
 
-/// Build the scoped Conjure registry: the transitive closure of conjure-target
-/// faces reachable from the seed faces present in the game. The closure follows
-/// conjure names (a conjured card may itself conjure another) to a fixpoint.
-/// Returns the registry plus every conjure name encountered along the way (used
-/// by the debug-only walker-coverage safety net).
+/// Build the scoped outside-the-game face registry: the transitive closure of
+/// faces reachable from the seed faces present in the game, taking the seed legs
+/// the game's format admits. The closure follows those names (a conjured card may
+/// itself conjure another) to a fixpoint, applying the same format gate at every
+/// step. Returns the registry plus every admitted name encountered along the way
+/// (used by the debug-only walker-coverage safety net).
 pub(crate) fn build_conjure_registry(
     state: &GameState,
     db: &CardDatabase,
 ) -> (HashMap<String, CardFace>, Vec<String>) {
-    let mut pending = collect_seed_conjure_names(state, db);
+    let format = state.format_config.format;
+    let mut pending = Vec::new();
+    collect_seed_conjure_names(state, db).drain_admitted_by(format, &mut pending);
+    // Fed only from `pending`, so a gated-out name can never reach the debug
+    // safety net in `rehydrate_card_db_metadata` or `card_subset.rs`'s universe.
     let mut all_collected = pending.clone();
 
     // Transitive closure: resolve each pending name, insert its face, and walk
@@ -1228,7 +1255,9 @@ pub(crate) fn build_conjure_registry(
             continue;
         };
         let before = pending.len();
-        collect_conjure_names_from_face(face, &mut pending);
+        let mut seeds = OutsideGameSeeds::default();
+        collect_conjure_names_from_face(face, &mut seeds);
+        seeds.drain_admitted_by(format, &mut pending);
         all_collected.extend_from_slice(&pending[before..]);
         registry.insert(key, face.clone());
     }
@@ -1428,10 +1457,9 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     if state.meld_pair_registry.is_empty() {
         state.meld_pair_registry = Arc::new(build_meld_pair_registry(db));
     }
-    // Populate the Conjure card-face registry (used by the Conjure effect
-    // handler). Scoped to exactly the faces reachable as Conjure targets so we
-    // never clone the entire database into per-game state. Decks with no
-    // conjure cards yield an empty registry and pay no allocation cost.
+    // Populate the outside-the-game card-face registry (read by the Conjure
+    // handler and by `game/meld.rs`). Scoped to the faces this game's format can
+    // actually reach.
     if state.card_face_registry.is_empty() {
         let (registry, collected_names) = build_conjure_registry(state, db);
 
@@ -1834,6 +1862,7 @@ pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::format::FormatConfig;
 
     /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
     /// must not seed `base_replacement_definitions` with a resolution-created
@@ -3477,7 +3506,10 @@ mod tests {
 
         let db = db_from_faces(&[conjurer.clone(), target.clone(), noise_a, noise_b]);
 
-        let mut state = GameState::default();
+        let mut state = GameState {
+            format_config: FormatConfig::historic(),
+            ..Default::default()
+        };
         create_object_from_card_face(&mut state, &conjurer, PlayerId(0));
 
         rehydrate_game_from_card_db(&mut state, &db);
@@ -3503,7 +3535,10 @@ mod tests {
         );
         let db = db_from_faces(std::slice::from_ref(&vanilla));
 
-        let mut state = GameState::default();
+        let mut state = GameState {
+            format_config: FormatConfig::historic(),
+            ..Default::default()
+        };
         create_object_from_card_face(&mut state, &vanilla, PlayerId(0));
 
         rehydrate_game_from_card_db(&mut state, &db);
@@ -3537,7 +3572,10 @@ mod tests {
 
         let db = db_from_faces(&[conjurer.clone(), target.clone()]);
 
-        let mut state = GameState::default();
+        let mut state = GameState {
+            format_config: FormatConfig::historic(),
+            ..Default::default()
+        };
         create_object_from_card_face(&mut state, &conjurer, PlayerId(0));
 
         rehydrate_game_from_card_db(&mut state, &db);
@@ -3581,7 +3619,10 @@ mod tests {
 
         let db = db_from_faces(&[card_a.clone(), card_b.clone(), card_c.clone()]);
 
-        let mut state = GameState::default();
+        let mut state = GameState {
+            format_config: FormatConfig::historic(),
+            ..Default::default()
+        };
         // Seed Card A via the deck pool to also exercise the deck-pool seed path.
         state
             .deck_pools
@@ -3601,13 +3642,194 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Format gating of the digital-only seed legs
+    // -----------------------------------------------------------------------
+
+    /// Build the registry through production rehydration from one battlefield
+    /// seed face, with `format` as the only axis that moves between calls.
+    fn registry_under(
+        format: GameFormat,
+        seed: &CardFace,
+        db: &CardDatabase,
+    ) -> Arc<HashMap<String, CardFace>> {
+        let mut state = GameState::default();
+        state.format_config.format = format;
+        create_object_from_card_face(&mut state, seed, PlayerId(0));
+        rehydrate_game_from_card_db(&mut state, db);
+        state.card_face_registry.clone()
+    }
+
+    const MELD_RESULT: &str = "Meld Result";
+
+    /// A front face whose meld names `MELD_RESULT` — the outside-the-game third
+    /// card whose characteristics the melded permanent presents (CR 712.4b).
+    fn meld_seed_face() -> CardFace {
+        let mut face = test_face(
+            "Meld Front",
+            "oracle-meld-front",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Meld {
+                source: "Meld Front".to_string(),
+                partner: "Meld Partner".to_string(),
+                result: MELD_RESULT.to_string(),
+                source_filter: TargetFilter::SelfRef,
+                partner_filter: TargetFilter::Any,
+                entry: crate::types::ability::PermanentEntryMode::Normal,
+            },
+        ));
+        face
+    }
+
+    fn plain_face(name: &str, oracle_id: &str) -> CardFace {
+        test_face(
+            name,
+            oracle_id,
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        )
+    }
+
+    #[test]
+    fn registry_skips_conjure_targets_when_the_format_forbids_digital_only_cards() {
+        let mut conjurer = plain_face("Gated Conjurer", "oracle-gated-conjurer");
+        conjurer
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+        let db = db_from_faces(&[
+            conjurer.clone(),
+            plain_face("Conjured Spirit", "oracle-spirit"),
+        ]);
+
+        // Reach guard: the open format proves this fixture reaches the seed walk,
+        // so the closed format's emptiness below cannot pass vacuously.
+        assert!(
+            registry_under(GameFormat::Historic, &conjurer, &db).contains_key("conjured spirit"),
+            "an Arena-legal pool seeds the conjure target"
+        );
+        assert!(
+            registry_under(GameFormat::Standard, &conjurer, &db).is_empty(),
+            "a pool with no digital-only card seeds no conjure target"
+        );
+    }
+
+    #[test]
+    fn registry_still_seeds_meld_results_when_the_format_forbids_digital_only_cards() {
+        let front = meld_seed_face();
+        let db = db_from_faces(&[front.clone(), plain_face(MELD_RESULT, "oracle-meld-result")]);
+
+        for format in [GameFormat::Standard, GameFormat::Historic] {
+            assert!(
+                registry_under(format, &front, &db).contains_key("meld result"),
+                "CR 701.42: meld is a paper keyword action, so the meld result seeds under {format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_gates_spellbook_seeds_on_the_format() {
+        let mut source = plain_face("Spellbook Source", "oracle-spellbook-source");
+        source.metadata.spellbook = vec!["Spellbook Card".to_string()];
+        let db = db_from_faces(&[
+            source.clone(),
+            plain_face("Spellbook Card", "oracle-spellbook-card"),
+        ]);
+
+        assert!(
+            registry_under(GameFormat::Historic, &source, &db).contains_key("spellbook card"),
+            "an Arena-legal pool seeds every spellbook face"
+        );
+        assert!(
+            registry_under(GameFormat::Standard, &source, &db).is_empty(),
+            "a spellbook face is digital-only and follows the same gate"
+        );
+    }
+
+    /// H1: the gate selects effects, not faces — one face carrying both legs
+    /// keeps its meld result and loses its conjure target.
+    #[test]
+    fn registry_gate_splits_per_effect_not_per_face() {
+        let mut front = meld_seed_face();
+        front
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+        let db = db_from_faces(&[
+            front.clone(),
+            plain_face(MELD_RESULT, "oracle-meld-result"),
+            plain_face("Conjured Spirit", "oracle-spirit"),
+        ]);
+
+        let registry = registry_under(GameFormat::Standard, &front, &db);
+        assert!(
+            registry.contains_key("meld result"),
+            "reach guard: the walker reached this face's ability list"
+        );
+        assert!(
+            !registry.contains_key("conjured spirit"),
+            "the digital leg on the same face is gated out"
+        );
+    }
+
+    /// H2: the gate holds one hop inside the transitive closure, not only at the
+    /// seed step — the member a seed-only gate would wrongly admit.
+    #[test]
+    fn registry_gate_applies_at_every_closure_step() {
+        let front = meld_seed_face();
+        let mut result = plain_face(MELD_RESULT, "oracle-meld-result");
+        result
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+        let db = db_from_faces(&[
+            front.clone(),
+            result,
+            plain_face("Conjured Spirit", "oracle-spirit"),
+        ]);
+
+        let registry = registry_under(GameFormat::Standard, &front, &db);
+        assert!(
+            registry.contains_key("meld result"),
+            "reach guard: the closure resolved and walked the meld result face"
+        );
+        assert!(
+            !registry.contains_key("conjured spirit"),
+            "a digital name reached inside the closure is gated like a seed"
+        );
+    }
+
+    /// H3: a format enforcing no built-in card pool restricts nothing.
+    #[test]
+    fn registry_seeds_conjure_targets_when_the_format_enforces_no_pool() {
+        let mut conjurer = plain_face("Gated Conjurer", "oracle-gated-conjurer");
+        conjurer
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+        let db = db_from_faces(&[
+            conjurer.clone(),
+            plain_face("Conjured Spirit", "oracle-spirit"),
+        ]);
+
+        for format in [
+            GameFormat::FreeForAll,
+            GameFormat::Custom(crate::types::custom_format::CustomFormatId(0)),
+        ] {
+            assert!(
+                registry_under(format, &conjurer, &db).contains_key("conjured spirit"),
+                "{format:?} enforces no card pool, so the gate stays open"
+            );
+        }
+    }
+
     /// FIELD-COVERAGE: place an `Effect::Conjure` in EVERY nested ability/effect
     /// carrier and assert the walker collects all names. A future struct gaining
     /// a new `Box<AbilityDefinition>` field is NOT caught by the compiler (it is
     /// struct-field access, not a match arm) — this test is that safety net.
     #[test]
     fn walker_covers_every_nested_carrier() {
-        let mut names: Vec<String> = Vec::new();
+        let mut names = OutsideGameSeeds::default();
 
         // sub_ability / else_ability / mode_abilities on AbilityDefinition.
         let mut def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
@@ -3926,7 +4148,7 @@ mod tests {
         ];
         for name in expected {
             assert!(
-                names.iter().any(|n| n == name),
+                names.digital.iter().any(|n| n == name),
                 "walker missed conjure name '{name}' in a nested carrier"
             );
         }

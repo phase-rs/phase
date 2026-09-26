@@ -14,7 +14,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::{DieRollContinuation, PendingDieRoll, PendingDieRollInstruction};
 
 use super::resolve_ability_chain;
-use crate::game::ability_utils::build_resolved_from_def_with_targets;
+use crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root;
 
 /// CR 706.2: Draw one natural result from the game's seeded RNG — "the number
 /// indicated on the top face of the die before any modifiers."
@@ -208,6 +208,11 @@ pub fn resolve(
         // CR 706.3a: an `Effect::RollDie` resolution finishes here, in
         // `execute_roll`.
         continuation: DieRollContinuation::Resolution,
+        // CR 608.2h: propagate so a counter-gated "that many" nested in a
+        // results-table branch still resolves against the live chain-root
+        // target once that branch runs (see
+        // `build_resolved_from_def_with_chain_root`'s doc).
+        chain_root_targets: ability.context.chain_root_targets.clone(),
     };
 
     // CR 706.1 + CR 614.1a: route the instruction through the replacement
@@ -312,6 +317,7 @@ fn execute_roll(
         // (`resume_roll_dice_after_replacement`), so anything arriving here owns
         // the results-table route by construction.
         continuation: _,
+        chain_root_targets,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -333,6 +339,7 @@ fn execute_roll(
         // CR 706.6: the determined part of the ignore set, held so the resume
         // path drops it alongside whatever the roller picks from the tie.
         forced_ignored: outcome.forced.clone(),
+        chain_root_targets,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -512,6 +519,7 @@ pub fn resume_after_ignore(
         // argument (the caller unions the roller's picks into it), so the
         // frame's own copy is only a carrier across the suspension.
         forced_ignored: _,
+        chain_root_targets,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -572,11 +580,12 @@ pub fn resume_after_ignore(
             // sub_abilities, conditions, etc.). `ResolvedAbility::new` with only the
             // effect drops `player_scope`, so "each opponent loses N life" on a d20
             // table (Herald of Hadar) incorrectly hit the controller (#2026).
-            let sub = build_resolved_from_def_with_targets(
+            let sub = build_resolved_from_def_with_targets_and_chain_root(
                 &branch.effect,
                 source_id,
                 controller,
                 targets.clone(),
+                chain_root_targets.clone(),
             );
             resolve_ability_chain(state, &sub, events, 0)?;
 
@@ -613,6 +622,7 @@ pub fn resume_after_ignore(
                     // could silently pick a different tied roll than the one the
                     // roller committed to.
                     forced_ignored: ignore_indices.clone(),
+                    chain_root_targets: chain_root_targets.clone(),
                 };
                 // CR 706.3a: park the owner in the structurally valid slot.
                 // A results-table branch that suspended on its own prompt is

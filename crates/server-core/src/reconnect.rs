@@ -77,30 +77,42 @@ impl ReconnectManager {
     /// Return the distinct game codes with expired grace periods (for forfeit
     /// processing), in the order they were observed.
     ///
+    /// **Reporting is not consuming.** The forfeit sweep declines to act on a
+    /// game whose session is contended, so erasing the record here made that
+    /// decline permanent: the one tick that mattered found the seat, skipped
+    /// it, and nothing ever re-recorded it — `record_disconnect` fires on a
+    /// socket close and the player is already gone. A record is consumed when
+    /// its game leaves the registry ([`crate::session::SessionManager::remove_game`]
+    /// erases it), or by the sweep once it has established there is nothing
+    /// left to forfeit. Until then the same code is reported on the next tick,
+    /// which is the retry the sweep's cadence already assumes.
+    ///
     /// Entries are keyed per `(game, seat)`, so a game whose seats lapse
-    /// together produced one element each. Callers treat a code as "one game to
+    /// together produces one element each. Callers treat a code as "one game to
     /// tear down" — emitting it twice sends the terminal `GameOver` to every
     /// player once per lapsed seat and repeats the session delete. Forfeit is a
     /// per-game event, so collapse here rather than at each call site.
-    /// [`Self::check_expired_with_players`] stays per-seat: its entries are
-    /// already distinct, and draft auto-pick acts on each seat individually.
-    pub fn check_expired(&mut self) -> Vec<String> {
+    pub fn check_expired(&self) -> Vec<String> {
         let mut expired = Vec::new();
         let mut expired_game_codes = HashSet::new();
-        self.disconnected.retain(|_key, info| {
-            if info.disconnect_time.elapsed() > info.grace_period {
-                if expired_game_codes.insert(info.game_code.clone()) {
-                    expired.push(info.game_code.clone());
-                }
-                false
-            } else {
-                true
+        for info in self.disconnected.values() {
+            if info.disconnect_time.elapsed() > info.grace_period
+                && expired_game_codes.insert(info.game_code.as_str())
+            {
+                expired.push(info.game_code.clone());
             }
-        });
+        }
         expired
     }
 
     /// Return expired entries with their player IDs (for per-seat handling like draft auto-pick).
+    ///
+    /// Destructive, unlike [`Self::check_expired`], because its consumer has no
+    /// decline: the draft auto-pick sweep takes the whole draft registry with
+    /// `.lock().await` rather than a `try_lock`, so every branch it takes —
+    /// picked, draft gone, no longer drafting, seat already back — is a final
+    /// disposition for that seat and not a deferral. Per-seat for the same
+    /// reason: auto-pick acts on each seat individually.
     pub fn check_expired_with_players(&mut self) -> Vec<(String, PlayerId)> {
         let mut expired = Vec::new();
         self.disconnected.retain(|_key, info| {
@@ -117,6 +129,16 @@ impl ReconnectManager {
     pub fn is_disconnected(&self, game_code: &str, player: PlayerId) -> bool {
         let key = format!("{}:{}", game_code, player.0);
         self.disconnected.contains_key(&key)
+    }
+
+    /// Erase every disconnect record belonging to one game. `disconnected` is
+    /// keyed per `(game, seat)`, so a game has one entry per lapsed seat and no
+    /// keyed `remove` can reach them; the entries carry their own `game_code`,
+    /// and `retain` over a `DisconnectInfo` field is the shape `check_expired`
+    /// already uses.
+    pub fn remove_game(&mut self, game_code: &str) {
+        self.disconnected
+            .retain(|_, info| info.game_code != game_code);
     }
 
     pub fn remove_disconnect(&mut self, game_code: &str, player: PlayerId) {
@@ -227,8 +249,30 @@ mod tests {
         assert_eq!(expired.len(), 2, "one entry per game, got {expired:?}");
         assert!(expired.contains(&"GAME01".to_string()));
         assert!(expired.contains(&"GAME02".to_string()));
-        // Every record is still consumed, whether or not it was reported.
-        assert!(!mgr.is_disconnected("GAME01", PlayerId(1)));
+        // Collapsing the report must not collapse the records: the unreported
+        // seats are what a later tick re-reports if this one cannot act.
+        assert!(mgr.is_disconnected("GAME01", PlayerId(1)));
+    }
+
+    #[test]
+    fn reporting_an_expired_game_does_not_consume_its_records() {
+        // The sweep declines a game whose session is contended. Consuming the
+        // record on report stranded that game forever: no later tick saw it
+        // and nothing re-records a player who is already gone.
+        let mut mgr = ReconnectManager::new(Duration::from_millis(0));
+        mgr.record_disconnect("GAME01", PlayerId(0), Duration::from_millis(0));
+        std::thread::sleep(Duration::from_millis(1));
+
+        assert_eq!(mgr.check_expired(), vec!["GAME01".to_string()]);
+        assert_eq!(
+            mgr.check_expired(),
+            vec!["GAME01".to_string()],
+            "a tick that did not act must leave the game for the next one"
+        );
+
+        // Consumption is the game leaving the registry, which erases by code.
+        mgr.remove_game("GAME01");
+        assert!(mgr.check_expired().is_empty());
     }
 
     #[test]

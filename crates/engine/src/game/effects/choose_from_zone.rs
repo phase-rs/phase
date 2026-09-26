@@ -997,7 +997,10 @@ fn collect_player_zone_cards(
 /// CR 608.2c + CR 608.2d + CR 603.7: Resolve the candidate card pool for a
 /// tracked-set pick.
 ///
-/// Priority order:
+/// Priority order (the `Legacy` provenance; every other
+/// [`ZoneChoiceCandidateSource`] short-circuits to its single authority — see
+/// the match below, notably `CostPaidObjects`, which reads only this ability's
+/// own cost-paid objects and has no fallback at all):
 /// 1. The current resolution chain's tracked set, including an empty set.
 /// 2. The latest non-empty tracked set from any prior publish in this game.
 /// 3. Explicit `TargetRef::Object` targets on the ability.
@@ -1045,6 +1048,64 @@ fn resolve_candidate_cards(
                 ability,
                 chain_tracked_set_cards(state).unwrap_or_default(),
                 filter,
+            ));
+        }
+        // CR 400.7j + CR 601.2h + CR 602.2b + CR 608.2d: the candidates are the
+        // objects THIS ability's own cost moved into the requested (public) zone —
+        // Coin of Fate's "Exile two creature cards from your graveyard" activation
+        // cost, whose effect then says "An opponent chooses one of the exiled
+        // cards". The cost payment recorded those referents on the resolving
+        // ability, so the pool is source-bound: no tracked set, no explicit
+        // targets, no direct zone scan (which would offer every unrelated card
+        // sitting in exile).
+        //
+        // The record is a SNAPSHOT of the payment; legality is live on two axes:
+        //
+        //   * CR 400.7 — identity. A cost-exiled card that LEFT exile and came
+        //     back (e.g. Pull from Eternity to the graveyard, then re-exiled by
+        //     Scrabbling Claws) is a new object with no relation to the one the
+        //     cost moved, so it is no longer one of "the exiled cards". The
+        //     engine reuses `ObjectId` across zone changes, so storage id alone
+        //     cannot separate "still the bound object" from "a new object at the
+        //     same id" — `CostPaidObjectSnapshot::is_current` compares the
+        //     incarnation epoch, which can. That epoch is pinned past the cost's
+        //     OWN move by `settle_cost_paid_provenance_recursive` (CR 400.7j), so only
+        //     a LATER move reads as stale.
+        //   * CR 608.2d — zone. A referent whose object has since left the
+        //     requested zone (the sacrificed source, recorded by the same cost
+        //     and now in the graveyard), or no longer exists at all, is not a
+        //     legal choice and is dropped.
+        //
+        // Payment order is preserved so the prompt lists the cards in the order
+        // they were paid.
+        ZoneChoiceCandidateSource::CostPaidObjects => {
+            let mut zones = Vec::with_capacity(1 + additional_zones.len());
+            zones.push(zone);
+            zones.extend_from_slice(additional_zones);
+            let mut candidates: Vec<ObjectId> = Vec::new();
+            for record in ability.cost_paid_objects.iter() {
+                // CR 400.7: `live_object_id` is the provenance authority: a
+                // membership-only legacy/hidden-discard record, and a stale
+                // captured record, both fail closed rather than rebinding a
+                // reused storage id.
+                let Some(id) = record.live_object_id(state) else {
+                    continue;
+                };
+                // A cost can stamp the same object through more than one recording
+                // site; an object must not be offered twice.
+                if candidates.contains(&id) {
+                    continue;
+                }
+                if state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|object| zones.contains(&object.zone))
+                {
+                    candidates.push(id);
+                }
+            }
+            return Ok(retain_matching_candidates(
+                state, ability, candidates, filter,
             ));
         }
         ZoneChoiceCandidateSource::Legacy => {}
@@ -1218,7 +1279,23 @@ fn resolve_zone_owner(
     zone_owner: ZoneOwner,
 ) -> Result<PlayerId, EffectError> {
     match zone_owner {
-        ZoneOwner::Controller => Ok(ability.controller),
+        // CR 109.5: "you"/"your" on an object refer to that object's CONTROLLER
+        // — the printed controller of the spell or ability — never the player a
+        // per-player fan-out happens to be iterating. The `player_scope` fan-out
+        // rebinds `ability.controller` to the iterated player and preserves the
+        // printed controller in `original_controller`
+        // (`effects/mod.rs:14389-14397` and `:13039-13041`, which also bind
+        // `scoped_player` to the same iterated player). Reading `controller`
+        // here made "a creature card in your graveyard" scan each ITERATED
+        // OPPONENT's graveyard.
+        //
+        // A clause that genuinely wants the iterated player's zone has a
+        // correct home in `ZoneOwner::ScopedPlayer`, which resolves the same
+        // binding the fan-out sets. Two cards will want it once their parses are
+        // repaired — Every Hope Shall Vanish ("a nonland card from each of those
+        // hands") and Tariff ("the creature they control") — both of which
+        // currently misparse to `zone: Exile` and so observe nothing here.
+        ZoneOwner::Controller => Ok(ability.original_controller.unwrap_or(ability.controller)),
         ZoneOwner::TargetedPlayer => ability
             .targets
             .iter()

@@ -2462,6 +2462,7 @@ mod tests {
                 condition: None,
                 duration_subject: None,
                 end_permission: None,
+                duration_event_source: None,
                 source_name: String::new(),
             });
 
@@ -2570,6 +2571,53 @@ mod tests {
             }
             other => panic!("Expected AssignCombatDamage choice, got {other:?}"),
         }
+    }
+
+    /// CR 119.3 + CR 510.2: three attackers connecting with a player in one batch
+    /// emit one `LifeChanged` each, and each reports the total that hit left the
+    /// player on — 18, 16, 14 rather than three copies of the batch's final 14.
+    /// A client animating the hits one at a time reads these totals in order, so a
+    /// batch that reported only the end state would make every hit show 14.
+    #[test]
+    fn player_combat_damage_reports_the_total_after_each_hit() {
+        let mut state = setup();
+        let assignments: Vec<(ObjectId, DamageAssignment)> = (0..3)
+            .map(|index| {
+                let attacker =
+                    create_creature(&mut state, PlayerId(0), &format!("Monk {index}"), 2, 2);
+                (
+                    attacker,
+                    DamageAssignment {
+                        target: DamageTarget::Player(PlayerId(1)),
+                        amount: 2,
+                    },
+                )
+            })
+            .collect();
+
+        let CombatDamageBatch::Complete(events) =
+            apply_combat_damage(&mut state, &assignments, CombatDamageSubStep::Regular)
+        else {
+            panic!("batch must complete: this scenario has no competing life-gain replacement");
+        };
+
+        let readings: Vec<(i32, Option<i32>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged {
+                    player_id,
+                    amount,
+                    new_total,
+                } if *player_id == PlayerId(1) => Some((*amount, new_total.0)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            readings,
+            vec![(-2, Some(18)), (-2, Some(16)), (-2, Some(14))]
+        );
+        assert_eq!(state.players[1].life, 14);
     }
 
     /// CR 122.1c + CR 510.2: a single shield counter prevents ALL combat damage
@@ -2943,11 +2991,9 @@ mod tests {
         let gains: Vec<i32> = events
             .iter()
             .filter_map(|e| match e {
-                GameEvent::LifeChanged { player_id, amount }
-                    if *player_id == PlayerId(0) && *amount > 0 =>
-                {
-                    Some(*amount)
-                }
+                GameEvent::LifeChanged {
+                    player_id, amount, ..
+                } if *player_id == PlayerId(0) && *amount > 0 => Some(*amount),
                 _ => None,
             })
             .collect();
@@ -3141,7 +3187,7 @@ mod tests {
         let gain = events
             .iter()
             .position(|e| {
-                matches!(e, GameEvent::LifeChanged { player_id, amount }
+                matches!(e, GameEvent::LifeChanged { player_id, amount, .. }
                     if *player_id == PlayerId(0) && *amount > 0)
             })
             .expect("the lifelink gain is emitted");

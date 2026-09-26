@@ -21,12 +21,22 @@ use crate::types::mana::{ManaCost, ManaCostShard};
 /// here (Firion class). Ordered longest-first so "power-up" wins before any
 /// shorter prefix could.
 pub(crate) fn parse_taggable_ability_keyword(input: &str) -> OracleResult<'_, &'static str> {
+    parse_taggable_ability_tag(input).map(|(rest, tag)| (rest, tag.keyword_str()))
+}
+
+/// Same taggable-keyword grammar as [`parse_taggable_ability_keyword`], but
+/// returning the typed `AbilityTag` rather than its string projection — for
+/// callers (e.g. `ActivateAsInstant`'s tag-scoped timing permission) that
+/// store and compare the tag itself instead of reconstructing it from text.
+/// Single authority for the keyword list: the string form now delegates here
+/// instead of duplicating the `alt()` arms.
+pub(crate) fn parse_taggable_ability_tag(input: &str) -> OracleResult<'_, AbilityTag> {
     alt((
-        value(AbilityTag::PowerUp.keyword_str(), tag("power-up")),
-        value(AbilityTag::Exhaust.keyword_str(), tag("exhaust")),
-        value(AbilityTag::Outlast.keyword_str(), tag("outlast")),
-        value(AbilityTag::Boast.keyword_str(), tag("boast")),
-        value(AbilityTag::Equip.keyword_str(), tag("equip")),
+        value(AbilityTag::PowerUp, tag("power-up")),
+        value(AbilityTag::Exhaust, tag("exhaust")),
+        value(AbilityTag::Outlast, tag("outlast")),
+        value(AbilityTag::Boast, tag("boast")),
+        value(AbilityTag::Equip, tag("equip")),
     ))
     .parse(input)
 }

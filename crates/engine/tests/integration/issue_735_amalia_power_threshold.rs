@@ -93,6 +93,7 @@ fn gain_life_and_resolve(runner: &mut GameRunner) {
     let events = vec![GameEvent::LifeChanged {
         player_id: P0,
         amount: 1,
+        new_total: engine::types::events::LifeTotalReading::default(),
     }];
     process_triggers(runner.state_mut(), &events);
     drain_to_priority(runner);

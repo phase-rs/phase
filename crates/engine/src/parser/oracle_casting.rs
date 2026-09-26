@@ -1,8 +1,9 @@
 use crate::parser::oracle_nom::bridge::nom_on_lower;
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, map, opt, value};
+use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -14,6 +15,7 @@ use crate::types::ability::{
     AbilityCost, AdditionalCost, CastingRestriction, Comparator, ParsedCondition, QuantityExpr,
     QuantityRef, SpellCastingOption,
 };
+use crate::types::mana::ManaColor;
 
 /// Split a combined additional-cost line from its trailing self-spell cost
 /// reduction (Rottenmouth Viper class: "...sacrifice N. This spell costs {1}
@@ -502,6 +504,60 @@ fn self_spell_phrase(lower: &str, card_name: &str) -> Option<String> {
     None
 }
 
+fn parse_mana_color_connector(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag(" and/or "),
+        tag(", and/or "),
+        tag(" or "),
+        tag(", or "),
+        tag(" and "),
+        tag(", and "),
+        tag(", "),
+    ))
+    .parse(input)
+}
+
+fn parse_colored_keyword(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
+    value(
+        vec![
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+            ManaColor::Green,
+        ],
+        tag("colored"),
+    )
+    .parse(input)
+}
+
+pub(crate) fn parse_mana_colors(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
+    alt((
+        parse_colored_keyword,
+        separated_list1(parse_mana_color_connector, nom_primitives::parse_color),
+    ))
+    .parse(input)
+}
+
+/// CR 601.2b / CR 601.2h: Parse a "Spend only [colors] mana on X" clause using nom combinators.
+pub(crate) fn parse_spend_only_on_x_clause(input: &str) -> OracleResult<'_, CastingRestriction> {
+    let (rest, _) = tag("spend only ").parse(input)?;
+    let (rest, colors) = parse_mana_colors(rest)?;
+    let (rest, _) = opt(tag(" mana")).parse(rest)?;
+    let (rest, _) = tag(" on x").parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, CastingRestriction::SpendOnlyOnX { colors }))
+}
+
+/// CR 601.2b / CR 601.2h: Extract a "Spend only ... on X." prefix from a line, returning
+/// the remainder of the line and the parsed `CastingRestriction`. Uses `nom_on_lower`
+/// to safely map the remainder back across case and Unicode transformations.
+pub(crate) fn extract_spend_only_on_x_prefix(line: &str) -> Option<(&str, CastingRestriction)> {
+    let lower = line.to_lowercase();
+    let (restriction, rest) = nom_on_lower(line, &lower, parse_spend_only_on_x_clause)?;
+    Some((rest.trim(), restriction))
+}
+
 /// CR 601.3: Parse "Cast this spell only [condition]" into typed restrictions.
 /// Handles ability word prefixes (e.g., "Tragic Backstory — Cast this spell only if...").
 pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestriction>> {
@@ -510,6 +566,11 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     let trimmed_lower = trimmed.to_lowercase();
     if parse_cant_spend_mana_restriction(&trimmed_lower) {
         return Some(vec![CastingRestriction::CantSpendMana]);
+    }
+    if let Ok((rest, restriction)) = parse_spend_only_on_x_clause(trimmed_lower.as_str()) {
+        if rest.trim().is_empty() || rest.trim() == "." {
+            return Some(vec![restriction]);
+        }
     }
     if let Some(restriction) = parse_negative_self_casting_restriction(&trimmed_lower) {
         return Some(vec![restriction]);
@@ -1785,6 +1846,52 @@ Trample";
         );
     }
 
+    /// CR 601.2f + CR 702.8a: Tegwyll's Scouring — the self-flash rider's
+    /// additional cost is a single-component "tapping three untapped creatures
+    /// you control with flying" phrase, so the per-component split must leave it
+    /// byte-identical to the pre-split lowering and the option must still carry
+    /// `TapCreatures { count: 3, …flying… }`. Sibling regression guard for
+    /// `parse_gerund_cost`'s component split.
+    #[test]
+    fn tegwyll_self_flash_gerund_survives_component_split() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by tapping three untapped creatures you control with flying in addition to paying its other costs.",
+            "Tegwyll's Scouring",
+        )
+        .expect("Tegwyll's single-component flash rider must survive the component split");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                cost:
+                    Some(AbilityCost::TapCreatures {
+                        ref requirement,
+                        ref filter,
+                    }),
+                condition: None,
+            } => {
+                assert_eq!(
+                    requirement.fixed_count(),
+                    Some(3),
+                    "Tegwyll taps three creatures, got {requirement:?}"
+                );
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("expected a Typed creature filter, got {filter:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "expected a Creature filter, got {typed:?}"
+                );
+                assert!(
+                    typed.properties.contains(&FilterProp::WithKeyword {
+                        value: Keyword::Flying
+                    }),
+                    "the flying restriction must survive the split, got {typed:?}"
+                );
+            }
+            other => panic!("expected AsThoughHadFlash with a TapCreatures cost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn alt_cost_sacrifice_typed_creature_arm() {
         // Delraich — "sacrifice three black creatures"
@@ -2589,5 +2696,53 @@ Trample";
             Some(AdditionalCost::Required(AbilityCost::Sacrifice(_))) => {}
             other => panic!("a readable body must stay a typed cost, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extract_spend_only_on_x_prefix_handles_expanding_unicode_and_colored_mana() {
+        // CR 601.2b / CR 601.2h: "Spend only colored mana on X." (Emblazoned Golem)
+        let line = "Spend only colored mana on X. No more than one mana of each color may be spent this way.";
+        let (rest, restriction) =
+            extract_spend_only_on_x_prefix(line).expect("colored mana on X should extract");
+        assert_eq!(
+            rest,
+            "No more than one mana of each color may be spent this way."
+        );
+        assert_eq!(
+            restriction,
+            CastingRestriction::SpendOnlyOnX {
+                colors: vec![
+                    ManaColor::White,
+                    ManaColor::Blue,
+                    ManaColor::Black,
+                    ManaColor::Red,
+                    ManaColor::Green,
+                ]
+            }
+        );
+
+        // Expanding Unicode in remainder (\u{0130} / İ expands from 2 to 3 bytes under to_lowercase())
+        let expanding = "Spend only black mana on X. \u{0130}deal test";
+        let (rest_expanding, restriction_expanding) =
+            extract_spend_only_on_x_prefix(expanding).expect("prefix extraction should succeed");
+        assert_eq!(rest_expanding, "\u{0130}deal test");
+        assert_eq!(
+            restriction_expanding,
+            CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black]
+            }
+        );
+
+        // Soul Burn: "Spend only black and/or red mana on X."
+        let soul_burn = "Spend only black and/or red mana on X. Soul Burn deals X damage.";
+        let (rest_sb, restriction_sb) =
+            extract_spend_only_on_x_prefix(soul_burn).expect("Soul Burn prefix should extract");
+        assert_eq!(rest_sb, "Soul Burn deals X damage.");
+        assert_eq!(
+            restriction_sb,
+            CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black, ManaColor::Red]
+            }
+        );
     }
 }

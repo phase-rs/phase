@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
-    AbilityDefinition, CopyTargetPurpose, Effect, PostReplacementContinuation, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, AttachCardinality, AttachSelection, CopyTargetPurpose, Effect,
+    PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -700,7 +700,21 @@ fn handle_replacement_choice_inner(
                 }
                 // CR 701.22a: Scry accepted after replacement choice.
                 scry @ ProposedEvent::Scry { .. } => {
+                    let events_before = events.len();
                     apply_scry_after_replacement(state, scry, events);
+                    // CR 701.22d: an empty-library scry publishes its event from
+                    // this replacement-choice handler, where resolve_chain_body's
+                    // recording does not see it, so record it here.
+                    for event in &events[events_before..] {
+                        if let GameEvent::PlayerPerformedAction {
+                            player_id, action, ..
+                        } = event
+                        {
+                            crate::game::effects::record_player_action_this_turn(
+                                state, *player_id, *action,
+                            );
+                        }
+                    }
                 }
                 // CR 701.37a: Explore accepted after replacement choice — the
                 // explore resolver handles the actual explore logic; this is a no-op here.
@@ -2677,6 +2691,9 @@ fn finish_copy_target_choice_entry(
                     Effect::Attach {
                         attachment: TargetFilter::SelfRef,
                         target: TargetFilter::Any,
+                        selection: AttachSelection::AtResolution {
+                            count: AttachCardinality::One,
+                        },
                     },
                     Vec::new(),
                     source_id,
@@ -5075,8 +5092,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let mut events = Vec::new();
@@ -5111,6 +5130,7 @@ mod tests {
                 display_name: "Soldier".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                loyalty: None,
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Soldier".to_string()],
                 supertypes: Vec::new(),
@@ -5236,6 +5256,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: Vec::new(),
@@ -5394,6 +5415,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: Vec::new(),
@@ -5569,6 +5591,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: Vec::new(),
@@ -5723,6 +5746,7 @@ mod tests {
                 display_name: "Dog".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                loyalty: None,
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Dog".to_string()],
                 supertypes: Vec::new(),
@@ -5860,6 +5884,7 @@ mod tests {
                 display_name: "Treasure".to_string(),
                 power: None,
                 toughness: None,
+                loyalty: None,
                 core_types: vec![CoreType::Artifact],
                 subtypes: vec!["Treasure".to_string()],
                 supertypes: Vec::new(),
@@ -7399,8 +7424,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -7606,8 +7633,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -7729,8 +7758,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -8187,8 +8218,10 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);

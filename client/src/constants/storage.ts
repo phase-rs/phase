@@ -70,6 +70,16 @@ export const DRAFT_RUN_KEY_PREFIX = "phase-draft-run:";
 /** localStorage key for the Zustand-persisted preferences store. */
 export const PREFERENCES_KEY = "phase-preferences";
 
+/**
+ * localStorage key for configured LLM opponent endpoints.
+ *
+ * Deliberately NOT part of {@link isUserOwnedStorageKey}: these records hold
+ * provider API keys, and the backup export and cloud-sync mirror are both
+ * off-device destinations a player has not consented to send a credential to.
+ * An LLM opponent is re-configured per device, on purpose.
+ */
+export const LLM_ENDPOINTS_KEY = "phase-llm-endpoints";
+
 /** localStorage key for personal draft workspace preferences. */
 export const DRAFT_WORKSPACE_PREFERENCES_KEY = "phase-draft-workspace-preferences";
 

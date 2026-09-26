@@ -2,7 +2,8 @@
 Type=Application
 Name=Phase
 Comment=Play Magic: The Gathering against AI opponents and other players
-Exec=phase-tauri
+Exec=phase-tauri %u
+MimeType=x-scheme-handler/phase;
 Icon=rs.phase.app
 Terminal=false
 Categories=Game;CardGame;

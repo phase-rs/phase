@@ -1,10 +1,13 @@
 // CR 604 / CR 613 - shared static parser grammar utilities.
 
+use super::evasion::combine_conditions;
 use super::oracle_trigger::NthEventTimingKind;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_nom::defender_exception;
+use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::types::ability::PlayerFilter;
 use nom::character::complete::{alphanumeric1, char, digit1, one_of};
 use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
@@ -692,7 +695,8 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // standard predicate path's `strip_suffix_turn_condition`), companion gated
     // Not(DuringYourTurn). Hunter's Blowgun: "Equipped creature has deathtouch
     // during your turn. Otherwise, it has reach."
-    type VE<'a> = OracleError<'a>;
+    // (The `type VE<'a>` alias this function carried was consumed only by the
+    // CR 702.3b two-`tag` `alt` that now delegates to the shared recognizer.)
     if let Some((head_tp, tail_tp)) = pred_tp
         .split_around(". otherwise, ")
         .or_else(|| pred_tp.split_around(". otherwise "))
@@ -834,22 +838,6 @@ pub(crate) fn parse_enchanted_equipped_predicate(
             .description(description.to_string())];
     }
 
-    // CR 702.3b: "can attack as though <pronoun> didn't have defender" →
-    // CanAttackWithDefender. Accepts both pronoun forms so plural subjects
-    // ("Creatures you control …they didn't…") routed through the
-    // creatures-you-control prefix handler (line ~620) land here.
-    if alt((
-        tag::<_, _, VE>("can attack as though it didn't have defender"),
-        tag::<_, _, VE>("can attack as though they didn't have defender"),
-    ))
-    .parse(pred_lower.as_str())
-    .is_ok()
-    {
-        return vec![StaticDefinition::new(StaticMode::CanAttackWithDefender)
-            .affected(affected)
-            .description(description.to_string())];
-    }
-
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature
     //
     // Only peel a trailing static-grant " unless " rider (Heroic Defiance:
@@ -892,6 +880,135 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         (pred_tp, None, String::new())
     };
     let body_lower = body_tp.lower;
+
+    // CR 702.3b + CR 508.1c: "can attack [<class>] as though
+    // <pronoun> didn't have defender" on an attached subject (and on the plural
+    // subjects the creatures-you-control prefix handler at line ~620 routes here).
+    // Shares ONE recognizer with the non-attached static production, the
+    // effect-side production and both conjunctive grammars.
+    //
+    // This arm sits BELOW the trailing-condition split so a printed
+    // `" as long as …"` / `" unless …"` rider is peeled by the SAME machinery the
+    // sibling evasion arms use, then conjoined with any class the interposed
+    // segment carries. It previously sat ABOVE the split and matched a PREFIX of
+    // the unsplit predicate, which silently DISCARDED that rider and published an
+    // unconditional permission — an enchanted/equipped subject could attack with
+    // no regard for a condition this parser can represent.
+    //
+    // The recognizer is still a PREFIX match, and it must stay one: an
+    // all-consuming policy here makes the arm decline, the line fall through, and
+    // the `AddKeyword(Defender)` inverse win. What changed is WHAT it is offered —
+    // the split's body rather than the whole predicate. Animate Wall, whose tail is
+    // ".", takes the no-rider path and is unmoved; guarded by
+    // `attached_subject_production_still_fires_with_a_trailing_rider` and
+    // `attached_subject_defender_exception_keeps_its_trailing_condition`.
+    if let Some((segment, rest)) =
+        defender_exception::parse_defender_exception_predicate(body_lower)
+    {
+        // CR 702.3b: DECLINE the duration form outright rather than falling
+        // through. "Enchanted creature can attack THIS TURN as though it didn't
+        // have defender" is a TEMPORARY exception to Defender; the generic
+        // continuous parser below reads the tail as a grant and emits
+        // `AddKeyword(Defender)` — the exact INVERSE of the printed permission,
+        // and the #8785 defect shape on a sibling grammar.
+        //
+        // An empty `Vec` means "not parsed here": callers fall back to
+        // `parse_static_line` (production (b)), which declines this form too, so
+        // the line ends up UNPARSED and visible as a coverage gap instead of
+        // silently reversed. That is the honest answer for a shape no corpus card
+        // prints as a static line, and it makes the two static productions agree
+        // rather than disagree. Guarded by
+        // `defender_exception_duration_form_is_declined_by_both_static_productions`.
+        if matches!(segment, DefenderExceptionSegment::DurationAdverbial) {
+            return Vec::new();
+        }
+        {
+            let mut def = StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                .affected(affected.clone())
+                .description(description.to_string());
+            // ONE conjoin authority, shared with the non-attached production.
+            if let Some(condition) =
+                combine_conditions(segment.permission_condition(), suffix_condition.clone())
+            {
+                if suffix_condition.is_some() {
+                    // A printed trailing gate participates, so route the result
+                    // through the shared enforcement-point remedy: a gate this
+                    // parser cannot represent on `CanAttackWithDefender` becomes
+                    // the inert marker and the permission fails CLOSED.
+                    attach_gated_condition(&mut def, condition, &gap_text);
+                } else {
+                    // No printed rider: unchanged from base, and NOT routed through
+                    // the remedy, which would re-wrap an already-inert terminal with
+                    // an empty gap text and lose the clause it names.
+                    def = def.condition(condition);
+                }
+            }
+
+            // CR 702.3b: a RULES-BEARING remainder must not be dropped. The
+            // recognizer returns unconsumed input, and base bound it as `_rest`
+            // and discarded it — so "Enchanted creature can attack as though it
+            // didn't have defender AND HAS FLYING." kept the permission and lost
+            // the flying grant, while coverage reported the card as supported.
+            // This is the same defect the non-attached production composes around;
+            // fixing it there and not here fixed the instance rather than the class.
+            //
+            // The companion is parsed by RE-ENTERING this production on the peeled
+            // remainder with the SAME `affected` — it is the authority for attached
+            // predicates, so "has flying" is already its job. The recursion is on a
+            // strictly shorter input that no longer contains the defender clause,
+            // so it cannot re-enter this arm forever.
+            //
+            // If the conjunction or the companion cannot be modelled, DECLINE the
+            // whole clause (empty vec) rather than emit a partial: callers fall
+            // back and the line shows as an unimplemented gap. A partial prefix
+            // must not be green. Guarded by
+            // `attached_subject_rules_bearing_remainder_composes_or_declines`.
+            let tail = rest.trim().trim_end_matches('.').trim();
+            if !tail.is_empty() {
+                let Some(companion_pred) = nom_tag_lower(tail, tail, "and ") else {
+                    return Vec::new();
+                };
+                let companions = parse_enchanted_equipped_predicate(
+                    companion_pred,
+                    affected.clone(),
+                    description,
+                );
+                if companions.is_empty() {
+                    return Vec::new();
+                }
+                // CR 508.1c: the printed trailing gate governs EVERY
+                // conjunct, not just the first. The recursion above is handed
+                // `companion_pred`, which comes from the body AFTER the trailing
+                // condition was split off — so a companion never sees that gate on
+                // its own, and composing without re-applying it grants the
+                // companion UNCONDITIONALLY while the permission stays gated.
+                // "…can attack as though it didn't have defender AND HAS FLYING as
+                // long as you control a Mountain" would grant flying with no
+                // Mountain. That is a fail-OPEN, and it is the same conjoin rule
+                // the non-attached composer already applies to both halves.
+                //
+                // `combine_conditions` so a companion carrying its own inner
+                // condition CONJOINS rather than being overwritten, and
+                // `attach_gated_condition` so a gate unrepresentable on the
+                // companion's mode fails CLOSED exactly as it does on the
+                // permission. Guarded by the conditional-companion fixture in
+                // `attached_subject_rules_bearing_remainder_composes_or_declines`.
+                let mut composed = vec![def];
+                for mut companion in companions {
+                    if let Some(gate) = suffix_condition.clone() {
+                        if let Some(merged) =
+                            combine_conditions(companion.condition.clone(), Some(gate))
+                        {
+                            attach_gated_condition(&mut companion, merged, &gap_text);
+                        }
+                    }
+                    composed.push(companion);
+                }
+                return composed;
+            }
+            return vec![def];
+        }
+    }
 
     if nom_tag_lower(body_lower, body_lower, "can't be blocked").is_some() {
         // "can't be blocked except by" → CantBeBlockedExceptBy
@@ -2002,32 +2119,56 @@ pub(crate) fn parse_graveyard_permission_condition(
     Ok((rest, condition))
 }
 
+/// CR 614.1a + CR 607.1: The linked stack-exit destination sentence shared by
+/// every "cast this way" permission ("… If a spell cast this way would be put
+/// into your graveyard, exile it instead."). Single authority for the literal:
+/// both the all-consuming recognizer below and
+/// `restriction::split_exile_spell_cast_this_way_rider` (which peels the
+/// sentence off a rider run before the additional-cost parse) key on this text.
+pub(crate) const EXILE_SPELL_CAST_THIS_WAY_RIDER: &str =
+    "if a spell cast this way would be put into your graveyard, exile it instead";
+
+/// CR 614.1a + CR 607.1: Recognize the trailing "If a spell cast this way
+/// would be put into your graveyard, exile it instead." sentence as a
+/// whole-text suffix (leading period/space tolerated). The sentence is the
+/// CR 614.1a replacement of the stack→graveyard event, linked back to the
+/// cast permission by "this way" (CR 607.1).
 pub(crate) fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult<'_, ()> {
     all_consuming(preceded(
         terminated(opt(tag(".")), space0),
         value(
             (),
-            terminated(
-                tag("if a spell cast this way would be put into your graveyard, exile it instead"),
-                opt(tag(".")),
-            ),
+            terminated(tag(EXILE_SPELL_CAST_THIS_WAY_RIDER), opt(tag("."))),
         ),
     ))
     .parse(input)
 }
 
 pub(crate) fn parse_top_of_library_permission_condition(trailing: &str) -> Option<StaticCondition> {
+    let (rest, condition) = parse_top_of_library_permission_condition_and_rest(trailing)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(condition)
+}
+
+/// CR 611.3a: The gate-prefixed condition WITH the text that follows it — the
+/// sequencing form of [`parse_top_of_library_permission_condition`], for
+/// permission shapes whose trailing may carry a second clause after the gate
+/// (e.g. a CR 118.9 alt-cost rider). Single authority for the " as long as "
+/// marker and the condition grammar; the full-consumption form above delegates
+/// here, so the two cannot drift.
+pub(crate) fn parse_top_of_library_permission_condition_and_rest(
+    trailing: &str,
+) -> Option<(&str, StaticCondition)> {
     let (rest, condition) = preceded(
         tag::<_, _, OracleError<'_>>(" as long as "),
         nom_condition::parse_inner_condition,
     )
     .parse(trailing)
     .ok()?;
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
-    if !rest.is_empty() {
-        return None;
-    }
-    Some(condition)
+    Some((rest, condition))
 }
 
 /// CR 118.9 + CR 119.4: Helper to parse the optional alt-cost rider that may
@@ -2631,6 +2772,11 @@ pub(crate) fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefi
         amount,
         spell_filter: None,
         dynamic_count: None,
+        // CR 601.2f: the cost floor is applied after every Reduce/Raise settles
+        // and only ever ADDS generic mana, so the CR 118.7b reach axis — which
+        // governs where an unmatched colored REDUCTION unit may go — never
+        // engages here. Present only because the field is shared with Reduce.
+        reach: CostReductionReach::SpillsToGeneric,
     })
     .description(text.to_string());
 

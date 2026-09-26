@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} draw)",
     "draws_other": " ({{count}} draws)",
     "main": "Main ({{count}}, min {{min}})",
+    "mainNoMinimum": "Main ({{count}})",
     "sideboard": "Sideboard ({{count}})",
     "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Move cards from the sideboard.",
@@ -96,6 +97,9 @@
     "message": "Your game won't be publicly listed. You can still host over P2P — just share the room code directly with your opponent.",
     "continueWithoutLobby": "Continue without lobby"
   },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "This lobby server is too old to list games in the selected format (it needs lobby protocol {{needed}})."
+  },
   "joinErrorDialog": {
     "dismiss": "Dismiss"
   },
@@ -103,7 +107,9 @@
     "firstMessageInvalid": "The host rejected the connection before setup. Refresh both windows and try again.",
     "versionRequired": "This host requires wire protocol v{{version}}. Refresh both windows and try again.",
     "versionMismatch": "Wire protocol mismatch: your client sent v{{guestVersion}}, but the host uses v{{hostVersion}}. Refresh both windows.",
-    "malformedAuthority": "The host rejected invalid connection authority. Rejoin using a new room code."
+    "malformedAuthority": "The host rejected invalid connection authority. Rejoin using a new room code.",
+    "frameUndecodable": "The host sent a message this client could not read. Refresh both windows and try again.",
+    "hostDisconnectedBeforeSetup": "Host disconnected before game setup completed"
   },
   "serverOfflinePrompt": {
     "title": "Matchmaking unreachable",
@@ -129,6 +135,8 @@
     "sandboxConfirm": "This is a Sandbox game. Players with debug permission can directly manipulate game state. Continue?",
     "draftBadgeTitle": "{{kind}} Draft — {{setCode}}",
     "draftBadge": "{{setCode}} Draft",
+    "cubeDraftBadgeTitle": "{{kind}} Draft — {{cubeName}}",
+    "cubeDraftBadge": "{{cubeName}} Draft",
     "p2pBadgeTitle": "Peer-to-peer game (host runs the engine)",
     "sandboxBadgeTitle": "This game allows debug actions. Use for testing — not a competitive match.",
     "hintSlow": "SLOW",
@@ -274,7 +282,11 @@
     "loadingCustomFormat": "Loading format…",
     "noSavedCustomFormats": "No saved custom formats yet.",
     "customFormatResolveFailed": "Could not load that saved format.",
-    "customFormatHostingUnavailable": "Hosting with a custom format isn't supported yet — deck legality can't be checked for it. Save and preview it for now."
+    "customFormatHostingUnavailable": "Hosting with a custom format isn't supported yet — deck legality can't be checked for it. Save and preview it for now.",
+    "botGameNotice": "Hosting Discord game {{code}}. Connection and privacy come from the Discord post.",
+    "botSeedIgnored": "Some settings from the Discord post couldn't be used here — check the format and player count.",
+    "botP2PNotice": "Your device runs the game. Keep the app open and stay connected.",
+    "botServerNotice": "A dedicated server runs the game. It may slow down or go offline."
   },
   "page": {
     "deckRejected": "Deck was rejected by the host.",
@@ -307,7 +319,20 @@
     "pickDeck": "Pick Deck",
     "anonymous": "Anonymous",
     "joining": "Joining",
-    "joinNeedsServer": "Pick a server before joining a game."
+    "joinNeedsServer": "Pick a server before joining a game.",
+    "serverDraftJoinUnsupported": "Server-hosted draft pods can't be joined from the lobby.",
+    "p2pDraftSpectateUnsupported": "Player-hosted draft pods can't be watched.",
+    "alreadyInDraftPod": "You're already in a draft pod. Leave it before joining another.",
+    "invalidGameLink": "This game link is invalid or incomplete.",
+    "waitingForHostTitle": "Waiting for host…",
+    "waitingForHostMessage": "The host hasn't opened this game yet, or it has closed. Retry once the host has opened their link.",
+    "botLinkBrokerUnreachable": "Couldn't reach the lobby server to open this Discord game. Check your connection, then open your host link again.",
+    "updatingTitle": "Updating to the latest version…",
+    "updatingMessage": "A newer version of phase.rs is out. The page will reload when it's ready.",
+    "refreshAfterGame": "Finish your current game, then refresh to update.",
+    "updateFailedTitle": "Couldn't update automatically",
+    "updateFailedMessage": "Refresh to get the latest version, or continue on this one. Players on different versions can't join the same game.",
+    "continueAnyway": "Continue anyway"
   },
   "draftLobbyPanel": {
     "draftPod": "Draft Pod",
@@ -323,5 +348,20 @@
     "checkingLegality": "Checking deck legality…",
     "legal": "✓ Legal in {{format}}",
     "notLegal": "Not legal in {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "This server doesn't support Discord games yet.",
+    "codeInUse": "This game's code is still held by an earlier room. Wait a few minutes, then open your host link from Discord again. If it keeps happening, start a new /lfg."
+  },
+  "openDesktop": {
+    "title": "Opening the phase.rs desktop app…",
+    "invalid": "This link can't be opened in the desktop app.",
+    "openApp": "Open desktop app",
+    "continueInBrowser": "Didn't open? Continue in browser",
+    "getDesktopApp": "Get the desktop app"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Game in progress",
+    "gameInProgressBody": "Finish or leave your current game, then open the link again."
   }
 }

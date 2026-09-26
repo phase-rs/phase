@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EngineWorkerClient } from "../engine-worker-client";
+import type { GameEvent } from "../types";
 
 const notifyEngineSlow = vi.hoisted(() => vi.fn());
 vi.mock("../../game/engineRecovery", () => ({
@@ -163,6 +164,57 @@ describe("EngineWorkerClient request timeout", () => {
     // rejection that fails the run).
     await vi.advanceTimersByTimeAsync(60_000);
     await expect(promise).resolves.toEqual({ stack: [] });
+  });
+});
+
+describe("EngineWorkerClient viewer transition projection", () => {
+  it("posts the viewer id and event slice to the transition endpoint", async () => {
+    const client = new EngineWorkerClient();
+    const events: GameEvent[] = [{ type: "GameStarted" }];
+    const pending = client.getViewerTransitionSnapshot(1, events);
+    const worker = currentWorker();
+    const posted = worker.posted[0];
+
+    expect(posted).toMatchObject({
+      type: "getViewerTransitionSnapshot",
+      viewerId: 1,
+      events,
+    });
+
+    const answer = {
+      state: { state: { waiting_for: { type: "Priority", player: 1 } } },
+      actions: [],
+      autoPassRecommended: false,
+      events,
+    };
+    worker.replyResult(posted.id as number, answer);
+
+    await expect(pending).resolves.toEqual(answer);
+    client.dispose();
+  });
+
+  it("surfaces recoverable Rust validation errors from the transition endpoint", async () => {
+    const client = new EngineWorkerClient();
+    const pending = client.getViewerTransitionSnapshot(256, []);
+    const worker = currentWorker();
+    const requestId = worker.posted[0].id as number;
+
+    worker.replyError(requestId, "INVALID_VIEWER_ID: 256 exceeds u8 range");
+
+    await expect(pending).rejects.toThrow("INVALID_VIEWER_ID: 256 exceeds u8 range");
+    client.dispose();
+  });
+
+  it("does not treat malformed event input as a successful snapshot", async () => {
+    const client = new EngineWorkerClient();
+    const pending = client.getViewerTransitionSnapshot(0, []);
+    const worker = currentWorker();
+    const requestId = worker.posted[0].id as number;
+
+    worker.replyError(requestId, "INVALID_TRANSITION_EVENTS: invalid event payload");
+
+    await expect(pending).rejects.toThrow("INVALID_TRANSITION_EVENTS: invalid event payload");
+    client.dispose();
   });
 });
 

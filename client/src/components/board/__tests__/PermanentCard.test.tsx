@@ -1472,10 +1472,7 @@ describe("PermanentCard", () => {
         11: exiledTwo,
       },
       exile: [10, 11],
-      exile_links: [
-        { exiled_id: 10, source_id: 1, kind: "TrackedBySource" },
-        { exiled_id: 11, source_id: 1, kind: "TrackedBySource" },
-      ],
+      derived: { linked_exile_ids: { "1": [10, 11] } },
     };
     useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
 

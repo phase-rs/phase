@@ -1203,7 +1203,11 @@ pub(crate) fn lower_oracle_block_ir(
             modes,
             reflexive_parent,
         } => {
-            let mut trigger_ctx = ctx.clone();
+            let mut trigger_ctx = ctx.clone_for_independent_body();
+            // CR 603.1: `parse_trigger_lines_at_index_ir` parses a NEW printed
+            // trigger line, which establishes its own event authority. Any outer
+            // `trigger_zone_change` would be unrelated, so this enters an
+            // INDEPENDENT body by name rather than relying on a clone's default.
             trigger_ctx.host_self_reference = host_self_reference;
             let mut triggers = parse_trigger_lines_at_index_ir(
                 &trigger_line,
@@ -1218,6 +1222,15 @@ pub(crate) fn lower_oracle_block_ir(
                 // facts, but no mode can leak chain-local state into another.
                 let mut mode_ctx = trigger.body_context.clone();
                 mode_ctx.diagnostics.clear();
+                // CR 608.2c vs CR 603.12: a NON-reflexive modal mode body is
+                // ordinary text of the same resolving triggered ability, so the
+                // plain clone above correctly keeps the trigger's proven
+                // zone-change authority. A REFLEXIVE modal parent ("… When you
+                // do, choose one —") is a CR 603.12 body with its own event
+                // authority, so it must enter an independent body by name.
+                if reflexive_parent.is_some() {
+                    mode_ctx = mode_ctx.clone_for_independent_body();
+                }
                 if let Some(scope) = modal_relative_player_scope_for_trigger(trigger) {
                     mode_ctx.relative_player_scope = Some(scope);
                 }
@@ -1428,6 +1441,10 @@ fn parse_modal_mode_irs(
         .iter()
         .map(|mode| {
             let mut mode_ctx = base_ctx.clone();
+            // CR 608.2c: each mode body continues whatever body `base_ctx`
+            // describes, so the plain clone inherits exactly the authority
+            // `base_ctx` holds — a reset base stays reset, and no mode can
+            // invent authority its parent lacked.
             mode_ctx.subject = mode_anaphor_subject(mode_ctx.subject.take());
             mode_ctx.diagnostics.clear();
             let mut ability = parse_ability_ir_with_context(&mode.body, kind, &mut mode_ctx);
@@ -1463,7 +1480,10 @@ fn anchor_mode_irs(
     .parse(lower.as_str())
     .is_ok()
     {
-        let mut mode_ctx = base_ctx.clone();
+        let mut mode_ctx = base_ctx.clone_for_independent_body();
+        // CR 603.1: an anchor mode whose body is a printed trigger line spawns a
+        // DISTINCT triggered ability, which establishes its own event authority,
+        // so this enters an INDEPENDENT body by name.
         mode_ctx.diagnostics.clear();
         let triggers = parse_trigger_lines_at_index_ir(body, card_name, None, &mut mode_ctx);
         base_ctx.diagnostics.extend(mode_ctx.diagnostics);
@@ -2147,6 +2167,10 @@ pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -
         .collect();
 
     let mut mode_ctx = ctx.clone();
+    // CR 700.2 + CR 608.2c: an INLINE modal ("choose one — …; or …") is ordinary
+    // text of the body the caller is already parsing, so the plain clone keeps
+    // the caller's zone-change authority. `oracle_trigger` calls this with the
+    // live trigger body context.
     Some(ModalIr {
         marker: EffectChainIr::single_clause(
             effect_body,

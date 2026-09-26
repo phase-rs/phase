@@ -648,8 +648,10 @@ fn ezio_verbatim_oracle_text_eliminates_damaged_player_when_optional_paid() {
 /// combat damage event would unlock Freerunning for every spell,
 /// silently breaking the keyword's gating semantics.
 ///
-/// Issue #1962 hardening (TEST-ONLY): the type-and-commander gate at
-/// triggers.rs:1696-1709 is currently exercised only indirectly
+/// Issue #1962 hardening (TEST-ONLY): the type-and-commander gate
+/// (the `is_assassin_creature || is_commander` expression in
+/// `triggers::collect_pending_triggers_with_collection`'s `DamageDealt` handling)
+/// is currently exercised only indirectly
 /// (through casting tests that assume the ledger is populated). This
 /// test pins down the **negative** branch directly: a vanilla
 /// Creature with no Assassin subtype and `is_commander == false`
@@ -3953,6 +3955,7 @@ fn owner_collected_filter_never_drops_non_zone_change_events() {
     let life = GameEvent::LifeChanged {
         player_id: PlayerId(0),
         amount: -1,
+        new_total: crate::types::events::LifeTotalReading::default(),
     };
     let events = vec![zone_change.clone(), life.clone()];
     state

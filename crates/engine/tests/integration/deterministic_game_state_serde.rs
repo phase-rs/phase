@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use engine::game::combat::{
-    AttackTarget, BlockRequirement, CombatRequirement, CombatState, DamageAssignment, DamageTarget,
+    AttackTarget, BlockHistoryPair, BlockRequirement, CombatRequirement, CombatState,
+    DamageAssignment, DamageTarget,
 };
 use engine::game::dungeon::DungeonProgress;
 use engine::game::game_object::{BackFaceData, GameObject, ProtectionStartSnapshot};
@@ -21,7 +22,7 @@ use engine::types::game_state::{
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
     WaitingFor,
 };
-use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
+use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::{PhaseStop, PhaseStopScope};
@@ -203,6 +204,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "players_attacked_this_turn",
         "creatures_attacked_this_turn",
         "creatures_blocked_this_turn",
+        "creature_blocked_attackers_this_turn",
         "players_who_created_token_this_turn",
         "players_who_discarded_card_this_turn",
         "players_who_sacrificed_artifact_this_turn",
@@ -681,6 +683,14 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "CombatState",
             None,
             "attacking_incarnations_this_combat",
+            "HashSet",
+            Classification::Canonical(HASH_SET),
+        ),
+        (
+            "src/game/combat.rs",
+            "CombatState",
+            None,
+            "creature_blocked_attackers_this_combat",
             "HashSet",
             Classification::Canonical(HASH_SET),
         ),
@@ -2235,7 +2245,9 @@ fn real_game_state_hash_owners_are_canonical_and_round_trip_across_all_persisten
         first_name < second_name,
         "objects must emit by typed numeric key order"
     );
-    let specialize = field_fragment(&forward_json, "specialize_faces", "foretold");
+    // Anchored on the next field that serializes unconditionally: `foretold` holds its
+    // default here and no longer emits a key.
+    let specialize = field_fragment(&forward_json, "specialize_faces", "base_power");
     assert!(
         specialize.find("\"White\"").expect("white face")
             < specialize.find("\"Blue\"").expect("blue face"),
@@ -2533,6 +2545,110 @@ fn protection_tuple_map_round_trips_deterministically_through_all_persistence_fo
                 .expect("source fixture object exists")
                 .protection_start_exempt_attachments,
             "{persistence_name} persistence restores every protection snapshot"
+        );
+    }
+}
+
+/// S1: the block-history pair sets (`CombatState::creature_blocked_attackers_this_combat`,
+/// `GameState::creature_blocked_attackers_this_turn`) round-trip through every
+/// persistence form with insertion-order-independent, `Ord`-sorted bytes —
+/// the model is `protection_tuple_map_round_trips_deterministically_through_all_persistence_forms`.
+#[test]
+fn block_history_pair_sets_round_trip_through_all_persistence_forms() {
+    let low = BlockHistoryPair {
+        blocker: ObjectIncarnationRef::of(ObjectId(1), 0),
+        attacker: ObjectIncarnationRef::of(ObjectId(10), 0),
+    };
+    let high = BlockHistoryPair {
+        blocker: ObjectIncarnationRef::of(ObjectId(2), 0),
+        attacker: ObjectIncarnationRef::of(ObjectId(20), 0),
+    };
+
+    let mut forward = GameState::new(FormatConfig::standard(), 2, 42);
+    forward.combat = Some(CombatState {
+        creature_blocked_attackers_this_combat: [low, high].into_iter().collect(),
+        ..Default::default()
+    });
+    forward.creature_blocked_attackers_this_turn = [low, high].into_iter().collect();
+
+    let mut reverse = GameState::new(FormatConfig::standard(), 2, 42);
+    reverse.combat = Some(CombatState {
+        creature_blocked_attackers_this_combat: [high, low].into_iter().collect(),
+        ..Default::default()
+    });
+    reverse.creature_blocked_attackers_this_turn = [high, low].into_iter().collect();
+
+    let forward_bytes = serde_json::to_string(&forward).expect("forward state serializes");
+    let reverse_bytes = serde_json::to_string(&reverse).expect("reverse state serializes");
+    assert_eq!(
+        forward_bytes, reverse_bytes,
+        "hash insertion order must not affect canonical state bytes"
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_str(&forward_bytes).expect("forward bytes are JSON");
+    let expected_pairs = serde_json::json!([
+        {
+            "blocker": {"object_id": 1, "incarnation": 0},
+            "attacker": {"object_id": 10, "incarnation": 0}
+        },
+        {
+            "blocker": {"object_id": 2, "incarnation": 0},
+            "attacker": {"object_id": 20, "incarnation": 0}
+        }
+    ]);
+    assert_eq!(
+        value["creature_blocked_attackers_this_turn"], expected_pairs,
+        "the turn-scoped field is an Ord-sorted sequence of exact pairs"
+    );
+    assert_eq!(
+        value["combat"]["creature_blocked_attackers_this_combat"], expected_pairs,
+        "the combat-scoped field is an Ord-sorted sequence of exact pairs"
+    );
+
+    let bare: GameState = serde_json::from_str(&forward_bytes).expect("bare state restores");
+    assert_eq!(
+        bare.creature_blocked_attackers_this_turn,
+        forward.creature_blocked_attackers_this_turn
+    );
+    assert_eq!(
+        bare.combat
+            .as_ref()
+            .expect("combat restores")
+            .creature_blocked_attackers_this_combat,
+        forward
+            .combat
+            .as_ref()
+            .expect("combat exists")
+            .creature_blocked_attackers_this_combat
+    );
+    assert_eq!(
+        serde_json::to_string(&bare).expect("bare state reserializes"),
+        forward_bytes,
+        "bare-state bytes remain stable after restore"
+    );
+
+    for (persistence_name, persisted) in [
+        ("raw", PersistedGameState::Raw(Box::new(forward.clone()))),
+        ("trusted", PersistedGameState::capture(forward.clone())),
+    ] {
+        let bytes = serde_json::to_string(&persisted)
+            .unwrap_or_else(|error| panic!("{persistence_name} state serializes: {error}"));
+        let restored: PersistedGameState = serde_json::from_str(&bytes)
+            .unwrap_or_else(|error| panic!("{persistence_name} state deserializes: {error}"));
+        assert_eq!(
+            serde_json::to_string(&restored)
+                .unwrap_or_else(|error| panic!("{persistence_name} state reserializes: {error}")),
+            bytes,
+            "{persistence_name} persistence bytes remain stable after restore"
+        );
+        let restored = restored
+            .into_game_state()
+            .unwrap_or_else(|error| panic!("{persistence_name} state finalizes: {error}"));
+        assert_eq!(
+            restored.creature_blocked_attackers_this_turn,
+            forward.creature_blocked_attackers_this_turn,
+            "{persistence_name} persistence restores the turn-scoped ledger"
         );
     }
 }

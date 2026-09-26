@@ -23,31 +23,12 @@
 # When `tokens-gen` reports a row superseded, delete the row from this file —
 # MTGJSON now ships the token and the generated preset is authoritative. The
 # committed-overlay test in `token_presets.rs` reds until you do.
+#
+# An empty overlay is this hatch's healthy steady state, not a defect: every
+# row is deleted once MTGJSON ships the token it stood in for, so it holds no
+# rows between preview seasons. Leave `token = []` in place then — the file is
+# still a catalog file, and the catalog shape requires the `token` key. The
+# tests tolerate an empty overlay and keep `merge_overlay` under test with a
+# catalog-derived probe; replace the line with `[[token]]` rows to add one.
 
-[[token]]
-id = "1cb84b18-676d-5b79-9c4c-4f94af329ae5"
-category = "Artifact"
-fidelity = "PartialMissingAbilities"
-source_card_names = ["Soul Tether"]
-set_code = "FRA"
-set_name = "Reality Fracture"
-released_at = "2026-10-02"
-type_line = "Token Artifact — Heartwood"
-rules_text = "{T}: Add {R} or {G}."
-
-[token.body]
-display_name = "Heartwood"
-core_types = ["Artifact"]
-subtypes = ["Heartwood"]
-supertypes = []
-colors = [
-    "Red",
-    "Green",
-]
-keywords = []
-
-[[token.source_card_refs]]
-card_name = "Woodwork Prodigy // Soul Tether"
-face_name = "Soul Tether"
-scryfall_oracle_id = "f3ed157f-a09b-405f-aec4-0e7a81d80fc8"
-scryfall_id = "7d17f7e3-7b63-4674-9024-4fd1827f40ec"
+token = []

@@ -5,6 +5,7 @@
   },
   "tabs": {
     "gameplay": "Rozgrywka",
+    "ai": "Przeciwnicy AI",
     "experimental": "Eksperymentalne",
     "visual": "Grafika",
     "combat": "Tempo",
@@ -36,7 +37,11 @@
     "logDockSide": "Pozycja dziennika gry",
     "spellPayment": "Płatność za czary",
     "manualManaPayment": "Ręczna płatność many za czary",
-    "spellPaymentOptions": { "auto": "Automatycznie", "autoExceptSacrificialMana": "Pytaj przed poświęceniem", "manual": "Ręcznie" },
+    "spellPaymentOptions": {
+      "auto": "Automatycznie",
+      "autoExceptSacrificialMana": "Pytaj przed poświęceniem",
+      "manual": "Ręcznie"
+    },
     "nativeEngine": "Używaj natywnego silnika w lokalnych grach i hostowanym trybie wieloosobowym",
     "nativeEngineDescription": "Używaj pobranego silnika do lokalnych gier z AI i gier hostowanych przez lobby. Goście nadal łączą się przez połączenie peer-to-peer lobby. Gdy silnik jest niedostępny, używany jest wbudowany silnik.",
     "boardBackground": "Tło pola bitwy",
@@ -133,9 +138,18 @@
       "right": "Wyrównaj do prawej"
     },
     "presets": {
-      "default": { "label": "Układ 1", "description": "Standardowy, zrównoważony układ." },
-      "layout2": { "label": "Układ 2", "description": "Większe pole bitwy ze schowanymi rękami." },
-      "layout3": { "label": "Układ 3", "description": "Wyższa dolna część." }
+      "default": {
+        "label": "Układ 1",
+        "description": "Standardowy, zrównoważony układ."
+      },
+      "layout2": {
+        "label": "Układ 2",
+        "description": "Większe pole bitwy ze schowanymi rękami."
+      },
+      "layout3": {
+        "label": "Układ 3",
+        "description": "Wyższa dolna część."
+      }
     },
     "zones": {
       "playerHud": "Twój HUD",
@@ -422,9 +436,31 @@
     "incompleteTitle": "Przygotowanie offline jest niepełne",
     "incompleteMessage": "Brakuje: {{capabilities}}. Mimo to włączyć pracę offline?",
     "confirmOffline": "Włącz pracę offline",
-    "states": { "needs-preparation": "Przygotuj to urządzenie przed pracą offline.", "preparing": "Przygotowywanie możliwości gry lokalnej…", "ready": "To urządzenie jest gotowe do lokalnej gry offline.", "failed": "Niektóre wymagane możliwości nie są gotowe.", "reconnect-required": "Połącz się ponownie przed przygotowaniem gry offline.", "reload-or-relaunch-required": "Odśwież aplikację lub uruchom ponownie desktop, a następnie spróbuj ponownie." },
-    "capabilities": { "appShell": "Powłoka aplikacji", "browserEngine": "Silnik przeglądarki i baza kart", "scryfallSearch": "Dane wyszukiwania", "preconCatalog": "Wygenerowane talie", "bundledAiCatalog": "Katalog talii SI", "deckLibrary": "Zainstalowana biblioteka talii", "coreVisuals": "Rewers karty i symbole many", "nativeEngine": "Silnik natywny" },
-    "capabilityStates": { "ready": "Gotowe", "not-ready": "Nie gotowe", "reload-required": "Wymagane odświeżenie", "not-applicable": "Nie dotyczy", "not-installed": "Nie zainstalowano" }
+    "states": {
+      "needs-preparation": "Przygotuj to urządzenie przed pracą offline.",
+      "preparing": "Przygotowywanie możliwości gry lokalnej…",
+      "ready": "To urządzenie jest gotowe do lokalnej gry offline.",
+      "failed": "Niektóre wymagane możliwości nie są gotowe.",
+      "reconnect-required": "Połącz się ponownie przed przygotowaniem gry offline.",
+      "reload-or-relaunch-required": "Odśwież aplikację lub uruchom ponownie desktop, a następnie spróbuj ponownie."
+    },
+    "capabilities": {
+      "appShell": "Powłoka aplikacji",
+      "browserEngine": "Silnik przeglądarki i baza kart",
+      "scryfallSearch": "Dane wyszukiwania",
+      "preconCatalog": "Wygenerowane talie",
+      "bundledAiCatalog": "Katalog talii SI",
+      "deckLibrary": "Zainstalowana biblioteka talii",
+      "coreVisuals": "Rewers karty i symbole many",
+      "nativeEngine": "Silnik natywny"
+    },
+    "capabilityStates": {
+      "ready": "Gotowe",
+      "not-ready": "Nie gotowe",
+      "reload-required": "Wymagane odświeżenie",
+      "not-applicable": "Nie dotyczy",
+      "not-installed": "Nie zainstalowano"
+    }
   },
   "artChain": {
     "emptyState": "Używanie domyślnej grafiki Scryfall. Dodaj reguły poniżej, aby dostosować.",
@@ -443,6 +479,48 @@
       "oldest": "Najstarsze wydanie",
       "preferBorderless": "Preferuj bez ramki",
       "preferExtended": "Preferuj grafikę rozszerzoną"
+    }
+  },
+  "llm": {
+    "title": "Przeciwnicy LLM",
+    "intro": "Opcjonalne. Po podłączeniu Phase do dostawcy LLM możesz oddać miejsce AI — albo boty w drafcie — temu modelowi zamiast wbudowanej AI. Nic z tego nie działa, dopóki nie włączysz dostawcy i nie przypiszesz go do miejsca, a każdy błąd wraca do wbudowanej AI w trakcie gry.",
+    "empty": "Nie skonfigurowano żadnego dostawcy. Wszystkimi miejscami steruje wbudowana AI.",
+    "addProvider": "Dodaj dostawcę",
+    "unnamed": "Dostawca bez nazwy",
+    "name": "Nazwa",
+    "namePlaceholder": "Nazwij tego dostawcę (np. „Claude”)",
+    "enable": "Włącz tego dostawcę",
+    "remove": "Usuń tego dostawcę",
+    "provider": "Dostawca",
+    "model": "Model",
+    "modelId": "Identyfikator modelu",
+    "customModel": "Własny…",
+    "modelPlaceholder": "Identyfikator modelu (np. gpt-5, claude-sonnet-5)",
+    "endpoint": "Endpoint",
+    "endpointPlaceholder": "https://twoj-serwer/v1",
+    "apiKey": "Klucz API",
+    "apiKeyPlaceholder": "Wklej swój klucz API",
+    "apiKeyOptional": "Opcjonalny dla serwerów lokalnych",
+    "apiKeyStorage": "Przechowywany w pamięci tylko na czas tej sesji przeglądarki. Klucze API nigdy nie trafiają na dysk i są wyłączone z eksportu kopii zapasowej oraz synchronizacji w chmurze, więc po przeładowaniu trzeba go wpisać ponownie. Klucz API wymaga też endpointu https://, chyba że serwer działa na localhost.",
+    "apiKeyGet": "Zdobądź klucz",
+    "test": "Testuj połączenie",
+    "testing": "Testowanie…",
+    "testOk": "Połączono.",
+    "draftToggle": {
+      "label": "Użyj do botów w drafcie",
+      "hint": "Boty w drafcie wybierają kartę modelem, z kontekstem dodatków danego formatu.",
+      "profile": "Dostawca do draftu"
+    },
+    "testHint": "Wysyła prawdziwe zapytanie i sprawdza odpowiedź dokładnie tak, jak zrobiłaby to tura gry.",
+    "errors": {
+      "engineUnavailable": "Nie udało się wczytać silnika.",
+      "requestNotBuilt": "Ten dostawca nie jest w pełni skonfigurowany.",
+      "undecodable": "Endpoint odpowiedział, ale nie czymś, czego gra może użyć.",
+      "emptyBody": "Endpoint zwrócił pustą odpowiedź.",
+      "cancelled": "Test został anulowany.",
+      "timedOut": "Endpoint nie odpowiedział na czas.",
+      "unreachable": "Nie udało się połączyć z endpointem. Sprawdź adres URL oraz to, czy dostawca zezwala na zapytania z przeglądarki.",
+      "oversized": "Endpoint zwrócił znacznie więcej danych niż odpowiedź czatu."
     }
   }
 }

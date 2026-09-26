@@ -90,6 +90,20 @@ const lostMineOption: DungeonPreview = {
       next_rooms: [6],
       marker: { x_permille: 500, y_permille: 610 },
     },
+    {
+      index: 5,
+      name: "Fungi Cavern",
+      text: "Target creature gets -4/-0 until your next turn.",
+      next_rooms: [6],
+      marker: { x_permille: 810, y_permille: 610 },
+    },
+    {
+      index: 6,
+      name: "Temple of Dumathoin",
+      text: "Draw a card.",
+      next_rooms: [],
+      marker: { x_permille: 500, y_permille: 800 },
+    },
   ],
 };
 
@@ -124,6 +138,20 @@ const tombOption: DungeonPreview = {
       text: "Discard a card and sacrifice a creature, an artifact, and a land.",
       next_rooms: [4],
       marker: { x_permille: 720, y_permille: 480 },
+    },
+    {
+      index: 3,
+      name: "Sandfall Cell",
+      text: "Each player loses 2 life unless they sacrifice a creature, artifact, or land of their choice.",
+      next_rooms: [4],
+      marker: { x_permille: 290, y_permille: 580 },
+    },
+    {
+      index: 4,
+      name: "Cradle of the Death God",
+      text: "Create The Atropal, a legendary 4/4 black God Horror creature token with deathtouch.",
+      next_rooms: [],
+      marker: { x_permille: 500, y_permille: 775 },
     },
   ],
 };
@@ -413,7 +441,7 @@ describe("DungeonChoiceModal preview", () => {
     ).toBeInTheDocument();
 
     const list = screen.getByRole("list");
-    expect(list).toHaveClass("sr-only");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(lostMineOption.room_count);
     expect(within(list).getByText(/Goblin Lair/)).toBeInTheDocument();
     expect(
       within(list).getByText(/Create a 1\/1 red Goblin creature token\./),

@@ -540,6 +540,8 @@ fn tracked_set_cast_anaphor_applies_both_cause_and_type_gates() {
             duration: None,
             driver: CastFromZoneDriver::default(),
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![],
         source,

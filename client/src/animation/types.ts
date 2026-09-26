@@ -110,6 +110,32 @@ export function impactDelayMsForAnimationEvent(event: AnimationEvent): number {
   return 0;
 }
 
+/**
+ * How long after its step begins a life change for `playerId` visually lands,
+ * before the speed multiplier.
+ *
+ * A life change is presented by whatever hit caused it — a card slam for direct
+ * player damage, the flurry for a collapsed swarm — so the delay comes from that
+ * impact event, and is zero when the change has no hit behind it (a drain, a
+ * paid cost). The displayed total, its flash, and the impact VFX must land
+ * together, so every one of them resolves the delay here rather than each
+ * picking its own impact event out of the step.
+ */
+export function lifeChangeImpactDelayMs(
+  lifeEffect: StepEffect,
+  effects: readonly StepEffect[],
+  playerId: number,
+): number {
+  const playerDamageEffect = effects.find(
+    (effect) => isPlayerDamageAnimationEvent(effect.event, playerId),
+  );
+  const groupedDamageEffect = lifeEffect.displayOnly
+    ? effects.find((effect) => effect.event.type === "GroupedDamageFlurry")
+    : undefined;
+  const impactEvent = playerDamageEffect?.event ?? groupedDamageEffect?.event;
+  return impactEvent ? impactDelayMsForAnimationEvent(impactEvent) : 0;
+}
+
 /** Base "your turn / opponent's turn" banner display duration, before any
  *  pacing multipliers apply. */
 export const TURN_BANNER_DURATION_MS = 1500;

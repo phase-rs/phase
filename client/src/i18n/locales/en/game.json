@@ -112,6 +112,10 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugMove": {
+    "runEtbEffects": "Run ETB effects",
+    "simulate": "Simulate (ETB effects, triggers + SBAs)"
+  },
   "debugLibrary": {
     "openActions": "Open debug actions for {{name}}"
   },
@@ -1709,6 +1713,10 @@
       "labelExile": "Exile",
       "labelBehold": "Behold"
     },
+    "empowerJace": {
+      "title": "Empower Jace",
+      "subtitle": "Choose a Jace token you control to gain +{{count}} loyalty"
+    },
     "collectEvidence": {
       "title": "Collect Evidence",
       "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"
@@ -2039,10 +2047,15 @@
     "subtitleCascade": "Cascade exiled {{name}} (mana value below {{sourceMv}}). Cast it without paying its mana cost, or decline and shuffle all {{total}} exiled cards to the bottom of your library.",
     "subtitleDiscover": "Discover exiled {{name}}. Cast it without paying its mana cost, or put it into your hand and shuffle the other {{missCount}} exiled cards to the bottom of your library.",
     "subtitleRipple": "Ripple revealed {{name}}. Cast it without paying its mana cost, or decline and put all {{total}} revealed cards on the bottom of your library in a random order.",
-    "subtitleGraveyardPaid": "Cast {{name}} from a graveyard by paying its mana cost — mana of any type may be spent. Or decline and leave it in the graveyard.",
+    "subtitleGraveyardPaid": "Cast {{name}} from a graveyard by paying its mana cost{{extra}}{{concession}}. Or decline and leave it in the graveyard.",
     "castNamed": "Cast {{name}}",
     "castSuffix": "(without paying its mana cost)",
-    "castPaidSuffix": "(pay its mana cost — any type of mana may be spent)",
+    "castPaidSuffix": "(pay its mana cost{{extra}}{{concession}})",
+    "paidExtraFragment": " plus {{extra}}",
+    "paidAnyTypeSubtitleFragment": " — mana of any type may be spent",
+    "paidAnyColorSubtitleFragment": " — mana of any color may be spent",
+    "paidAnyTypeSuffixFragment": " — any type of mana may be spent",
+    "paidAnyColorSuffixFragment": " — any color of mana may be spent",
     "putIntoHand": "Put into hand",
     "decline": "Decline",
     "discoverDeclineSuffix": "(put the rest on the bottom)",
@@ -2392,6 +2405,25 @@
     "moveDown": "Move down",
     "triggerFallback": "Trigger {{number}}"
   },
+  "costReductionOrder": {
+    "eyebrow": "Cost Reduction Order",
+    "title": "Order Your Cost Reductions",
+    "subtitle": "These reductions lock in a different total depending on the order you apply them (CR 601.2f). The top of this list is applied first.",
+    "appliedFirst": "Applied first",
+    "appliedLast": "Applied last",
+    "lockedCost": "Total cost locked in",
+    "lockedCostUnknown": "Same as one of the totals below",
+    "outcomesHeading": "Totals you can lock in",
+    "reachColoredOnly": "Reduces only colored mana",
+    "reachSpills": "Can reduce generic mana",
+    "multiplier": "×{{count}}",
+    "confirmOrder": "Confirm Order",
+    "cancel": "Cancel",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "reductionFallback": "Reduction {{number}}",
+    "floor": "Can't reduce the cost below {{count}} mana"
+  },
   "unhandledWaitingFor": {
     "title": "Action required, but UI is missing",
     "body": "The game is waiting on you for an action, but this version of phase.rs does not yet have a UI for it. This is a bug — please report it so we can fix it. Use the button below to leave the game.",
@@ -2522,6 +2554,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "orderingCostReductions": "ordering cost reductions",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",
@@ -2537,6 +2570,7 @@
       "mulligan": "Mulligan",
       "discarding": "Discarding",
       "orderingTriggers": "Ordering triggers",
+      "orderingCostReductions": "Ordering cost reductions",
       "respondingToStack": "Responding",
       "priorityCombat": "Combat",
       "priorityMain": "Main phase",

@@ -16,9 +16,9 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AggregateFunction, AttackScope,
-    BasicLandType, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
-    CastPermissionConstraint, CastingPermission, ContinuousModification, ControllerRef, CountScope,
+    AbilityCondition, AbilityCost, AbilityDefinition, AggregateFunction, BasicLandType,
+    CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CastPermissionConstraint,
+    CastingPermission, CombatHistoryScope, ContinuousModification, ControllerRef, CountScope,
     DamageChannel, Duration, Effect, FilterProp, ModalSelectionCondition, ModalSelectionConstraint,
     ObjectProperty, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis,
     QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RoundingMode,
@@ -798,6 +798,15 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every tree that pipeline produces — which is every tree a runtime walker
+        // sees — and cannot make a definition cast-unstable. (NOT a universal claim
+        // about the field: `parse_effect_chain` outside the pipeline leaves marks
+        // intact, and no runtime path reaches such a tree. See
+        // `types::ability::UnloweredGuard`.)
+        unlowered_guard: _,
+        face_down_in_exile: _,
     } = definition;
 
     activation_mana_payment_restriction.is_none()
@@ -915,6 +924,14 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         sub_link: _,
         iteration_kind_binding: _,
         sibling_condition: _,
+        // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
+        // deferred guard verdict before it hands a tree out, so this is `None` on
+        // every tree that pipeline produces — which is every tree a runtime walker
+        // sees — and carries no game-state payload. (NOT a universal claim about the
+        // field: `parse_effect_chain` outside the pipeline leaves marks intact, and
+        // no runtime path reaches such a tree. See `types::ability::UnloweredGuard`.)
+        unlowered_guard: _,
+        face_down_in_exile: _,
     } = definition
     else {
         return false;
@@ -1752,6 +1769,10 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | ObjectScope::OwnedLinkedExileCard
             | ObjectScope::Demonstrative
             | ObjectScope::AmassedArmy
+            // CR 608.2h + CR 601.2c: the chain-root spell's target is read from
+            // the ability's own carried context during resolution, never as a
+            // static CDA read.
+            | ObjectScope::ChainRootTarget
             // CR 120.1: the per-iteration damage source of an
             // `EachSourceDealsDamage` batch is bound per batch member only at
             // resolution time, never as a static CDA read.
@@ -1769,6 +1790,13 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             | QuantityRef::ObjectNameWordCount { scope }
             | QuantityRef::ObjectTypelineComponentCount { scope }
             | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope_is_resolution_only(*scope),
+            // CR 608.2h: `QuantityRef::CountersOn` deliberately stays OUT of the
+            // list above. Its resolvers own their live-vs-LKI ladder, so a
+            // departed referent (a destroyed `ChainRootTarget`, an exiled
+            // `Source`) still reports a real recorded count; classifying it as a
+            // resolution-only object read would let
+            // `quantity_expr_missing_resolution_only_referent` gate that read
+            // `false` before the ladder ever runs.
             _ => false,
         },
         QuantityExpr::DivideRounded { inner, .. }
@@ -1912,6 +1940,16 @@ fn resolution_only_scope_referent_present(
             })
         }
         ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
+        // CR 601.2c: referent presence mirrors the `Target` arm, but against the
+        // ability-carried chain-root list rather than this sub-ability's own
+        // targets. Unreachable for `QuantityRef::CountersOn` today (that variant
+        // is not in `quantity_expr_missing_resolution_only_referent`'s leaf
+        // list), but adjudicated rather than wildcarded.
+        ObjectScope::ChainRootTarget => ability
+            .context
+            .chain_root_targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_))),
         // CR 120.1: the per-iteration batch member is bound only while the
         // per-source resolver runs; absent everywhere else.
         ObjectScope::BatchSource => ctx.damage_source.is_some(),
@@ -2269,7 +2307,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
-        | StaticCondition::AnyPlayerAttackedYouLastTurn
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -4917,8 +4955,15 @@ fn resolve_ref(
                 crate::types::zones::Zone::Battlefield,
             );
             aggregate_over_players(
+                // CR 104.5 + CR 800.4 + CR 800.4a: a departed player controls no
+                // battlefield objects, so leaving them in the population feeds a
+                // guaranteed 0 into the fold. `Min` then reports that 0 as the
+                // board minimum (Balance's Arm A below reads exactly this
+                // shape), which is the same failure `LifeTotal{Min}` had before
+                // `resolve_per_team_life` gained its own filter.
                 state.players.iter().filter(|p| {
                     crate::game::players::matches_relation(state, p.id, controller, *relation)
+                        && !p.is_eliminated
                 }),
                 *aggregate,
                 |p| {
@@ -6456,8 +6501,23 @@ fn scoped_players<'a>(
         CountScope::SourceChosenPlayer => {
             source_chosen_player_for_context(state, &ctx).is_some_and(|player| p.id == player)
         }
-        CountScope::All => true,
-        CountScope::Opponents => p.id != controller,
+        // CR 104.5 + CR 800.4 + CR 800.4a: a player who has left the game is
+        // not part of the live population these two scopes range over, and
+        // CR 800.4a takes their owned objects out of the game with them. So
+        // neither their player counters (CR 122.1) nor their zone and
+        // spell-cast counts may contribute to an "each player" / "each
+        // opponent" total. Same population as the `PlayerScope` aggregate
+        // authority in `resolve_per_player_scalar`, which filters
+        // `!p.is_eliminated` on its `Opponent` and `AllPlayers` arms; these
+        // two scopes are the `CountScope` mirror of those and must agree.
+        //
+        // The single-player scopes above deliberately keep no such filter: they
+        // name ONE specific player rather than ranging over a population, and
+        // silently resolving `Controller` (the "you" axis) or a persisted
+        // `SourceChosenPlayer` to the empty set would read 0 instead of that
+        // player's actual value.
+        CountScope::All => !p.is_eliminated,
+        CountScope::Opponents => p.id != controller && !p.is_eliminated,
     })
 }
 
@@ -6477,9 +6537,33 @@ fn count_scope_owner_matches(
         CountScope::SourceChosenPlayer => {
             source_chosen_player_for_context(state, &ctx).is_some_and(|player| owner == player)
         }
-        CountScope::All => true,
-        CountScope::Opponents => owner != controller,
+        // CR 800.4a: "all objects owned by that player leave the game" — so a
+        // departed player's cards are not part of the exile population these
+        // two scopes range over, even though this engine models leaving the
+        // game by moving those cards INTO `state.exile` (see
+        // `elimination::eliminate_player`, whose own test asserts the departed
+        // player's graveyard and library cards land there). Keying on the
+        // OWNER is what makes this precise: a card owned by a surviving player
+        // but exiled by the departed one stays counted, because CR 800.4a only
+        // removes objects the departed player OWNED.
+        //
+        // Single-player scopes above keep no filter, for the same reason as in
+        // `scoped_players`: they name one player rather than a population.
+        CountScope::All => !player_has_left(state, owner),
+        CountScope::Opponents => owner != controller && !player_has_left(state, owner),
     }
+}
+
+/// CR 104.5 + CR 800.4: whether `player` has left the game.
+///
+/// An unknown id reads as "still in the game" so a lookup miss can never
+/// silently delete a live player from a population count.
+fn player_has_left(state: &GameState, player: PlayerId) -> bool {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|p| p.is_eliminated)
 }
 
 fn count_scope_actor_matches(
@@ -6530,12 +6614,46 @@ pub(crate) fn damage_record_matches_kind(
     }
 }
 
+/// CR 120.9: Partition the matching damage records by `key_of`, sum each
+/// partition, then apply `aggregate` across the per-partition sums. Single
+/// authority for every `DamageGroupKey` axis so a third axis is a key
+/// function, not a third copy of this fold.
+fn aggregate_per_group<'a, K: Eq + std::hash::Hash>(
+    matching: impl Iterator<Item = &'a DamageRecord>,
+    key_of: impl Fn(&DamageRecord) -> K,
+    aggregate: AggregateFunction,
+) -> i32 {
+    let mut totals: HashMap<K, u32> = HashMap::new();
+    for record in matching {
+        totals
+            .entry(key_of(record))
+            .and_modify(|total| *total = total.saturating_add(record.amount))
+            .or_insert(record.amount);
+    }
+    let aggregated: Option<u32> = match aggregate {
+        AggregateFunction::Max => totals.values().copied().max(),
+        AggregateFunction::Min => totals.values().copied().min(),
+        AggregateFunction::Sum => Some(totals.values().copied().sum()),
+    };
+    aggregated.map(u32_to_i32_saturating).unwrap_or(0)
+}
+
 /// CR 120.1 + CR 120.9 + CR 603.4: Resolver for `QuantityRef::DamageDealtThisTurn`.
 ///
 /// Walks `state.damage_dealt_this_turn`, filters records whose source/target
 /// match the supplied filters, then either sums every match (no `group_by`) or
 /// partitions by the group key, sums each partition, and applies `aggregate`
-/// across the per-group sums (CR 120.9 "by a specific source").
+/// across the per-group sums.
+///
+/// Two grouping axes exist — one partition of the same record stream per
+/// participant role, each under its own authority (CR 120.9 for the source
+/// axis; CR 120.1 + CR 120.3 for the recipient axis):
+/// - `Some(SourceId)` — "the most damage dealt by any single source";
+/// - `Some(Target)` — "the most damage dealt to any single recipient", the
+///   existential reading of the printed phrase "a player / an opponent was
+///   dealt N or more damage this turn" (CR 603.4: the intervening-if is checked
+///   at fire and again as it resolves, so the threshold must hold for SOME ONE
+///   recipient, never for the sum across recipients).
 #[allow(clippy::too_many_arguments)]
 fn resolve_damage_dealt_this_turn(
     state: &GameState,
@@ -6590,20 +6708,18 @@ fn resolve_damage_dealt_this_turn(
         // collapses to a sum (Max/Min/Sum over a one-element set all coincide
         // with the total sum).
         None => u32_to_i32_saturating(matching.map(|record| record.amount).sum()),
+        // CR 120.9: per-source partitioning — "the most damage dealt by any
+        // single source".
         Some(DamageGroupKey::SourceId) => {
-            let mut totals: HashMap<ObjectId, u32> = HashMap::new();
-            for record in matching {
-                totals
-                    .entry(record.source_id)
-                    .and_modify(|total| *total = total.saturating_add(record.amount))
-                    .or_insert(record.amount);
-            }
-            let aggregated: Option<u32> = match aggregate {
-                AggregateFunction::Max => totals.values().copied().max(),
-                AggregateFunction::Min => totals.values().copied().min(),
-                AggregateFunction::Sum => Some(totals.values().copied().sum()),
-            };
-            aggregated.map(u32_to_i32_saturating).unwrap_or(0)
+            aggregate_per_group(matching, |record| record.source_id, aggregate)
+        }
+        // CR 603.4: per-recipient partitioning — the existential reading of
+        // "a player / an opponent was dealt N or more damage this turn". The
+        // intervening-if is satisfied when SOME ONE recipient was dealt that
+        // much; summing across recipients (the ungrouped arm above) would let
+        // two recipients' separate hits satisfy a threshold neither met alone.
+        Some(DamageGroupKey::Target) => {
+            aggregate_per_group(matching, |record| record.target.clone(), aggregate)
         }
     }
 }
@@ -6792,6 +6908,11 @@ fn object_for_scope<'a>(
         | ObjectScope::OtherRevealedCard
         | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
+        // CR 601.2c: `ChainRootTarget`'s identity is
+        // `ability.context.chain_root_targets`, carried by the resolving
+        // ability and therefore unavailable to this ability-free helper; it is
+        // resolved in `resolve_counters_on_scope`.
+        | ObjectScope::ChainRootTarget
         | ObjectScope::AmassedArmy => None,
         // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
         // batch is bound per batch member by the per-source resolver.
@@ -6870,6 +6991,9 @@ pub(crate) fn object_id_for_scope(
         | ObjectScope::OtherRevealedCard
         | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
+        // CR 601.2c: identity is `ability.context.chain_root_targets` — see the
+        // matching arm in `object_for_scope`.
+        | ObjectScope::ChainRootTarget
         | ObjectScope::AmassedArmy => None,
         // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
         // batch is bound per batch member by the per-source resolver.
@@ -7159,6 +7283,42 @@ fn resolve_counters_on_scope(
                     .unwrap_or_else(|| {
                         counter_count_from_map(&snapshot.lki.counters, counter_type)
                     })
+            })
+            .unwrap_or(0),
+        // CR 608.2c + CR 122.2 + CR 400.7 + CR 608.2h: "that <permanent>" /
+        // "that many" back-reference to the chain-root spell's own target.
+        // LIVE counters while that target is still on the battlefield (an
+        // indestructible target that was NOT destroyed — CR 702.12b — still
+        // feeds the placement); its LKI counter map once it has left (CR 122.2:
+        // the counters ceased to exist; CR 400.7: it is a new object there).
+        // Identity is the ability-carried chain-root target list, NEVER this
+        // sub-ability's own (recipient) targets — mirrors the `CostPaidObject`
+        // and `AmassedArmy` arms above.
+        //
+        // This arm must stay EXPLICIT: the `_ =>` fall-through below would
+        // resolve `ChainRootTarget` through `object_for_scope`, which has no
+        // referent for it, and silently report 0.
+        ObjectScope::ChainRootTarget => ability
+            .and_then(|ability| {
+                ability
+                    .context
+                    .chain_root_targets
+                    .iter()
+                    .find_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        _ => None,
+                    })
+            })
+            .map(|id| {
+                let live = state.objects.get(&id);
+                let on_battlefield = live.is_some_and(|obj| obj.zone == Zone::Battlefield);
+                if !on_battlefield {
+                    if let Some(lki) = state.lki_cache.get(&id) {
+                        return counter_count_from_map(&lki.counters, counter_type);
+                    }
+                }
+                live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
+                    .unwrap_or(0)
             })
             .unwrap_or(0),
         _ => object_for_scope(state, scope, ctx, targets)
@@ -7677,6 +7837,14 @@ where
         ObjectScope::OtherRevealedCard => 0,
         // MV-only referent; no P/T semantics.
         ObjectScope::OwnedLinkedExileCard => 0,
+        // CR 601.2c: `ChainRootTarget` is produced only for
+        // `QuantityRef::CountersOn` today (Dismantle / Rite of the Serpent). No
+        // card reads the chain-root target's P/T, so this is a fail-closed
+        // placeholder — never a silent wildcard. Extend by mirroring the
+        // `resolve_counters_on_scope` arm against
+        // `ability.context.chain_root_targets`; `game/coverage.rs` reports these
+        // characteristic readers as `Unhandled` until then.
+        ObjectScope::ChainRootTarget => 0,
         // CR 120.1 + CR 208.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN characteristic ("deals
         // damage equal to ITS power"). Guarded live-then-LKI read (a batch
@@ -8003,6 +8171,13 @@ fn resolve_object_mana_value(
                 current_mana_value.unwrap_or(0)
             }
         }
+        // CR 601.2c: `ChainRootTarget` is produced only for
+        // `QuantityRef::CountersOn` today (Dismantle / Rite of the Serpent). No
+        // card reads the chain-root target's mana value, so this is a
+        // fail-closed placeholder — never a silent wildcard. Extend by mirroring
+        // the `resolve_counters_on_scope` arm against
+        // `ability.context.chain_root_targets`.
+        ObjectScope::ChainRootTarget => 0,
         // CR 120.1 + CR 202.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN mana value. Live object
         // first, LKI fallback (mirrors the `EventSource` arm), so a batch member
@@ -8084,10 +8259,12 @@ fn resolve_single_player_scope(
 
 /// CR 102 + CR 119 + CR 402: Resolve a per-player scalar through a `PlayerScope`.
 ///
-/// Single authority for all `LifeTotal { player }` / `HandSize { player }`-style
-/// player-scoped quantity references. `extract` returns the scalar for a single
-/// player (e.g., `p.life`, `p.hand.len()`); the scope decides which players
-/// contribute and how to combine them.
+/// Single authority for the `HandSize { player }`-style player-scoped quantity
+/// references — NOT for `LifeTotal { player }`, whose arm never reaches here:
+/// it routes through `players::team_life_total` / `resolve_per_team_life` for
+/// CR 810.9a team folding. `extract` returns the scalar for a single player
+/// (e.g., `p.hand.len()`); the scope decides which players contribute and how
+/// to combine them.
 ///
 /// - `Controller`: returns the controller's value, or 0 if not found.
 /// - `Target`: returns the first player target's value (CR 115.1), or 0.
@@ -8155,19 +8332,33 @@ where
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
+        // CR 104.3 + CR 104.5 + CR 800.4: a player who has left the game is
+        // excluded from the aggregate population, same as
+        // `resolve_player_count`'s candidate loop — an eliminated player's
+        // scalar must not inflate a `Max`/`Min`/`Sum` read over the
+        // remaining, still-in-the-game players (Sokenzan Renegade: an
+        // eliminated player's larger hand must not out-rank the live
+        // leader).
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
-            state.players.iter().filter(|p| p.id != controller),
+            state
+                .players
+                .iter()
+                .filter(|p| p.id != controller && !p.is_eliminated),
             *aggregate,
             &mut extract,
         ),
-        // CR 102.1: aggregate over all players, optionally excluding the
-        // `exclude` anchor ("each OTHER player").
+        // CR 102.1 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
+        // players still in the game, optionally excluding the `exclude`
+        // anchor ("each OTHER player").
         PlayerScope::AllPlayers { aggregate, exclude } => {
             let excluded_id = exclude.as_deref().and_then(|ex| {
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
             aggregate_over_players(
-                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                state
+                    .players
+                    .iter()
+                    .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
                 *aggregate,
                 &mut extract,
             )
@@ -8208,10 +8399,14 @@ where
     F: FnMut(&crate::types::player::Player) -> Option<i32>,
 {
     match scope {
-        // CR 102.2 / CR 102.1: the aggregate populations, narrowed to the
-        // players that actually have the scalar.
+        // CR 102.2 / CR 102.1 / CR 104.3 + CR 104.5 + CR 800.4: the
+        // aggregate populations, narrowed to players still in the game that
+        // actually have the scalar.
         PlayerScope::Opponent { aggregate } => aggregate_over_present_players(
-            state.players.iter().filter(|p| p.id != controller),
+            state
+                .players
+                .iter()
+                .filter(|p| p.id != controller && !p.is_eliminated),
             *aggregate,
             &mut extract,
         ),
@@ -8220,7 +8415,10 @@ where
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
             aggregate_over_present_players(
-                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                state
+                    .players
+                    .iter()
+                    .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
                 *aggregate,
                 &mut extract,
             )
@@ -8310,18 +8508,23 @@ fn resolve_per_team_life(
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
     match scope {
-        // CR 102.2: aggregate over all opponents' teams.
+        // CR 102.2 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
+        // opponents' teams still in the game. An eliminated player's
+        // `team_life_total` reads 0 (`shared_resource_members` returns empty
+        // for a departed player off-2HG), so leaving them in this fold lets
+        // 0 win a `Min` read below every live player's actual life.
         PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams(
             state,
             state
                 .players
                 .iter()
-                .filter(|p| p.id != controller)
+                .filter(|p| p.id != controller && !p.is_eliminated)
                 .map(|p| p.id),
             *aggregate,
         ),
-        // CR 102.1: aggregate over all players' teams, optionally excluding
-        // the `exclude` anchor ("each OTHER player").
+        // CR 102.1 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
+        // players' teams still in the game, optionally excluding the
+        // `exclude` anchor ("each OTHER player").
         PlayerScope::AllPlayers { aggregate, exclude } => {
             let excluded_id = exclude.as_deref().and_then(|ex| {
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
@@ -8331,7 +8534,7 @@ fn resolve_per_team_life(
                 state
                     .players
                     .iter()
-                    .filter(|p| Some(p.id) != excluded_id)
+                    .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated)
                     .map(|p| p.id),
                 *aggregate,
             )
@@ -8640,7 +8843,7 @@ pub(crate) fn resolve_player_count(
 
     if let PlayerFilter::OpponentAttacked {
         subject,
-        scope: AttackScope::ThisCombat,
+        scope: CombatHistoryScope::ThisCombat,
     } = filter
     {
         return usize_to_i32_saturating(
@@ -8940,10 +9143,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
         ChoiceValue, Comparator, ControllerRef, CountScope, DamageChannel, DamageKindFilter,
-        DevotionColors, Duration, Effect, FilterProp, KickerVariant, ModalSelectionCondition,
-        ModalSelectionConstraint, ObjectProperty, ObjectScope, PlayerRelation, RepeatContinuation,
-        SharedQuality, StaticCondition, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
-        TypedFilter,
+        DelayedTriggerCondition, DevotionColors, DieResultBranch, Duration, Effect, FilterProp,
+        KickerVariant, ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty,
+        ObjectScope, PlayerRelation, RepeatContinuation, SharedQuality, StaticCondition,
+        TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -8954,6 +9157,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use crate::types::phase::Phase;
     use crate::types::zones::Zone;
     use crate::types::{LandPlayRecord, SpellCastRecord};
 
@@ -11331,6 +11535,255 @@ mod tests {
         );
     }
 
+    /// G5 — REGRESSION: pins the `!p.is_eliminated` filter on
+    /// `resolve_per_team_life`'s `AllPlayers`/`Opponent` arms, mirroring the
+    /// guard on their `resolve_per_player_scalar` siblings (pinned by
+    /// `f7_hostile_eliminated_player_hand_axis_leader_still_wins`,
+    /// `crates/engine/tests/integration/superlative_player_subject_control.rs`).
+    /// WITHOUT that filter this read returns 0 rather than the lowest live
+    /// life total, and this test fails.
+    /// Because `topology::shared_resource_members` returns EMPTY for a departed
+    /// (non-2HG) player, `team_life_total` for an eliminated player reads 0 —
+    /// which becomes the new Min whenever it undercuts every live player's
+    /// actual life. `Max` is unaffected (0 never wins a Max fold unless every
+    /// life total is non-positive), which is why the `Max`-shaped sibling
+    /// fixture `hostile_eliminated_player_life_axis_excluded_from_population`
+    /// (`unique_player_property_leader_condition.rs`) was green even before
+    /// this filter existed — only the `Min` reads were wrong.
+    ///
+    /// 3 players, lives 20/15/12 (P0 controller); P2 (the true minimum, 12) is
+    /// ELIMINATED. Expected (CR 104.3 + CR 104.5 + CR 800.4: an eliminated
+    /// player has left the game and must not contribute to a live population):
+    /// `Min` over the live players {P0:20, P1:15} = 15. MEASURED at HEAD
+    /// (pre-fix): reads 0, because eliminated P2's `team_life_total` (0, not
+    /// 12) still enters the fold and wins the Min.
+    #[test]
+    fn life_total_min_excludes_eliminated_player_from_population() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        state.players[0].life = 20;
+        state.players[1].life = 15;
+        state.players[2].life = 12;
+        state.players[2].is_eliminated = true;
+
+        let all_players_min = QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_players_min, PlayerId(0), ObjectId(0)),
+            15,
+            "an eliminated player's team_life_total (0) must not win the live-population Min"
+        );
+
+        let opponent_min = QuantityExpr::Ref {
+            qty: QuantityRef::LifeTotal {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &opponent_min, PlayerId(0), ObjectId(0)),
+            15,
+            "the same exclusion must hold for the Opponent-scoped population"
+        );
+    }
+
+    /// G5 SIBLING — REGRESSION: pins the `!p.is_eliminated` filters on
+    /// `resolve_per_player_scalar_opt`'s `Opponent` / `AllPlayers` arms, the
+    /// partially-defined-scalar twin of the guards on `resolve_per_player_scalar`.
+    /// Those two arms had NO test of their own; this row is that test.
+    ///
+    /// `PlayerChosenNumber` is the shape that discriminates them. Unlike
+    /// `LifeTotal`, an eliminated player's `chosen_number()` still reads back the
+    /// number they actually chose, so a departed player enters the fold with a
+    /// REAL value rather than a 0 — which is exactly what `Min` picks up when
+    /// their number undercuts every live player's.
+    ///
+    /// 3 players, chosen numbers 5 / 7 / 2 (P0 controller); P2 (the true
+    /// minimum, 2) is ELIMINATED. Expected (CR 104.3 + CR 104.5 + CR 800.4: a
+    /// player who has left the game is not in the population): `AllPlayers{Min}`
+    /// over the live {P0:5, P1:7} = 5, and `Opponent{Min}` over the live
+    /// opponents {P1:7} = 7. Each arm was discriminated on its own, measured:
+    /// reverting the `AllPlayers` filter fails the first assertion (reads 2,
+    /// expected 5); reverting the `Opponent` filter alone fails the second
+    /// (reads 2, expected 7).
+    #[test]
+    fn player_chosen_number_min_excludes_eliminated_player_from_population() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        state.players[0].chosen_attributes = vec![ChosenAttribute::Number(5)];
+        state.players[1].chosen_attributes = vec![ChosenAttribute::Number(7)];
+        state.players[2].chosen_attributes = vec![ChosenAttribute::Number(2)];
+        state.players[2].is_eliminated = true;
+
+        let all_players_min = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerChosenNumber {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_players_min, PlayerId(0), ObjectId(0)),
+            5,
+            "an eliminated player's chosen number (2) must not win the live-population Min"
+        );
+
+        let opponent_min = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerChosenNumber {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &opponent_min, PlayerId(0), ObjectId(0)),
+            7,
+            "the same exclusion must hold for the Opponent-scoped population"
+        );
+    }
+
+    /// CR 104.5 + CR 800.4 + CR 122.1: `CountScope::All` ranges over the LIVE
+    /// player population, so a departed player's poison counters must not
+    /// inflate an "each player" total.
+    ///
+    /// Drives the real departure path (`eliminate_player`), not a hand-set
+    /// flag. The mid-test assertion is the non-vacuity guard: elimination does
+    /// NOT clear `poison_counters`, so the departed 40 is still sitting on the
+    /// struct when the quantity resolves. Without that check the test would
+    /// pass for the wrong reason if elimination ever started zeroing counters.
+    ///
+    /// REVERT-FAIL: drop `!p.is_eliminated` from `scoped_players`'s `All` arm
+    /// and this reads 43 instead of 3.
+    #[test]
+    fn player_counter_all_scope_excludes_departed_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        state.players[0].poison_counters = 1;
+        state.players[1].poison_counters = 2;
+        state.players[2].poison_counters = 40;
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(
+            state.players[2].is_eliminated,
+            "precondition: P2 must have actually left the game"
+        );
+        assert_eq!(
+            state.players[2].poison_counters, 40,
+            "non-vacuity: the departed player's counters must SURVIVE elimination, so that \
+             excluding them is the filter's doing and not a side effect of the sweep"
+        );
+
+        let all_poison = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+                scope: CountScope::All,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &all_poison, PlayerId(0), ObjectId(0)),
+            3,
+            "an 'each player' poison total must sum the live survivors (1 + 2) and leave the \
+             departed player's 40 out"
+        );
+    }
+
+    /// CR 102.1 + CR 104.5 + CR 800.4: the same live-population rule for
+    /// `CountScope::Opponents`, which must drop BOTH the controller and the
+    /// departed opponent while keeping the surviving one.
+    ///
+    /// REVERT-FAIL: drop `!p.is_eliminated` from the `Opponents` arm and this
+    /// reads 42 instead of 2.
+    #[test]
+    fn player_counter_opponents_scope_excludes_departed_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        state.players[0].poison_counters = 1;
+        state.players[1].poison_counters = 2;
+        state.players[2].poison_counters = 40;
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert_eq!(
+            state.players[2].poison_counters, 40,
+            "non-vacuity: see the All-scope sibling"
+        );
+
+        let opponent_poison = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &opponent_poison, PlayerId(0), ObjectId(0)),
+            2,
+            "an 'each opponent' poison total must read only the SURVIVING opponent (2): the \
+             controller's 1 is not an opponent and the departed 40 is not in the game"
+        );
+    }
+
+    /// CR 800.4a: the owner-axis counterpart for the EXILE zone, which reaches
+    /// `count_scope_owner_matches` rather than `scoped_players` (exile is a
+    /// global zone, so membership is predicated per object on `obj.owner`).
+    ///
+    /// This engine models "leaves the game" by moving the departed player's
+    /// cards into `state.exile` — measured here by the mid-test assertions:
+    /// after a real `eliminate_player`, the card IS in exile and IS still
+    /// owned by P2. So without the owner-axis filter an "each opponent" exile
+    /// count reports a card that CR 800.4a says left the game.
+    ///
+    /// REVERT-FAIL: drop `!player_has_left(..)` from either arm of
+    /// `count_scope_owner_matches` and both counts read 1 instead of 0.
+    #[test]
+    fn exile_zone_count_excludes_cards_owned_by_a_departed_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        let card = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(2),
+            "Departed Bear".to_string(),
+            crate::types::zones::Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(
+            state.exile.contains(&card),
+            "non-vacuity: this engine routes a departed player's cards INTO exile, so the \
+             card must be sitting there for the filter to have anything to exclude"
+        );
+        assert_eq!(
+            state.objects.get(&card).map(|o| o.owner),
+            Some(PlayerId(2)),
+            "non-vacuity: ownership must survive the sweep, so exclusion is the filter's \
+             doing and not a re-owning side effect"
+        );
+
+        for scope in [CountScope::Opponents, CountScope::All] {
+            let expr = QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Exile,
+                    card_types: Vec::new(),
+                    filter: None,
+                    scope: scope.clone(),
+                },
+            };
+            assert_eq!(
+                resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+                0,
+                "{scope:?}: a card owned by a player who left the game must not be counted \
+                 as an exiled card (CR 800.4a)"
+            );
+        }
+    }
+
     /// CR 810.9a + CR 810.4: `LifeAboveStarting` reads the controller's TEAM
     /// total minus the (team-correct) starting life (30 in 2HG). Team at 55 →
     /// 25 above starting. Reverting Site 7 to `p.life` reads only the
@@ -13217,6 +13670,301 @@ mod tests {
         // record.source_controller (LKI per CR 120.9).
         assert_eq!(resolve_quantity(&state, &your_max, PlayerId(0), source), 5);
         assert_eq!(resolve_quantity(&state, &your_max, PlayerId(1), source), 9);
+    }
+
+    /// CR 603.4 + CR 120.9: the per-recipient grouping axis. Two hits of 3 to
+    /// DIFFERENT players from the SAME source — the existential reading
+    /// (`Max` over `Some(DamageGroupKey::Target)`) sees **3**, because neither
+    /// recipient was dealt 6, while the ungrouped `Sum` sees 6 and the
+    /// per-source axis (`Max` over `Some(SourceId)`) also sees 6. The same
+    /// ledger under three groupings: the discriminator is the grouping key, not
+    /// the records.
+    ///
+    /// The second half runs the mirror case (3+3 to the SAME recipient from two
+    /// different sources): the per-recipient bucket is 6 while the per-source
+    /// axis sees 3 — proving the target axis is not a disguised source axis.
+    ///
+    /// Hostile row: an object-recipient record added to the same ledger leaves
+    /// the player result at exactly 3 (asserted as a number, so the row cannot
+    /// pass because nothing matched).
+    #[test]
+    fn resolve_damage_dealt_this_turn_groups_by_recipient_existentially() {
+        use crate::types::ability::DamageGroupKey;
+
+        let query =
+            |aggregate: AggregateFunction, group_by: Option<DamageGroupKey>| QuantityExpr::Ref {
+                qty: QuantityRef::DamageDealtThisTurn {
+                    source: Box::new(TargetFilter::Any),
+                    target: Box::new(TargetFilter::Player),
+                    aggregate,
+                    group_by,
+                    damage_kind: DamageKindFilter::Any,
+                    channel: DamageChannel::Total,
+                },
+            };
+
+        // Ledger A: one source deals 3 to P1 and 3 to P0.
+        let mut split = GameState::new_two_player(42);
+        let source_a = create_object(
+            &mut split,
+            CardId(1000),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Battlefield,
+        );
+        let source_b = create_object(
+            &mut split,
+            CardId(1001),
+            PlayerId(0),
+            "Raging Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut split,
+            CardId(1002),
+            PlayerId(1),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+        split.damage_dealt_this_turn.extend([
+            DamageRecord {
+                source_id: source_a,
+                source_controller: PlayerId(0),
+                target: TargetRef::Player(PlayerId(1)),
+                target_controller: PlayerId(1),
+                amount: 3,
+                is_combat: true,
+                ..Default::default()
+            },
+            DamageRecord {
+                source_id: source_a,
+                source_controller: PlayerId(0),
+                target: TargetRef::Player(PlayerId(0)),
+                target_controller: PlayerId(0),
+                amount: 3,
+                is_combat: true,
+                ..Default::default()
+            },
+        ]);
+
+        assert_eq!(
+            resolve_quantity(
+                &split,
+                &query(AggregateFunction::Max, Some(DamageGroupKey::Target)),
+                PlayerId(0),
+                source_a
+            ),
+            3,
+            "neither recipient reached 6 — the existential per-recipient reading is 3"
+        );
+        assert_eq!(
+            resolve_quantity(
+                &split,
+                &query(AggregateFunction::Sum, None),
+                PlayerId(0),
+                source_a
+            ),
+            6,
+            "counterfactual: the ungrouped sum sees both hits"
+        );
+        assert_eq!(
+            resolve_quantity(
+                &split,
+                &query(AggregateFunction::Max, Some(DamageGroupKey::SourceId)),
+                PlayerId(0),
+                source_a
+            ),
+            6,
+            "the per-source axis sees the one source's 3+3"
+        );
+
+        // Hostile: an object recipient cannot change the player buckets — the
+        // `Player` target filter refuses the object record outright, so the
+        // player result stays exactly 3 (not 5, and not 0).
+        split.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source_b,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(bystander),
+            target_controller: PlayerId(1),
+            amount: 5,
+            is_combat: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_quantity(
+                &split,
+                &query(AggregateFunction::Max, Some(DamageGroupKey::Target)),
+                PlayerId(0),
+                source_a
+            ),
+            3,
+            "an object recipient must not enter the player buckets"
+        );
+
+        // Ledger B (the mirror): two different sources each deal 3 to P1.
+        let mut same_recipient = GameState::new_two_player(42);
+        let attacker_a = create_object(
+            &mut same_recipient,
+            CardId(1000),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_b = create_object(
+            &mut same_recipient,
+            CardId(1001),
+            PlayerId(0),
+            "Raging Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        same_recipient.damage_dealt_this_turn.extend([
+            DamageRecord {
+                source_id: attacker_a,
+                source_controller: PlayerId(0),
+                target: TargetRef::Player(PlayerId(1)),
+                target_controller: PlayerId(1),
+                amount: 3,
+                is_combat: true,
+                ..Default::default()
+            },
+            DamageRecord {
+                source_id: attacker_b,
+                source_controller: PlayerId(0),
+                target: TargetRef::Player(PlayerId(1)),
+                target_controller: PlayerId(1),
+                amount: 3,
+                is_combat: true,
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(
+            resolve_quantity(
+                &same_recipient,
+                &query(AggregateFunction::Max, Some(DamageGroupKey::Target)),
+                PlayerId(0),
+                attacker_a
+            ),
+            6,
+            "one recipient was dealt 3+3 — the per-recipient bucket is 6"
+        );
+        assert_eq!(
+            resolve_quantity(
+                &same_recipient,
+                &query(AggregateFunction::Max, Some(DamageGroupKey::SourceId)),
+                PlayerId(0),
+                attacker_a
+            ),
+            3,
+            "the per-source axis still sees 3 per source — not a disguised source axis"
+        );
+    }
+
+    /// CR 120.1 + CR 120.3 + CR 120.9: the player subjects of a damage-history
+    /// threshold must never be satisfied by damage dealt to a PERMANENT that
+    /// player controls — CR 120.1 lists players and permanents as distinct damage
+    /// recipients and CR 120.3 keys the results on which kind received it. The
+    /// parser emits the player-only recipient shape
+    /// `And { [Player, Typed{controller}] }` for "you"/"an opponent"; its
+    /// `Player` child refuses object recipients. The bare contentless
+    /// `Typed{controller}` (the pre-fix shape) matched an opponent's creature —
+    /// the counterfactual row below pins that difference so the test cannot pass
+    /// because nothing matched.
+    #[test]
+    fn player_damage_threshold_refuses_object_recipients() {
+        use crate::types::ability::DamageGroupKey;
+
+        let mut state = GameState::new_two_player(42);
+        let scoping = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Scoping".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(1001),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = create_object(
+            &mut state,
+            CardId(1002),
+            PlayerId(1),
+            "Opponent's Bear".to_string(),
+            Zone::Battlefield,
+        );
+        // 6 damage to an OPPONENT'S CREATURE.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(victim),
+            target_controller: PlayerId(1),
+            amount: 6,
+            is_combat: true,
+            ..Default::default()
+        });
+
+        let player_only = QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Max,
+                group_by: Some(DamageGroupKey::Target),
+                damage_kind: DamageKindFilter::Any,
+                channel: DamageChannel::Total,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &player_only, PlayerId(0), scoping),
+            0,
+            "6 damage to an opponent's CREATURE is not damage dealt to a player"
+        );
+
+        // Counterfactual (the pre-fix contentless `Typed`): it matched the
+        // object recipient and reported 6 — the bug this row pins.
+        let bare_typed = QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                aggregate: AggregateFunction::Max,
+                group_by: Some(DamageGroupKey::Target),
+                damage_kind: DamageKindFilter::Any,
+                channel: DamageChannel::Total,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &bare_typed, PlayerId(0), scoping),
+            6,
+            "counterfactual: the contentless Typed recipient matched the creature"
+        );
+
+        // Paired positive: 6 damage to the opponent PLAYER satisfies the
+        // player-only threshold.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 6,
+            is_combat: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_quantity(&state, &player_only, PlayerId(0), scoping),
+            6,
+            "6 damage to the opponent player satisfies the player-only threshold"
+        );
     }
 
     /// CR 120.9 (audit M2): the source filter's `controller` predicate must be
@@ -19836,6 +20584,54 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 1);
     }
 
+    /// CR 104.5 + CR 800.4a: a departed player controls no battlefield
+    /// objects, so leaving them in the population feeds a guaranteed 0 into
+    /// the fold and `Min` reports the board minimum as 0. Balance's Arm A
+    /// reads this exact shape, so the practical effect would be every
+    /// surviving player sacrificing down to a departed player's zero.
+    ///
+    /// Drives the real `eliminate_player` path. The mid-test assertion is the
+    /// non-vacuity guard: P1 is a LIVE player holding 1 land, so the expected
+    /// 1 can only come from the live population — if the filter also dropped
+    /// survivors this would read P0's 3, and unfiltered it reads 0.
+    ///
+    /// REVERT-FAIL: drop `!p.is_eliminated` here and this reads 0 instead of 1.
+    #[test]
+    fn controlled_by_each_player_min_excludes_a_departed_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 0);
+        add_lands(&mut state, PlayerId(0), 3);
+        add_lands(&mut state, PlayerId(1), 1);
+        // P2 gets lands too, so the sweep has something to take away and the
+        // fixture is not just "a player who never had any".
+        add_lands(&mut state, PlayerId(2), 2);
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        assert!(
+            state.players[2].is_eliminated,
+            "precondition: P2 must have actually left the game"
+        );
+        assert!(
+            !state.players[1].is_eliminated,
+            "non-vacuity: P1 must still be live, so the expected Min comes from the \
+             surviving population rather than from dropping everyone"
+        );
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Min,
+                relation: PlayerRelation::All,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)),
+            1,
+            "Min must be the fewest among players STILL IN THE GAME (P1's 1), not the 0 a \
+             departed player contributes"
+        );
+    }
+
     #[test]
     fn controlled_by_each_player_max_picks_the_most() {
         // P0 has 3 lands, P1 has 1 → Max resolves to 3.
@@ -20980,6 +21776,795 @@ mod tests {
         assert_eq!(
             got, 7,
             "an undeparted Army still reads its LIVE mana value (7), proving the negative above is not vacuous"
+        );
+    }
+
+    /// Build a spell whose chain-root target `T` is an artifact carrying
+    /// `{Plus1Plus1: 2, "oil": 1}`, plus the resolving ability that names it via
+    /// `SpellContext::chain_root_targets`.
+    fn chain_root_target_fixture() -> (GameState, ObjectId, ObjectId, ResolvedAbility) {
+        let mut state = GameState::new_two_player(7);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dismantle".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Counter-Laden Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.counters.insert(CounterType::Plus1Plus1, 2);
+            obj.counters.insert(CounterType::Generic("oil".into()), 1);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: None,
+                    properties: vec![],
+                }),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        // The `finalize_cast` stamp, reproduced verbatim.
+        ability.context.chain_root_targets = vec![TargetRef::Object(target)];
+        (state, spell, target, ability)
+    }
+
+    fn chain_root_ctx(spell: ObjectId) -> QuantityContext {
+        QuantityContext {
+            entering: None,
+            source: spell,
+            trigger_source: None,
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            event_amount: None,
+        }
+    }
+
+    /// P1a — CR 702.12b + CR 608.2h: an indestructible chain-root target that was
+    /// NOT destroyed is still on the battlefield, so "that many" reads its LIVE
+    /// counter map. (Dismantle ruling 2: "If the target is legal but not destroyed
+    /// … you do put counters on an artifact.")
+    #[test]
+    fn chain_root_target_counters_read_live_map_while_target_survives() {
+        let (state, spell, target, ability) = chain_root_target_fixture();
+
+        // Positive reach-guard: the live map really holds 3 counters of 2 kinds.
+        assert_eq!(
+            state.objects[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            3,
+            "reach-guard: the live target carries 3 counters before the read"
+        );
+        assert_eq!(state.objects[&target].zone, Zone::Battlefield);
+
+        // CR 122.1 (Dismantle ruling 3): kind is irrelevant, only the TOTAL.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                None,
+            ),
+            3,
+            "counter_type: None sums every kind on the surviving chain-root target"
+        );
+        // A typed read still selects one kind.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                Some(&CounterType::Plus1Plus1),
+            ),
+            2,
+            "Rite of the Serpent's typed gate reads only the +1/+1 counters"
+        );
+    }
+
+    /// P1b — CR 122.2 + CR 400.7 + CR 608.2h: once the chain-root target has been
+    /// destroyed its counters have ceased to exist, so the read falls to its LKI
+    /// counter map and still reports the pre-destruction total.
+    #[test]
+    fn chain_root_target_counters_fall_back_to_lki_once_target_is_destroyed() {
+        let (mut state, spell, target, ability) = chain_root_target_fixture();
+        let lki = state.objects[&target].snapshot_public_characteristics();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.zone = Zone::Graveyard;
+            obj.counters.clear();
+        }
+        state.lki_cache.insert(target, lki);
+
+        // Positive reach-guards: the live map is now EMPTY and the LKI holds 3.
+        assert_eq!(
+            state.objects[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            0,
+            "reach-guard: the destroyed object's live counters are gone (CR 122.2)"
+        );
+        assert_eq!(
+            state.lki_cache[&target]
+                .counters
+                .values()
+                .copied()
+                .sum::<u32>(),
+            3,
+            "reach-guard: the LKI snapshot holds the pre-destruction total"
+        );
+
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                Some(&ability),
+                None,
+            ),
+            3,
+            "a destroyed chain-root target reports its LKI counter total, not 0"
+        );
+    }
+
+    /// The arm is keyed off the ability-carried chain-root list, never off this
+    /// sub-ability's own targets and never off a turn-wide "what was destroyed"
+    /// ledger. With no chain-root target the read is a fail-closed 0, not a panic.
+    #[test]
+    fn chain_root_target_counters_ignore_sibling_targets_and_missing_referent() {
+        let (state, spell, target, ability) = chain_root_target_fixture();
+
+        let mut no_root = ability.clone();
+        no_root.context.chain_root_targets.clear();
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[TargetRef::Object(target)],
+                Some(&no_root),
+                None,
+            ),
+            0,
+            "an empty chain_root_targets reads 0 even when `targets` names the artifact"
+        );
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &[],
+                None,
+                None,
+            ),
+            0,
+            "no ability at all is a fail-closed 0, never a panic"
+        );
+    }
+
+    /// P2 — CR 601.2c: the chain-root target is readable from a sub TWO levels
+    /// under the spell root, while that sub's OWN `targets` name a different
+    /// object (the resolution-chosen recipient). This is the whole point of the
+    /// scope: `ObjectScope::Target` would read the recipient.
+    #[test]
+    fn chain_root_target_survives_to_depth_two_while_sub_targets_differ() {
+        let (mut state, spell, target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let leaf = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::ChainRootTarget,
+                        counter_type: None,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+            },
+            vec![TargetRef::Object(recipient)],
+            spell,
+            PlayerId(0),
+        );
+        let mid = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: vec![],
+            },
+            vec![],
+            spell,
+            PlayerId(0),
+        )
+        .sub_ability(leaf);
+        let mut chain = root.sub_ability(mid);
+        // Exactly what the cast pipeline does after `finalize_cast` stamps the
+        // context: one whole-struct copy down the entire chain.
+        chain.set_context_recursive(chain.context.clone());
+
+        let depth_two = chain
+            .sub_ability
+            .as_deref()
+            .and_then(|mid| mid.sub_ability.as_deref())
+            .expect("reach-guard: the depth-2 leaf exists");
+
+        // Positive reach-guard: the leaf carries the ROOT's chain-root target
+        // while its own `targets` name the recipient — two DIFFERENT ids.
+        assert_eq!(
+            depth_two.context.chain_root_targets,
+            vec![TargetRef::Object(target)],
+            "reach-guard: chain_root_targets rode the context clone to depth 2"
+        );
+        assert_eq!(depth_two.targets, vec![TargetRef::Object(recipient)]);
+        assert_ne!(target, recipient);
+
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::ChainRootTarget,
+                chain_root_ctx(spell),
+                &depth_two.targets,
+                Some(depth_two),
+                None,
+            ),
+            3,
+            "the depth-2 sub reads the ROOT's target counters, not its own recipient's"
+        );
+        // The discriminator: the recipient has no counters, so a `Target`-scoped
+        // read (the pre-fix binding) would report 0.
+        assert_eq!(
+            resolve_counters_on_scope(
+                &state,
+                ObjectScope::Target,
+                chain_root_ctx(spell),
+                &depth_two.targets,
+                Some(depth_two),
+                None,
+            ),
+            0,
+            "ObjectScope::Target reads the recipient (0) — this is the bug ChainRootTarget fixes"
+        );
+    }
+
+    /// Adjacent-sibling fail-closed contract: the object-characteristic readers
+    /// are deliberately NOT wired for `ChainRootTarget` (no card consumer). They
+    /// must return an explicit 0, never panic and never silently wildcard.
+    #[test]
+    fn chain_root_target_characteristic_reads_fail_closed_to_zero() {
+        let (state, spell, _target, ability) = chain_root_target_fixture();
+        let _ = spell;
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::ChainRootTarget,
+                    },
+                },
+                &ability,
+            ),
+            0,
+            "no card reads the chain-root target's power; the arm fails closed"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::ChainRootTarget,
+                    },
+                },
+                &ability,
+            ),
+            0,
+            "no card reads the chain-root target's mana value; the arm fails closed"
+        );
+    }
+
+    /// The counter gate must not be pre-empted by the resolution-only referent
+    /// check: `QuantityRef::CountersOn` owns its own live/LKI ladder, so a
+    /// DESTROYED chain-root target still reports a real recorded count.
+    #[test]
+    fn chain_root_target_counter_gate_is_not_gated_by_missing_referent_precheck() {
+        let (mut state, _spell, target, ability) = chain_root_target_fixture();
+        let lki = state.objects[&target].snapshot_public_characteristics();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.zone = Zone::Graveyard;
+            obj.counters.clear();
+        }
+        state.lki_cache.insert(target, lki);
+
+        let gate = QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::ChainRootTarget,
+                counter_type: None,
+            },
+        };
+        assert!(
+            !quantity_expr_uses_resolution_only_object_scope(&gate),
+            "CountersOn stays out of the resolution-only object-scope list"
+        );
+        assert!(
+            !quantity_expr_missing_resolution_only_referent(&state, &gate, &ability),
+            "the counter gate must not be pre-gated false for a departed referent"
+        );
+        // Positive control: the same scope on a characteristic read IS classified
+        // resolution-only, so the negative above is not vacuous.
+        assert!(
+            quantity_expr_uses_resolution_only_object_scope(&QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::ChainRootTarget,
+                },
+            }),
+            "control: a characteristic read on the same scope IS resolution-only"
+        );
+    }
+
+    /// Serde round-trip for the new variant and the new `SpellContext` field.
+    #[test]
+    fn chain_root_target_scope_and_context_field_round_trip() {
+        let json = serde_json::to_string(&ObjectScope::ChainRootTarget).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ObjectScope>(&json).unwrap(),
+            ObjectScope::ChainRootTarget
+        );
+
+        let context = crate::types::ability::SpellContext {
+            chain_root_targets: vec![TargetRef::Object(ObjectId(1))],
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&context).unwrap();
+        assert!(
+            encoded.contains("chain_root_targets"),
+            "a populated chain-root list serializes: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_str::<crate::types::ability::SpellContext>(&encoded)
+                .unwrap()
+                .chain_root_targets,
+            vec![TargetRef::Object(ObjectId(1))]
+        );
+
+        // `skip_serializing_if = "Vec::is_empty"`: no other card's serialized
+        // SpellContext gains the field (card-data diff scope, plan gate G4).
+        let empty = serde_json::to_string(&crate::types::ability::SpellContext::default()).unwrap();
+        assert!(
+            !empty.contains("chain_root_targets"),
+            "an empty chain-root list is omitted: {empty}"
+        );
+    }
+
+    /// Production-path regression for the CR 608.2h + CR 603.7a nested-carrier
+    /// chain-root propagation fix: `build_resolved_from_def_with_chain_root`
+    /// (the authority `delayed_trigger::resolve` materializes a delayed
+    /// payload through) must carry the creating ability's
+    /// `chain_root_targets` onto the delayed payload it installs — with NO
+    /// manual stamping anywhere in this test, unlike the fixture's own
+    /// depth-two sibling test above, which builds its chain by hand precisely
+    /// because there was previously no propagating authority to call. Firing
+    /// the STORED ability (exactly the entry point real trigger dispatch uses
+    /// once a delayed trigger goes on the stack and resolves, CR 603.3b) must
+    /// then place the correct number of REAL counters, not 0.
+    #[test]
+    fn chain_root_target_counter_gate_survives_a_delayed_trigger_firing_in_production() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let expected_chain_root_targets = root.context.chain_root_targets.clone();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        // CR 608.2d: an untargeted, controller-scoped recipient filter — same
+        // shape Dismantle itself prints — with exactly one legal candidate
+        // (`recipient`; the fixture's own `target` is opponent-controlled and
+        // does not match), so resolution auto-picks it with no prompt.
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        // CR 608.2d: the recipient is a description, not a target (CR 115.10a —
+        // no literal "target" word), so it must be chosen AT RESOLUTION, not
+        // announced at stack time. Mirrors what `try_parse_put_counter_choice`
+        // stamps on the real parsed shape (`dismantle_chain_shape`'s
+        // `TargetChoiceTiming::Resolution` assertion above).
+        let mut inner_put_counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        inner_put_counter.target_choice_timing = TargetChoiceTiming::Resolution;
+        let mut payload = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(inner_put_counter),
+                uses_tracked_set: false,
+            },
+        );
+
+        // Exactly the chunk loop's counter-gate call site
+        // (`oracle_effect::mod.rs`): rebind the deferred payload's
+        // placeholder to the gate's own QuantityRef before it is stored for
+        // later resolution.
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut payload,
+            &gate_qty,
+        );
+
+        // Chain the (rebound) CreateDelayedTrigger effect under the SAME
+        // resolving Destroy ability the fixture built, exactly as the cast
+        // pipeline does after `finalize_cast` stamps `chain_root_targets`:
+        // one whole-struct context copy down the entire chain (same
+        // mechanism `chain_root_target_survives_to_depth_two_while_sub_
+        // targets_differ` above exercises).
+        let controller = root.controller;
+        let mut chain = root.sub_ability(crate::game::ability_utils::build_resolved_from_def(
+            &payload, spell, controller,
+        ));
+        chain.set_context_recursive(chain.context.clone());
+        let creating = chain.sub_ability.as_deref().expect("sub_ability present");
+
+        let mut events = Vec::new();
+        crate::game::effects::delayed_trigger::resolve(&mut state, creating, &mut events)
+            .expect("delayed trigger installation must not error");
+
+        let installed = state
+            .delayed_triggers
+            .first()
+            .expect("delayed trigger must install");
+        assert_eq!(
+            installed.ability.context.chain_root_targets, expected_chain_root_targets,
+            "the installed delayed trigger's payload must inherit chain_root_targets \
+             automatically — no manual stamping anywhere in this test"
+        );
+        let Effect::PutCounter { count, .. } = &installed.ability.effect else {
+            panic!(
+                "expected PutCounter as the installed payload, got {:?}",
+                installed.ability.effect
+            );
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: gate_qty.clone()
+            },
+            "the installed payload must still carry the rebound (not EventContextAmount) count"
+        );
+
+        // Fire it: resolve the stored ability through the SAME entry point
+        // production trigger dispatch uses once a delayed trigger goes on the
+        // stack and resolves (CR 603.3b).
+        let stored_ability = (*installed.ability).clone();
+        crate::game::effects::resolve_ability_chain(&mut state, &stored_ability, &mut events, 0)
+            .expect("firing the delayed trigger must not error");
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "firing the delayed trigger must place the chain-root target's real \
+             counter total (3) on the recipient, not 0"
+        );
+    }
+
+    /// Production-path regression for the CR 608.2h chain-root propagation
+    /// through a `RollDie` results-table branch, covering a RESUMED branch
+    /// specifically (per review: propagation must survive a mid-loop
+    /// suspension, not just a fresh roll). Rather than driving the unrelated
+    /// interactive-choice machinery that WOULD cause such a suspension, this
+    /// constructs the resume frame directly at `next_index: 1` — exactly the
+    /// shape `execute_roll` re-parks once an earlier die's own branch
+    /// suspends — and calls `resume_after_ignore`, the SAME entry point
+    /// `drain_active_die_roll` uses to continue a suspended roll. Only die
+    /// index 1 is unrolled by this call; the propagated `chain_root_targets`
+    /// must still reach its branch.
+    #[test]
+    fn chain_root_target_counter_gate_survives_a_resumed_roll_die_branch() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        let mut branch_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        branch_def.target_choice_timing = TargetChoiceTiming::Resolution;
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut branch_def,
+            &gate_qty,
+        );
+
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: spell,
+            controller: root.controller,
+            roller: root.controller,
+            targets: Vec::new(),
+            sides: 6,
+            // Die 0 already resolved (skipped by next_index below); die 1 is
+            // what this resume call unrolls.
+            results: vec![3, 4],
+            ignore_rules: Vec::new(),
+            results_table: vec![DieResultBranch {
+                min: 1,
+                max: 6,
+                effect: Box::new(branch_def),
+            }],
+            modifier: None,
+            die_result: None,
+            next_index: 1,
+            running_total: 0,
+            rolled_any: true,
+            forced_ignored: Vec::new(),
+            chain_root_targets: root.context.chain_root_targets.clone(),
+        };
+
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+        )
+        .expect("resuming the die-roll loop must not error");
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "the resumed die's branch must place the chain-root target's real \
+             counter total, not 0"
+        );
+    }
+
+    /// Production-path regression for the CR 608.2h chain-root propagation
+    /// through a `FlipCoin` win/lose branch, covering the Krark's Thumb
+    /// RESUME path specifically (`resume_after_keep`) — the entry point real
+    /// trigger dispatch uses once the controller keeps one of the doubled
+    /// flips. `chain_root_targets` must survive on the `PendingCoinFlip`
+    /// frame across that suspension.
+    #[test]
+    fn chain_root_target_counter_gate_survives_a_resumed_coin_flip_branch() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        let mut win_effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        win_effect.target_choice_timing = TargetChoiceTiming::Resolution;
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut win_effect,
+            &gate_qty,
+        );
+
+        let pending = crate::types::resolution::PendingCoinFlip {
+            source_id: spell,
+            controller: root.controller,
+            flipper: root.controller,
+            targets: Vec::new(),
+            win_effect: Some(Box::new(win_effect)),
+            lose_effect: None,
+            kind: crate::types::resolution::PendingCoinFlipKind::Single,
+            chain_root_targets: root.context.chain_root_targets.clone(),
+        };
+
+        let mut events = Vec::new();
+        crate::game::effects::flip_coin::resume_after_keep(
+            &mut state,
+            pending,
+            vec![true],
+            &mut events,
+        )
+        .expect("resuming after the keep choice must not error");
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "the resumed win branch must place the chain-root target's real \
+             counter total, not 0"
+        );
+    }
+
+    /// Production-path regression for the CR 608.2h chain-root propagation
+    /// through a `Vote` per-ballot body, covering the per-ballot RESUME path
+    /// specifically (`drain_active_vote_ballot`) — the entry point real vote
+    /// resolution uses once an earlier ballot's own interactive choice
+    /// resolves and the remaining voters continue. `chain_root_targets` must
+    /// survive on the `PendingVoteBallotIteration` frame across that
+    /// suspension.
+    #[test]
+    fn chain_root_target_counter_gate_survives_a_resumed_vote_ballot() {
+        let (mut state, spell, _target, root) = chain_root_target_fixture();
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&recipient)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let gate_qty = QuantityRef::CountersOn {
+            scope: ObjectScope::ChainRootTarget,
+            counter_type: None,
+        };
+        let recipient_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        let mut ballot_template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: recipient_filter,
+            },
+        );
+        ballot_template.target_choice_timing = TargetChoiceTiming::Resolution;
+        crate::parser::oracle_effect::rebind_event_context_amount_counts_in_ability(
+            &mut ballot_template,
+            &gate_qty,
+        );
+
+        state.push_vote_ballot(crate::types::game_state::PendingVoteBallotIteration {
+            ability_template: Box::new(ballot_template),
+            remaining_voters: vec![root.controller],
+            source_id: spell,
+            controller: root.controller,
+            chain_root_targets: root.context.chain_root_targets.clone(),
+        });
+
+        let mut events = Vec::new();
+        crate::game::effects::vote::drain_active_vote_ballot(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "the resumed ballot must place the chain-root target's real counter \
+             total, not 0"
         );
     }
 

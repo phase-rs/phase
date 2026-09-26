@@ -3,13 +3,13 @@
 //! exiled" must split into a player-scoped exile plus an owner-binding
 //! `PlayFromExile` grant, and the two rider sentences ("Each spell cast this way
 //! costs {1} more to cast." / "Each land played this way enters tapped.") must
-//! fold into that grant's `cast_cost_raise` / `land_enter_tapped` rather than
+//! fold into that grant's `cast_cost_modifier` / `land_enter_tapped` rather than
 //! emitting a board-wide cost static or ETB-tapped replacement.
 
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, CastingPermission, Duration, Effect, PermissionGrantee, TargetFilter,
-    TypeFilter,
+    AbilityDefinition, CastCostModifier, CastingPermission, Duration, Effect, PermissionGrantee,
+    TargetFilter, TypeFilter,
 };
 use engine::types::mana::ManaCost;
 use engine::types::zones::EtbTapState;
@@ -82,7 +82,7 @@ fn lightstall_etb_grants_owner_play_with_cost_raise_and_land_tapped() {
 
     let CastingPermission::PlayFromExile {
         duration,
-        cast_cost_raise,
+        cast_cost_modifier,
         land_enter_tapped,
         ..
     } = permission
@@ -100,12 +100,12 @@ fn lightstall_etb_grants_owner_play_with_cost_raise_and_land_tapped() {
 
     // CR 601.2f: "Each spell cast this way costs {1} more to cast." folds into the grant.
     assert_eq!(
-        *cast_cost_raise,
-        Some(ManaCost::Cost {
+        *cast_cost_modifier,
+        Some(CastCostModifier::raise(ManaCost::Cost {
             shards: vec![],
             generic: 1,
-        }),
-        "the cost-raise rider must fold into the grant's cast_cost_raise as {{1}}"
+        })),
+        "the cost-raise rider must fold into the grant's cast_cost_modifier as a Raise of {{1}}"
     );
 
     // CR 614.1c: "Each land played this way enters tapped." folds into the grant.
@@ -158,7 +158,7 @@ fn gobakhan_exiles_only_nonlands_and_raises_the_exiled_spell_cost() {
     assert_eq!(*grantee, PermissionGrantee::ObjectOwner);
     let CastingPermission::PlayFromExile {
         duration,
-        cast_cost_raise,
+        cast_cost_modifier,
         ..
     } = permission
     else {
@@ -166,10 +166,10 @@ fn gobakhan_exiles_only_nonlands_and_raises_the_exiled_spell_cost() {
     };
     assert_eq!(*duration, Duration::Permanent);
     assert_eq!(
-        *cast_cost_raise,
-        Some(ManaCost::Cost {
+        *cast_cost_modifier,
+        Some(CastCostModifier::raise(ManaCost::Cost {
             shards: vec![],
             generic: 2,
-        })
+        }))
     );
 }

@@ -1,0 +1,294 @@
+{
+  "search": {
+    "title": "検索",
+    "subtitle": "現在のリストにカードを追加します。",
+    "reset": "リセット",
+    "textPlaceholder": "カードを検索…",
+    "allTypes": "すべてのタイプ",
+    "cardType": "カードタイプ",
+    "browseFormatFilter": "フォーマットで使用可能",
+    "cmcMax": "CMC上限:",
+    "sets": "セット",
+    "addSetPlaceholder": "セットコードを追加…",
+    "addSet": "追加",
+    "removeSet": "{{name}}を削除",
+    "emptyHint": "フィルターを追加して閲覧を開始",
+    "searching": "検索中…",
+    "searchFailed": "検索に失敗しました",
+    "results_one": "{{count}}件の結果",
+    "results_other": "{{count}}件の結果",
+    "browseFormat": {
+      "all": "すべてのカード"
+    }
+  },
+  "filters": {
+    "title": "フィルター",
+    "close": "フィルターを閉じる",
+    "done": "完了",
+    "search": "検索"
+  },
+  "deck": {
+    "backToDeck": "デッキに戻る",
+    "listView": "リスト表示",
+    "stackView": "スタック表示",
+    "groupType": "タイプ",
+    "groupColor": "色",
+    "groupByType": "タイプでグループ化",
+    "groupByColor": "色でグループ化"
+  },
+  "tabs": {
+    "ariaLabel": "デッキ構築画面",
+    "deck": "デッキ",
+    "info": "情報"
+  },
+  "toolbar": {
+    "menu": "メニュー",
+    "deckBuilder": "デッキ構築",
+    "untitledDeck": "無題のデッキ",
+    "deckName": "デッキ名",
+    "format": "フォーマット",
+    "bracket": "ブラケット",
+    "saved": "保存済み ✓",
+    "clone": "複製",
+    "cloneTitle": "新しい名前でコピーを保存",
+    "loadDeck": "デッキを読み込む…",
+    "nameToSave": "保存するデッキ名を入力",
+    "savedToastTitle": "デッキを保存しました",
+    "savedToastDescription": "「{{name}}」をデッキに保存しました。",
+    "clonedToastTitle": "デッキを複製しました",
+    "clonedToastDescription": "「{{name}}」としてコピーを保存しました。"
+  },
+  "unsaved": {
+    "title": "未保存の変更",
+    "dismiss": "ダイアログを閉じる",
+    "bodyLeaving": "このデッキに未保存の変更があります。移動する前に保存しますか？",
+    "bodyLoading": "このデッキに未保存の変更があります。別のデッキを読み込む前に保存しますか？",
+    "discard": "破棄",
+    "saveAndContinue": "保存して続行"
+  },
+  "card": {
+    "moveToSideboard": "{{name}}を1枚サイドボードへ移動",
+    "moveToMain": "{{name}}を1枚メインデッキへ移動",
+    "moveToTarget": "{{name}}を1枚{{target}}へ移動",
+    "removeOne": "{{name}}を1枚削除",
+    "addOne": "{{name}}を1枚追加",
+    "copyLimit": "{{name}}はコピー上限です",
+    "makeCommander": "{{name}}を統率者にする",
+    "makeCommanderTitle": "これを統率者にする",
+    "chooseArtFor": "{{name}}のアートを選択",
+    "alternateArtTap": "別アートあり — タップして選択",
+    "alternateArtRightClick": "別アートあり — 右クリックして選択",
+    "unsupportedExpand_one": "未対応メカニック{{count}}件。詳細を展開",
+    "unsupportedExpand_other": "未対応メカニック{{count}}件。詳細を展開",
+    "unsupportedTitle_one": "未対応メカニック{{count}}件 — クリックして展開",
+    "unsupportedTitle_other": "未対応メカニック{{count}}件 — クリックして展開"
+  },
+  "grid": {
+    "allFormats": "すべて",
+    "addCard": "{{name}}を追加",
+    "notLegal": "{{name}} — {{format}}では使用不可",
+    "notFormat": "{{format}}では使用不可"
+  },
+  "deckList": {
+    "currentList": "現在のリスト",
+    "import": "インポート",
+    "importTitle": "テキストからデッキをインポート（MTGAまたは.dck形式）",
+    "export": "エクスポート",
+    "exportTitle": "デッキをエクスポート",
+    "mainTab": "メイン（{{count}}）",
+    "sideboardTab": "サイドボード（{{count}}）",
+    "maybeboardTab": "候補（{{count}}）",
+    "mainName": "メイン",
+    "sideboardName": "サイドボード",
+    "maybeboardName": "候補",
+    "mainDeckHeading_one": "メインデッキ（{{count}}枚）",
+    "mainDeckHeading_other": "メインデッキ（{{count}}枚）",
+    "sideboardUnlimited": "サイドボード（{{count}}）",
+    "sideboardLimited": "サイドボード（{{count}}/{{max}}）",
+    "maybeboard": "候補（{{count}}）",
+    "sideboardExceeds": "サイドボードが{{max}}枚制限を超えています",
+    "sideboardEmptyHint": "デッキカードの「→ サイドボード」でここへ移動できます。",
+    "maybeboardEmptyHint": "検討中のカードです。デッキカードの「→ 候補」でここに置けます。",
+    "group": {
+      "Creatures": "クリーチャー",
+      "Planeswalkers": "プレインズウォーカー",
+      "Instants": "インスタント",
+      "Sorceries": "ソーサリー",
+      "Artifacts": "アーティファクト",
+      "Enchantments": "エンチャント",
+      "Battles": "バトル",
+      "Lands": "土地",
+      "Other": "その他"
+    },
+    "colorGroup": {
+      "White": "白",
+      "Blue": "青",
+      "Black": "黒",
+      "Red": "赤",
+      "Green": "緑",
+      "Multicolor": "多色",
+      "Colorless": "無色",
+      "Lands": "土地"
+    },
+    "importModalTitle": "デッキをインポート",
+    "pastePlaceholder": "デッキリストを貼り付け（MTGAまたは.dck形式）…",
+    "fromFile": "ファイルから",
+    "parse": "解析",
+    "parsing": "解析中…",
+    "parseError": "カードが見つかりません。MTGAまたは.dck形式のデッキを貼り付けてください。",
+    "exportModalTitle": "デッキをエクスポート",
+    "saveToFile": "ファイルに保存",
+    "copied": "コピーしました！",
+    "copy": "コピー",
+    "commanderHeading": "統率者",
+    "removeCommander": "{{name}}を統率者から外す"
+  },
+  "moveList": {
+    "empty": "空"
+  },
+  "stack": {
+    "deckView": "デッキ表示",
+    "visualDeckStack": "デッキスタック表示",
+    "mainBadge": "メイン {{count}}",
+    "sideboardBadge": "サイドボード {{count}}",
+    "maybeboardBadge": "候補 {{count}}",
+    "mainName": "メイン",
+    "sideboardName": "サイドボード",
+    "maybeboardName": "候補",
+    "emptyHint": "追加したカードは段差のあるスタックでここに表示されます。",
+    "commanderBadge": "統率者",
+    "commanderLane": "統率者",
+    "mainDeckLane": "メインデッキ",
+    "noCommander": "統率者が選択されていません。",
+    "mainEmpty": "メインデッキのカードがここに表示されます。",
+    "cardCount_one": "{{count}}枚",
+    "cardCount_other": "{{count}}枚",
+    "mainSideBadge": "メイン{{main}} + サイド{{side}}",
+    "mainMaybeBadge": "メイン{{main}} + 候補{{side}}",
+    "groupCards_one": "{{count}}枚",
+    "groupCards_other": "{{count}}枚",
+    "group": {
+      "Creatures": "クリーチャー",
+      "Planeswalkers": "プレインズウォーカー",
+      "Instants": "インスタント",
+      "Sorceries": "ソーサリー",
+      "Artifacts": "アーティファクト",
+      "Enchantments": "エンチャント",
+      "Battles": "バトル",
+      "Lands": "土地",
+      "Other": "その他"
+    },
+    "colorGroup": {
+      "White": "白",
+      "Blue": "青",
+      "Black": "黒",
+      "Red": "赤",
+      "Green": "緑",
+      "Multicolor": "多色",
+      "Colorless": "無色",
+      "Lands": "土地"
+    },
+    "sideboardGroup": "サイドボード",
+    "maybeboardGroup": "候補",
+    "addOne": "{{name}}を1枚追加",
+    "copyLimit": "{{name}}はコピー上限です",
+    "removeOne": "{{name}}を1枚削除",
+    "removeCommander": "{{name}}を統率者から外す"
+  },
+  "printingPicker": {
+    "title": "アートを選択",
+    "noPrintings": "このカードに別の印刷版はありません。",
+    "filterPlaceholder": "セットまたはコレクター番号で絞り込み…",
+    "filterAriaLabel": "印刷版を絞り込む",
+    "count_one": "{{count}}印刷版",
+    "count_other": "{{count}}印刷版",
+    "countMatching_one": "「{{query}}」に一致する{{count}}印刷版",
+    "countMatching_other": "「{{query}}」に一致する{{count}}印刷版",
+    "useDefault": "既定を使用",
+    "noMatches": "条件に一致する印刷版はありません。",
+    "noImage": "画像なし",
+    "showMore_one": "さらに表示（残り{{count}}）",
+    "showMore_other": "さらに表示（残り{{count}}）"
+  },
+  "stats": {
+    "formatLegality": "フォーマット適性",
+    "engineCoverage": "エンジン対応率",
+    "unsupportedTitle": "未対応:\n{{list}}"
+  },
+  "commanderPanel": {
+    "heading": "統率者",
+    "noCommander": "統率者が選択されていません",
+    "remove": "削除",
+    "identity": "アイデンティティ:",
+    "setAsCommander": "統率者に設定:",
+    "cardCount": "{{count}}/{{expected}}枚",
+    "cardCountNoMinimum_one": "{{count}}枚",
+    "cardCountNoMinimum_few": "{{count}}枚",
+    "cardCountNoMinimum_many": "{{count}}枚",
+    "cardCountNoMinimum_other": "{{count}}枚",
+    "singletonViolations": "1枚制限違反: {{cards}}",
+    "colorViolations": "固有色違反: {{cards}}",
+    "signatureSpell": {
+      "heading": "署名呪文",
+      "noSignatureSpell": "署名呪文が選択されていません",
+      "setAsSignatureSpell": "署名呪文に設定:",
+      "remove": "署名呪文を削除",
+      "mustBeInstantOrSorcery": "署名呪文はインスタントかソーサリーでなければなりません",
+      "outsideColorIdentity": "{{name}}: オースブレイカーの固有色外"
+    },
+    "companion": {
+      "heading": "相棒",
+      "noCompanion": "相棒が選択されていません",
+      "remove": "相棒を削除"
+    }
+  },
+  "manaCurve": {
+    "title": "マナカーブ",
+    "colors": "色"
+  },
+  "legality": {
+    "legal": "使用可能",
+    "banned": "禁止",
+    "restricted": "制限",
+    "notLegal": "使用不可"
+  },
+  "contextMenu": {
+    "chooseArt": "アートを選択…",
+    "noAlternates": "別の印刷版なし",
+    "clearOverride": "アート上書きを解除"
+  },
+  "bracket": {
+    "unavailable": "このビルドではブラケットを推定できません。",
+    "addCommander": "ブラケット推定を見るには統率者を追加してください。",
+    "estimated": "推定: B{{tier}} {{label}}",
+    "manual": "手動: B{{tier}} {{label}}",
+    "mismatch": " ⚠ 不一致",
+    "hideBreakdown": "内訳を隠す",
+    "showBreakdown": "内訳を表示",
+    "hideBreakdownButton": "▲ 内訳を隠す",
+    "showBreakdownButton": "▼ 内訳を表示",
+    "forced": "（強制 B{{tier}}）",
+    "dataVersion": "データ: {{version}}",
+    "aboutBrackets": "ブラケットについて ↗",
+    "estimatedChip": "推定: B{{tier}}",
+    "estimatedChipFull": "推定ブラケット: B{{tier}} {{label}}"
+  },
+  "bracketPicker": {
+    "ariaLabel": "デッキブラケット",
+    "unrated": "未評価"
+  },
+  "warnings": {
+    "commanderCount": "デッキは{{count}}枚です（{{expected}}枚ちょうど必要）",
+    "singleton": "{{name}}: 複数枚あります（ハイランダー形式）",
+    "colorIdentity": "{{name}}: 統率者の固有色外",
+    "minimumCount": "デッキは{{count}}枚です（最低60枚）",
+    "maxCopies": "{{name}}: {{count}}枚（上限4枚）",
+    "companionInMain": "{{name}}は相棒ですがメインデッキにも入っています。これはデッキ構築条件に違反します。相棒として使うにはメインデッキから外してください。"
+  },
+  "switcher": {
+    "starred": "スター付き",
+    "unfiled": "未分類",
+    "searchPlaceholder": "デッキを検索…",
+    "noMatches": "一致するデッキはありません"
+  }
+}

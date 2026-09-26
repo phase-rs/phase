@@ -79,6 +79,7 @@
     "draws_one": " ({{count}} pareggio)",
     "draws_other": " ({{count}} pareggi)",
     "main": "Principale ({{count}}, min {{min}})",
+    "mainNoMinimum": "Principale ({{count}})",
     "sideboard": "Sideboard ({{count}})",
     "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Sposta carte dalla sideboard.",
@@ -96,6 +97,9 @@
     "message": "La tua partita non sarà elencata pubblicamente. Puoi comunque ospitare tramite P2P — basta condividere direttamente il codice della stanza con il tuo avversario.",
     "continueWithoutLobby": "Continua senza lobby"
   },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Questo server della lobby è troppo vecchio per elencare partite nel formato selezionato (richiede il protocollo lobby {{needed}})."
+  },
   "joinErrorDialog": {
     "dismiss": "Ignora"
   },
@@ -103,7 +107,9 @@
     "firstMessageInvalid": "L'host ha rifiutato la connessione prima della configurazione. Aggiorna entrambe le finestre e riprova.",
     "versionRequired": "Questo host richiede il protocollo di connessione v{{version}}. Aggiorna entrambe le finestre e riprova.",
     "versionMismatch": "Il protocollo di connessione non corrisponde: il tuo client ha inviato v{{guestVersion}}, ma l'host usa v{{hostVersion}}. Aggiorna entrambe le finestre.",
-    "malformedAuthority": "L'host ha rifiutato un'autorizzazione di connessione non valida. Rientra con un nuovo codice stanza."
+    "malformedAuthority": "L'host ha rifiutato un'autorizzazione di connessione non valida. Rientra con un nuovo codice stanza.",
+    "frameUndecodable": "L'host ha inviato un messaggio che questo client non è riuscito a leggere. Aggiorna entrambe le finestre e riprova.",
+    "hostDisconnectedBeforeSetup": "La connessione con l'host si è interrotta prima del completamento della configurazione."
   },
   "serverOfflinePrompt": {
     "title": "Matchmaking irraggiungibile",
@@ -129,6 +135,8 @@
     "sandboxConfirm": "Questa è una partita Sandbox. I giocatori con permesso di debug possono manipolare direttamente lo stato di gioco. Continuare?",
     "draftBadgeTitle": "Draft {{kind}} — {{setCode}}",
     "draftBadge": "Draft {{setCode}}",
+    "cubeDraftBadgeTitle": "Draft {{kind}} — {{cubeName}}",
+    "cubeDraftBadge": "Draft {{cubeName}}",
     "p2pBadgeTitle": "Partita peer-to-peer (l'host esegue il motore)",
     "sandboxBadgeTitle": "Questa partita consente azioni di debug. Da usare per i test — non una partita competitiva.",
     "hintSlow": "LENTO",
@@ -274,7 +282,11 @@
     "loadingCustomFormat": "Caricamento del formato…",
     "noSavedCustomFormats": "Nessun formato personalizzato salvato.",
     "customFormatResolveFailed": "Impossibile caricare il formato salvato.",
-    "customFormatHostingUnavailable": "Ospitare con un formato personalizzato non è ancora supportato — la legalità del mazzo non può essere verificata per esso. Per ora, salvalo e limitati all'anteprima."
+    "customFormatHostingUnavailable": "Ospitare con un formato personalizzato non è ancora supportato — la legalità del mazzo non può essere verificata per esso. Per ora, salvalo e limitati all'anteprima.",
+    "botGameNotice": "Stai ospitando la partita Discord {{code}}. Connessione e privacy sono stabilite dal post su Discord.",
+    "botSeedIgnored": "Alcune impostazioni del post su Discord non possono essere usate qui — controlla il formato e il numero di giocatori.",
+    "botP2PNotice": "Il tuo dispositivo esegue la partita. Tieni l'app aperta e resta connesso.",
+    "botServerNotice": "Un server dedicato esegue la partita. Potrebbe rallentare o andare offline."
   },
   "page": {
     "deckRejected": "Il mazzo è stato rifiutato dall'host.",
@@ -307,7 +319,20 @@
     "pickDeck": "Scegli mazzo",
     "anonymous": "Anonimo",
     "joining": "Connessione in corso",
-    "joinNeedsServer": "Scegli un server prima di unirti a una partita."
+    "joinNeedsServer": "Scegli un server prima di unirti a una partita.",
+    "serverDraftJoinUnsupported": "Non è possibile unirsi dalla lobby ai pod di draft ospitati dal server.",
+    "p2pDraftSpectateUnsupported": "I pod di draft ospitati da un giocatore non possono essere guardati.",
+    "alreadyInDraftPod": "Sei già in un pod di draft. Esci prima di unirti a un altro.",
+    "invalidGameLink": "Questo link alla partita non è valido o è incompleto.",
+    "waitingForHostTitle": "In attesa dell'host…",
+    "waitingForHostMessage": "L'host non ha ancora aperto questa partita, oppure è stata chiusa. Riprova quando l'host avrà aperto il suo link.",
+    "botLinkBrokerUnreachable": "Impossibile raggiungere il server della lobby per aprire questa partita Discord. Controlla la connessione, poi riapri il tuo link da host.",
+    "updatingTitle": "Aggiornamento all'ultima versione…",
+    "updatingMessage": "È disponibile una versione più recente di phase.rs. La pagina si ricaricherà quando sarà pronta.",
+    "refreshAfterGame": "Termina la partita in corso, poi aggiorna per passare alla nuova versione.",
+    "updateFailedTitle": "Impossibile aggiornare automaticamente",
+    "updateFailedMessage": "Aggiorna per ottenere l'ultima versione, oppure continua con questa. I giocatori con versioni diverse non possono unirsi alla stessa partita.",
+    "continueAnyway": "Continua comunque"
   },
   "draftLobbyPanel": {
     "draftPod": "Pod di draft",
@@ -323,5 +348,20 @@
     "checkingLegality": "Verifica della legalità del mazzo…",
     "legal": "✓ Legale in {{format}}",
     "notLegal": "Non legale in {{format}}"
+  },
+  "botLink": {
+    "codeUnsupported": "Questo server non supporta ancora le partite Discord.",
+    "codeInUse": "Il codice di questa partita è ancora occupato da una stanza precedente. Attendi qualche minuto, poi riapri il tuo link da host da Discord. Se continua a succedere, avvia un nuovo /lfg."
+  },
+  "openDesktop": {
+    "title": "Apertura dell'app desktop di phase.rs…",
+    "invalid": "Questo link non può essere aperto nell'app desktop.",
+    "openApp": "Apri l'app desktop",
+    "continueInBrowser": "Non si è aperta? Continua nel browser",
+    "getDesktopApp": "Scarica l'app desktop"
+  },
+  "deepLink": {
+    "gameInProgressTitle": "Partita in corso",
+    "gameInProgressBody": "Termina o abbandona la partita in corso, poi riapri il link."
   }
 }

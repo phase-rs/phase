@@ -58,7 +58,7 @@ use crate::types::zones::Zone;
 use super::casting::{
     ability_mana_payment_excluded_sources, can_pay_effect_mana_cost_after_auto_tap,
     find_eligible_discard_targets, mana_ability_cost_payment_is_paused, pay_ability_mana_cost,
-    pay_ability_mana_cost_excluding, pay_effect_mana_cost_with_resume,
+    pay_ability_mana_cost_excluding, pay_effect_mana_cost_with_resume, PausedManaPayment,
 };
 use super::engine::EngineError;
 use super::filter::FilterContext;
@@ -841,7 +841,13 @@ fn pay_ability_cost_inner(
             // auto-tap path. Pre-flight then pay; either step failing is a
             // payment failure (not an engine error).
             PaymentScope::Resolution { .. } => {
-                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, cost) {
+                if !can_pay_effect_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    source_id,
+                    cost,
+                    PausedManaPayment::Resumable,
+                ) {
                     return Ok(payment_failed("insufficient mana"));
                 }
                 let resume = effect_pay_cost_mana_resume(
@@ -887,7 +893,13 @@ fn pay_ability_cost_inner(
             PaymentScope::Resolution { .. } => {
                 let amount = resolve_cost_quantity(state, quantity, player, source_id, scope);
                 let mana_cost = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
-                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, &mana_cost) {
+                if !can_pay_effect_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    source_id,
+                    &mana_cost,
+                    PausedManaPayment::Resumable,
+                ) {
                     return Ok(payment_failed("insufficient mana"));
                 }
                 let resume = effect_pay_cost_mana_resume(
@@ -1314,6 +1326,7 @@ fn pay_ability_cost_inner(
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: true,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     face_down_profile: None,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
@@ -2282,7 +2295,13 @@ fn can_pay_resolution(
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
     match cost {
         AbilityCost::Mana { cost: mana_cost } => {
-            can_pay_effect_mana_cost_after_auto_tap(state, payer, ability.source_id, mana_cost)
+            can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                mana_cost,
+                PausedManaPayment::Resumable,
+            )
         }
         // CR 118.4 + CR 107.3c: Resolve the dynamic generic to a concrete
         // amount, then check mana payability. Dynamic-generic ability costs
@@ -2291,7 +2310,13 @@ fn can_pay_resolution(
         AbilityCost::ManaDynamic { quantity } => {
             let amount = resolve_quantity_with_targets(state, quantity, ability);
             let mana = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
-            can_pay_effect_mana_cost_after_auto_tap(state, payer, ability.source_id, &mana)
+            can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                &mana,
+                PausedManaPayment::Resumable,
+            )
         }
         // CR 119.4: Pay life requires the player's life total to be at least the
         // payment amount (and no CantLoseLife lock).

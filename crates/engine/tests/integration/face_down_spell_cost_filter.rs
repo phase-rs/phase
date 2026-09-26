@@ -313,13 +313,13 @@ fn a_face_up_creature_spell_is_not_reduced() {
 
 /// Helper for the exile-parity pair below: a morph creature in EXILE that is
 /// both foretold (castable face up for {1}) and granted `PlayFromExile` with a
-/// {2} `cast_cost_raise`. The explicit face-down election routes through
+/// {2} `cast_cost_modifier`. The explicit face-down election routes through
 /// `PlayFromExile` (CR 601.2a-b), so the real face-down cast pays {3}+{2}={5};
 /// a variant-less projection infers Foretell first and would price {3}.
 fn exile_morph_with_competing_permissions(
     pool: usize,
 ) -> (engine::game::scenario::GameRunner, ObjectId) {
-    use engine::types::ability::{CardPlayMode, CastingPermission, Duration};
+    use engine::types::ability::{CardPlayMode, CastCostModifier, CastingPermission, Duration};
     use engine::types::statics::CastFrequency;
     use engine::types::zones::EtbTapState;
 
@@ -351,7 +351,7 @@ fn exile_morph_with_competing_permissions(
             card_filter: None,
             single_use_group: None,
             single_use: false,
-            cast_cost_raise: Some(ManaCost::generic(2)),
+            cast_cost_modifier: Some(CastCostModifier::raise(ManaCost::generic(2))),
             alt_ability_cost: None,
             land_enter_tapped: EtbTapState::Unspecified,
         });

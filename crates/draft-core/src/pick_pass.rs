@@ -35,7 +35,9 @@ pub fn apply_pick_with_draft_effect(
 /// CR 903.13b: how many cards one pick step takes from this seat's pack.
 ///
 /// `DraftProcedure::cards_per_pick` is 1 for the four CR 905.1a kinds and 2 for
-/// `CommanderDraft`, clamped to what the pack still holds: CR 903.13b's
+/// `CommanderDraft`, and 1 for `Winston`, which takes no pick step at all --
+/// its turns are whole-pile decisions and never reach this function. Clamped to
+/// what the pack still holds: CR 903.13b's
 /// procedure "continues until all cards in that draft round have been drafted",
 /// so an odd pack's final step takes the one card that remains. The clamp makes
 /// that correct by construction rather than by special case.
@@ -370,7 +372,8 @@ mod tests {
     /// Pick this seat's whole pick step from the front of its current pack.
     ///
     /// Reads `cards_per_pick` so the helper stays kind-agnostic: one card for
-    /// the four CR 905.1a kinds, two for CommanderDraft (CR 903.13b), clamped
+    /// the four CR 905.1a kinds, two for CommanderDraft (CR 903.13b), and one
+    /// for `Winston`, which takes no pick step at all. Clamped
     /// to whatever the pack still holds.
     fn pick_first(session: &mut DraftSession, seat: u8) -> Vec<DraftDelta> {
         let card_instance_ids: Vec<String> = {

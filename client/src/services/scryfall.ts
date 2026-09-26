@@ -1,4 +1,5 @@
 import type { GameFormat, TokenImageRef } from "../adapter/types";
+import { formatMetadata } from "../data/formatRegistry";
 import type { CardImageSource, ImageRungs } from "./visualPacks/types.ts";
 
 interface ScryfallImageFace {
@@ -699,21 +700,9 @@ export interface ScryfallCard {
   }>;
 }
 
-const SCRYFALL_LEGALITY_KEY_OVERRIDES: Partial<Record<GameFormat, string | null>> = {
-  Archenemy: null,
-  Brawl: "standardbrawl",
-  DuelCommander: "duel",
-  FreeForAll: null,
-  HistoricBrawl: "brawl",
-  Limited: null,
-  TinyLeaders: null,
-  TwoHeadedGiant: null,
-};
-
+/** The engine-published key of `format`'s legality table; undefined when the card data records none. */
 export function scryfallLegalityKey(format: GameFormat): string | undefined {
-  const override = SCRYFALL_LEGALITY_KEY_OVERRIDES[format];
-  if (override === null) return undefined;
-  return override ?? format.toLowerCase();
+  return formatMetadata(format)?.legality_key ?? undefined;
 }
 
 interface ScryfallSearchResponse {

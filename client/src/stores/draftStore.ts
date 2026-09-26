@@ -13,6 +13,14 @@ import {
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
 import {
+  cancelLlmDraftRun,
+  collectLlmDraftResponses,
+  recordLlmDraftSubmission,
+  reportLlmDraftOutcomes,
+  resetLlmDraftBreaker,
+} from "../services/llm/draftLlm";
+import { draftProfile, useLlmStore } from "./llmStore";
+import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
   migrateLegacyWorkspace,
   normalizeVirtualBasicCount,
@@ -21,9 +29,12 @@ import {
   appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
   makeInteractiveVirtualBasicInstanceId,
+  placeArrivingPoolCards,
   reconcileWorkspaceState,
+  unplacedPoolIds,
   updateWorkspacePlacement,
 } from "../components/draft/workspace/workspacePlacement";
+import { getArrivingCardBoardPreferences } from "../components/draft/workspace/workspacePreferences";
 import {
   addVirtualBasic,
   projectDeckNames,
@@ -221,10 +232,24 @@ function beginLifecycle(): number {
   exclusiveToken = null;
   invalidateWorkspaceDependents();
   cancelScheduledPersistence();
-  useDraftStore.setState({
+  // Abandoning or replacing a draft must take its LLM work with it. Without
+  // this, a provider call started for the old draft runs to its full timeout
+  // holding a socket, and its reply lands against a pod that no longer exists.
+  cancelLlmDraftRun();
+  // The failure breaker is scoped to a draft, not to the tab. A provider that
+  // was down during one draft must get a fresh chance in the next, or three
+  // transient failures would silently disable it for the rest of the session.
+  resetLlmDraftBreaker();
+  useDraftStore.setState((state) => ({
     ...initialState,
+    // Bot difficulty is the player's setup choice, not per-draft state. The
+    // setup screen stays mounted while a start loads (the card database fetch
+    // for Sealed/Hard+ can take seconds), so resetting it here would show the
+    // selector snap back to Medium even though the chosen value was already
+    // captured and forwarded to the engine.
+    difficulty: state.difficulty,
     interactionGeneration: lifecycleGeneration,
-  });
+  }));
   return lifecycleGeneration;
 }
 
@@ -391,10 +416,71 @@ type WorkspaceInstallOperation =
       readonly persistence: "schedule";
     };
 
+/**
+ * Ids this operation resolves a placement for ITSELF, which the arriving pass
+ * must leave alone.
+ *
+ * A `sideboard` destination, because the pass is deck-only: the card still
+ * carries reconcile's `"deck"` default when the pass runs, so the pass would
+ * stamp a deck-geometry column that `applyDestination` then carries into the
+ * sideboard, to be clamped by `normalizeWorkspaceForBoardGeometry` to that
+ * zone's last column once it overflows the narrower sideboard.
+ *
+ * A `placementHint`, because `applyDestination` falls back per FIELD:
+ * `placementHint?.row ?? placement.row`. `DraftPickPlacementHint.row` is
+ * optional, and `useDraftWorkspaceDrag` omits it whenever the drop hit a column
+ * but no row band. On a two-row board the pass would then decide that card's
+ * row through the engine classification, where the hint path has always fallen
+ * back to reconcile's default — a drag-behaviour change this change has no
+ * business making. That card's own COLUMN is unaffected either way, since a
+ * hint always wins there — `row` is the whole of what this arm protects.
+ *
+ * `acknowledged-auto-pick` installs to `"deck"` unconditionally below, so only
+ * its hint can exclude it.
+ */
+function operationResolvesOwnPlacement(operation: WorkspaceInstallOperation): readonly string[] {
+  switch (operation.kind) {
+    case "state":
+      return [];
+    case "acknowledged-pick":
+      return operation.placementHint !== undefined || operation.destination !== "deck"
+        ? operation.placeInstanceIds
+        : [];
+    case "acknowledged-auto-pick":
+      return operation.placementHint !== undefined ? [operation.addedInstanceId] : [];
+  }
+}
+
 function installWorkspace(operation: WorkspaceInstallOperation): void {
-  let workspace = reconcileWorkspaceState(
-    operation.baseWorkspace,
+  const ownPlacement = operationResolvesOwnPlacement(operation);
+  // Against `operation.baseWorkspace`, the PRE-reconcile workspace, so a card
+  // that entered the pool on this install still counts as arriving. Asked after
+  // the reconcile below it would already hold the column-0 default and be
+  // filtered out, which is why the id list is computed here and not inside the
+  // placement call.
+  const arriving = unplacedPoolIds(operation.baseWorkspace, operation.authoritativeView.pool)
+    .filter((instanceId) => !ownPlacement.includes(instanceId));
+  // Sorted placement for cards that reach the pool with no hint resolved for
+  // them: the `kind: "state"` installs `startLocalDraft` and `resumeDraft` make,
+  // plus the hint-less deck picks `PackDisplay.request` dispatches through
+  // `pickCard`, `pickCardStep` and `pickCardWithDraftEffect`. Without this they
+  // stack in the board's first column whatever the sort says.
+  // BEFORE the switch, and the order is load-bearing — do not move this below
+  // it. For a multi-id hint-less DECK pick (`pickCardWithDraftEffect` from
+  // `PackDisplay.request`) both calls write the same two ids' placements: this
+  // pass appends them in POOL order, `applyDestination` appends them in REQUEST
+  // order and re-appends an id it finds already placed (`if (!placement)
+  // continue` is its only skip). Whichever runs last decides the stack order.
+  // Pinned by `appends_a_hint_less_deck_draft_effect_pick_in_request_order`,
+  // which was the single placement failure of a full `npx vitest run` with this
+  // call moved below the switch — it failed there on `second.order`, expecting
+  // 0 and getting 1, the pool-order result.
+  let workspace = placeArrivingPoolCards(
+    reconcileWorkspaceState(operation.baseWorkspace, operation.authoritativeView.pool),
+    arriving,
     operation.authoritativeView.pool,
+    operation.authoritativeView.pool_groups,
+    getArrivingCardBoardPreferences(),
   );
   switch (operation.kind) {
     case "state":
@@ -662,13 +748,45 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     useDraftStore.setState({ pendingPickIntent: null, pickInteractionLocked: false });
   };
   try {
+    // LLM drafters are opt-in twice over: a profile must be configured AND
+    // drafting must be switched on for it. Anything else — including a pod with
+    // no bot seats — takes the ordinary engine-bot path.
+    //
+    // Collected BEFORE the submitting lease is taken. `collectLlmDraftResponses`
+    // builds its requests under a lease of its own and then performs the
+    // provider I/O with none held, so the singleton draft engine queue is never
+    // blocked across a network round trip. Each reply carries the pack
+    // fingerprint it was built from and the engine re-validates it against the
+    // live pack below, so a pack that moved on during the gap is refused per
+    // seat rather than mis-picked.
+    const llmProfile = request.kind === "pick" ? draftProfile(useLlmStore.getState()) : undefined;
+    const llmResponses = llmProfile
+      ? await collectLlmDraftResponses(llmProfile, isFresh)
+      : [];
+    if (!isFresh()) {
+      // The pick was superseded while the provider was answering. Cut the round
+      // loose rather than letting it run to its timeout holding sockets open.
+      cancelLlmDraftRun();
+      return { status: "ignored", reason: "stale" };
+    }
+
     const nextView = await withDraftEngineOperation((lease) => {
       if (!isFresh()) {
         throw new Error("Stale draft pick request");
       }
       switch (request.kind) {
-        case "pick":
+        case "pick": {
+          if (llmResponses.length > 0 && llmProfile) {
+            const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
+            reportLlmDraftOutcomes(outcome.llmOutcomes);
+            // The breaker counts the ENGINE's verdict, not the fact that bytes
+            // arrived: a round of 401s or undecodable replies must count as a
+            // failure, or a broken provider would reset the breaker forever.
+            recordLlmDraftSubmission(llmProfile.id, outcome.llmOutcomes);
+            return outcome.view;
+          }
           return lease.submitPick(request.instanceId);
+        }
         case "draft-effect": {
           const adapterInstanceIds = [...request.instanceIds];
           return lease.submitPickWithDraftEffect(request.effectCardInstanceId, adapterInstanceIds);

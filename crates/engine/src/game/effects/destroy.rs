@@ -195,31 +195,39 @@ pub fn resolve(
             ..
         }
     );
-    let self_ref_target = matches!(
-        &ability.effect,
-        Effect::Destroy {
-            target: TargetFilter::SelfRef,
-            ..
+    for target in destroyed_targets(state, ability) {
+        if let TargetRef::Object(obj_id) = target {
+            match destroy_single_object(state, obj_id, ability.source_id, cant_regenerate, events) {
+                DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
+                DestroyOutcome::NeedsChoice => return Ok(()),
+            }
         }
-    );
-    if self_ref_target && ability.targets.is_empty() {
-        match destroy_single_object(
-            state,
-            ability.source_id,
-            ability.source_id,
-            cant_regenerate,
-            events,
-        ) {
-            DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
-            DestroyOutcome::NeedsChoice => return Ok(()),
-        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
+}
+
+/// CR 701.8a: the objects a single-target `Destroy` node destroys. Shared by
+/// `resolve` and `stack_reach`, so a pending node is read with the resolver's
+/// own binding.
+pub(super) fn destroyed_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let target_filter = match &ability.effect {
+        Effect::Destroy { target, .. } => Some(target),
+        _ => None,
+    };
+    if matches!(target_filter, Some(TargetFilter::SelfRef)) && ability.targets.is_empty() {
+        return vec![TargetRef::Object(ability.source_id)];
     }
     // CR 400.7 + CR 603.7c: a delayed destroy's pinned referent that became a
     // new object is dropped. The SelfRef fallback above still reads the RAW
     // `ability.targets`, so dropping every element here cannot re-bind the
-    // destroy to the source, and there is no pool fallback below this loop —
-    // substitution alone is sufficient and no early return is needed.
-    // Bound before the loop: `destroy_single_object` takes `&mut GameState`.
+    // destroy to the source.
     //
     // CR 603.2 + CR 608.2k: an untargeted object anaphor on a triggered ability
     // ("whenever ... is dealt damage, destroy IT") names an object carried by the
@@ -238,11 +246,7 @@ pub fn resolve(
     //
     // Gated on `ability.targets.is_empty()` so a genuinely targeted destroy still
     // affects exactly the chosen targets (CR 608.2b).
-    let target_filter = match &ability.effect {
-        Effect::Destroy { target, .. } => Some(target),
-        _ => None,
-    };
-    let live_targets = match target_filter {
+    match target_filter {
         Some(filter)
             if ability.targets.is_empty()
                 && crate::game::targeting::is_pure_event_context_filter(filter) =>
@@ -250,24 +254,7 @@ pub fn resolve(
             crate::game::targeting::resolved_targets(ability, filter, state)
         }
         _ => ability.live_object_targets(state),
-    };
-    for target in &live_targets {
-        if let TargetRef::Object(obj_id) = target {
-            match destroy_single_object(state, *obj_id, ability.source_id, cant_regenerate, events)
-            {
-                DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
-                DestroyOutcome::NeedsChoice => return Ok(()),
-            }
-        }
     }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
 }
 
 /// Does this destroy filter carry the "other" qualifier? A spell that creates

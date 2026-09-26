@@ -2513,6 +2513,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Gift(_) => "gift".to_string(),
         Keyword::Discover(n) => format!("discover {n}"),
         Keyword::Spree => "spree".to_string(),
+        Keyword::Tiered => "tiered".to_string(),
         Keyword::Ravenous => "ravenous".to_string(),
         Keyword::Daybound => "daybound".to_string(),
         Keyword::Nightbound => "nightbound".to_string(),
@@ -2816,7 +2817,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
 /// exactly how a candidate recognizer starts silently swallowing card text.
 ///
 /// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
-pub(crate) const KEYWORD_COST_PREFIXES: [&str; 96] = [
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 97] = [
     "cycling",
     "basic landcycling",
     "flashback",
@@ -2906,6 +2907,7 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 96] = [
     "modular",
     "partner",
     "spree",
+    "tiered",
     "casualty",
     "bargain",
     "storied",
@@ -3755,6 +3757,14 @@ mod tests {
         assert!(is_keyword_cost_line("gift a card"));
         assert!(is_keyword_cost_line("gift a treasure"));
         assert!(is_keyword_cost_line("gift a tapped fish"));
+    }
+
+    /// CR 702.183a: the Tiered header is a bare keyword line. It is consumed at
+    /// Priority 0 by the modal block (`parse_oracle_block`), so the candidate
+    /// recognizer must nominate it exactly as it does Spree's.
+    #[test]
+    fn tiered_is_keyword_cost_line() {
+        assert!(is_keyword_cost_line("tiered"));
     }
 
     #[test]
@@ -5918,6 +5928,11 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "spree",
             valid_line: "Spree",
+            reach: ProductionReach::SpecializedTypedRoute,
+        },
+        RouterKeywordCase {
+            prefix: "tiered",
+            valid_line: "Tiered",
             reach: ProductionReach::SpecializedTypedRoute,
         },
         RouterKeywordCase {

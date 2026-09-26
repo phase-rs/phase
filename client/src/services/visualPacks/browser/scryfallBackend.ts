@@ -340,7 +340,7 @@ function selectorForPack(selectedPack: PackId, root: CatalogRoot): InstallSelect
   if (selectedPack === packId("deck_library")) return { kind: "deck_library", membershipDigest: root };
   const printing = /^printing:([a-z0-9]{3,6})$/.exec(selectedPack);
   if (printing) return { kind: "printing", set: printing[1] };
-  const locale = /^locale:(de|es|fr|it|pt):([a-z0-9]{3,6})$/.exec(selectedPack);
+  const locale = /^locale:(de|es|fr|it|ja|pt):([a-z0-9]{3,6})$/.exec(selectedPack);
   if (locale) return { kind: "locale", language: locale[1], set: locale[2] };
   throw new VisualPackBackendError("invalid_input");
 }

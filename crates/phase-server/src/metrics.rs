@@ -135,10 +135,12 @@ pub struct Snapshot {
 /// and a scrape that acquired them in the other order would be a lock-ordering
 /// edge introduced purely by observability.
 pub async fn collect(app: &AppState) -> Snapshot {
+    // Whole-map reads only: a scrape locks no game, so the one-lock-at-a-time
+    // contract above is unchanged by per-session locking.
     let (games_active, game_codes) = {
         let mgr = app.sessions.lock().await;
-        let codes: HashSet<String> = mgr.sessions.keys().cloned().collect();
-        (mgr.sessions.len(), codes)
+        let codes: HashSet<String> = mgr.game_codes().cloned().collect();
+        (mgr.game_count(), codes)
     };
 
     let (drafts_active, draft_codes, drafts_with_seated_humans) = {

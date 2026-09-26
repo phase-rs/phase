@@ -829,6 +829,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 3 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
             } => {}
             other => panic!("expected ExileTop(controller, 3), got {other:?}"),
         }

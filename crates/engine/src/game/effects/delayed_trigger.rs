@@ -36,13 +36,15 @@ pub fn resolve(
     // PARSER-EMITTED condition, while its `ParentTarget` anaphor is still
     // visible.
     //
-    // PLACEMENT IS LOAD-BEARING — DO NOT SINK THIS CALL. Two binders below
+    // PLACEMENT IS LOAD-BEARING — DO NOT SINK THIS CALL. Three binders below
     // rewrite the exact filter shapes this predicate keys on:
     //   * `bind_tracked_set_to_condition`      — ParentTarget | Any | TrackedSet(0)
     //                                            -> TrackedSet { real_id }
+    //   * `bind_parent_slots_from_root`          — ParentTargetSlot -> SpecificObject
+    //                                            / SpecificPlayer (chain-root slot)
     //   * `bind_contextual_filter_to_condition` — ParentTarget -> SpecificObject
-    //                                            / Or / Any; ParentTargetSlot likewise
-    // Evaluated after either of them, this predicate returns `false` for EVERY
+    //                                            / Or / Any
+    // Evaluated after any of them, this predicate returns `false` for EVERY
     // in-class pair — both sides of its discrimination collapse to `false`, the
     // pin is always stamped, and Saffi Eriksdotter / Adarkar Valkyrie / Cryptek /
     // Together Forever / Whippoorwill / Fatal Fissure / Lagrella go permanently
@@ -102,10 +104,10 @@ pub fn resolve(
     // fall through to `bind_contextual_filter_to_condition`, whose empty-parent
     // rewrite resolves `ParentTarget` → `TargetFilter::Any`
     // (`parent_targets_filter(&[])`), would OVER-FIRE on every creature's combat
-    // damage. The contextual bind rewrites all three `WheneverEvent` filter slots
-    // (`valid_card`, `valid_source`, `valid_target`), so a bare `ParentTarget` in
-    // ANY of them is over-fire prone and must gate installation — not just
-    // `valid_source`. Scoped to a pre-bind `ParentTarget` only, so a `SelfRef`
+    // damage. The contextual bind rewrites all four `WheneverEvent` filter slots
+    // (`valid_card`, `valid_source`, `valid_target`, `valid_subject_player`),
+    // so a bare `ParentTarget` in ANY of them is over-fire prone and must gate
+    // installation — not just `valid_source`. Scoped to a pre-bind `ParentTarget` only, so a `SelfRef`
     // reference (Human Torch's "he", whose empty `ability.targets` is normal) still
     // installs. "Bare" means the reference, not its position: the bind recurses
     // into `And` / `Or` / `Not`, and a `ParentTarget` it reaches there is
@@ -120,21 +122,37 @@ pub fn resolve(
     // so it is gated here too. It is listed second because it also carries an
     // `or_trigger`, whose filters go through the same rewrite.
     //
-    // WHAT THIS STILL DOES NOT COVER, measured and stated because the obvious
-    // reading of the guard is that it does: only a bare `ParentTarget` is
-    // rejected. `TargetFilter::ParentTargetSlot { index }` degrades the same way
-    // — `concrete_parent_target_filter` falls back to `Any` for an out-of-range
-    // slot — and is NOT rejected. MEASURED over the corpus, exactly one card
-    // carries a `ParentTargetSlot` in a delayed-trigger filter: Stolen Uniform
-    // (`WhenNextEvent { ChangesController, valid_card: ParentTargetSlot { 1 } }`),
-    // and no `WheneverEvent` carries one at all.
-    //
-    // This PR does not change that card in either direction. Before it,
-    // `WhenNextEvent` reached no guard whatsoever and always installed; after it,
-    // the guard can only ever refuse MORE, and it does not refuse a slot. So the
-    // gap is pre-existing and untouched here rather than opened here — repairing
-    // it means testing whether the slot is in range, which changes a card outside
-    // #8721's class and needs its own measurement (filed).
+    // CR 608.2c + CR 608.2b (issue #8758): a `TargetFilter::ParentTargetSlot {
+    // index }` in a condition filter names a slot of the WHOLE declared chain,
+    // not of `ability.targets` — the clause that installs the trigger inherits
+    // only its immediate parent's targets, so Stolen Uniform's installing
+    // clause (three instructions below the two `TargetOnly` declarations)
+    // holds one target, and slot 1 indexed into that list was out of range and
+    // fell back to `Any`, a watch on every permanent its controller lost this
+    // turn. The slot is resolved here through
+    // `resolve_live_parent_slot_from_root`, the shared chain-root slot
+    // authority, which also carries the CR 608.2b legality stamp and the
+    // CR 400.7 pin. A slot it cannot resolve
+    // — out of range, illegal as the spell resolved, or stale — names nothing
+    // and becomes `TargetFilter::None`; the filter's own boolean structure then
+    // decides what survives (an `Or` keeps its other branches, an `And`
+    // collapses), and the install is refused only when NO alternative of the
+    // condition can match any more (`condition_cannot_match`) — an illegal
+    // referent must not take a still-legal alternative with it (CR 608.2b:
+    // "Other parts of the effect for which those targets are not illegal may
+    // still affect them"; review of PR #8881). A condition none of whose
+    // alternatives can match installs no trigger, for the same reason the
+    // empty-parent `ParentTarget` above installs none. It is bound BEFORE the
+    // contextual bind so that bind never sees a slot; the four
+    // `filter: TargetFilter` variants go through the same call, so the slot
+    // rule covers every condition that carries a filter.
+    let mut filter_groups = condition_filter_groups(&mut condition);
+    for filter in filter_groups.iter_mut().flatten() {
+        let _bound = bind_parent_slots_from_root(filter, &|index| {
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
+        });
+    }
+    let no_alternative_can_match = condition_cannot_match(&filter_groups);
     let over_fire_prone_triggers: Vec<&crate::types::ability::TriggerDefinition> = match &condition
     {
         DelayedTriggerCondition::WheneverEvent { trigger, .. } => vec![trigger.as_ref()],
@@ -168,25 +186,24 @@ pub fn resolve(
         | DelayedTriggerCondition::WhenEntersBattlefield { .. }
         | DelayedTriggerCondition::WhenDiesOrExiled { .. } => Vec::new(),
     };
-    if !over_fire_prone_triggers.is_empty() {
-        let references_empty_parent = ability.targets.is_empty()
-            && over_fire_prone_triggers.iter().any(|trigger| {
-                [
-                    &trigger.valid_source,
-                    &trigger.valid_card,
-                    &trigger.valid_target,
-                ]
-                .iter()
-                .any(|filter| filter.as_ref().is_some_and(reaches_bare_parent_target_bind))
-            });
-        if references_empty_parent {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::CreateDelayedTrigger,
-                source_id: ability.source_id,
-                subject: None,
-            });
-            return Ok(());
-        }
+    let references_empty_parent = ability.targets.is_empty()
+        && over_fire_prone_triggers.iter().any(|trigger| {
+            [
+                &trigger.valid_source,
+                &trigger.valid_card,
+                &trigger.valid_target,
+                &trigger.valid_subject_player,
+            ]
+            .iter()
+            .any(|filter| filter.as_ref().is_some_and(reaches_bare_parent_target_bind))
+        });
+    if references_empty_parent || no_alternative_can_match {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::CreateDelayedTrigger,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
     }
 
     bind_contextual_filter_to_condition(&mut condition, &ability.targets);
@@ -266,10 +283,15 @@ pub fn resolve(
         .and(ability.trigger_source.as_ref())
         .map(|source| source.identity.reference.object_id)
         .unwrap_or(ability.source_id);
-    let mut delayed_ability = crate::game::ability_utils::build_resolved_from_def(
+    // CR 608.2h: propagate the creating ability's chain-root target list so a
+    // counter-gated "that many" nested in the delayed payload still reads the
+    // live/LKI chain-root target once the trigger fires, instead of an empty
+    // list (see `build_resolved_from_def_with_chain_root`'s doc).
+    let mut delayed_ability = crate::game::ability_utils::build_resolved_from_def_with_chain_root(
         &effect_def,
         delayed_source_id,
         ability.controller,
+        ability.context.chain_root_targets.clone(),
     );
 
     // CR 603.7: Bind the most recent tracked set to the built ability chain's
@@ -871,66 +893,176 @@ fn effect_references_last_created(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::LastCreated))
 }
 
-fn bind_contextual_filter_to_condition(
-    condition: &mut DelayedTriggerCondition,
-    parent_targets: &[TargetRef],
-) {
+/// Every filter of `condition` that the creation-time binders rewrite, grouped
+/// by ALTERNATIVE: the single `filter` of the zone-change family is one group;
+/// each embedded `TriggerDefinition` is one group holding its four filter
+/// slots (`valid_card`, `valid_source`, `valid_target`,
+/// `valid_subject_player`), so a `WhenNextEvent`'s `or_trigger` — a second way
+/// for the same delayed trigger to fire — is a second group. Within a group
+/// every filter must match for the trigger to fire; across groups any one
+/// group suffices. The phase conditions and the filterless `WhenLeavesPlay`
+/// carry none. One enumeration for both binders and for
+/// [`condition_cannot_match`], so a condition variant or a filter slot cannot
+/// be bound by one and missed by another (review of PR #8881: the fourth slot
+/// was missing from the first cut).
+fn condition_filter_groups(condition: &mut DelayedTriggerCondition) -> Vec<Vec<&mut TargetFilter>> {
+    fn trigger_filters(
+        trigger: &mut crate::types::ability::TriggerDefinition,
+    ) -> Vec<&mut TargetFilter> {
+        [
+            &mut trigger.valid_card,
+            &mut trigger.valid_source,
+            &mut trigger.valid_target,
+            &mut trigger.valid_subject_player,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
     match condition {
-        // CR 603.7c + CR 608.2k: A delayed triggered ability that refers to
-        // "that creature/permanent" binds the single chosen object into the
-        // condition filter. Runs AFTER the tracked-set condition rewrite, so
-        // genuine "those cards" tracked-set forms (already `TrackedSet`) pass
-        // through untouched; only an unbound `ParentTarget` (single-target
-        // class, no tracked set) binds to the concrete object. Covers the whole
-        // zone-change condition family so "that creature dies / leaves play /
-        // enters" back-references all resolve identically.
         DelayedTriggerCondition::WhenDies { filter }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
         | DelayedTriggerCondition::WhenEntersBattlefield { filter }
-        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
-            bind_parent_target_filter(filter, parent_targets);
-        }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => vec![vec![filter]],
         DelayedTriggerCondition::WheneverEvent { trigger, .. } => {
-            for filter in [
-                &mut trigger.valid_card,
-                &mut trigger.valid_source,
-                &mut trigger.valid_target,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                bind_parent_target_filter(filter, parent_targets);
-            }
+            vec![trigger_filters(trigger)]
         }
         DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
             ..
-        } => {
-            for filter in [
-                &mut trigger.valid_card,
-                &mut trigger.valid_source,
-                &mut trigger.valid_target,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                bind_parent_target_filter(filter, parent_targets);
-            }
-            if let Some(alt) = or_trigger {
-                for filter in [
-                    &mut alt.valid_card,
-                    &mut alt.valid_source,
-                    &mut alt.valid_target,
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    bind_parent_target_filter(filter, parent_targets);
+        } => std::iter::once(trigger_filters(trigger))
+            .chain(or_trigger.iter_mut().map(|alt| trigger_filters(alt)))
+            .collect(),
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::WhenLeavesPlay { .. } => Vec::new(),
+    }
+}
+
+/// Can no alternative of the condition match any more? A group with a
+/// `TargetFilter::None` leaf (the bound form of a slot with no referent) can
+/// never fire; a condition all of whose groups are dead — and that has at
+/// least one — cannot fire at all. A condition without filters (the phase
+/// family) is never dead by this test.
+fn condition_cannot_match(filter_groups: &[Vec<&mut TargetFilter>]) -> bool {
+    !filter_groups.is_empty()
+        && filter_groups.iter().all(|group| {
+            group
+                .iter()
+                .any(|filter| matches!(**filter, TargetFilter::None))
+        })
+}
+
+/// CR 603.7c + CR 608.2k: A delayed triggered ability that refers to
+/// "that creature/permanent" binds the single chosen object into the
+/// condition filter. Runs AFTER the tracked-set condition rewrite, so
+/// genuine "those cards" tracked-set forms (already `TrackedSet`) pass
+/// through untouched; only an unbound `ParentTarget` (single-target
+/// class, no tracked set) binds to the concrete object. Covers the whole
+/// zone-change condition family so "that creature dies / leaves play /
+/// enters" back-references all resolve identically.
+fn bind_contextual_filter_to_condition(
+    condition: &mut DelayedTriggerCondition,
+    parent_targets: &[TargetRef],
+) {
+    for filter in condition_filter_groups(condition).into_iter().flatten() {
+        bind_parent_target_filter(filter, parent_targets);
+    }
+}
+
+/// CR 608.2c + CR 608.2b: Bind every `ParentTargetSlot { index }` this filter
+/// reaches to the referent `resolve_slot` gives for that declared slot —
+/// `SpecificObject` / `SpecificPlayer` — walking the same `And` / `Or` / `Not`
+/// shape as `concrete_parent_target_filter`. A slot with no referent becomes
+/// `TargetFilter::None`, the leaf that matches nothing, and the boolean
+/// structure above it is simplified so that no legal alternative is lost
+/// (CR 608.2b: "Other parts of the effect for which those targets are not
+/// illegal may still affect them"):
+/// - `And` with a `None` member can never match and becomes `None`;
+/// - `Or` drops its `None` members and keeps the rest (a single survivor is
+///   unwrapped), becoming `None` only when none remain;
+/// - `Not` over `None` becomes `Any` — an exclusion of nothing excludes
+///   nothing, the same decision `game::filter::normalize_contextual_filter`
+///   takes for its direct-child `Not { ParentTargetSlot }` form; it is written
+///   here rather than left to that normaliser because the normaliser indexes
+///   the immediate parent's list, which is not the chain a slot numbers. A
+///   `Not` over `Any` is the mirror image and becomes `None`, so a doubly
+///   negated dead slot is still recognised as dead.
+///
+/// Whether the WHOLE condition can still match is decided afterwards by
+/// [`condition_cannot_match`], per alternative. The simplification touches
+/// only composites in which a slot was actually bound (the returned flag), so
+/// a filter that carries no slot leaves this function exactly as it came.
+///
+/// A `Not` over a slot that resolves to a PLAYER stays `Not { SpecificPlayer }`
+/// — "every player but that one" — as does an `Or` or `And` over live player
+/// slots. The object axis has always evaluated those shapes; the player axis
+/// (`trigger_matchers::player_matches_filter`) walks `Not`/`Or`/`And` too,
+/// so the shape is judged and not read as the wildcard. Zero corpus carriers
+/// in a delayed condition (walk of every
+/// `CreateDelayedTrigger.condition`); pinned by
+/// `parent_target_slot_delayed_condition_8758::a_not_over_a_bound_player_slot_excludes_only_that_player`.
+fn bind_parent_slots_from_root(
+    filter: &mut TargetFilter,
+    resolve_slot: &dyn Fn(usize) -> Option<TargetRef>,
+) -> bool {
+    match filter {
+        TargetFilter::ParentTargetSlot { index } => {
+            *filter = match resolve_slot(*index) {
+                Some(TargetRef::Object(id)) => TargetFilter::SpecificObject { id },
+                Some(TargetRef::Player(id)) => TargetFilter::SpecificPlayer { id },
+                None => TargetFilter::None,
+            };
+            true
+        }
+        TargetFilter::Not { filter: inner } => {
+            let bound = bind_parent_slots_from_root(inner, resolve_slot);
+            if bound {
+                match inner.as_ref() {
+                    TargetFilter::None => *filter = TargetFilter::Any,
+                    TargetFilter::Any => *filter = TargetFilter::None,
+                    _ => {}
                 }
             }
+            bound
         }
-        _ => {}
+        TargetFilter::And { filters } => {
+            // Every member is bound — no short-circuit — before the composite
+            // is simplified.
+            let mut bound = false;
+            for member in filters.iter_mut() {
+                bound |= bind_parent_slots_from_root(member, resolve_slot);
+            }
+            if bound
+                && filters
+                    .iter()
+                    .any(|member| matches!(member, TargetFilter::None))
+            {
+                *filter = TargetFilter::None;
+            }
+            bound
+        }
+        TargetFilter::Or { filters } => {
+            // Every member is bound — no short-circuit — before the composite
+            // is simplified.
+            let mut bound = false;
+            for member in filters.iter_mut() {
+                bound |= bind_parent_slots_from_root(member, resolve_slot);
+            }
+            if bound {
+                filters.retain(|member| !matches!(member, TargetFilter::None));
+                match filters.len() {
+                    0 => *filter = TargetFilter::None,
+                    1 => *filter = filters.remove(0),
+                    _ => {}
+                }
+            }
+            bound
+        }
+        // Catch-all on purpose, as in `reaches_bare_parent_target_bind`: only
+        // the composites the binder recurses into matter here.
+        _ => false,
     }
 }
 
@@ -945,10 +1077,14 @@ pub(crate) fn concrete_parent_target_filter(
     let filter = crate::game::filter::normalize_contextual_filter(filter, parent_targets);
     match filter {
         TargetFilter::ParentTarget => parent_targets_filter(parent_targets),
-        // CR 603.7c + CR 608.2c: bind a `ParentTargetSlot { index }` delayed
-        // condition filter to the concrete parent object at that declared slot
-        // (single-slot analogue of the `ParentTarget` arm). Out-of-range/empty
-        // slots fall back to `Any`, matching `parent_targets_filter`'s empty case.
+        // CR 603.7c + CR 608.2c: bind a `ParentTargetSlot { index }` filter to
+        // the concrete parent object at that declared slot (single-slot analogue
+        // of the `ParentTarget` arm). Out-of-range/empty slots fall back to
+        // `Any`, matching `parent_targets_filter`'s empty case. Reached only from
+        // the firing-time tracked-set bind (`change_zone`), whose
+        // `parent_targets` is the delayed ability's chain-root snapshot; the
+        // creation-time condition bind resolves slots through
+        // `bind_parent_slots_from_root` before this runs (issue #8758).
         TargetFilter::ParentTargetSlot { index } => parent_targets
             .get(index)
             .map(|target| match target {
@@ -1000,16 +1136,19 @@ pub(crate) fn concrete_parent_target_filter(
 ///   reference deeper under a `Not` is bound by the arm above. (Named, unpinned,
 ///   zero corpus carriers: `Not { Not { ParentTarget } }` therefore normalises to
 ///   `Not { Any }` and installs a trigger that can never fire.)
-/// - `ParentTargetSlot { .. }`: degrades to `Any` for an out-of-range slot and is
-///   NOT gated by this PR — issue #8758, measured and filed separately.
+/// - `ParentTargetSlot { .. }`: never reaches this binder. `bind_parent_slots_from_root`
+///   resolves every slot against the chain root first; a slot with no referent
+///   becomes `None`, and `condition_cannot_match` refuses the install only when
+///   no alternative of the condition can match (issue #8758, PR #8881).
 /// - `TrackedSetFiltered { .. }`: the binder does not descend into it, so a
 ///   `ParentTarget` inside never degrades; unbound it under-matches, not over.
 ///
 /// The one printed carrier of a nested reference is Rhino's Rampage,
 /// `And { ParentTarget, Typed(creature an opponent controls) }`; it declares two
 /// targets, and `reflexive_this_way_delayed_s25::rhinos_rampage_*` drive it end
-/// to end. A new composite variant must be added to BOTH this match and the
-/// binder's; neither will remind you of the other.
+/// to end. A new composite variant must be added to this match, to
+/// `bind_parent_slots_from_root`'s, and to the binder's; none will remind you
+/// of the others.
 fn reaches_bare_parent_target_bind(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Not { filter: inner }

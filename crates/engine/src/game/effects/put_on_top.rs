@@ -4,7 +4,7 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    ResolvedAbility, TargetFilter,
+    ResolvedAbility, TargetChoiceTiming, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -186,9 +186,35 @@ pub fn resolve(
     // CR 115.1 + CR 400.2: When the filter specifies a private zone (hand/library)
     // and no targets were pre-selected during casting (because the Oracle text does
     // not say "target"), present an EffectZoneChoice for resolution-time selection.
-    // This covers Brainstorm ("put two cards from your hand on top of your library")
-    // and similar cards where the player chooses during resolution.
+    // This covers an exact count — Brainstorm ("put two cards from your hand on top
+    // of your library"), whose prompt demands exactly `count` — and an any-number
+    // count — Valakut Awakening ("put any number of cards from your hand on the
+    // bottom of your library"), whose prompt accepts 0..=count.
     let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
+    // CR 107.1c + CR 608.2d: "put ANY NUMBER of <population> …" carries its
+    // player-chosen cardinality as the `UpTo` wrapper (the parser's
+    // `LibraryPlacementCardinality::AnyNumber` arm — the same encoding as
+    // "sacrifice any number of …"). `resolve_quantity_with_targets` already reads
+    // `UpTo` as its max, so `expected` is the eligible pool's size; the prompt must
+    // then accept 0..=count instead of exactly `count`. The submission validator
+    // (`engine_resolution_choices.rs`, `EffectZoneChoice` × `SelectCards`) bounds an
+    // `up_to` selection with two comparisons (`< min_count`, `> count`); with
+    // `up_to: false` it rejects any `chosen.len() != count`. A zero selection then
+    // takes that arm's generic empty branch, which stamps `last_effect_count = 0`
+    // for a chained "that many".
+    //
+    // TEST-HARNESS CONSEQUENCES (measured by
+    // `valakut_awakening_stalls_at_any_number_prompt_without_declared_cards`; do
+    // not remove this note):
+    //   * `GameRunner::advance_until_stack_empty` auto-answers a pending
+    //     `PutAtLibraryPosition` choice ONLY when `!up_to`; for an any-number
+    //     placement it leaves the prompt pending.
+    //   * `SpellCast::resolve` (`drive_resolution`) stops at ANY `EffectZoneChoice`
+    //     with no declared `.effect_zone(..)` cards, regardless of `up_to`.
+    //   * "Choose zero" cannot be declared: `.effect_zone(&[])` is the same as no
+    //     intent. Submit `GameAction::SelectCards { cards: vec![] }` via
+    //     `runner.act(..)` instead.
+    let count_is_up_to = count_expr.is_up_to();
     let expected = if expected == 0
         && matches!(
             position,
@@ -207,16 +233,34 @@ pub fn resolve(
         expected
     };
 
-    // CR 601.2c + CR 401.4 (issue #6565 / #6836): A per-opponent target fanout
-    // ("for each opponent, put up to one target ... that player controls ...")
-    // pre-selects one target PER opponent at stack time — `multi_target.max =
-    // PlayerCount { Opponent }`, so `collected_targets` already holds every
-    // chosen permanent (one per opponent). The effect's `count` (`Fixed(1)`) is
-    // the PER-OPPONENT cap, NOT the total, so it must never gate a further
-    // "choose `count` of them" prompt over the already-targeted permanents
-    // (which would loop forever and place at most one). Each pre-chosen target
-    // is placed into its own owner's library (CR 400.7, routed by the move).
-    let expected = if crate::game::ability_utils::is_per_opponent_target_fanout(ability) {
+    // CR 601.2c + CR 115.1 (CR 115.1a spells / CR 115.1d triggers; activated
+    // abilities via CR 602.2b) + CR 401.4 (issue #6565 / #6836): an ability that
+    // announced a VARIABLE-SIZE target set places exactly the targets chosen at
+    // announcement — the number of targets is fixed at announcement and does not
+    // change afterwards. The effect's `count` is NEVER that set's total: for a
+    // per-opponent fanout ("for each opponent, put up to one target ... that
+    // player controls ...", `multi_target.max = PlayerCount { Opponent }`) it is
+    // the PER-OPPONENT cap, and for "any number of target ..." / "up to N target
+    // ..." it is only the lowering default. So it must neither truncate the
+    // placement nor gate a further "choose `count` of them" prompt over the
+    // already-chosen targets (which would loop forever and place at most one).
+    // Each chosen target is placed into its OWN owner's library, not the
+    // controller's (CR 400.3: an object that would go to a library other than
+    // its owner's goes to its owner's corresponding zone instead). That routing
+    // is performed by the zone move below, not decided here.
+    // Zero chosen targets (CR 107.1c + CR 115.6) falls into the `expected == 0`
+    // no-op below.
+    //
+    // `Resolution` timing is excluded because those targets are empty by design
+    // until the resolution-time choice is made.
+    //
+    // This SUBSUMES `ability_utils::is_per_opponent_target_fanout`, whose three
+    // conjuncts are a strict superset of these two, so the fanout behaviour is
+    // preserved rather than changed. That helper is left in place for its other
+    // callers (`grep -rn is_per_opponent_target_fanout crates/engine/src/`).
+    let expected = if ability.multi_target.is_some()
+        && ability.target_choice_timing == TargetChoiceTiming::Stack
+    {
         collected_targets.len()
     } else {
         expected
@@ -233,16 +277,47 @@ pub fn resolve(
         }
         if let Some(source_zone) = target_filter.extract_in_zone() {
             if matches!(source_zone, Zone::Hand | Zone::Library) {
+                let choosing_player = crate::game::effects::controller_for_relative_filter(
+                    state,
+                    ability,
+                    &target_filter,
+                );
+                // CR 608.2d: a choice offered while an effect resolves is made
+                // while applying that effect. For "target opponent puts", the
+                // relative filter identifies that instructed opponent as the
+                // player who chooses their card.
+                let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
+                    ability,
+                    choosing_player,
+                );
                 let eligible: Vec<_> = match source_zone {
-                    Zone::Hand => state.players[ability.controller.0 as usize]
+                    Zone::Hand => state.players[choosing_player.0 as usize]
                         .hand
                         .iter()
                         .copied()
+                        .filter(|&id| {
+                            crate::game::filter::matches_target_filter_for_zone(
+                                state,
+                                id,
+                                source_zone,
+                                &target_filter,
+                                &ctx,
+                            )
+                        })
                         .collect(),
-                    Zone::Library => state.players[ability.controller.0 as usize]
+                    Zone::Library => state.players[choosing_player.0 as usize]
                         .library
                         .iter()
                         .copied()
+                        .filter(|&id| {
+                            crate::game::filter::matches_target_filter_for_zone(
+                                state,
+                                id,
+                                source_zone,
+                                &target_filter,
+                                &ctx,
+                            )
+                        })
                         .collect(),
                     _ => unreachable!(),
                 };
@@ -256,11 +331,12 @@ pub fn resolve(
                     return Ok(());
                 }
                 state.waiting_for = WaitingFor::EffectZoneChoice {
-                    player: ability.controller,
+                    player: choosing_player,
                     cards: eligible,
                     count: expected.min(eligible_count),
                     min_count: 0,
-                    up_to: false,
+                    // load-bearing: the any-number placement prompt.
+                    up_to: count_is_up_to,
                     source_id: ability.source_id,
                     effect_kind: EffectKind::PutAtLibraryPosition,
                     zone: source_zone,
@@ -271,6 +347,7 @@ pub fn resolve(
                     enters_attacking: false,
                     owner_library: false,
                     track_exiled_by_source: false,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     // CR 708.2a: library-position selection is not a face-down entry.
                     face_down_profile: None,
                     enter_with_counters: vec![],
@@ -313,7 +390,9 @@ pub fn resolve(
             cards: collected_targets,
             count: expected,
             min_count: 0,
-            up_to: false,
+            // Set for parity with the eligible-pool prompt so the two constructions
+            // cannot drift; no any-number placement reaches this prompt today.
+            up_to: count_is_up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::PutAtLibraryPosition,
             // PART 2 of a two-part fix — this half PREVENTS FUTURE WEDGES; the
@@ -355,6 +434,7 @@ pub fn resolve(
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],

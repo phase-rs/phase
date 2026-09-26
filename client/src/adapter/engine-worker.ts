@@ -21,9 +21,13 @@ import init, {
   get_ai_action_proposal_from_scores_with_diagnostics,
   get_ai_scored_candidates,
   submit_ai_action_proposal,
+  buildLlmDecisionRequest,
+  getAiActionProposalFromLlmResponse,
+  llmProviderCatalog,
   get_legal_actions_js,
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
+  get_viewer_transition_snapshot_js,
   restore_game_state,
   resume_restored_game_state,
   resume_multiplayer_host_state,
@@ -53,7 +57,13 @@ import init, {
   get_card_rulings,
 } from "@wasm/engine";
 
-import { isActionOutcome, type ActionRejection, type AiActionProposal, type GameAction } from "./types";
+import {
+  isActionOutcome,
+  type ActionRejection,
+  type AiActionProposal,
+  type GameAction,
+  type GameEvent,
+} from "./types";
 import type {
   InteractionPreviewRequest,
   InteractionSubmission,
@@ -96,6 +106,7 @@ type EngineRequest =
   | { type: "getSnapshot"; id: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
+  | { type: "getViewerTransitionSnapshot"; id: number; viewerId: number; events: GameEvent[] }
   | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
   | { type: "getAiActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
   | { type: "getAiTacticalActionProposal"; id: number; difficulty: string; playerId: number }
@@ -104,6 +115,24 @@ type EngineRequest =
   | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "getAiActionProposalFromScoresWithDiagnostics"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "submitAiActionProposal"; id: number; proposal: AiActionProposal }
+  | {
+      type: "buildLlmDecisionRequest";
+      id: number;
+      difficulty: string;
+      playerId: number;
+      endpointJson: string;
+      historyJson: string;
+    }
+  | {
+      type: "getAiActionProposalFromLlmResponse";
+      id: number;
+      playerId: number;
+      fingerprint: string;
+      provider: string;
+      status: number;
+      responseBody: string;
+    }
+  | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
   | { type: "resumeRestoredGameState"; id: number }
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
@@ -509,6 +538,20 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      case "getViewerTransitionSnapshot": {
+        const r = get_viewer_transition_snapshot_js(msg.viewerId, msg.events);
+        if (typeof r === "string") {
+          error(msg.id, r);
+          break;
+        }
+        if (r === null) {
+          error(msg.id, "NOT_INITIALIZED: get_viewer_transition_snapshot_js returned null");
+          break;
+        }
+        result(msg.id, r);
+        break;
+      }
+
       case "getAiActionProposal": {
         const proposal = get_ai_action_proposal(msg.difficulty, msg.playerId);
         result(msg.id, proposal ?? null);
@@ -550,6 +593,38 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "getAiActionProposalFromScoresWithDiagnostics": {
         result(msg.id, get_ai_action_proposal_from_scores_with_diagnostics(msg.scoresJson, msg.difficulty, msg.playerId, BigInt(msg.seed)) ?? null);
+        break;
+      }
+
+      case "buildLlmDecisionRequest": {
+        result(
+          msg.id,
+          buildLlmDecisionRequest(
+            msg.difficulty,
+            msg.playerId,
+            msg.endpointJson,
+            msg.historyJson,
+          ) ?? null,
+        );
+        break;
+      }
+
+      case "getAiActionProposalFromLlmResponse": {
+        result(
+          msg.id,
+          getAiActionProposalFromLlmResponse(
+            msg.playerId,
+            msg.fingerprint,
+            msg.provider,
+            msg.status,
+            msg.responseBody,
+          ) ?? null,
+        );
+        break;
+      }
+
+      case "llmProviderCatalog": {
+        result(msg.id, llmProviderCatalog());
         break;
       }
 
