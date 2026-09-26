@@ -248,7 +248,7 @@ describe("DeckBuilder", () => {
     });
   });
 
-  it("a rename saved behind a transaction that replaces the old name leaves the replacement and saves the deck under the new name", async () => {
+  it.each([false, true])("a rename preserves a replacement of the old name, including a same-name Load while queued (reload=%s)", async (reload) => {
     const user = userEvent.setup();
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "P",
@@ -274,14 +274,24 @@ describe("DeckBuilder", () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let publishReplacement!: () => void;
+    const replacing = new Promise<void>((resolve) => {
+      publishReplacement = resolve;
+    });
+    let replacementPublished!: () => void;
+    const published = new Promise<void>((resolve) => {
+      replacementPublished = resolve;
+    });
     const holder = withSavedDeckLibrary(async (txn) => {
-      await held;
+      await replacing;
       removeSavedDeckData(txn, "P");
       removeDeckMeta(txn, "P");
       writeSavedDeckData(txn, "P", JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] }));
       stampDeckMeta(txn, "P", 2000);
       toggleDeckStar(txn, "P");
       localStorage.setItem(ACTIVE_DECK_KEY, "P");
+      replacementPublished();
+      await held;
     });
     await vi.waitFor(async () => {
       expect((await navigator.locks.query()).held).toHaveLength(1);
@@ -294,6 +304,14 @@ describe("DeckBuilder", () => {
       expect((await navigator.locks.query()).pending).toHaveLength(1);
     });
 
+    publishReplacement();
+    await published;
+    if (reload) {
+      await user.click(screen.getByRole("button", { name: "Load deck..." }));
+      await user.click(screen.getByRole("option", { name: "P" }));
+      await user.click(screen.getByRole("button", { name: "Discard" }));
+      await screen.findByDisplayValue("P");
+    }
     release();
     await holder;
     await waitFor(() => {
@@ -310,10 +328,15 @@ describe("DeckBuilder", () => {
     const renamedMeta = getDeckMeta("N");
     expect(renamedMeta?.starred).toBeFalsy();
     expect(renamedMeta?.addedAt).not.toBe(2000);
-    expect(useAppNotificationStore.getState().notification).toEqual({
-      title: "Deck saved",
-      description: '"N" was saved to your decks.',
-    });
+    if (reload) {
+      expect(nameInput).toHaveValue("P");
+      expect(screen.getByRole("button", { name: "remove-Mountain" })).toBeInTheDocument();
+    } else {
+      expect(useAppNotificationStore.getState().notification).toEqual({
+        title: "Deck saved",
+        description: '"N" was saved to your decks.',
+      });
+    }
   });
 
   it("renaming after an in-place save moves the deck", async () => {

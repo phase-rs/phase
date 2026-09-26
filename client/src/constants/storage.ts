@@ -446,7 +446,7 @@ export function saveBuilderDeck(
 ): Promise<SavedDeckSnapshot> {
   return withSavedDeckLibrary(async (txn) => {
     const live = savedDeckRef.current;
-    const effective = previous && live && live.name === previous.name ? live : previous;
+    const effective = claimsEditor() && previous && live && live.name === previous.name ? live : previous;
     if (effective && effective.name !== nextName && savedDeckUnchanged(txn, effective)) {
       // If nextName already names another deck, the writeSavedDeckData below overwrites
       // its data (pre-existing Save behavior) and moveSavedDeck's metadata
