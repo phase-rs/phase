@@ -1553,6 +1553,7 @@ mod menace_requires_two_blockers;
 mod minimus_containment_treasure_grant;
 mod modal_enters_becomes_choice;
 mod modal_mode_labels;
+mod modal_saga_chapter_runtime;
 mod molten_core_maestro_2384;
 mod molten_psyche;
 mod momir_basic_emblem;

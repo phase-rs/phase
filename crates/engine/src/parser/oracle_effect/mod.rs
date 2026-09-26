@@ -36229,6 +36229,17 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     lower_ability_ir(&parse_ability_ir_standalone(text, kind))
 }
 
+/// CR 611.2a: the text of an effect body's FIRST clause, split exactly as the
+/// effect-chain parser splits it (a quoted ability stays whole). That clause
+/// lowers to the chain's top-level effect, so a duration it states belongs to
+/// that effect and not to any later instruction.
+pub(crate) fn first_clause_text(text: &str) -> Option<String> {
+    split_clause_sequence(text)
+        .into_iter()
+        .next()
+        .map(|chunk| chunk.text)
+}
+
 /// Parse a compound effect chain with subject context for pronoun resolution.
 /// CR 608.2k: Used by the trigger parser to thread the trigger subject so that
 /// bare pronouns ("it") resolve to TriggeringSource instead of SelfRef.
