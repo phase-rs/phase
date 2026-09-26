@@ -5,10 +5,13 @@ export {
   BRACKET_AXES,
   BRACKET_TIER_NUMERIC,
   type BracketAxis,
+  type BracketCheck,
+  type BracketCheckOutcome,
+  type BracketCoverage,
   type BracketDeckRequest,
   type BracketEstimate,
-  type BracketViolation,
   type CommanderBracketTier,
+  type EstimateConfidence,
   isBracketEstimate,
 } from "./bracketEstimate";
 

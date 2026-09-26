@@ -446,7 +446,7 @@ impl std::fmt::Display for GateVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::game::AxisReading;
+    use engine::game::{AxisReading, BracketCoverage, EstimateConfidence};
     use strum::IntoEnumIterator;
 
     fn catalog_deck(commander: Vec<CatalogCard>) -> CatalogDeck {
@@ -473,7 +473,13 @@ mod tests {
                     axes: BracketAxis::iter()
                         .map(|axis| (axis, AxisReading::default()))
                         .collect(),
-                    violations: BTreeMap::new(),
+                    checks: Vec::new(),
+                    coverage: BracketCoverage {
+                        counted: 0,
+                        resolved: 0,
+                        unresolved: Vec::new(),
+                        confidence: EstimateConfidence::Complete,
+                    },
                     data_version: "test".to_string(),
                 },
             },

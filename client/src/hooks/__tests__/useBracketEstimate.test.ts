@@ -8,16 +8,30 @@ import type { ParsedDeck } from "../../services/deckParser";
 const mockEstimate: BracketEstimate = {
   tier: "upgraded",
   axes: {
-    game_changers: { count: 1, cap_at_tier: 3, contributing: ["Smothering Tithe"] },
-    mass_land_denial: { count: 0, cap_at_tier: 0, contributing: [] },
-    extra_turns: { count: 0, cap_at_tier: null, contributing: [] },
+    game_changers: { count: 1, contributing: ["Smothering Tithe"] },
+    mass_land_denial: { count: 0, contributing: [] },
+    extra_turns: { count: 0, contributing: [] },
     efficient_tutors: {
       count: 2,
-      cap_at_tier: null,
       contributing: ["Demonic Tutor", "Vampiric Tutor"],
     },
   },
-  violations: {},
+  checks: [
+    {
+      axis: "game_changers",
+      comparator: "GE",
+      threshold: 1,
+      floor: "upgraded",
+      observed: 1,
+      outcome: { kind: "fired" },
+      official_line: "Bracket 1 and 2 decks exclude Game Changers.",
+      source_document: "MTG Commander Format — Game Changers",
+      source_published: "2026-02-09",
+      source_url: "https://magic.wizards.com/en/formats/commander",
+      evidence: ["Smothering Tithe"],
+    },
+  ],
+  coverage: { counted: 4, resolved: 4, unresolved: [], confidence: "complete" },
   data_version: "test-1",
 };
 

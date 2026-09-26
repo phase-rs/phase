@@ -1,7 +1,9 @@
 //! Pins the legacy bracket-signal wire shape through database loading and estimation.
 
 use engine::database::{BracketLists, CardDatabase};
-use engine::game::bracket_estimate::{estimate_bracket, BracketAxis, CommanderBracketTier};
+use engine::game::bracket_estimate::{
+    estimate_bracket, BracketAxis, BracketCheckOutcome, CommanderBracketTier, EstimateConfidence,
+};
 use engine::game::deck_loading::PlayerDeckList;
 
 const LEGACY_CARD_DATA: &str = r#"{
@@ -96,13 +98,21 @@ fn estimate_over_a_legacy_export_reports_an_axis_keyed_reading() {
         estimate.axes[&BracketAxis::GameChangers].contributing,
         ["Smothering Tithe"]
     );
-    assert_eq!(
-        estimate.axes[&BracketAxis::GameChangers].cap_at_tier,
-        Some(3)
-    );
     assert_eq!(estimate.axes[&BracketAxis::MassLandDenial].count, 0);
-    assert_eq!(
-        estimate.axes[&BracketAxis::MassLandDenial].cap_at_tier,
-        Some(0)
-    );
+    assert!(estimate.checks.iter().any(|check| {
+        check.axis == BracketAxis::GameChangers
+            && check.threshold == 1
+            && check.outcome == BracketCheckOutcome::Fired
+    }));
+    assert!(estimate.checks.iter().any(|check| {
+        check.axis == BracketAxis::MassLandDenial
+            && check.outcome
+                == BracketCheckOutcome::Clear {
+                    cards_until_fired: Some(1),
+                }
+    }));
+    assert_eq!(estimate.coverage.counted, 3);
+    assert_eq!(estimate.coverage.resolved, 2);
+    assert_eq!(estimate.coverage.unresolved, ["Atraxa, Praetors' Voice"]);
+    assert_eq!(estimate.coverage.confidence, EstimateConfidence::Partial);
 }

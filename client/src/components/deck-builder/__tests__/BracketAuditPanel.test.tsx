@@ -10,18 +10,78 @@ const estimate: BracketEstimate = {
   axes: {
     game_changers: {
       count: 2,
-      cap_at_tier: 3,
       contributing: ["Smothering Tithe", "Cyclonic Rift"],
     },
-    mass_land_denial: { count: 0, cap_at_tier: 0, contributing: [] },
-    extra_turns: { count: 1, cap_at_tier: null, contributing: ["Time Warp"] },
+    mass_land_denial: { count: 0, contributing: [] },
+    extra_turns: { count: 1, contributing: ["Time Warp"] },
     efficient_tutors: {
       count: 3,
-      cap_at_tier: null,
       contributing: ["Demonic Tutor", "Vampiric Tutor", "Enlightened Tutor"],
     },
   },
-  violations: {},
+  checks: [
+    {
+      axis: "game_changers",
+      comparator: "GE",
+      threshold: 1,
+      floor: "upgraded",
+      observed: 2,
+      outcome: { kind: "fired" },
+      official_line: "Bracket 1 and 2 decks exclude Game Changers.",
+      source_document: "MTG Commander Format — Game Changers",
+      source_published: "2026-02-09",
+      source_url: "https://magic.wizards.com/en/formats/commander",
+      evidence: ["Smothering Tithe", "Cyclonic Rift"],
+    },
+    {
+      axis: "game_changers",
+      comparator: "GE",
+      threshold: 4,
+      floor: "optimized",
+      observed: 2,
+      outcome: { kind: "clear", cards_until_fired: 2 },
+      official_line: "Brackets 4 and 5 allow for unlimited Game Changers.",
+      source_document: "MTG Commander Format — Game Changers",
+      source_published: "2026-02-09",
+      source_url: "https://magic.wizards.com/en/formats/commander",
+      evidence: ["Smothering Tithe", "Cyclonic Rift"],
+    },
+    {
+      axis: "mass_land_denial",
+      comparator: "GE",
+      threshold: 1,
+      floor: "optimized",
+      observed: 0,
+      outcome: { kind: "clear", cards_until_fired: 1 },
+      official_line: "you should not expect to see these cards anywhere in Brackets 1-3",
+      source_document: "Introducing Commander Brackets Beta",
+      source_published: "2025-02-11",
+      source_url:
+        "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+      evidence: [],
+    },
+    {
+      axis: "extra_turns",
+      comparator: "GE",
+      threshold: 1,
+      floor: "core",
+      observed: 1,
+      outcome: { kind: "fired" },
+      official_line:
+        "No intentional two-card infinite combos, mass land denial, or extra-turn cards.",
+      source_document: "Introducing Commander Brackets Beta",
+      source_published: "2025-02-11",
+      source_url:
+        "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+      evidence: ["Time Warp"],
+    },
+  ],
+  coverage: {
+    counted: 8,
+    resolved: 7,
+    unresolved: ["Missing Card"],
+    confidence: "partial",
+  },
   data_version: "2025-09-24-wotc",
 };
 
@@ -45,9 +105,9 @@ describe("BracketAuditPanel", () => {
   it("expands to show per-axis breakdown", () => {
     render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
-    expect(screen.getByText(/Game Changers/i)).toBeInTheDocument();
-    expect(screen.getByText("Smothering Tithe")).toBeInTheDocument();
-    expect(screen.getByText("Cyclonic Rift")).toBeInTheDocument();
+    expect(screen.getAllByText(/^Game Changers$/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Smothering Tithe").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Cyclonic Rift").length).toBeGreaterThan(0);
     expect(screen.getByText(/2025-09-24-wotc/)).toBeInTheDocument();
   });
 
@@ -55,8 +115,52 @@ describe("BracketAuditPanel", () => {
     const onCardClick = vi.fn();
     render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={onCardClick} />);
     fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
-    fireEvent.click(screen.getByText("Smothering Tithe"));
+    fireEvent.click(screen.getAllByText("Smothering Tithe")[0]);
     expect(onCardClick).toHaveBeenCalledWith("Smothering Tithe");
+  });
+
+  it("renders a check row for a rule that did not fire", () => {
+    render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(screen.getByText(/0 of 1/i)).toBeInTheDocument();
+  });
+
+  it("shows how many more cards cross the next floor", () => {
+    render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(screen.getByText(/2 more crosses to B4/i)).toBeInTheDocument();
+  });
+
+  it("renders the official line and its dated source", () => {
+    render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(
+      screen.getByText("you should not expect to see these cards anywhere in Brackets 1-3"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/2025-02-11/).length).toBeGreaterThan(0);
+  });
+
+  it("shows the unresolved list when confidence is partial", () => {
+    render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(screen.getByText("Not found in card data")).toBeInTheDocument();
+    expect(screen.getByText("Missing Card")).toBeInTheDocument();
+  });
+
+  it("renders no unresolved block when complete", () => {
+    const completeEstimate: BracketEstimate = {
+      ...estimate,
+      coverage: { counted: 8, resolved: 8, unresolved: [], confidence: "complete" },
+    };
+    render(
+      <BracketAuditPanel
+        estimate={completeEstimate}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(screen.queryByText("Not found in card data")).toBeNull();
   });
 
   it("renders an empty-state placeholder when estimate is null and format is Commander", () => {

@@ -23,11 +23,11 @@ interface Props {
   emptyReason?: "not-commander" | "no-commander" | "unsupported";
 }
 
-const AXIS_LABEL: Record<BracketAxis, string> = {
-  game_changers: "Game Changers",
-  mass_land_denial: "Mass Land Denial",
-  extra_turns: "Extra Turns",
-  efficient_tutors: "Efficient Tutors",
+const AXIS_I18N_KEY: Record<BracketAxis, string> = {
+  game_changers: "bracket.axis.gameChangers",
+  mass_land_denial: "bracket.axis.massLandDenial",
+  extra_turns: "bracket.axis.extraTurns",
+  efficient_tutors: "bracket.axis.efficientTutors",
 };
 
 export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyReason }: Props) {
@@ -87,20 +87,85 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
 
       {expanded && (
         <dl className="mt-3 space-y-2 text-xs">
-          {BRACKET_AXES.map((axis) => {
-            const { count, contributing: cards, cap_at_tier: cap } = estimate.axes[axis];
-            const violation = estimate.violations[axis];
+          {estimate.checks.map((check) => {
+            const outcomeText =
+              check.outcome.kind === "fired"
+                ? t("bracket.check.fired", {
+                    observed: check.observed,
+                    tier: BRACKET_TIER_NUMERIC[check.floor],
+                    label: BRACKET_LABEL[BRACKET_TIER_NUMERIC[check.floor]],
+                  })
+                : check.outcome.cards_until_fired !== null
+                  ? t("bracket.check.clear", {
+                      observed: check.observed,
+                      threshold: check.threshold,
+                      remaining: check.outcome.cards_until_fired,
+                      tier: BRACKET_TIER_NUMERIC[check.floor],
+                    })
+                  : t("bracket.check.clearMax", {
+                      observed: check.observed,
+                      tier: BRACKET_TIER_NUMERIC[check.floor],
+                    });
             return (
-              <div key={axis} className="grid grid-cols-[180px_60px_1fr] items-start gap-2">
-                <dt className="text-slate-300">{AXIS_LABEL[axis]}</dt>
-                <dd className="text-slate-200">
-                  {count}
-                  {cap !== null && ` / ${cap}`}
-                </dd>
+              <div
+                key={`${check.axis}-${check.threshold}-${check.floor}`}
+                className="grid grid-cols-[180px_1fr] items-start gap-2"
+              >
+                <dt className="text-slate-300">{t(AXIS_I18N_KEY[check.axis])}</dt>
                 <dd className="text-slate-400">
-                  {cards.length === 0 && "—"}
-                  {cards.map((name, i) => (
-                    <span key={name}>
+                  <div className={check.outcome.kind === "fired" ? "text-amber-300" : undefined}>
+                    {outcomeText}
+                  </div>
+                  {check.axis === "extra_turns" && (
+                    <div className="text-[10px] text-slate-500">{t("bracket.uncalibrated")}</div>
+                  )}
+                  {check.evidence.length > 0 && (
+                    <div>
+                      {check.evidence.map((name, index) => (
+                        <span key={`${name}-${index}`}>
+                          <button
+                            type="button"
+                            onClick={() => onCardClick(name)}
+                            className="inline-flex min-h-[44px] items-center text-slate-300 underline-offset-2 hover:underline sm:min-h-0"
+                          >
+                            {name}
+                          </button>
+                          {index < check.evidence.length - 1 && ", "}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-1 text-[10px] text-slate-500">
+                    <span>{check.official_line} </span>
+                    <a
+                      href={check.source_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline-offset-2 hover:underline"
+                    >
+                      {t("bracket.check.source", {
+                        document: check.source_document,
+                        published: check.source_published,
+                      })}
+                    </a>
+                  </div>
+                </dd>
+              </div>
+            );
+          })}
+          {BRACKET_AXES.filter(
+            (axis) => !estimate.checks.some((check) => check.axis === axis),
+          ).map((axis) => {
+            const reading = estimate.axes[axis];
+            return (
+              <div key={axis} className="grid grid-cols-[180px_1fr] items-start gap-2">
+                <dt className="text-slate-300">{t(AXIS_I18N_KEY[axis])}</dt>
+                <dd className="text-slate-400">
+                  <div>
+                    {reading.count} — {t("bracket.uncounted")}
+                  </div>
+                  {reading.contributing.map((name, index) => (
+                    <span key={`${name}-${index}`}>
                       <button
                         type="button"
                         onClick={() => onCardClick(name)}
@@ -108,20 +173,34 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
                       >
                         {name}
                       </button>
-                      {i < cards.length - 1 && ", "}
+                      {index < reading.contributing.length - 1 && ", "}
                     </span>
                   ))}
-                  {violation && (
-                    <span className="ml-2 text-amber-300">
-                      {t("bracket.forced", { tier: BRACKET_TIER_NUMERIC[violation.forced_floor] })}
-                    </span>
-                  )}
                 </dd>
               </div>
             );
           })}
+          <div className="border-t border-white/5 pt-2 text-slate-400">
+            {t("bracket.coverage", {
+              resolved: estimate.coverage.resolved,
+              counted: estimate.coverage.counted,
+            })}
+          </div>
+          {estimate.coverage.confidence === "partial" && (
+            <div className="space-y-1 text-slate-400">
+              <div>
+                {t("bracket.confidencePartial", { n: estimate.coverage.unresolved.length })}
+              </div>
+              <div className="text-slate-300">{t("bracket.unresolvedHeading")}</div>
+              <ul className="list-disc pl-5">
+                {estimate.coverage.unresolved.map((name) => (
+                  <li key={name}>{name}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="border-t border-white/5 pt-2 text-[10px] text-slate-500">
-            {t("bracket.dataVersion", { version: estimate.data_version })} ·{" "}
+            {t("bracket.dataVersion", { version: estimate.data_version })} · {t("bracket.baseFloor")} ·{" "}
             <a
               href="https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta"
               target="_blank"

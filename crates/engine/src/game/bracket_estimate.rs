@@ -1,19 +1,20 @@
 //! Commander bracket estimator. Profiles a Commander deck along four axes
 //! (Game Changers, Mass Land Denial, Extra Turns, Efficient Tutors) and
-//! returns a `BracketEstimate` placing the deck in bracket B1–B4.
+//! returns a `BracketEstimate` placing the deck in bracket B2–B4.
 //!
 //! Pure: no game state, no I/O, no randomness. Same `(deck, db)` →
 //! identical `BracketEstimate`.
 //!
 //! Bracket policy is **not** part of the Comprehensive Rules — it is WotC's
-//! Commander Format Panel guidance. No `// CR` annotations apply.
+//! Commander Format Panel guidance. No Comprehensive Rules annotations apply.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
 use crate::game::deck_loading::PlayerDeckList;
+use crate::types::ability::Comparator;
 
 /// Commander bracket tier. The estimator never returns `Cedh` — that is a
 /// meta self-declaration kept on the frontend's existing manual picker.
@@ -67,7 +68,7 @@ impl CommanderBracketTier {
     }
 
     /// Numeric bracket level (B1..=B5 → 1..=5). Used for ordered
-    /// comparisons (e.g., sorting violations by tier).
+    /// comparisons when composing bracket floors.
     pub fn as_u8(self) -> u8 {
         match self {
             Self::Exhibition => 1,
@@ -79,15 +80,7 @@ impl CommanderBracketTier {
     }
 }
 
-/// One axis that forced the deck above a tier ceiling.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BracketViolation {
-    pub axis: BracketAxis,
-    pub count: u8,
-    pub prior_cap: u8,
-    pub forced_floor: CommanderBracketTier,
-}
-
+/// One observable Commander Brackets policy axis.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, strum::EnumIter,
 )]
@@ -106,11 +99,167 @@ pub enum BracketAxis {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AxisReading {
     pub count: u8,
-    /// `None` means no cap on this axis at the resolved tier. This must remain
-    /// an explicit JSON `null` so the frontend can validate every reading.
-    pub cap_at_tier: Option<u8>,
     /// Cards that counted toward this axis, in deck order (commander first).
     pub contributing: Vec<String>,
+}
+
+/// Where a floor rule's official line was read from. A `&'static str` struct,
+/// not an enum: the engine never dispatches on the value, it only reports it.
+/// The non-CR analogue of the descriptive half of a rules annotation.
+#[derive(Debug, Clone, Copy)]
+pub struct FloorRuleSource {
+    /// WotC document title, as published.
+    pub document: &'static str,
+    /// Publication date, ISO-8601.
+    pub published: &'static str,
+    pub url: &'static str,
+}
+
+/// One official bracket line, encoded. `comparator`/`threshold` say when the
+/// line's restriction is exceeded; `floor` is the lowest bracket that still
+/// permits the observed count.
+///
+/// NOT a Comprehensive Rules artifact — Commander Brackets are WotC Commander
+/// Format Panel format guidance. See the module header.
+#[derive(Debug, Clone, Copy)]
+pub struct FloorRule {
+    pub axis: BracketAxis,
+    pub comparator: Comparator,
+    pub threshold: u8,
+    pub floor: CommanderBracketTier,
+    /// The official sentence this row encodes, quoted verbatim.
+    pub official_line: &'static str,
+    pub source: FloorRuleSource,
+}
+
+const SRC_FORMAT_PAGE: FloorRuleSource = FloorRuleSource {
+    document: "MTG Commander Format — Game Changers",
+    published: "2026-02-09",
+    url: "https://magic.wizards.com/en/formats/commander",
+};
+const SRC_INTRO: FloorRuleSource = FloorRuleSource {
+    document: "Introducing Commander Brackets Beta",
+    published: "2025-02-11",
+    url: "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+};
+
+const FLOOR_RULES: &[FloorRule] = &[
+    FloorRule {
+        axis: BracketAxis::GameChangers,
+        comparator: Comparator::GE,
+        threshold: 1,
+        floor: CommanderBracketTier::Upgraded,
+        official_line: "Bracket 1 and 2 decks exclude Game Changers. \
+                        Bracket 3 allows for up to three Game Changers.",
+        source: SRC_FORMAT_PAGE,
+    },
+    FloorRule {
+        axis: BracketAxis::GameChangers,
+        comparator: Comparator::GE,
+        threshold: 4,
+        floor: CommanderBracketTier::Optimized,
+        official_line: "Bracket 3 allows for up to three Game Changers. \
+                        Brackets 4 and 5 allow for unlimited Game Changers.",
+        source: SRC_FORMAT_PAGE,
+    },
+    FloorRule {
+        axis: BracketAxis::MassLandDenial,
+        comparator: Comparator::GE,
+        threshold: 1,
+        floor: CommanderBracketTier::Optimized,
+        official_line: "you should not expect to see these cards anywhere in Brackets 1-3",
+        source: SRC_INTRO,
+    },
+    // Bracket 1 alone excludes extra-turn cards outright. Brackets 2 and 3 both
+    // permit them "in low quantities"; WotC has published no integer for "low
+    // quantities" or for "chained in succession", so there is NO second
+    // extra-turns row. The count ships as uncalibrated evidence instead of a
+    // fabricated threshold. (Intro article, Bracket 2 and Bracket 3 Deck
+    // Building lines.)
+    FloorRule {
+        axis: BracketAxis::ExtraTurns,
+        comparator: Comparator::GE,
+        threshold: 1,
+        floor: CommanderBracketTier::Core,
+        official_line: "No intentional two-card infinite combos, mass land denial, \
+                        or extra-turn cards.",
+        source: SRC_INTRO,
+    },
+    // RETIRED 2025-10-21: EfficientTutors. "the avenue we'd like to take is to
+    // remove the tutor restrictions from Commander Brackets entirely and rely on
+    // Game Changers to catch the most efficient tutors."
+    // — Commander Brackets Beta Update, 2025-10-21.
+    // The axis survives as evidence only (no row here): 6 of the 13 curated
+    // tutor names are themselves Game Changers, so a tutor floor double-counted
+    // cards the Game Changer rows already price.
+];
+
+/// Where the estimator starts before any rule fires.
+///
+/// NOT Exhibition. Bracket 1 is defined by theme, not by power: "A deck is not
+/// Bracket 1 based on power level alone. It's really about the gameplay
+/// experience and trying to engender highly thematic gameplay."
+/// — Commander Brackets Beta Update, 2025-10-21.
+/// An estimator that reads card names cannot observe theme, so returning
+/// Exhibition is a claim it has no evidence for. Core is the lowest tier this
+/// estimator can assert. A player whose deck IS thematic declares Bracket 1
+/// themselves; that declaration governs.
+const BASE_FLOOR: CommanderBracketTier = CommanderBracketTier::Core;
+
+/// What a rule did when it was evaluated. Every rule in `FLOOR_RULES` produces
+/// one of these, fired or not, so the reader can see an axis was looked at and
+/// found clean, and how far it is from the next step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BracketCheckOutcome {
+    /// The comparator is not satisfied. `cards_until_fired` is the smallest
+    /// number of additional matching cards that would satisfy it, or `None`
+    /// when no number of additions can.
+    Clear { cards_until_fired: Option<u8> },
+    /// The comparator is satisfied; this rule contributed `floor`.
+    Fired,
+}
+
+/// One evaluated `FloorRule`. Wire-visible, so every provenance field is owned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BracketCheck {
+    pub axis: BracketAxis,
+    pub comparator: Comparator,
+    pub threshold: u8,
+    /// The tier this rule forces when it fires.
+    pub floor: CommanderBracketTier,
+    pub observed: u8,
+    pub outcome: BracketCheckOutcome,
+    /// The official sentence this rule encodes, quoted verbatim.
+    pub official_line: String,
+    pub source_document: String,
+    /// ISO-8601.
+    pub source_published: String,
+    pub source_url: String,
+    /// Card names on this axis, in deck order. The evidence for `observed`.
+    pub evidence: Vec<String>,
+}
+
+/// How much of the deck the estimator could actually read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimateConfidence {
+    /// Every counted deck name resolved to a printed card face.
+    Complete,
+    /// At least one counted name did not resolve. Counts are lower bounds.
+    Partial,
+}
+
+/// What the estimator read, and what it could not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BracketCoverage {
+    /// Names in the counted sections, including duplicates.
+    pub counted: u16,
+    /// How many of those resolved through `CardDatabase::get_face_by_name`.
+    pub resolved: u16,
+    /// Distinct names that did not resolve, sorted.
+    pub unresolved: Vec<String>,
+    pub confidence: EstimateConfidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,11 +267,9 @@ pub struct BracketEstimate {
     pub tier: CommanderBracketTier,
     /// Every `BracketAxis` is present, including zero-count axes.
     pub axes: BTreeMap<BracketAxis, AxisReading>,
-    /// At most one violation per axis — keyed by `BracketAxis` so the
-    /// invariant is expressed in the type. Iterate in `BracketAxis`
-    /// declaration order (BTreeMap) or sort by `forced_floor` on the
-    /// consumer side.
-    pub violations: BTreeMap<BracketAxis, BracketViolation>,
+    /// One row per `FLOOR_RULES` entry, fired or not, in table order.
+    pub checks: Vec<BracketCheck>,
+    pub coverage: BracketCoverage,
     /// `BracketLists.version`, passed through from the export pipeline.
     pub data_version: String,
 }
@@ -140,7 +287,7 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
     // breaks this binding and forces the next author to classify it.
     //
     // This is WotC Commander Format Panel guidance, not the Comprehensive Rules —
-    // no `// CR` annotation applies (see the module header).
+    // no Comprehensive Rules annotation applies (see the module header).
     let PlayerDeckList {
         commander,       // counted — the commander is a card in the game
         main_deck,       // counted — the 99
@@ -173,7 +320,16 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
         .chain(main_deck.iter())
         .chain(companion.iter())
         .chain(signature_spell.iter());
+    let mut counted = 0_u16;
+    let mut resolved = 0_u16;
+    let mut unresolved = BTreeSet::new();
     for name in counted_names {
+        counted = counted.saturating_add(1);
+        if db.get_face_by_name(name).is_some() {
+            resolved = resolved.saturating_add(1);
+        } else {
+            unresolved.insert(name.clone());
+        }
         for axis in db.bracket_signals_for(name).axes() {
             let reading = axes.entry(axis).or_default();
             reading.count = reading.count.saturating_add(1);
@@ -181,96 +337,72 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
         }
     }
 
-    let (tier, violations) = decide_tier(&axes);
-    for (axis, reading) in &mut axes {
-        reading.cap_at_tier = cap_for(*axis, tier);
-    }
+    let unresolved: Vec<String> = unresolved.into_iter().collect();
+    let confidence = if unresolved.is_empty() {
+        EstimateConfidence::Complete
+    } else {
+        EstimateConfidence::Partial
+    };
+    let (tier, checks) = decide_tier(&axes);
 
     Some(BracketEstimate {
         tier,
         axes,
-        violations,
+        checks,
+        coverage: BracketCoverage {
+            counted,
+            resolved,
+            unresolved,
+            confidence,
+        },
         data_version: db.bracket_lists.version.clone(),
     })
 }
 
-/// Per-axis caps for each tier. `u8::MAX` represents an effectively infinite
-/// cap (no upper bound at that tier).
-///
-/// Table layout: each row is `(axis, [B1_cap, B2_cap, B3_cap, B4_cap])`.
-/// The estimator raises the tier floor whenever `axis_count > cap[tier_idx]`.
-const CAPS: &[(BracketAxis, [u8; 4])] = &[
-    (BracketAxis::GameChangers, [0, 0, 3, u8::MAX]),
-    (BracketAxis::MassLandDenial, [0, 0, 0, u8::MAX]),
-    (BracketAxis::ExtraTurns, [0, 0, u8::MAX, u8::MAX]),
-    (BracketAxis::EfficientTutors, [0, 2, u8::MAX, u8::MAX]),
-];
-
-const TIERS: [CommanderBracketTier; 4] = [
-    CommanderBracketTier::Exhibition,
-    CommanderBracketTier::Core,
-    CommanderBracketTier::Upgraded,
-    CommanderBracketTier::Optimized,
-];
-
-/// Walks `axes` against the per-axis cap table. For each axis whose count
-/// exceeds at least one tier ceiling, emits exactly one `BracketViolation`
-/// recording the highest ceiling crossed. The returned tier is the max
-/// floor across axes. Violations are keyed by `BracketAxis` (at most one
-/// per axis — the type expresses this invariant). Callers that need display
-/// ordering should sort by `forced_floor` on their side.
-fn decide_tier(
-    axes: &BTreeMap<BracketAxis, AxisReading>,
-) -> (
-    CommanderBracketTier,
-    BTreeMap<BracketAxis, BracketViolation>,
-) {
-    let mut floor_index: usize = 0;
-    let mut violations: BTreeMap<BracketAxis, BracketViolation> = BTreeMap::new();
-
-    for (axis, caps) in CAPS {
-        let count = axes.get(axis).map_or(0, |reading| reading.count);
-        let mut highest_crossed: Option<(u8, CommanderBracketTier)> = None;
-        for (tier_idx, cap) in caps.iter().enumerate() {
-            if count > *cap {
-                let new_floor = (tier_idx + 1).min(TIERS.len() - 1);
-                if new_floor > floor_index {
-                    floor_index = new_floor;
-                }
-                highest_crossed = Some((*cap, TIERS[new_floor]));
-            }
-        }
-        if let Some((cap, forced_floor)) = highest_crossed {
-            violations.insert(
-                *axis,
-                BracketViolation {
-                    axis: *axis,
-                    count,
-                    prior_cap: cap,
-                    forced_floor,
-                },
-            );
-        }
-    }
-
-    (TIERS[floor_index], violations)
+/// Smallest `d >= 0` that makes the rule fire, or `None` if additions cannot.
+fn cards_until_fired(rule: &FloorRule, observed: u8) -> Option<u8> {
+    (0..=(u8::MAX - observed)).find(|d| {
+        rule.comparator
+            .evaluate(i32::from(observed + d), i32::from(rule.threshold))
+    })
 }
 
-/// Cap for one axis at one tier. `None` means uncapped (`u8::MAX` in `CAPS`).
-fn cap_for(axis: BracketAxis, tier: CommanderBracketTier) -> Option<u8> {
-    let tier_idx = match tier {
-        CommanderBracketTier::Exhibition => 0,
-        CommanderBracketTier::Core => 1,
-        CommanderBracketTier::Upgraded => 2,
-        // cEDH caps mirror B4 (no caps at this tier).
-        CommanderBracketTier::Optimized | CommanderBracketTier::Cedh => 3,
-    };
-    CAPS.iter()
-        .find(|(candidate, _)| *candidate == axis)
-        .and_then(|(_, caps)| match caps[tier_idx] {
-            u8::MAX => None,
-            value => Some(value),
-        })
+/// Evaluates every cited floor rule and composes the maximum fired floor.
+fn decide_tier(
+    readings: &BTreeMap<BracketAxis, AxisReading>,
+) -> (CommanderBracketTier, Vec<BracketCheck>) {
+    let mut floor = BASE_FLOOR;
+    let mut checks = Vec::with_capacity(FLOOR_RULES.len());
+    for rule in FLOOR_RULES {
+        let reading = readings.get(&rule.axis);
+        let observed = reading.map_or(0, |value| value.count);
+        let fired = rule
+            .comparator
+            .evaluate(i32::from(observed), i32::from(rule.threshold));
+        if fired && rule.floor.as_u8() > floor.as_u8() {
+            floor = rule.floor;
+        }
+        checks.push(BracketCheck {
+            axis: rule.axis,
+            comparator: rule.comparator,
+            threshold: rule.threshold,
+            floor: rule.floor,
+            observed,
+            outcome: if fired {
+                BracketCheckOutcome::Fired
+            } else {
+                BracketCheckOutcome::Clear {
+                    cards_until_fired: cards_until_fired(rule, observed),
+                }
+            },
+            official_line: rule.official_line.to_string(),
+            source_document: rule.source.document.to_string(),
+            source_published: rule.source.published.to_string(),
+            source_url: rule.source.url.to_string(),
+            evidence: reading.map_or_else(Vec::new, |value| value.contributing.clone()),
+        });
+    }
+    (floor, checks)
 }
 
 #[cfg(test)]
@@ -326,6 +458,37 @@ mod tests {
         }
     }
 
+    const CARD_DATA_WITH_KNOWN_FACES: &str = r#"{
+        "known commander": {
+            "name": "Known Commander", "mana_cost": { "type": "NoCost" },
+            "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+            "power": null, "toughness": null, "loyalty": null, "defense": null,
+            "oracle_text": null, "abilities": [], "triggers": [], "static_abilities": [],
+            "replacements": [], "keywords": []
+        },
+        "forest": {
+            "name": "Forest", "mana_cost": { "type": "NoCost" },
+            "card_type": { "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Forest"] },
+            "power": null, "toughness": null, "loyalty": null, "defense": null,
+            "oracle_text": null, "abilities": [], "triggers": [], "static_abilities": [],
+            "replacements": [], "keywords": []
+        },
+        "smothering tithe": {
+            "name": "Smothering Tithe", "mana_cost": { "type": "NoCost" },
+            "card_type": { "supertypes": [], "core_types": ["Enchantment"], "subtypes": [] },
+            "power": null, "toughness": null, "loyalty": null, "defense": null,
+            "oracle_text": null, "abilities": [], "triggers": [], "static_abilities": [],
+            "replacements": [], "keywords": [],
+            "bracket_signals": { "game_changer": true }
+        }
+    }"#;
+
+    fn db_with_known_faces() -> CardDatabase {
+        CardDatabase::from_json_str(CARD_DATA_WITH_KNOWN_FACES)
+            .unwrap()
+            .with_bracket_lists(BracketLists::from_pairs("faces-1", &[]))
+    }
+
     #[test]
     fn empty_deck_returns_none() {
         let db = CardDatabase::default();
@@ -341,77 +504,19 @@ mod tests {
     }
 
     #[test]
-    fn clean_deck_is_b1_exhibition() {
+    fn clean_deck_is_base_floor_core() {
         let db = db_with_signals(&[]);
         let d = deck(vec!["Atraxa, Praetors' Voice"], vec!["Forest", "Island"]);
         let e = estimate_bracket(&d, &db).unwrap();
-        assert_eq!(e.tier, CommanderBracketTier::Exhibition);
+        assert_eq!(e.tier, CommanderBracketTier::Core);
         assert!(e
             .axes
             .values()
             .all(|reading| reading.count == 0 && reading.contributing.is_empty()));
-        assert!(e.violations.is_empty());
-    }
-
-    #[test]
-    fn one_or_two_tutors_only_is_b2_core() {
-        let db = db_with_signals(&[
-            (
-                "Demonic Tutor",
-                BracketSignals {
-                    efficient_tutor: true,
-                    ..Default::default()
-                },
-            ),
-            (
-                "Vampiric Tutor",
-                BracketSignals {
-                    efficient_tutor: true,
-                    ..Default::default()
-                },
-            ),
-        ]);
-        let d = deck(
-            vec!["Atraxa, Praetors' Voice"],
-            vec!["Demonic Tutor", "Vampiric Tutor", "Forest"],
-        );
-        let e = estimate_bracket(&d, &db).unwrap();
-        assert_eq!(e.tier, CommanderBracketTier::Core);
-        assert_eq!(e.axes[&BracketAxis::EfficientTutors].count, 2);
-    }
-
-    #[test]
-    fn three_tutors_only_is_b3_upgraded() {
-        let db = db_with_signals(&[
-            (
-                "Demonic Tutor",
-                BracketSignals {
-                    efficient_tutor: true,
-                    ..Default::default()
-                },
-            ),
-            (
-                "Vampiric Tutor",
-                BracketSignals {
-                    efficient_tutor: true,
-                    ..Default::default()
-                },
-            ),
-            (
-                "Mystical Tutor",
-                BracketSignals {
-                    efficient_tutor: true,
-                    ..Default::default()
-                },
-            ),
-        ]);
-        let d = deck(
-            vec!["Atraxa, Praetors' Voice"],
-            vec!["Demonic Tutor", "Vampiric Tutor", "Mystical Tutor"],
-        );
-        let e = estimate_bracket(&d, &db).unwrap();
-        assert_eq!(e.tier, CommanderBracketTier::Upgraded);
-        assert_eq!(e.axes[&BracketAxis::EfficientTutors].count, 3);
+        assert!(e
+            .checks
+            .iter()
+            .all(|check| matches!(check.outcome, BracketCheckOutcome::Clear { .. })));
     }
 
     #[test]
@@ -427,10 +532,12 @@ mod tests {
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
         assert_eq!(e.axes[&BracketAxis::GameChangers].count, 1);
-        assert!(
-            e.violations.contains_key(&BracketAxis::GameChangers),
-            "GameChangers violation must be present"
-        );
+        assert!(e
+            .checks
+            .iter()
+            .any(|check| check.axis == BracketAxis::GameChangers
+                && check.threshold == 1
+                && check.outcome == BracketCheckOutcome::Fired));
     }
 
     #[test]
@@ -492,7 +599,7 @@ mod tests {
         };
         let e = estimate_bracket(&d, &db).unwrap();
 
-        assert_eq!(e.tier, CommanderBracketTier::Exhibition);
+        assert_eq!(e.tier, BASE_FLOOR);
         assert!(e.axes[&BracketAxis::GameChangers].contributing.is_empty());
     }
 
@@ -516,7 +623,7 @@ mod tests {
         };
         let e = estimate_bracket(&d, &db).unwrap();
 
-        assert_eq!(e.tier, CommanderBracketTier::Exhibition);
+        assert_eq!(e.tier, BASE_FLOOR);
         assert!(e.axes[&BracketAxis::GameChangers].contributing.is_empty());
     }
 
@@ -548,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn any_extra_turn_forces_b3() {
+    fn one_extra_turn_forces_core_not_upgraded() {
         let db = db_with_signals(&[(
             "Time Warp",
             BracketSignals {
@@ -558,7 +665,7 @@ mod tests {
         )]);
         let d = deck(vec!["Cmdr"], vec!["Time Warp"]);
         let e = estimate_bracket(&d, &db).unwrap();
-        assert_eq!(e.tier, CommanderBracketTier::Upgraded);
+        assert_eq!(e.tier, CommanderBracketTier::Core);
     }
 
     #[test]
@@ -690,22 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn one_tutor_is_b2_core() {
-        let db = db_with_signals(&[(
-            "Demonic Tutor",
-            BracketSignals {
-                efficient_tutor: true,
-                ..Default::default()
-            },
-        )]);
-        let d = deck(vec!["Cmdr"], vec!["Demonic Tutor"]);
-        let e = estimate_bracket(&d, &db).unwrap();
-        assert_eq!(e.tier, CommanderBracketTier::Core);
-        assert_eq!(e.axes[&BracketAxis::EfficientTutors].count, 1);
-    }
-
-    #[test]
-    fn highest_axis_wins_and_violations_recorded_per_axis() {
+    fn highest_axis_wins_and_checks_recorded_per_rule() {
         let db = db_with_signals(&[
             (
                 "Smothering Tithe",
@@ -725,41 +817,18 @@ mod tests {
         let d = deck(vec!["Cmdr"], vec!["Smothering Tithe", "Armageddon"]);
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Optimized, "MLD pushes to B4");
-        assert_eq!(e.violations.len(), 2, "one violation per crossed axis");
-        assert_eq!(
-            e.violations[&BracketAxis::MassLandDenial].forced_floor,
-            CommanderBracketTier::Optimized
-        );
-        assert_eq!(
-            e.violations[&BracketAxis::GameChangers].forced_floor,
-            CommanderBracketTier::Upgraded
-        );
-    }
-
-    #[test]
-    fn caps_are_defined_for_every_axis_at_every_tier() {
-        use strum::IntoEnumIterator;
-
-        let expected = [
-            (
-                CommanderBracketTier::Exhibition,
-                [Some(0), Some(0), Some(0), Some(0)],
-            ),
-            (
-                CommanderBracketTier::Core,
-                [Some(0), Some(0), Some(0), Some(2)],
-            ),
-            (
-                CommanderBracketTier::Upgraded,
-                [Some(3), Some(0), None, None],
-            ),
-            (CommanderBracketTier::Optimized, [None, None, None, None]),
-        ];
-        for (tier, caps) in expected {
-            for (axis, expected_cap) in BracketAxis::iter().zip(caps) {
-                assert_eq!(cap_for(axis, tier), expected_cap, "{tier:?} {axis:?}");
-            }
-        }
+        assert!(e
+            .checks
+            .iter()
+            .any(|check| check.axis == BracketAxis::MassLandDenial
+                && check.floor == CommanderBracketTier::Optimized
+                && check.outcome == BracketCheckOutcome::Fired));
+        assert!(e
+            .checks
+            .iter()
+            .any(|check| check.axis == BracketAxis::GameChangers
+                && check.floor == CommanderBracketTier::Upgraded
+                && check.outcome == BracketCheckOutcome::Fired));
     }
 
     #[test]
@@ -774,6 +843,235 @@ mod tests {
             assert_eq!(reading.count, 0);
             assert!(reading.contributing.is_empty());
         }
+    }
+
+    #[test]
+    fn tutors_are_counted_but_force_no_floor() {
+        let tutor = BracketSignals {
+            efficient_tutor: true,
+            ..Default::default()
+        };
+        let names = [
+            "Tutor 1", "Tutor 2", "Tutor 3", "Tutor 4", "Tutor 5", "Tutor 6", "Tutor 7", "Tutor 8",
+            "Tutor 9", "Tutor 10",
+        ];
+        let entries: Vec<(&str, BracketSignals)> =
+            names.iter().map(|name| (*name, tutor)).collect();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], names.to_vec()),
+            &db_with_signals(&entries),
+        )
+        .unwrap();
+
+        assert_eq!(estimate.tier, BASE_FLOOR);
+        assert_eq!(estimate.axes[&BracketAxis::EfficientTutors].count, 10);
+        assert!(estimate
+            .checks
+            .iter()
+            .all(|check| check.axis != BracketAxis::EfficientTutors));
+    }
+
+    #[test]
+    fn every_rule_emits_a_check_row() {
+        let estimate =
+            estimate_bracket(&deck(vec!["Cmdr"], vec!["Forest"]), &db_with_signals(&[])).unwrap();
+        assert_eq!(estimate.checks.len(), FLOOR_RULES.len());
+        assert!(estimate
+            .checks
+            .iter()
+            .all(|check| matches!(check.outcome, BracketCheckOutcome::Clear { .. })));
+    }
+
+    #[test]
+    fn clear_row_reports_cards_until_fired() {
+        let signal = BracketSignals {
+            game_changer: true,
+            ..Default::default()
+        };
+        let db = db_with_signals(&[("A", signal), ("B", signal), ("C", signal)]);
+        let estimate = estimate_bracket(&deck(vec!["Cmdr"], vec!["A", "B", "C"]), &db).unwrap();
+        let row = estimate
+            .checks
+            .iter()
+            .find(|check| check.axis == BracketAxis::GameChangers && check.threshold == 4)
+            .unwrap();
+        assert_eq!(
+            row.outcome,
+            BracketCheckOutcome::Clear {
+                cards_until_fired: Some(1)
+            }
+        );
+    }
+
+    #[test]
+    fn two_game_changer_rules_both_present() {
+        let estimate =
+            estimate_bracket(&deck(vec!["Cmdr"], vec![]), &db_with_signals(&[])).unwrap();
+        let thresholds: Vec<u8> = estimate
+            .checks
+            .iter()
+            .filter(|check| check.axis == BracketAxis::GameChangers)
+            .map(|check| check.threshold)
+            .collect();
+        assert_eq!(thresholds, [1, 4]);
+    }
+
+    #[test]
+    fn every_floor_rule_cites_a_source() {
+        for rule in FLOOR_RULES {
+            let published = rule.source.published.as_bytes();
+            assert!(!rule.official_line.is_empty());
+            assert!(!rule.source.document.is_empty());
+            assert!(!rule.source.url.is_empty());
+            assert_eq!(published.len(), 10);
+            assert!(published
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 4 | 7) && *byte == b'-'
+                    || !matches!(index, 4 | 7) && byte.is_ascii_digit()));
+        }
+    }
+
+    #[test]
+    fn floor_is_max_over_fired_rules() {
+        let db = db_with_signals(&[
+            (
+                "Smothering Tithe",
+                BracketSignals {
+                    game_changer: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "Armageddon",
+                BracketSignals {
+                    mass_land_denial: true,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Smothering Tithe", "Armageddon"]),
+            &db,
+        )
+        .unwrap();
+        assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
+        assert!(estimate.checks.iter().any(|check| {
+            check.axis == BracketAxis::GameChangers
+                && check.threshold == 1
+                && check.outcome == BracketCheckOutcome::Fired
+        }));
+        assert!(estimate.checks.iter().any(|check| {
+            check.axis == BracketAxis::MassLandDenial && check.outcome == BracketCheckOutcome::Fired
+        }));
+    }
+
+    #[test]
+    fn cards_until_fired_is_none_when_unreachable() {
+        let rule = FloorRule {
+            axis: BracketAxis::GameChangers,
+            comparator: Comparator::LE,
+            threshold: 0,
+            floor: CommanderBracketTier::Core,
+            official_line: "test",
+            source: SRC_INTRO,
+        };
+        assert_eq!(cards_until_fired(&rule, 3), None);
+    }
+
+    #[test]
+    fn unresolved_names_are_reported() {
+        let estimate = estimate_bracket(
+            &deck(
+                vec!["Known Commander"],
+                vec!["Zulu Missing", "Alpha Missing"],
+            ),
+            &db_with_known_faces(),
+        )
+        .unwrap();
+        assert_eq!(
+            estimate.coverage.unresolved,
+            ["Alpha Missing", "Zulu Missing"]
+        );
+        assert_eq!(estimate.coverage.confidence, EstimateConfidence::Partial);
+    }
+
+    #[test]
+    fn empty_database_is_partial_not_clean() {
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Forest", "Island"]),
+            &CardDatabase::default(),
+        )
+        .unwrap();
+        assert_eq!(estimate.coverage.counted, 3);
+        assert_eq!(estimate.coverage.resolved, 0);
+        assert_eq!(estimate.coverage.confidence, EstimateConfidence::Partial);
+    }
+
+    #[test]
+    fn fully_resolved_deck_is_complete() {
+        let estimate = estimate_bracket(
+            &deck(vec!["Known Commander"], vec!["Forest"]),
+            &db_with_known_faces(),
+        )
+        .unwrap();
+        assert_eq!(estimate.coverage.counted, 2);
+        assert_eq!(estimate.coverage.resolved, 2);
+        assert!(estimate.coverage.unresolved.is_empty());
+        assert_eq!(estimate.coverage.confidence, EstimateConfidence::Complete);
+    }
+
+    #[test]
+    fn unresolved_names_are_deduplicated_and_sorted() {
+        let estimate = estimate_bracket(
+            &deck(
+                vec!["Missing B"],
+                vec!["Missing A", "Missing B", "Missing B", "Missing B"],
+            ),
+            &CardDatabase::default(),
+        )
+        .unwrap();
+        assert_eq!(estimate.coverage.unresolved, ["Missing A", "Missing B"]);
+        assert_eq!(estimate.coverage.counted, 5);
+    }
+
+    #[test]
+    fn signals_are_read_for_unresolved_names() {
+        let db = db_with_signals(&[(
+            "Armageddon",
+            BracketSignals {
+                mass_land_denial: true,
+                ..Default::default()
+            },
+        )]);
+        let estimate = estimate_bracket(&deck(vec!["Cmdr"], vec!["Armageddon"]), &db).unwrap();
+        assert_eq!(estimate.axes[&BracketAxis::MassLandDenial].count, 1);
+        assert!(estimate
+            .coverage
+            .unresolved
+            .contains(&"Armageddon".to_string()));
+        assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
+    }
+
+    #[test]
+    fn coverage_does_not_change_the_tier() {
+        let signal = BracketSignals {
+            game_changer: true,
+            ..Default::default()
+        };
+        let unresolved_db = db_with_signals(&[("Smothering Tithe", signal)]);
+        let mut resolved_db = db_with_known_faces();
+        resolved_db
+            .bracket_signals_by_name
+            .insert("smothering tithe".to_string(), signal);
+        let input = deck(vec!["Known Commander"], vec!["Smothering Tithe"]);
+        let unresolved = estimate_bracket(&input, &unresolved_db).unwrap();
+        let resolved = estimate_bracket(&input, &resolved_db).unwrap();
+        assert_eq!(unresolved.tier, resolved.tier);
+        assert_eq!(unresolved.axes, resolved.axes);
+        assert_eq!(unresolved.checks, resolved.checks);
+        assert_eq!(unresolved.coverage.confidence, EstimateConfidence::Partial);
+        assert_eq!(resolved.coverage.confidence, EstimateConfidence::Complete);
     }
 
     #[test]
@@ -794,8 +1092,24 @@ mod tests {
             value["axes"]["game_changers"]["contributing"][0],
             "Smothering Tithe"
         );
-        assert!(value["axes"]["extra_turns"]["cap_at_tier"].is_null());
-        assert!(value.get("axis_caps_at_tier").is_none());
-        assert!(value.get("contributing").is_none());
+        assert_eq!(value["checks"][0]["comparator"], "GE");
+        assert_eq!(
+            value["checks"][0]["outcome"],
+            serde_json::json!({ "kind": "fired" })
+        );
+        assert_eq!(
+            value["checks"][1]["outcome"],
+            serde_json::json!({ "kind": "clear", "cards_until_fired": 3 })
+        );
+        assert_eq!(value["coverage"]["confidence"], "partial");
+        let complete = estimate_bracket(
+            &deck(vec!["Known Commander"], vec!["Forest"]),
+            &db_with_known_faces(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(complete).unwrap()["coverage"]["confidence"],
+            "complete"
+        );
     }
 }
