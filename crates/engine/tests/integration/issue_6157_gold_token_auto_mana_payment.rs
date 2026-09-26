@@ -16,14 +16,15 @@ use engine::game::effects::token::predefined_token_abilities;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, DiscardSelfScope, Effect,
-    ManaContribution, ManaProduction, QuantityExpr, SacrificeCost, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CardSelectionMode,
+    DiscardSelfScope, Effect, ManaContribution, ManaProduction, QuantityExpr, SacrificeCost,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ManaChoice, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::mana::{ManaColor, ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -55,6 +56,15 @@ fn draw_spell(scenario: &mut GameScenario) -> ObjectId {
         .add_spell_to_hand_from_oracle(P0, "Auto-Pay Draw", true, "Draw a card.")
         .with_mana_cost(ManaCost::generic(1))
         .id()
+}
+
+fn run_with_mana_test_stack(test: fn()) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(test)
+        .expect("spawn mana test thread")
+        .join()
+        .expect("mana test thread panicked");
 }
 
 #[test]
@@ -291,4 +301,228 @@ fn led_shaped_discard_sacrifice_not_auto_tapped_stays_manual() {
         Some(Zone::Battlefield),
         "the LED-shaped source must remain available for its manual discard-and-sacrifice payment"
     );
+}
+
+#[test]
+fn instant_only_mana_ability_cannot_pay_for_cast() {
+    run_with_mana_test_stack(check_instant_only_mana_ability_cannot_pay_for_cast);
+}
+
+fn check_instant_only_mana_ability_cannot_pay_for_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = draw_spell(&mut scenario);
+    let led = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Lion's Eye Diamond",
+            "Discard your hand, Sacrifice this artifact: Add three mana of any one color. Activate only as an instant.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let gold = make_token(runner.state_mut(), 953, "Gold");
+    let ability_index = runner.state().objects[&led]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsInstant)
+        })
+        .expect("Oracle-built Diamond must retain its instant-only restriction");
+    assert!(matches!(
+        *runner.state().objects[&led].abilities[ability_index].effect,
+        Effect::Mana { .. }
+    ));
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the spell must reach a manual mana-payment window");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    assert!(
+        matches!(runner.state().pending_cast.as_deref(), Some(pending) if pending.object_id == spell)
+    );
+    let hand_size = runner.state().players[P0.0 as usize].hand.len();
+    let mana_before = runner.state().players[P0.0 as usize].mana_pool.total();
+    let error = runner
+        .act(GameAction::ActivateAbility {
+            source_id: led,
+            ability_index,
+        })
+        .err()
+        .expect("Diamond cannot activate during mana payment");
+    assert!(
+        matches!(error, engine::game::engine::EngineError::ActionNotAllowed(ref message)
+            if message == "Activation restriction not satisfied: AsInstant"),
+        "expected Diamond's timing restriction, got {error:?}"
+    );
+    assert_eq!(runner.state().objects[&led].zone, Zone::Battlefield);
+    assert_eq!(runner.state().players[P0.0 as usize].hand.len(), hand_size);
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        mana_before
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    assert!(
+        matches!(runner.state().pending_cast.as_deref(), Some(pending) if pending.object_id == spell)
+    );
+
+    let gold_ability_index = runner.state().objects[&gold]
+        .abilities
+        .iter()
+        .position(|ability| matches!(*ability.effect, Effect::Mana { .. }))
+        .expect("Gold has a mana ability");
+    let prompted = runner
+        .act(GameAction::ActivateAbility {
+            source_id: gold,
+            ability_index: gold_ability_index,
+        })
+        .expect("Gold may activate during the same mana-payment window");
+    assert!(matches!(
+        prompted.waiting_for,
+        WaitingFor::ChooseManaColor { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("choose Gold's produced mana");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("Gold's mana must finish the original cast");
+    assert_eq!(runner.state().objects[&gold].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert!(runner.state().pending_cast.is_none());
+}
+
+#[test]
+fn instant_only_tap_mana_cannot_auto_pay_for_cast() {
+    run_with_mana_test_stack(check_instant_only_tap_mana_cannot_auto_pay_for_cast);
+}
+
+fn check_instant_only_tap_mana_cannot_auto_pay_for_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = draw_spell(&mut scenario);
+    let source = scenario
+        .add_creature(P0, "Instant-only mana source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap)
+            .activation_restrictions(vec![ActivationRestriction::AsInstant]),
+        )
+        .id();
+    let mut runner = scenario.build();
+    let gold = make_token(runner.state_mut(), 954, "Gold");
+    assert!(runner.state().objects[&source].abilities[0]
+        .activation_restrictions
+        .contains(&ActivationRestriction::AsInstant));
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Gold must pay while the instant-only source is ineligible");
+    assert_eq!(runner.state().objects[&gold].zone, Zone::Graveyard);
+    assert!(!runner.state().objects[&source].tapped);
+}
+
+#[test]
+fn subtype_only_land_still_pays_for_cast() {
+    run_with_mana_test_stack(check_subtype_only_land_still_pays_for_cast);
+}
+
+fn check_subtype_only_land_still_pays_for_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = draw_spell(&mut scenario);
+    let mut runner = scenario.build();
+    let land = create_object(
+        runner.state_mut(),
+        CardId(955),
+        P0,
+        "Intrinsic Forest".to_string(),
+        Zone::Battlefield,
+    );
+    let object = runner.state_mut().objects.get_mut(&land).unwrap();
+    object.card_types.core_types.push(CoreType::Land);
+    object.card_types.subtypes.push("Forest".to_string());
+    object.base_card_types = object.card_types.clone();
+    assert!(object.abilities.is_empty());
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the intrinsic Forest mana ability must pay for the spell");
+    assert!(runner.state().objects[&land].tapped);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+}
+
+#[test]
+fn instant_only_mana_ability_activates_with_priority() {
+    run_with_mana_test_stack(check_instant_only_mana_ability_activates_with_priority);
+}
+
+fn check_instant_only_mana_ability_activates_with_priority() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Instant-only mana artifact",
+            "{T}: Add {G}. Activate only as an instant.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let ability_index = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::AsInstant)
+        })
+        .expect("the mana ability must retain its instant-only restriction");
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        })
+        .expect("instant-only mana must be activatable with priority");
+    assert!(runner.state().objects[&source].tapped);
 }
