@@ -263,7 +263,24 @@
     "showBreakdown": "Pokaż szczegóły",
     "hideBreakdownButton": "▲ Ukryj szczegóły",
     "showBreakdownButton": "▼ Pokaż szczegóły",
-    "forced": "(wymuszony B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Masowe niszczenie lądów",
+      "extraTurns": "Dodatkowe tury",
+      "efficientTutors": "Efektywne tutory"
+    },
+    "check": {
+      "fired": "{{observed}} — wymusza B{{tier}} {{label}}",
+      "clear": "{{observed}} z {{threshold}} — jeszcze {{remaining}}, aby przejść do B{{tier}}",
+      "clearMax": "{{observed}} — nie można osiągnąć B{{tier}} przez dodawanie kart",
+      "source": "{{document}}, {{published}}"
+    },
+    "uncounted": "Uwzględniono jako przesłankę — dla tej osi nie obowiązuje żadna reguła poziomu.",
+    "uncalibrated": "WotC nie publikuje liczby dla „małych ilości”; ta wartość nie jest skalibrowana.",
+    "coverage": "Odczytano {{resolved}} z {{counted}} kart w talii",
+    "confidencePartial": "{{n}} nazw kart nie znaleziono w danych kart — te zliczenia są dolnymi granicami.",
+    "unresolvedHeading": "Nie znaleziono w danych kart",
+    "baseFloor": "Poziom 1 jest definiowany przez motyw talii, którego estymator nie potrafi wykryć. Szacunki zaczynają się od B2.",
     "dataVersion": "Dane: {{version}}",
     "aboutBrackets": "O poziomach ↗",
     "estimatedChip": "Szacowany: B{{tier}}",
