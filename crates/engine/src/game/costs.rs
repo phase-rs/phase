@@ -347,6 +347,42 @@ fn flatten_cost_components(cost: &AbilityCost, components: &mut Vec<AbilityCost>
     }
 }
 
+/// CR 601.2h + CR 602.2b: A cost component that moves objects from a library to
+/// a PUBLIC zone belongs to the second payment tier — "first, they pay all costs
+/// that don't involve random elements or moving objects from the library to a
+/// public zone, in any order. Then they pay all remaining costs in any order."
+/// CR 602.2b binds 601.2b-i to activated abilities.
+///
+/// CR 400.2 fixes what "public" means: graveyard, battlefield, stack, exile,
+/// ante and command are public; LIBRARY AND HAND ARE HIDDEN. So a hypothetical
+/// library->hand cost is NOT deferred — only moves out of a library into a
+/// public zone are.
+///
+/// Single authority, shared by the payment partition in `pay_ability_cost_inner`
+/// and the interactive activation-cost scheduler
+/// (`casting_costs::surface_next_unpaid_interactive_activation_cost`) so the
+/// tier plan that schedules a prompt and the tier plan that pays cannot drift.
+///
+/// Classifies ONE component. Callers tier a composite by flattening it to leaves
+/// (`flatten_cost_components`) and applying this to each: tiering a whole child
+/// `Composite` on behalf of one nested library leg would wrongly defer that
+/// child's first-tier siblings too. `OneOf` and `PerCounter` never reach this
+/// classification — both are rejected earlier in `pay_ability_cost_inner`
+/// ("OneOf cost is only valid as an unless-cost", "PerCounter cost must be
+/// expanded against game state before reaching pay_ability_cost").
+pub(crate) fn is_library_to_public_zone_cost(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Exile {
+            zone: Some(Zone::Library),
+            ..
+        } | AbilityCost::ExileWithAggregate {
+            zone: Zone::Library,
+            ..
+        }
+    )
+}
+
 /// CR 118.12 + CR 605.3b + CR 616.1: A nested composite carries the unpaid
 /// suffix of each enclosing composite into a paused mana-payment root. The
 /// root begins with `active_cost`; anything after that prefix belongs to an
@@ -508,6 +544,9 @@ fn move_self_activation_cost(
                 paused_at_index: 0,
                 destination,
                 completion: PendingCostMoveCompletion::FinishPending,
+                // A self-move cost owes no published count (CR 118.11 applies to
+                // the deterministic library-exile shape below).
+                requested_cost_count: None,
             });
             // A mandatory replacement may have delivered this cost move and
             // surfaced its own post-effect prompt. Only a still-pending CR
@@ -528,7 +567,11 @@ fn move_self_activation_cost(
 
 /// CR 406.6: Record an "exiled with [source] this turn" relation only for a
 /// cost object that actually arrived in exile after replacements applied.
-fn record_delivered_cost_exile(state: &mut GameState, exiled_id: ObjectId, source_id: ObjectId) {
+pub(crate) fn record_delivered_cost_exile(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+) {
     if state
         .objects
         .get(&exiled_id)
@@ -933,12 +976,42 @@ fn pay_ability_cost_inner(
             }
         },
         AbilityCost::Composite { costs } => {
+            // CR 601.2h + CR 602.2b: a composite activation cost pays its
+            // library-to-public-zone components LAST. `is_library_to_public_zone_cost`
+            // is the single authority for that classification and carries the rule
+            // text; this arm owns only the ORDER it imposes.
+            //
+            // Tier each LEAF, not each top-level child. A child `Composite` that
+            // merely *contains* a library-to-public leg must not be deferred whole:
+            // that would drag its own first-tier siblings into tier 2, which CR
+            // 601.2h does not say. Flattening first also means the classification
+            // needs no recursion of its own — every component it sees is a leaf.
+            //
+            // A STABLE partition: relative order within each tier is preserved, so a
+            // mana-leading composite stays mana-leading and
+            // `resume_cost_with_concrete_mana`'s "a mana payment root must begin with
+            // mana" invariant still holds. Payment order is reordered here rather
+            // than at parse time because a CONSTRUCTED `Composite` never passes
+            // through the parser, and the suffixes below are derived from this same
+            // vector. `enclosing_composite_suffix` is unaffected by the reordering:
+            // it only requires a resume cost to begin with its ACTIVE cost's own
+            // leaves, and `composite_cost_suffix` always emits `leading` first.
+            let mut leaves = Vec::new();
+            for sub_cost in costs {
+                flatten_cost_components(sub_cost, &mut leaves);
+            }
+            let ordered: Vec<AbilityCost> = leaves
+                .iter()
+                .filter(|sub| !is_library_to_public_zone_cost(sub))
+                .chain(leaves.iter().filter(|sub| is_library_to_public_zone_cost(sub)))
+                .cloned()
+                .collect();
             let enclosing_suffix = enclosing_composite_suffix(cost, resume_cost);
-            for (index, sub_cost) in costs.iter().enumerate() {
+            for (index, sub_cost) in ordered.iter().enumerate() {
                 let prior_waiting_for = state.waiting_for.clone();
                 let sub_resume_cost = composite_cost_suffix(
                     Some(sub_cost),
-                    &costs[index + 1..],
+                    &ordered[index + 1..],
                     &enclosing_suffix,
                 )
                 .expect("a composite component always has an unpaid suffix");
@@ -964,7 +1037,7 @@ fn pay_ability_cost_inner(
                             return Ok(PaymentOutcome::Paused {
                                 remaining_cost: composite_cost_suffix(
                                     None,
-                                    &costs[index + 1..],
+                                    &ordered[index + 1..],
                                     &enclosing_suffix,
                                 ),
                             });
@@ -987,7 +1060,7 @@ fn pay_ability_cost_inner(
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: composite_cost_suffix(
                                 remaining_cost.as_ref(),
-                                &costs[index + 1..],
+                                &ordered[index + 1..],
                                 &enclosing_suffix,
                             ),
                         });
@@ -1789,6 +1862,75 @@ fn pay_ability_cost_inner(
             {
                 return Ok(outcome);
             }
+        }
+        // CR 118.3 + CR 601.2h + CR 406.6: "Exile the top N cards of your
+        // library" is a DETERMINISTIC cost — the cards are not chosen, so no
+        // interactive detour intercepts it (`find_non_self_exile` matches only
+        // hand and graveyard, and `cost_payability::eligible_exile_cost_objects`
+        // already treats a library exile cost as top-of-library rather than a
+        // choice). Without this arm the cost fell through to the interactive
+        // no-op below and was silently treated as paid, so the ability resolved
+        // for free (issue #782). Covers Thought Lash, Phyrexian Devourer, Royal
+        // Herbalist, Storm Elemental and Whirling Catapult (which exiles two).
+        //
+        // Activation scope only: resolution-time payment of this shape (Thought
+        // Lash's cumulative upkeep) keeps its existing path and remains issue
+        // #581's territory.
+        AbilityCost::Exile {
+            count,
+            zone: Some(Zone::Library),
+            filter: None,
+        } if matches!(scope, PaymentScope::Activation { .. }) => {
+            let count = *count as usize;
+            let top: Vec<ObjectId> = state
+                .players
+                .get(player.0 as usize)
+                .map(|p| p.library.iter().copied().take(count).collect())
+                .unwrap_or_default();
+            // CR 118.3: a player can't pay a cost without the resources to pay it.
+            if top.len() < count {
+                return Ok(payment_failed(
+                    "not enough cards in library to exile for cost",
+                ));
+            }
+            for (index, &card_id) in top.iter().enumerate() {
+                match zone_pipeline::move_object(
+                    state,
+                    ZoneMoveRequest::cost(card_id, Zone::Exile, source_id),
+                    events,
+                ) {
+                    ZoneMoveResult::Done => record_delivered_cost_exile(state, card_id, source_id),
+                    ZoneMoveResult::NeedsChoice(choice_player) => {
+                        state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
+                            player,
+                            pending: None,
+                            chosen: top.clone(),
+                            paused_at_index: index,
+                            destination: Zone::Exile,
+                            completion: PendingCostMoveCompletion::FinishPending,
+                            // CR 118.11: this payment pauses BEFORE the
+                            // `last_effect_count` write below, so carry the count the
+                            // cost called for across the round trip; the completion
+                            // publishes it once every leg has settled.
+                            requested_cost_count: Some(count as u32),
+                        });
+                        if state.pending_replacement.is_some() {
+                            pause_cost_payment_for_replacement_choice(state, choice_player);
+                        }
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
+                    ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        unreachable!("a cost move to Exile cannot require Aura attachment")
+                    }
+                }
+            }
+            // CR 118.11: "The actions performed when paying a cost may be modified
+            // by effects. Even if they are ... the cost has still been paid." So the
+            // paid count is the count the cost CALLED FOR, not how many objects a
+            // replacement let arrive in exile.
+            state.last_effect_count = Some(count as i32);
         }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
@@ -3455,6 +3597,68 @@ mod tests {
         assert!(
             can_pay_activation(&scenario.state, src, &cost),
             "hand-exile composite must keep its unchanged (payable) dry-run verdict"
+        );
+    }
+
+    /// CR 601.2h + CR 602.2b: "First, they pay all costs that don't involve random
+    /// elements or moving objects from the library to a public zone, in any order.
+    /// Then they pay all remaining costs in any order." CR 602.2b binds 601.2b-i to
+    /// activated abilities, so a composite that STORES its library-exile leg first
+    /// must still pay the mana leg first.
+    ///
+    /// Constructed deliberately: no printed card reaches this state. All seven
+    /// library-exile activation costs in the corpus store `['Mana','Exile']`, so
+    /// stored order happened to satisfy CR 601.2h already and the defect was latent
+    /// — which is exactly why a card-driven test cannot cover it.
+    ///
+    /// The discriminator is CR 601.2h's other half, "partial payments are not
+    /// allowed". With an unpayable mana leg, paying in STORED order exiles the top
+    /// card and only then fails, leaving the library permanently one card short;
+    /// paying in TIER order fails on mana first and the library is untouched.
+    #[test]
+    fn a_composite_pays_mana_before_its_library_exile_leg() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Library Exiler", 0, 1).id();
+        let top = scenario.add_card_to_library_top(P0, "Top Card");
+        // Reach-guard: the card really starts in the library, so the assertion below
+        // cannot pass merely because it was never there.
+        assert_eq!(
+            scenario.state.objects[&top].zone,
+            Zone::Library,
+            "reach-guard: the cost's library card starts in the library"
+        );
+
+        // Library-exile leg STORED FIRST; the mana leg is unpayable (no sources).
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Library),
+                    filter: None,
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+            ],
+        };
+
+        let outcome = pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            src,
+            &cost,
+            Some(0),
+            &mut Vec::new(),
+        );
+        assert!(
+            !matches!(outcome, Ok(PaymentOutcome::Paid)),
+            "an unpayable mana leg must not report a paid cost, got {outcome:?}"
+        );
+        assert_eq!(
+            scenario.state.objects[&top].zone,
+            Zone::Library,
+            "CR 601.2h: mana is tier 1 and is attempted first; it fails, and partial \
+             payments are not allowed, so the library-to-public-zone leg must never run"
         );
     }
 

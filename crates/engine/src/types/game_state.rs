@@ -7583,6 +7583,16 @@ pub enum PendingCostMoveResume {
         paused_at_index: usize,
         destination: Zone,
         completion: PendingCostMoveCompletion,
+        /// CR 118.11: the number of objects this cost CALLED FOR, owed to
+        /// `last_effect_count` once every parked move has settled. A deterministic
+        /// top-of-library exile cost publishes its count inline when it pays
+        /// without pausing; when a replacement pauses it mid-payment, the count
+        /// must survive the round trip instead of being recomputed from what
+        /// actually arrived. `None` for every other cost shape, which owes no
+        /// count — the completion is shared, so the field is what identifies a
+        /// resume that owes one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_cost_count: Option<u32>,
     },
     SacrificeForCost {
         player: PlayerId,
