@@ -2386,6 +2386,20 @@ impl FormatConfig {
         }
     }
 
+    /// CR 103.4 + CR 810.4 + CR 904.5: Starting-life quantities read the
+    /// format's rules baseline for the referenced player. Individual formats
+    /// use the configured total; FixedTeams use the configured shared team
+    /// total; OneVsMany uses the selected seat's individual total (40 for the
+    /// archenemy, 20 for each hero in default Archenemy).
+    pub fn starting_life_total_for_player(&self, player: PlayerId) -> i32 {
+        match self.topology() {
+            FormatTopology::IndividualSeats | FormatTopology::FixedTeams { .. } => {
+                self.starting_life
+            }
+            FormatTopology::OneVsMany { .. } => self.starting_life_for_player(player),
+        }
+    }
+
     pub fn archenemy_player(&self) -> Option<PlayerId> {
         match self.topology() {
             FormatTopology::OneVsMany { archenemy, .. } => Some(archenemy),
@@ -3608,6 +3622,32 @@ mod tests {
     fn starting_life_for_seat_preserves_non_team_formats() {
         assert_eq!(FormatConfig::standard().starting_life_for_seat(), 20);
         assert_eq!(FormatConfig::commander().starting_life_for_seat(), 40);
+    }
+
+    #[test]
+    fn starting_life_total_for_player_follows_topology() {
+        let standard = FormatConfig::standard();
+        assert_eq!(standard.starting_life_total_for_player(PlayerId(0)), 20);
+
+        let two_headed_giant = FormatConfig::two_headed_giant();
+        assert_eq!(
+            two_headed_giant.starting_life_total_for_player(PlayerId(0)),
+            30,
+            "FixedTeams uses the shared team starting total, not the per-seat half"
+        );
+
+        let mut archenemy = FormatConfig::archenemy();
+        archenemy.archenemy_player = Some(PlayerId(2));
+        assert_eq!(
+            archenemy.starting_life_total_for_player(PlayerId(2)),
+            40,
+            "OneVsMany uses the selected archenemy's rules total"
+        );
+        assert_eq!(
+            archenemy.starting_life_total_for_player(PlayerId(0)),
+            20,
+            "OneVsMany uses a hero's rules total rather than the archenemy's"
+        );
     }
 
     #[test]

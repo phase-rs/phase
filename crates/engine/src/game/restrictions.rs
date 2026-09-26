@@ -1091,7 +1091,11 @@ fn activation_restriction_applies(
                     gates,
                 )
         }
-        ActivationRestriction::AsInstant => true,
+        // CR 304.5 + CR 605.3a: This printed restriction limits mana activation to priority.
+        ActivationRestriction::AsInstant => {
+            matches!(state.waiting_for, crate::types::WaitingFor::Priority { player: holder } if holder == player)
+                && state.pending_cast.is_none()
+        }
         // CR 702.62a: "If you could begin to cast this card by putting it onto the
         // stack from your hand" — defer to the underlying card type's natural
         // cast timing. Instants activate any time priority is held; sorceries
