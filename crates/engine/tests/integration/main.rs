@@ -1142,6 +1142,7 @@ mod precast_copy_shortcut;
 mod prepared_state_serde;
 mod primo_unbounded_fractal_counters;
 mod printed_ability_order;
+mod printed_alternative_cost_from_exile;
 mod printed_damage_prevention_survives_turn;
 mod proctor_of_potential_restriction;
 mod proliferate_zero_counter;

@@ -2445,6 +2445,41 @@ pub(super) fn spell_cast_origin_zone(
         .unwrap_or(spell_obj.zone)
 }
 
+/// CR 118.9a + CR 601.2b: whether a cast of `obj` from exile by `player` pays the
+/// spell's PRINTED mana cost — i.e. every object-attached authority is an
+/// impulse-class `PlayFromExile` grant with no cost substitute of its own, and at
+/// least one of them is `player`'s. Only such a cast may elect the spell's own
+/// printed alternative cost (Fireblast under Experimental Synthesizer): only one
+/// alternative cost applies to a spell, so an authority that already replaces the
+/// mana cost ("without paying its mana cost", Foretell, energy, pay-life riders)
+/// leaves no room for it.
+///
+/// Deliberately conservative: ANY sibling permission that is not a plain impulse
+/// grant — including one carrying a CR 601.2f cost rider ("costs {1} more"), whose
+/// composition with a non-mana alternative cost is not measured — answers `false`, so the verdict never depends on which authority the
+/// cast pipeline elects. A cast authorized purely by a static exile permission
+/// (no object-attached grant) also answers `false` — that class carries its own
+/// cost modes and is not widened here.
+pub(super) fn exile_cast_pays_printed_mana_cost(
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    let mut authorized = false;
+    for permission in &obj.casting_permissions {
+        match permission {
+            CastingPermission::PlayFromExile {
+                granted_to,
+                alt_ability_cost: None,
+                cast_cost_modifier: None,
+                provenance,
+                ..
+            } if provenance.is_impulse() => authorized |= *granted_to == player,
+            _ => return false,
+        }
+    }
+    authorized
+}
+
 /// Collect the keywords granted to `object_id` by `CastWithKeyword` statics
 /// (CR 604.1). `fused` projects a pre-payment fused split spell with its COMBINED
 /// characteristics (CR 702.102b) so `CastWithKeyword` `affected` filters keyed on
