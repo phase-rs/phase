@@ -130,6 +130,8 @@ fn anya_uses_each_opponents_own_starting_life_for_both_clauses() {
     // Both clauses use strict less-than: the Archenemy at exactly half of 40
     // does not qualify, even though 20 is above half of the controller's 20.
     set_life(&mut runner, P1, 20);
+    // A qualifying teammate must not satisfy either opponent predicate.
+    set_life(&mut runner, PlayerId(2), 9);
     assert_eq!(effective_pt(&mut runner, anya), (4, 4));
     assert!(!effective_has_keyword(
         &mut runner,

@@ -16494,7 +16494,7 @@ pub mod tests {
         GameState::new_two_player(42)
     }
 
-    /// CR 103.4e + CR 904.5 + CR 603.4: Cecil's parsed resolution-time
+    /// CR 103.4e + CR 904.5 + CR 608.2c: Cecil's parsed resolution-time
     /// "half your starting life" gate reads the trigger controller's own
     /// topology-specific baseline. The same post-loss life (15) is at or
     /// below half of the archenemy's 40 (so Cecil untaps/transforms), but not
