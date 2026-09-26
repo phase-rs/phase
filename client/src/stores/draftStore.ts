@@ -224,7 +224,10 @@ let lifecycleGeneration = 0;
 let workspaceRevision = 0;
 let persistenceGeneration = 0;
 let suggestionToken = 0;
-let exclusiveToken: { identity: symbol; kind: "pick" | "submit" | "launch" } | null = null;
+type ExclusiveKind = "pick" | "submit" | "launch" | "end";
+
+let exclusiveToken: { identity: symbol; kind: ExclusiveKind } | null = null;
+let endingRun: { draftId: string; promise: Promise<void> } | null = null;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function cancelScheduledPersistence(): void {
@@ -238,7 +241,7 @@ function invalidateWorkspaceDependents(): void {
   suggestionToken += 1;
 }
 
-function beginLifecycle(): number {
+function invalidateLifecycle(): number {
   lifecycleGeneration += 1;
   exclusiveToken = null;
   invalidateWorkspaceDependents();
@@ -251,6 +254,10 @@ function beginLifecycle(): number {
   // was down during one draft must get a fresh chance in the next, or three
   // transient failures would silently disable it for the rest of the session.
   resetLlmDraftBreaker();
+  return lifecycleGeneration;
+}
+
+function publishInitialState(generation: number): void {
   useDraftStore.setState((state) => ({
     ...initialState,
     // Bot difficulty is the player's setup choice, not per-draft state. The
@@ -259,24 +266,33 @@ function beginLifecycle(): number {
     // selector snap back to Medium even though the chosen value was already
     // captured and forwarded to the engine.
     difficulty: state.difficulty,
-    interactionGeneration: lifecycleGeneration,
+    interactionGeneration: generation,
   }));
-  return lifecycleGeneration;
 }
 
-function admitExclusive(kind: "pick" | "submit" | "launch"): symbol | null {
+function beginLifecycle(): number {
+  const generation = invalidateLifecycle();
+  publishInitialState(generation);
+  return generation;
+}
+
+function admitExclusive(kind: ExclusiveKind): symbol | null {
   if (exclusiveToken) return null;
   const identity = Symbol(kind);
   exclusiveToken = { identity, kind };
   return identity;
 }
 
-function isExclusive(identity: symbol, kind?: "pick" | "submit" | "launch"): boolean {
+function isExclusive(identity: symbol, kind?: ExclusiveKind): boolean {
   return exclusiveToken?.identity === identity && (!kind || exclusiveToken.kind === kind);
 }
 
 function retireExclusive(identity: symbol): void {
   if (exclusiveToken?.identity === identity) exclusiveToken = null;
+}
+
+function endRunOwnsExclusive(): boolean {
+  return exclusiveToken?.kind === "end";
 }
 
 function workspaceFacades(workspace: DraftWorkspaceState, view: DraftPlayerView) {
@@ -306,6 +322,7 @@ function workspaceMutationBlocked(state: Pick<
 }
 
 function schedulePersistence(delay = 500): void {
+  if (endRunOwnsExclusive()) return;
   const generation = ++persistenceGeneration;
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
@@ -322,6 +339,7 @@ async function persistDraft(
   const { adapter, draftId, view, workspaceState, selectedSet, phase } = state;
   if (!adapter || !draftId || !view || !workspaceState || !selectedSet
     || phase === "setup" || phase === "playing" || phase === "complete"
+    || endRunOwnsExclusive()
     || options.canPersist?.() === false) return;
   const lifecycle = lifecycleGeneration;
   const revision = workspaceRevision;
@@ -333,7 +351,7 @@ async function persistDraft(
       }
       return lease.exportSession();
     });
-    if (options.canPersist?.() === false) return;
+    if (options.canPersist?.() === false || endRunOwnsExclusive()) return;
     if (generation !== persistenceGeneration || lifecycle !== lifecycleGeneration
       || revision !== workspaceRevision || useDraftStore.getState().adapter !== adapter) {
       if (options.propagateFailure) throw new Error("Stale draft persistence request");
@@ -1564,7 +1582,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
   // run record only appears at launch), so persist it — otherwise reloading on
   // the launching screen restores the stale default. Mirrors setPoolSortMode.
   setRunFormat: (runFormat) => {
-    if (exclusiveToken?.kind === "launch") return;
+    if (exclusiveToken?.kind === "launch" || exclusiveToken?.kind === "end") return;
     set({ runFormat });
     schedulePersistence();
   },
@@ -1830,10 +1848,46 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     }
   },
 
-  endRun: async (draftId) => {
+  endRun: (draftId) => {
     const id = draftId ?? get().draftId;
-    if (id) await cleanupQuickDraftLifecycle(id);
-    beginLifecycle();
+    if (endingRun) {
+      return endingRun.draftId === id
+        ? endingRun.promise
+        : Promise.reject(new Error("Another draft run is ending"));
+    }
+    if (!id) {
+      beginLifecycle();
+      return Promise.resolve();
+    }
+
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const generation = invalidateLifecycle();
+    const token = admitExclusive("end")!;
+    const operation = { draftId: id, promise };
+    endingRun = operation;
+    useDraftStore.setState({ interactionGeneration: generation });
+
+    void Promise.resolve().then(() => cleanupQuickDraftLifecycle(id)).then(
+      () => {
+        if (generation === lifecycleGeneration && isExclusive(token, "end")) {
+          retireExclusive(token);
+          publishInitialState(generation);
+        }
+        if (endingRun === operation) endingRun = null;
+        resolve();
+      },
+      (error: unknown) => {
+        retireExclusive(token);
+        if (endingRun === operation) endingRun = null;
+        reject(error);
+      },
+    );
+    return promise;
   },
 
   reset: () => {

@@ -6,6 +6,7 @@ import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DraftEngineOperationLease,
+  withDraftEngineOperation,
   type DraftCardInstance,
   type DraftPlayerView,
 } from "../../adapter/draft-adapter";
@@ -51,7 +52,7 @@ const wasm = vi.hoisted(() => ({
 }));
 
 const persistence = vi.hoisted(() => ({
-  cleanupQuickDraftLifecycle: vi.fn(async () => undefined),
+  cleanupQuickDraftLifecycle: vi.fn<(_id: string) => Promise<void>>(async () => undefined),
   drainQuickDraftPersistence: vi.fn(async () => undefined),
   inspectActiveQuickDraftLifecycle: vi.fn<() => Promise<unknown>>(async () => null),
   loadDraftRun: vi.fn<() => Promise<unknown>>(async () => null),
@@ -2903,5 +2904,256 @@ describe("draft store workspace authority", () => {
     await expect(launch).rejects.toThrow("Stale draft match launch");
     expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
     expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+  });
+
+  it.each(["success", "failure"] as const)("coalesces a subscriber-reentrant End Run through %s", async (outcome) => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    const before = useDraftStore.getState();
+    const gate = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(gate.promise);
+    let nested: Promise<void> | undefined;
+    let callbacks = 0;
+    const unsubscribe = useDraftStore.subscribe((state) => {
+      if (state.interactionGeneration === before.interactionGeneration + 1 && !nested) {
+        callbacks += 1;
+        nested = useDraftStore.getState().endRun(before.draftId!);
+      }
+    });
+
+    const outer = useDraftStore.getState().endRun(before.draftId!);
+    const duplicate = useDraftStore.getState().endRun(before.draftId!);
+    expect(callbacks).toBe(1);
+    expect(nested).toBe(outer);
+    expect(duplicate).toBe(outer);
+    expect(useDraftStore.getState()).toMatchObject({
+      draftId: before.draftId, phase: before.phase,
+      runState: before.runState, workspaceState: before.workspaceState,
+      interactionGeneration: before.interactionGeneration + 1,
+    });
+    await Promise.resolve();
+    expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledExactlyOnceWith(before.draftId);
+    let settled = false;
+    void outer.then(() => { settled = true; }, () => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    unsubscribe();
+
+    if (outcome === "failure") {
+      const error = new Error("cleanup unavailable");
+      gate.reject(error);
+      await expect(outer).rejects.toBe(error);
+      await expect(nested).rejects.toBe(error);
+      expect(useDraftStore.getState()).toMatchObject({
+        draftId: before.draftId, phase: before.phase,
+        workspaceState: before.workspaceState,
+        interactionGeneration: before.interactionGeneration + 1,
+      });
+      const retry = useDraftStore.getState().endRun(before.draftId!);
+      await retry;
+      expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledTimes(2);
+      expect(useDraftStore.getState().interactionGeneration).toBe(before.interactionGeneration + 2);
+      expect(useDraftStore.getState().draftId).toBeNull();
+    } else {
+      gate.resolve();
+      await expect(outer).resolves.toBeUndefined();
+      await expect(nested).resolves.toBeUndefined();
+      expect(useDraftStore.getState().draftId).toBeNull();
+      expect(useDraftStore.getState().interactionGeneration).toBe(before.interactionGeneration + 1);
+      await start();
+      wasm.submit_pick.mockReturnValue(view([card("new")]));
+      await expect(useDraftStore.getState().pickCard("new"))
+        .resolves.toEqual({ status: "acknowledged" });
+      expect(wasm.submit_pick).toHaveBeenCalledOnce();
+    }
+    expect(settled).toBe(true);
+  });
+
+  it.each(["success", "failure"] as const)("fences a pending format snapshot through cleanup %s", async (outcome) => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    await settleTimers();
+    persistence.persistQuickDraftSnapshot.mockClear();
+    const id = useDraftStore.getState().draftId!;
+    const gate = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(gate.promise);
+    useDraftStore.getState().setRunFormat("bo3");
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    const ending = useDraftStore.getState().endRun(id);
+    useDraftStore.getState().setRunFormat("single");
+    expect(useDraftStore.getState().runFormat).toBe("bo3");
+    expect(vi.getTimerCount()).toBe(0);
+    await settleTimers();
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    if (outcome === "success") {
+      gate.resolve();
+      await expect(ending).resolves.toBeUndefined();
+      await settleTimers();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+      return;
+    }
+    const error = new Error("cleanup failed");
+    gate.reject(error);
+    await expect(ending).rejects.toBe(error);
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    useDraftStore.getState().setRunFormat("run");
+    expect(useDraftStore.getState().runFormat).toBe("run");
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    await settleTimers();
+    expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledWith(
+      id, expect.any(String), expect.any(Object), expect.objectContaining({ runFormat: "run" }),
+    );
+  });
+
+  it.each([false, true])("fences an engine-queued format export (end=%s)", async (end) => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    await settleTimers();
+    persistence.persistQuickDraftSnapshot.mockClear();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const holding = withDraftEngineOperation(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    useDraftStore.getState().setRunFormat("bo3");
+    await vi.advanceTimersByTimeAsync(500);
+    const cleanup = deferred<void>();
+    if (end) persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(cleanup.promise);
+    const ending = end ? useDraftStore.getState().endRun() : null;
+    release.resolve();
+    await holding;
+    await Promise.resolve();
+    await Promise.resolve();
+    if (end) {
+      cleanup.resolve();
+      await ending;
+      expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledOnce();
+      expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    } else {
+      await vi.waitFor(() => expect(persistence.persistQuickDraftSnapshot).toHaveBeenCalledOnce());
+    }
+  });
+
+  it("blocks initial launch publication and a second launch during End Run", async () => {
+    await start([card("human", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    await settleTimers();
+    persistence.persistQuickDraftSnapshot.mockClear();
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    const load = deferred<DraftRunState | null>();
+    persistence.loadDraftRun.mockReturnValueOnce(load.promise).mockResolvedValue(null);
+    const navigate = vi.fn();
+    const launch = useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledOnce();
+    const cleanup = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(cleanup.promise);
+    const ending = useDraftStore.getState().endRun();
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledOnce();
+    load.resolve(null);
+    await expect(launch).rejects.toThrow("Stale draft match launch");
+    expect(persistence.publishInitialDraftMatch).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(persistence.persistQuickDraftSnapshot).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    cleanup.reject(new Error("retry"));
+    await expect(ending).rejects.toThrow("retry");
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("blocks next-match publication during End Run (run-only=%s)", async (runOnly) => {
+    let id: string;
+    if (runOnly) {
+      id = "resumed-run";
+      persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue({
+        id, setCode: "TST", difficulty: 2, kind: "Quick", phase: "playing",
+      });
+      persistence.loadQuickDraftSession.mockResolvedValue(null);
+    } else {
+      await start([card("human", "Forest")]);
+      id = useDraftStore.getState().draftId!;
+    }
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Forest"], opponentDeck: ["Opponent"],
+      usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId: id, gameId: "staged", format: "run", resultCountAtLaunch: 0,
+        botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    if (runOnly) {
+      persistence.loadDraftRun.mockResolvedValue(run);
+      expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId: id });
+      expect(useDraftStore.getState().workspaceState).toBeNull();
+    } else {
+      useDraftStore.setState({ phase: "playing", runState: run });
+      await settleTimers();
+    }
+    const load = deferred<DraftRunState>();
+    persistence.loadDraftRun.mockReturnValueOnce(load.promise).mockResolvedValue(run);
+    const navigate = vi.fn();
+    const launch = useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledWith(id);
+    const cleanup = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(cleanup.promise);
+    const ending = useDraftStore.getState().endRun(id);
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledTimes(runOnly ? 2 : 1);
+    load.resolve(run);
+    await launch;
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    cleanup.reject(new Error("retry"));
+    await expect(ending).rejects.toThrow("retry");
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it.each(["success", "failure"] as const)("keeps a newer run and its launch after old cleanup %s", async (outcome) => {
+    await start([card("A", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    const idA = useDraftStore.getState().draftId!;
+    const cleanup = deferred<void>();
+    persistence.cleanupQuickDraftLifecycle.mockReturnValueOnce(cleanup.promise);
+    const endingA = useDraftStore.getState().endRun(idA);
+    await Promise.resolve();
+    expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledExactlyOnceWith(idA);
+    useDraftStore.getState().reset();
+    await start([card("B", "Forest")]);
+    useDraftStore.setState({ phase: "launching" });
+    const stateB = useDraftStore.getState();
+    expect(stateB.draftId).not.toBe(idA);
+    const loadB = deferred<DraftRunState | null>();
+    persistence.loadDraftRun.mockReturnValueOnce(loadB.promise);
+    wasm.get_bot_deck.mockReturnValue({ main_deck: ["Opponent"], lands: {} });
+    const navigate = vi.fn();
+    const launchB = useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledOnce();
+    await expect(useDraftStore.getState().endRun(stateB.draftId!))
+      .rejects.toThrow("Another draft run is ending");
+    expect(persistence.cleanupQuickDraftLifecycle).toHaveBeenCalledOnce();
+    expect(useDraftStore.getState().interactionGeneration).toBe(stateB.interactionGeneration);
+    if (outcome === "failure") {
+      const error = new Error("A cleanup failed");
+      cleanup.reject(error);
+      await expect(endingA).rejects.toBe(error);
+    } else {
+      cleanup.resolve();
+      await expect(endingA).resolves.toBeUndefined();
+    }
+    expect(useDraftStore.getState()).toMatchObject({
+      draftId: stateB.draftId, phase: stateB.phase, runState: stateB.runState,
+      workspaceState: stateB.workspaceState,
+      interactionGeneration: stateB.interactionGeneration,
+    });
+    await useDraftStore.getState().launchMatch(navigate);
+    expect(persistence.loadDraftRun).toHaveBeenCalledOnce();
+    loadB.resolve(null);
+    await launchB;
+    expect(persistence.publishInitialDraftMatch).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledOnce();
   });
 });
