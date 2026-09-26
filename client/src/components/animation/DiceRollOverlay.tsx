@@ -18,6 +18,7 @@ const DIE_SIZE = 132;
 // Accent RGB triples (sans `rgb(...)`) so they compose into rgba()/gradients.
 const GOLD = "251,191,36"; // amber-400 — the winner / emphasis accent
 const NEUTRAL = "148,163,184"; // slate-400 — a non-decisive die
+const IGNORED = "100,116,139"; // slate-500 — a dropped/ignored die, still shown so the roll stays auditable
 const COIN_WON = "52,211,153"; // emerald-400 — the flipper won
 const COIN_LOST = "251,113,133"; // rose-400 — the flipper lost
 
@@ -417,7 +418,13 @@ function InGameDice({
   return (
     <div className="relative flex items-end justify-center gap-10 select-none">
       {payload.rolls.map((roll, i) => (
-        <DieFace key={i} animate={animate} accent={NEUTRAL} value={roll.value}>
+        <DieFace
+          key={i}
+          animate={animate}
+          accent={roll.ignored ? IGNORED : NEUTRAL}
+          ignored={roll.ignored}
+          value={roll.value}
+        >
           {(handleSettle) =>
             animate ? (
               <Suspense fallback={<DiePlaceholder label={String(roll.value)} />}>
@@ -442,15 +449,18 @@ function InGameDice({
 /**
  * Wraps a single die/coin and plays a landing flourish the moment it settles: a
  * scale "pop", an expanding accent ring, and a soft radial flash. `emphasize`
- * adds a lingering glow for the contest winner. The die is supplied as a render
- * prop so the wrapper can hand its settle callback to whichever 3D child (Dice3D
- * / Coin3D) it renders; the static fallback settles on mount instead.
+ * adds a lingering glow for the contest winner. `ignored` dims a dropped die
+ * (roll-2-drop-lowest) and strikes its badge while still showing its value.
+ * The die is supplied as a render prop so the wrapper can hand its settle
+ * callback to whichever 3D child (Dice3D / Coin3D) it renders; the static
+ * fallback settles on mount instead.
  */
 function DieFace({
   children,
   animate,
   accent,
   emphasize = false,
+  ignored = false,
   value,
   onSettle,
 }: {
@@ -458,10 +468,13 @@ function DieFace({
   animate: boolean;
   accent: string;
   emphasize?: boolean;
+  /** A dropped die: dimmed with a struck badge, value still visible. */
+  ignored?: boolean;
   /** When set, a numeric result badge pops in below the die as it lands. */
   value?: number;
   onSettle?: () => void;
 }) {
+  const { t } = useTranslation();
   // Static fallbacks never fire a 3D `onSettle`, so they start settled.
   const [settled, setSettled] = useState(!animate);
   const handleSettle = useCallback(() => {
@@ -481,7 +494,10 @@ function DieFace({
       animate={settled ? { scale: [1, 1.14, 1] } : { scale: 1 }}
       transition={{ duration: 0.36, ease: [0.34, 1.56, 0.64, 1] }}
     >
-      <div className="relative rounded-2xl" style={{ width: DIE_SIZE, height: DIE_SIZE }}>
+      <div
+        className={`relative rounded-2xl${ignored ? " opacity-60 saturate-50" : ""}`}
+        style={{ width: DIE_SIZE, height: DIE_SIZE }}
+      >
         {/* Lingering glow for the emphasized (winner) die. */}
         {emphasize && (
           <motion.div
@@ -520,12 +536,16 @@ function DieFace({
       </div>
 
       {/* Result badge: the engine's rolled value, revealed as the die lands so
-          the outcome is legible without reading the cluttered polyhedron face. */}
+          the outcome is legible without reading the cluttered polyhedron face.
+          A dropped (ignored) die keeps its value struck through with an
+          "Ignored" caption so players see what the lowest roll was. */}
       {value != null && (
         <AnimatePresence>
           {settled && (
             <motion.span
-              className="min-w-9 rounded-md px-2 py-0.5 text-center text-xl font-extrabold tabular-nums"
+              className={`min-w-9 rounded-md px-2 py-0.5 text-center text-xl font-extrabold tabular-nums${
+                ignored ? " line-through decoration-2" : ""
+              }`}
               initial={{ opacity: 0, scale: 0.6, y: -4 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0 }}
@@ -540,6 +560,11 @@ function DieFace({
             </motion.span>
           )}
         </AnimatePresence>
+      )}
+      {ignored && settled && (
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+          {t("diceRoll.ignoredDie")}
+        </span>
       )}
     </motion.div>
   );

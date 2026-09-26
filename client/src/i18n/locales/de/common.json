@@ -303,7 +303,8 @@
     "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
     "turnOrder": "Zugreihenfolge",
     "turnOrderItem": "Zug {{turn}}: {{name}}",
-    "youTakeTurn": "Du bist in Zug {{turn}} dran"
+    "youTakeTurn": "Du bist in Zug {{turn}} dran",
+    "ignoredDie": "Ignoriert"
   },
   "chrome": {
     "back": "Zurück",

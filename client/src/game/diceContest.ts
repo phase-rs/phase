@@ -48,11 +48,15 @@ export function flashStartingPlayerContest(
 /**
  * Fire the in-game roll overlay for an action's event batch. Groups all
  * `DieRolled` into one die overlay (e.g. a Krark's Thumb double) and queues
- * every `CoinFlipped` after it. Always `context: "ability"`. No-ops when the
- * batch contains neither.
+ * every `CoinFlipped` after it. Always `context: "ability"`. CR 706.6-ignored
+ * dice (`DieRollIgnored`) join the SAME overlay, marked ignored, in batch
+ * order — players see what the lowest roll was. No-ops when the batch
+ * contains neither dice nor coins.
  */
 export function flashInGameRolls(events: GameEvent[]): void {
+  type DieRollIgnoredEvent = Extract<GameEvent, { type: "DieRollIgnored" }>;
   const dice = events.filter((e): e is DieRolledEvent => e.type === "DieRolled");
+  const ignored = events.filter((e): e is DieRollIgnoredEvent => e.type === "DieRollIgnored");
   const coins = events.filter((e): e is CoinFlippedEvent => e.type === "CoinFlipped");
   const flash = useUiStore.getState().flashDiceRoll;
   // All dice in the batch group into one overlay (e.g. a Krark's Thumb double);
@@ -63,11 +67,24 @@ export function flashInGameRolls(events: GameEvent[]): void {
   const numericDice = dice.filter(
     (e): e is DieRolledEvent & { data: { result: number } } => e.data.result !== null,
   );
-  if (numericDice.length > 0) {
+  // Batch order is die-index order (the engine emits survivors and ignored
+  // mirrors inline as each die resolves), so merging by position keeps every
+  // die where it was rolled. Position tags ride the pair (never matched by
+  // player — one player routinely rolls several dice).
+  const byPosition = new Map<GameEvent, number>(events.map((e, i) => [e, i]));
+  const ordered = [
+    ...numericDice.map((e) => ({ event: e as DieRolledEvent | DieRollIgnoredEvent, ignored: false })),
+    ...ignored.map((e) => ({ event: e as DieRolledEvent | DieRollIgnoredEvent, ignored: true })),
+  ].sort((a, b) => (byPosition.get(a.event) ?? 0) - (byPosition.get(b.event) ?? 0));
+  if (ordered.length > 0) {
     flash({
       kind: "die",
-      sides: numericDice[0].data.sides,
-      rolls: numericDice.map((e) => ({ playerId: e.data.player_id, value: e.data.result })),
+      sides: ordered[0].event.data.sides,
+      rolls: ordered.map(({ event, ignored }) => ({
+        playerId: event.data.player_id,
+        value: event.data.result as number,
+        ...(ignored ? { ignored: true as const } : {}),
+      })),
       context: "ability",
     });
   }

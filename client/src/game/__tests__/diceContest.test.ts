@@ -17,6 +17,11 @@ const coin = (player_id: number, won: boolean): GameEvent => ({
   type: "CoinFlipped",
   data: { player_id, won },
 });
+// CR 706.6: a die ignored by a replacement (e.g. Wyll's drop-lowest).
+const ignoredDie = (player_id: number, sides: number, result: number): GameEvent => ({
+  type: "DieRollIgnored",
+  data: { player_id, sides, result },
+});
 const gameStarted: GameEvent = { type: "GameStarted" };
 // CR 103.1 starting-player contest: each round is a list of [playerId, value]
 // rolls; round 0 is every seat, later rounds are the tied-max reroll group.
@@ -254,5 +259,22 @@ describe("flashInGameRolls", () => {
     expect(useUiStore.getState().diceRoll).toMatchObject({ kind: "coin" });
     vi.advanceTimersByTime(2400);
     expect(useUiStore.getState().diceRoll).toBeNull();
+  });
+
+  it("marks CR 706.6-ignored dice in the same overlay, in batch order (roll-2-drop-lowest)", () => {
+    flashInGameRolls([die(0, 20, 14), ignoredDie(0, 20, 4)]);
+    const d = useUiStore.getState().diceRoll;
+    expect(d).toMatchObject({ kind: "die", sides: 20, context: "ability" });
+    expect(d?.kind === "die" && d.rolls).toEqual([
+      { playerId: 0, value: 14 },
+      { playerId: 0, value: 4, ignored: true },
+    ]);
+  });
+
+  it("shows an ignored-only batch as an all-ignored overlay", () => {
+    flashInGameRolls([ignoredDie(0, 20, 4)]);
+    const d = useUiStore.getState().diceRoll;
+    expect(d).toMatchObject({ kind: "die", sides: 20, context: "ability" });
+    expect(d?.kind === "die" && d.rolls).toEqual([{ playerId: 0, value: 4, ignored: true }]);
   });
 });

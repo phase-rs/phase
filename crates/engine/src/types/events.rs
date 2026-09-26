@@ -1557,6 +1557,17 @@ pub enum GameEvent {
         sides: u8,
         result: Option<u8>,
     },
+    /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
+    /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never
+    /// touch an ignored roll). Display mirror ONLY: it must never be read as
+    /// a roll by triggers, results tables, aggregates, snapshots, or AI —
+    /// an ignored roll "is considered to have never happened". Emitted
+    /// alongside the survivors so the UI can show what the lowest roll was.
+    DieRollIgnored {
+        player_id: PlayerId,
+        sides: u8,
+        result: u8,
+    },
     /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
     /// authoritative structured event so the contest can be rendered round by
     /// round (including tie rerolls) with no downstream re-derivation. `rounds`

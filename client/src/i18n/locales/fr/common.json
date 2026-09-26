@@ -303,7 +303,8 @@
     "lostCoinFlip": "{{name}} a perdu le pile ou face",
     "turnOrder": "Ordre des tours",
     "turnOrderItem": "Tour {{turn}} : {{name}}",
-    "youTakeTurn": "Vous jouez au tour {{turn}}"
+    "youTakeTurn": "Vous jouez au tour {{turn}}",
+    "ignoredDie": "Ignoré"
   },
   "chrome": {
     "back": "Retour",

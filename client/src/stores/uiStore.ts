@@ -42,8 +42,10 @@ export type DiceRollPayload =
       /** d-sides (e.g. 20 for the first-player contest, dN for card rolls). */
       sides: number;
       /** One entry per physical die shown. For the contest this is the FINAL
-       *  (decisive) round — kept for the no-rounds fallback and overlay keying. */
-      rolls: { playerId: PlayerId; value: number }[];
+       *  (decisive) round — kept for the no-rounds fallback and overlay keying.
+       *  `ignored` marks a CR 706.6-ignored die (engine `DieRollIgnored` event):
+       *  shown so players see what the lowest roll was, never a rules roll. */
+      rolls: { playerId: PlayerId; value: number; ignored?: boolean }[];
       context: "startingPlayer" | "ability";
       /** Starting-player contest: the high roller who takes the first turn. */
       winner?: PlayerId;
