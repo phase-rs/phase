@@ -1,4 +1,9 @@
 {
+  "landscapeGate": {
+    "title": "Faites pivoter votre appareil",
+    "description": "Le champ de bataille est disponible en mode paysage sur téléphone et tablette.",
+    "exit": "Retour au menu"
+  },
   "playerLatency": {"host":"Hôte","waiting":"En attente","value":"{{ms}} ms","description":"Latence aller-retour vers l’hôte. Une réponse manquante ne déconnecte pas la partie."},
   "abilityBlock": {
     "badge": "Bloquée",
@@ -135,6 +140,14 @@
     "holdCtrlFront": "Maintenez Ctrl pour la face avant",
     "holdCtrlFlip": "Maintenez Ctrl pour pivoter",
     "flip": "Pivoter",
+    "detailAriaLabel": "Détails de la carte : {{name}}",
+    "closeDetails": "Fermer les détails de la carte",
+    "detailViewOptions": "Affichage des détails de la carte",
+    "detailView": {
+      "live": "En jeu",
+      "original": "Original",
+      "parse": "Analyse"
+    },
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
     "altParsedAbilities": "Alt : capacités analysées",
@@ -2436,6 +2449,20 @@
     "EndCombat": "Fin de combat",
     "PostCombatMain": "Phase principale 2",
     "End": "Étape de fin",
+    "Cleanup": "Nettoyage"
+  },
+  "phaseNameCompact": {
+    "Untap": "Dégagement",
+    "Upkeep": "Entretien",
+    "Draw": "Pioche",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attaquants",
+    "DeclareBlockers": "Bloqueurs",
+    "CombatDamage": "Blessures",
+    "EndCombat": "Fin combat",
+    "PostCombatMain": "Principale 2",
+    "End": "Fin",
     "Cleanup": "Nettoyage"
   },
   "counterMoveDistribution": {

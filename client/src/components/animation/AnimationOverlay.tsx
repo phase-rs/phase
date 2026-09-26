@@ -10,7 +10,11 @@ import {
 } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
 import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
-import { useAnimationStore } from "../../stores/animationStore.ts";
+import {
+  useAnimationStore,
+  type CardMotionTarget,
+  type ReleasedCardMotion,
+} from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { audioManager } from "../../audio/AudioManager.ts";
@@ -32,6 +36,7 @@ import {
   visibleAnimationImageSnapshot,
 } from "./ResolvedAnimationImage.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
+import { stackCardMotionTarget } from "./cardMotion.ts";
 
 
 interface ActiveFloat {
@@ -61,10 +66,17 @@ interface ActiveShatter {
 
 interface ActiveCastArc {
   id: number;
-  from: { x: number; y: number };
-  to: { x: number; y: number };
-  snapshot: AnimationImageSnapshot | null;
-  mode: "cast" | "resolve-permanent" | "resolve-spell";
+  objectId: number;
+  from: CardMotionTarget;
+  to: CardMotionTarget;
+  release?: ReleasedCardMotion;
+  snapshot?: AnimationImageSnapshot | null;
+  mode:
+    | "cast"
+    | "play-permanent"
+    | "resolve-permanent"
+    | "resolve-spell";
+  duration: number;
 }
 
 interface ActiveMillReveal {
@@ -174,6 +186,18 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const activeGeneration = useAnimationStore((s) => s.activeGeneration);
   const advanceStep = useAnimationStore((s) => s.advanceStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
+  const getCardMotionDestination = useAnimationStore(
+    (s) => s.getCardMotionDestination,
+  );
+  const getZoneMotionDestination = useAnimationStore(
+    (s) => s.getZoneMotionDestination,
+  );
+  const releasedCardMotions = useAnimationStore(
+    (s) => s.releasedCardMotions,
+  );
+  const inFlightObjectIds = useAnimationStore(
+    (s) => s.inFlightObjectIds,
+  );
   const particleRef = useRef<ParticleCanvasHandle>(null);
   const stepTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [activeFloats, setActiveFloats] = useState<ActiveFloat[]>([]);
@@ -205,6 +229,115 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
       return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
     },
     [getPosition],
+  );
+
+  const getObjectMotionTarget = useCallback(
+    (objectId: number): CardMotionTarget | null => {
+      const release = useAnimationStore
+        .getState()
+        .getReleasedCardMotion(objectId);
+      if (release) return release;
+      const rect =
+        currentSnapshot.get(objectId)
+        ?? getPosition(objectId)
+        ?? findCardElement(objectId)?.getBoundingClientRect();
+      return rect ? { rect, rotation: 0 } : null;
+    },
+    [getPosition],
+  );
+
+  const getZoneTarget = useCallback(
+    (objectId: number, zone: string): CardMotionTarget | null => {
+      if (zone === "Stack") {
+        return stackCardMotionTarget(
+          { width: window.innerWidth, height: window.innerHeight },
+          usePreferencesStore.getState().stackDockSide,
+        );
+      }
+      if (zone === "Battlefield") {
+        return getCardMotionDestination(objectId) ?? null;
+      }
+
+      const oldState = useGameStore.getState().gameState;
+      const newState = useAnimationStore.getState().animationNewState;
+      const object =
+        newState?.objects[objectId]
+        ?? oldState?.objects[objectId];
+      if (object) {
+        const projected = getZoneMotionDestination(
+          object.owner,
+          zone.toLowerCase(),
+        );
+        if (projected) return projected;
+      }
+
+      const fallbackCenter =
+        zone === "Hand"
+          ? { x: window.innerWidth / 2, y: window.innerHeight - 96 }
+          : { x: window.innerWidth * 0.12, y: window.innerHeight * 0.68 };
+      return {
+        rect: new DOMRect(
+          fallbackCenter.x - 48,
+          fallbackCenter.y - 67,
+          96,
+          134,
+        ),
+        rotation: 0,
+      };
+    },
+    [getCardMotionDestination, getZoneMotionDestination],
+  );
+
+  const startCardFlight = useCallback(
+    (
+      objectId: number,
+      toZone: string,
+      mode: ActiveCastArc["mode"],
+      stepEffects: StepEffect[],
+    ) => {
+      const preObject = useGameStore.getState().gameState?.objects[objectId];
+      const from = getObjectMotionTarget(objectId)
+        ?? (preObject?.zone === "Stack"
+          ? stackCardMotionTarget(
+              { width: window.innerWidth, height: window.innerHeight },
+              usePreferencesStore.getState().stackDockSide,
+            )
+          : null);
+      const to = getZoneTarget(objectId, toZone);
+      if (!from || !to) return;
+
+      const release = useAnimationStore
+        .getState()
+        .getReleasedCardMotion(objectId);
+      const postObject = useAnimationStore.getState().animationNewState?.objects[objectId];
+      const snapshot = mode === "cast" && preObject?.display_visible_to_viewer === false
+        ? visibleAnimationImageSnapshot(postObject)
+        : mode === "resolve-spell" && postObject == null
+          ? visibleAnimationImageSnapshot(preObject)
+          : null;
+      useAnimationStore.getState().markObjectInFlight(objectId);
+      const id = ++castArcIdCounter;
+      const duration = Math.max(
+        0.12,
+        Math.max(...stepEffects.map((item) => item.duration))
+          * speedMultiplier
+          / 1000,
+      );
+      setActiveCastArcs((previous) => [
+        ...previous.filter((arc) => arc.objectId !== objectId),
+        {
+          id,
+          objectId,
+          from,
+          to,
+          release,
+          snapshot,
+          mode,
+          duration,
+        },
+      ]);
+    },
+    [getObjectMotionTarget, getZoneTarget, speedMultiplier],
   );
 
   /** Query the actual DOM position of a player's HUD element. */
@@ -337,7 +470,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             pos = getPlayerHudPosition(target.Player);
           }
 
-          // Creature-on-creature: slam the actual card element (Arena-style)
+          // Creature-on-creature: slam the actual card element (Tabletop-style)
           if ("Object" in target && vfxQuality !== "minimal") {
             // For bidirectional pairs (combat or fight), only slam the first direction.
             // The second direction still gets its floating damage number below.
@@ -536,13 +669,12 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             const burstColor = getCardColors(colors)[0] ?? "#06b6d4";
             if (vfxQuality !== "minimal") {
               particleRef.current?.spellImpact(pos.x, pos.y, hexToRgb(burstColor));
-              const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
-              const id = ++castArcIdCounter;
-              setActiveCastArcs((previous) => [
-                ...previous,
-                { id, from: pos, to: stackPos, snapshot, mode: "cast" },
-              ]);
             }
+          }
+          const preObject = useGameStore.getState().gameState?.objects[object_id];
+          const released = useAnimationStore.getState().getReleasedCardMotion(object_id);
+          if (preObject?.display_visible_to_viewer === false && !released) {
+            startCardFlight(object_id, "Stack", "cast", stepEffects);
           }
           break;
         }
@@ -554,8 +686,12 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         case "ZoneChanged": {
           const { object_id, from: fromZone, to: toZone } = event.data;
           if (toZone === "Battlefield") {
-            const pos = getObjectPosition(object_id);
-            if (pos) {
+            const destination = getZoneTarget(object_id, toZone);
+            if (destination) {
+              const pos = {
+                x: destination.rect.x + destination.rect.width / 2,
+                y: destination.rect.y + destination.rect.height / 2,
+              };
               const gameState = useGameStore.getState().gameState;
               const colors = gameState?.objects[object_id]?.color ?? [];
               const id = ++revealIdCounter;
@@ -564,39 +700,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               if (vfxQuality !== "minimal") {
                 const summonColor = colors.length > 0 ? hexToRgb(getCardColors(colors)[0]) : undefined;
                 particleRef.current?.summonBurst(pos.x, pos.y, summonColor);
-
-                if (fromZone === "Stack") {
-                  const snapshot = visiblePreEventSnapshot(object_id);
-                  const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
-                  const arcId = ++castArcIdCounter;
-                  setActiveCastArcs((previous) => [
-                    ...previous,
-                    {
-                      id: arcId,
-                      from: stackPos,
-                      to: pos,
-                      snapshot,
-                      mode: "resolve-permanent",
-                    },
-                  ]);
-                }
               }
-            }
-          } else if (fromZone === "Stack" && toZone === "Graveyard") {
-            if (vfxQuality !== "minimal") {
-              const snapshot = visiblePreEventSnapshot(object_id);
-              const stackPos = { x: window.innerWidth * 0.75, y: window.innerHeight * 0.4 };
-              const arcId = ++castArcIdCounter;
-              setActiveCastArcs((previous) => [
-                ...previous,
-                {
-                  id: arcId,
-                  from: stackPos,
-                  to: stackPos,
-                  snapshot,
-                  mode: "resolve-spell",
-                },
-              ]);
             }
           } else if (fromZone === "Library" && toZone === "Graveyard") {
             if (vfxQuality !== "minimal") {
@@ -637,6 +741,31 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 setActiveMillReveals((prev) => [...prev, { id, cards: millCards, from: fromPos, to: toPos }]);
               }
             }
+          }
+
+          if (toZone === "Stack") {
+            const released = useAnimationStore
+              .getState()
+              .getReleasedCardMotion(object_id);
+            if (!released) {
+              startCardFlight(object_id, toZone, "cast", stepEffects);
+            }
+          } else if (toZone === "Battlefield") {
+            startCardFlight(
+              object_id,
+              toZone,
+              fromZone === "Stack"
+                ? "resolve-permanent"
+                : "play-permanent",
+              stepEffects,
+            );
+          } else if (fromZone === "Stack") {
+            startCardFlight(
+              object_id,
+              toZone,
+              "resolve-spell",
+              stepEffects,
+            );
           }
           break;
         }
@@ -691,7 +820,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [
       getPosition,
       getObjectPosition,
+      getZoneTarget,
       getPlayerHudPosition,
+      startCardFlight,
       vfxQuality,
       speedMultiplier,
       containerRef,
@@ -737,9 +868,13 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     setActiveShatters((prev) => prev.filter((s) => s.id !== id));
   }, []);
 
-  const handleCastArcComplete = useCallback((id: number) => {
-    setActiveCastArcs((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+  const handleCastArcComplete = useCallback(
+    (id: number, objectId: number) => {
+      useAnimationStore.getState().clearObjectMotion(objectId);
+      setActiveCastArcs((prev) => prev.filter((arc) => arc.id !== id));
+    },
+    [],
+  );
 
   const handleMillRevealComplete = useCallback((id: number) => {
     setActiveMillReveals((prev) => prev.filter((m) => m.id !== id));
@@ -817,14 +952,40 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
       ))}
 
       {/* Cast arc animations (z-45) */}
+      {[...releasedCardMotions.entries()]
+        .filter(
+          ([objectId, motion]) =>
+            motion.intendedZone === "Stack"
+            && !inFlightObjectIds.has(objectId),
+        )
+        .map(([objectId, motion]) => (
+          <CastArcAnimation
+            key={`staged-cast-${objectId}`}
+            objectId={objectId}
+            from={motion}
+            to={stackCardMotionTarget(
+              { width: window.innerWidth, height: window.innerHeight },
+              usePreferencesStore.getState().stackDockSide,
+            )}
+            release={motion}
+            mode="cast"
+            duration={Math.max(0.001, 0.42 * speedMultiplier)}
+            onComplete={() => undefined}
+          />
+        ))}
       {activeCastArcs.map((arc) => (
         <CastArcAnimation
           key={`arc-${arc.id}`}
+          objectId={arc.objectId}
           from={arc.from}
           to={arc.to}
+          release={arc.release}
           snapshot={arc.snapshot}
           mode={arc.mode}
-          onComplete={() => handleCastArcComplete(arc.id)}
+          duration={arc.duration}
+          onComplete={() =>
+            handleCastArcComplete(arc.id, arc.objectId)
+          }
         />
       ))}
 

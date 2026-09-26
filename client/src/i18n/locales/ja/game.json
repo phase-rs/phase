@@ -1,4 +1,9 @@
 {
+  "landscapeGate": {
+    "title": "デバイスを横向きにしてください",
+    "description": "スマートフォンやタブレットでは、戦場は横向きでプレイできます。",
+    "exit": "メニューに戻る"
+  },
   "playerLatency": {
     "host": "ホスト",
     "waiting": "待機中",
@@ -140,6 +145,14 @@
     "holdCtrlFront": "Ctrlを押して表面を表示",
     "holdCtrlFlip": "Ctrlを押して反転",
     "flip": "反転",
+    "detailAriaLabel": "カードの詳細: {{name}}",
+    "closeDetails": "カードの詳細を閉じる",
+    "detailViewOptions": "カード詳細表示",
+    "detailView": {
+      "live": "ライブ",
+      "original": "オリジナル",
+      "parse": "解析"
+    },
     "report": "問題を報告",
     "reported": "報告済み ✓",
     "altParsedAbilities": "Alt: 解析済み能力",
@@ -2460,6 +2473,20 @@
     "EndCombat": "戦闘終了",
     "PostCombatMain": "メイン・フェイズ2",
     "End": "終了ステップ",
+    "Cleanup": "クリンナップ"
+  },
+  "phaseNameCompact": {
+    "Untap": "アンタップ",
+    "Upkeep": "アップキープ",
+    "Draw": "ドロー",
+    "PreCombatMain": "メイン1",
+    "BeginCombat": "戦闘",
+    "DeclareAttackers": "攻撃指定",
+    "DeclareBlockers": "ブロック指定",
+    "CombatDamage": "ダメージ",
+    "EndCombat": "戦闘終了",
+    "PostCombatMain": "メイン2",
+    "End": "終了",
     "Cleanup": "クリンナップ"
   },
   "counterMoveDistribution": {

@@ -63,11 +63,11 @@ describe("computePTDisplay", () => {
     expect(display.toughnessColor).toBe("white");
   });
 
-  it("returns green power color when buffed", () => {
+  it("returns blue power color when buffed", () => {
     const obj = makeGameObject({ power: 5, base_power: 3 });
     const display = computePTDisplay(obj)!;
 
-    expect(display.powerColor).toBe("green");
+    expect(display.powerColor).toBe("blue");
   });
 
   it("returns red power color when debuffed", () => {
@@ -85,11 +85,11 @@ describe("computePTDisplay", () => {
     expect(display.toughnessColor).toBe("red");
   });
 
-  it("returns green toughness color when buffed", () => {
+  it("returns blue toughness color when buffed", () => {
     const obj = makeGameObject({ toughness: 6, base_toughness: 4 });
     const display = computePTDisplay(obj)!;
 
-    expect(display.toughnessColor).toBe("green");
+    expect(display.toughnessColor).toBe("blue");
   });
 
   it("returns red toughness color when debuffed", () => {

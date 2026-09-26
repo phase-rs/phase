@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GameState, TargetRef, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildCopyTargetSlot,
   buildGameState,
@@ -23,15 +24,28 @@ describe("PlayerHud", () => {
     // OR `isSpectator`, and the two live in different module-singleton stores that
     // persist across tests in this file. Both are reset here, not only in
     // `afterEach`, so one spectator row cannot make every later seated row inert.
-    useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
-    useGameStore.setState({ gameState: buildGameState(), gameMode: null, waitingFor: null });
+    useMultiplayerStore.setState({
+      activePlayerId: 0,
+      isSpectator: false,
+      playerAvatars: new Map([
+        [0, { kind: "external" as const, url: "/player-avatar.jpg" }],
+      ]),
+    });
+    useUiStore.setState({ fullControl: false, manualManaOverride: false });
+    useGameStore.setState({
+      gameState: buildGameState(),
+      gameMode: null,
+      waitingFor: null,
+      stateHistory: [],
+    });
   });
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
-  it("renders local poison and speed as compact accessible badges", () => {
+  it("renders local poison and speed outside the unified edge life pill", () => {
     const gameState = buildGameState();
     gameState.players[0].poison_counters = 8;
     gameState.players[0].speed = 3;
@@ -42,13 +56,19 @@ describe("PlayerHud", () => {
 
     render(<PlayerHud />);
 
-    // Badges now use the custom GameplayTooltip (text rendered in the DOM)
-    // rather than a native `title`; the aria-label stays on the badge element.
-    expect(screen.getByLabelText("8 poison counters")).toBeInTheDocument();
-    expect(screen.getByText("Poison counters: 8")).toBeInTheDocument();
-    expect(screen.getByLabelText("Speed 3")).toBeInTheDocument();
-    expect(screen.getByText("Speed: 3")).toBeInTheDocument();
-    expect(screen.queryByText("Speed")).toBeNull();
+    const plate = document.querySelector('[data-hud-plate]');
+    const statuses = document.querySelector('[data-player-hud-edge-statuses]');
+    expect(statuses).toContainElement(screen.getByLabelText("8 poison counters"));
+    expect(statuses).toContainElement(screen.getByLabelText("Speed 3"));
+    expect(statuses).toHaveClass(
+      "right-0",
+      "top-0",
+      "translate-x-1/2",
+      "-translate-y-1/2",
+    );
+    expect(statuses).not.toHaveClass("left-1/2", "bottom-full");
+    expect(plate).not.toContainElement(screen.getByLabelText("8 poison counters"));
+    expect(plate).not.toContainElement(screen.getByLabelText("Speed 3"));
   });
 
   it("hides local zero poison counters", () => {
@@ -57,7 +77,7 @@ describe("PlayerHud", () => {
     expect(screen.queryByText(/Poison counters:/)).toBeNull();
   });
 
-  it("renders local Next Up badge only for the next actual turn", () => {
+  it("renders temporary turn badges outside the unified edge life pill", () => {
     act(() => {
       useGameStore.setState({
         gameState: buildGameState({
@@ -73,7 +93,9 @@ describe("PlayerHud", () => {
 
     render(<PlayerHud />);
 
-    expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
+    const nextUp = screen.getByTitle("This player's turn is next.");
+    expect(document.querySelector('[data-player-hud-edge-statuses]')).toContainElement(nextUp);
+    expect(document.querySelector('[data-hud-plate]')).not.toContainElement(nextUp);
   });
 
   // ── The player-target affordance: one authority + one actor gate ──────────
@@ -260,5 +282,90 @@ describe("PlayerHud", () => {
         expect(dispatch).not.toHaveBeenCalled();
       });
     });
+  });
+
+  it("centers the rendered life pill without a desktop-only offset", () => {
+    const { container } = render(<PlayerHud alignNameplateToAnchor />);
+    const hud = container.querySelector<HTMLElement>("[data-local-player-hud]");
+
+    expect(hud).toHaveAttribute("data-edge-pill-layout", "true");
+    expect(hud).not.toHaveAttribute("data-nameplate-anchor-aligned");
+    expect(hud?.style.transform).toBe("");
+  });
+
+  it("uses a portrait-filled life pill with independent glass controls at every resolution", () => {
+    act(() => {
+      useGameStore.setState({ gameMode: "ai", stateHistory: [buildGameState()] });
+    });
+
+    const { container } = render(<PlayerHud alignNameplateToAnchor />);
+
+    expect(container.querySelector('[data-edge-pill-layout="true"]')).toHaveAttribute(
+      "data-player-life-shape",
+      "pill",
+    );
+    const plate = container.querySelector('[data-hud-plate]');
+    const cornerControls = container.querySelector('[data-player-hud-corner-controls]');
+    const undoControl = container.querySelector('[data-player-hud-undo-control]');
+    expect(cornerControls).toContainElement(
+      screen.getByRole("button", { name: "Full Control Off" }),
+    );
+    expect(cornerControls).toContainElement(screen.getByRole("button", { name: "Manual" }));
+    expect(plate).not.toContainElement(screen.getByRole("button", { name: "Manual" }));
+    expect(plate).not.toContainElement(screen.getByRole("button", { name: "Full Control Off" }));
+    expect(plate).not.toContainElement(screen.getByRole("button", { name: "Undo" }));
+    expect(undoControl).toContainElement(screen.getByRole("button", { name: "Undo" }));
+    expect(plate).toHaveTextContent("20");
+    expect(plate?.querySelector("[data-hud-plate-label]")).not.toBeInTheDocument();
+    expect(plate?.querySelector("svg")).toBeNull();
+    expect(plate?.querySelector('[data-hud-plate-art] img')).toHaveAttribute(
+      "src",
+      "/player-avatar.jpg",
+    );
+    expect(container.querySelectorAll('[data-major-phase-stop-rail]')).toHaveLength(1);
+    expect(container.querySelector('[data-player-hud-phase-stop-rail]'))
+      .toContainElement(container.querySelector('[data-major-phase-stop-rail="all"]'));
+    expect(container.querySelector('[data-phase-stop-rail-center-gap]')).toBeInTheDocument();
+    expect(container.querySelector('[data-hud-plate-corner]')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-hud-plate-trailing]')).not.toBeInTheDocument();
+    const manualMana = screen.getByRole("button", { name: "Manual" });
+    expect(manualMana).toHaveAttribute("data-icon-only", "true");
+    expect(manualMana).toHaveClass("tabletop-liquid-glass-control");
+    expect(manualMana.querySelector("[data-control-label]")).toBeNull();
+    const fullControl = screen.getByRole("button", { name: "Full Control Off" });
+    expect(fullControl).toHaveAttribute("data-icon-only", "true");
+    expect(fullControl).toHaveClass("tabletop-liquid-glass-control");
+    const undo = screen.getByRole("button", { name: "Undo" });
+    expect(undo).toHaveClass("tabletop-liquid-glass-control");
+    expect(undo.querySelector("svg")).toHaveClass("h-5", "w-5");
+    expect(undoControl).toHaveClass("fixed");
+
+  });
+
+  it("uses the same edge pill for the desktop HUD", () => {
+    act(() => {
+      useGameStore.setState({ gameMode: "ai", stateHistory: [buildGameState()] });
+    });
+
+    const { container } = render(<PlayerHud />);
+
+    expect(container.querySelector('[data-edge-pill-layout="true"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-edge-pill-layout="true"]')).toHaveAttribute(
+      "data-player-life-shape",
+      "pill",
+    );
+    expect(container.querySelector('[data-player-hud-corner-controls]')).toContainElement(
+      screen.getByRole("button", { name: "Full Control Off" }),
+    );
+    expect(container.querySelector('[data-player-hud-corner-controls]')).toContainElement(
+      screen.getByRole("button", { name: "Manual" }),
+    );
+    expect(container.querySelector('[data-player-hud-undo-control]')).toContainElement(
+      screen.getByRole("button", { name: "Undo" }),
+    );
+    expect(container.querySelectorAll('[data-major-phase-stop-rail]')).toHaveLength(1);
+    expect(container.querySelector('[data-hud-plate-corner]')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-hud-plate-trailing]')).not.toBeInTheDocument();
+
   });
 });

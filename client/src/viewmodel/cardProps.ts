@@ -43,7 +43,7 @@ export interface CardViewProps {
   colorIdentity: ManaColor[];
 }
 
-export type PTColor = "white" | "green" | "red";
+export type PTColor = "white" | "blue" | "red";
 
 export interface PTDisplay {
   power: number;
@@ -250,7 +250,7 @@ export function computePTDisplay(obj: GameObject): PTDisplay | null {
 
   const powerColor: PTColor =
     obj.base_power != null && obj.power > obj.base_power
-      ? "green"
+      ? "blue"
       : obj.base_power != null && obj.power < obj.base_power
         ? "red"
         : "white";
@@ -259,7 +259,7 @@ export function computePTDisplay(obj: GameObject): PTDisplay | null {
     obj.damage_marked > 0
       ? "red"
       : obj.base_toughness != null && obj.toughness > obj.base_toughness
-        ? "green"
+        ? "blue"
         : obj.base_toughness != null && obj.toughness < obj.base_toughness
           ? "red"
           : "white";

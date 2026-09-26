@@ -31,9 +31,8 @@ import type {
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
-import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
-import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
+import { useLandscapeGameRequirement } from "../hooks/useLandscapeGameRequirement.ts";
 import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
 import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
 import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGamesSideboardModal.tsx";
@@ -43,10 +42,12 @@ import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { RevealOverlay } from "../components/animation/RevealOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
+import { CommanderCutInHost } from "../components/animation/CommanderCutIn.tsx";
 import { ScryOutcomeOverlay } from "../components/animation/ScryOutcomeOverlay.tsx";
 import { flashStartingPlayerContest } from "../game/diceContest.ts";
 import { loopDetectionModeFromQuery } from "../game/loopDetectionMode.ts";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
+import { LandscapeGameBoundary } from "../components/board/LandscapeGameGate.tsx";
 import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
 import { DebugLibraryViewer } from "../components/chrome/DebugLibraryViewer.tsx";
@@ -55,7 +56,11 @@ import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.t
 import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
 import { AttackRequirementBadges } from "../components/combat/AttackRequirementBadges.tsx";
 import { BlockerConstraintBadges } from "../components/combat/BlockerConstraintBadges.tsx";
-import { GameBoard } from "../components/board/GameBoard.tsx";
+import { TabletopGameBoard } from "../components/tabletop3d/TabletopGameBoard.tsx";
+import type { TabletopSeatAssignment } from "../components/tabletop3d/tabletopLayout.ts";
+import {
+  TabletopHandCommandZone,
+} from "../components/tabletop3d/TabletopHandCommandZone.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
 import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
@@ -63,13 +68,10 @@ import { isFocusTargetAvailable } from "../components/ui/focusTarget.ts";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
-import { MobilePhaseChip } from "../components/controls/MobilePhaseChip.tsx";
 import { MayTriggerAutoChoiceList } from "../components/board/MayTriggerAutoChoiceList.tsx";
 import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
-import { OpponentHand } from "../components/hand/OpponentHand.tsx";
-import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
-import { HandBadge } from "../components/hand/HandBadge.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
+import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
 import { FlowHelpNudge } from "../components/help/FlowHelpNudge.tsx";
 import { ReportCardNudge } from "../components/help/ReportCardNudge.tsx";
 import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
@@ -130,10 +132,6 @@ import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
-import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
-import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
-import { LibraryPile } from "../components/zone/LibraryPile.tsx";
-import { ExilePile } from "../components/zone/ExilePile.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import {
   PreferencesModal,
@@ -159,6 +157,7 @@ import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
+import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
 import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
@@ -177,7 +176,7 @@ import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
-import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../hooks/usePlayerId.ts";
 import { ABILITY_BLOCK_REASON_KEY } from "../viewmodel/abilityBlockReason.ts";
 import {
   abilityChoiceLabel,
@@ -192,22 +191,14 @@ import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
 import {
   getCastableZoneViewerTarget,
   getBoardChoiceView,
-  getOpponentIds,
   getSeatCount,
   getWaitingForObjectChoiceIds,
   isSplitBoardActive,
   resolveMultiplayerBoardLayout,
-  resolveFocusedOpponent,
-  shouldRenderFocusedOpponentTopRow,
   type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { GAME_Z_LAYER } from "../constants/ui.ts";
-
-type ZoneRailStyle = CSSProperties & {
-  "--card-w": string;
-  "--card-h": string;
-};
 
 function castableZoneViewerAutoOpenKey(target: ZoneViewerTarget): string {
   return `${target.zone}:${target.playerId}:${target.objectIds.join(",")}`;
@@ -255,6 +246,7 @@ export function GamePage() {
   const { id: gameId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const location = useLocation();
+  const requiresLandscape = useLandscapeGameRequirement();
   // `useBroker` is threaded through React Router's location state from
   // `MultiplayerPage` — intentionally not a URL param, so a hard refresh
   // re-evaluates broker reachability instead of pinning the "no lobby"
@@ -763,65 +755,71 @@ export function GamePage() {
   if (!gameId) return null;
 
   return (
-    <GameProvider
-      gameId={gameId}
-      mode={mode}
-      difficulty={difficulty}
-      joinCode={joinCode || undefined}
-      formatConfig={formatConfig}
-      playerCount={playerCount}
-      matchConfig={matchConfig}
-      firstPlayer={firstPlayer}
-      useBroker={useBroker}
-      roomName={roomNameParam ?? undefined}
-      source={sourceParam}
-      draftId={draftIdParam}
-      serverUrl={serverParam}
-      onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
-      onP2PEvent={
-        mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
-      }
-      onReady={
-        mode === "online" || mode === "spectate" || mode === "p2p-host" || mode === "p2p-join"
-          ? handleReady
-          : undefined
-      }
-      onCardDataMissing={handleCardDataMissing}
-      onNoDeck={handleNoDeck}
-      onResumeReset={handleResumeReset}
+    <LandscapeGameBoundary
+      requiresLandscape={requiresLandscape}
+      sessionId={gameId}
+      onExit={() => navigate("/")}
     >
-      <GamePageContent
+      <GameProvider
         gameId={gameId}
-        mode={rawMode}
-        isOnlineMode={isOnlineMode}
-        hostGameCode={hostGameCode}
-        waitingForOpponent={waitingForOpponent}
-        opponentDisconnected={opponentDisconnected}
-        reconnectState={reconnectState}
-        showCardDataMissing={showCardDataMissing}
-        onDismissCardDataMissing={() => setShowCardDataMissing(false)}
-        resumeResetReason={resumeResetReason}
-        onDismissResumeReset={() => setResumeResetReason(null)}
-        showConcedeDialog={showConcedeDialog}
-        onShowConcedeDialog={() => setShowConcedeDialog(true)}
-        onHideConcedeDialog={() => setShowConcedeDialog(false)}
-        receivedEmote={receivedEmote}
-        timerRemaining={timerRemaining}
-        gameStartedAt={gameStartedAt}
-        terminalReason={terminalReason}
-        pendingTakeback={pendingTakeback}
-        onCloseTakebackDialog={() => setPendingTakeback(null)}
-        disconnectChoice={disconnectChoice}
-        onDismissDisconnectChoice={() => setDisconnectChoice(null)}
-        pauseReason={pauseReason}
-        isP2PHost={mode === "p2p-host"}
-        bracketViolationError={bracketViolationError}
-        onDismissBracketViolation={() => {
-          setBracketViolationError(null);
-          navigate("/setup");
-        }}
-      />
-    </GameProvider>
+        mode={mode}
+        difficulty={difficulty}
+        joinCode={joinCode || undefined}
+        formatConfig={formatConfig}
+        playerCount={playerCount}
+        matchConfig={matchConfig}
+        firstPlayer={firstPlayer}
+        useBroker={useBroker}
+        roomName={roomNameParam ?? undefined}
+        source={sourceParam}
+        draftId={draftIdParam}
+        serverUrl={serverParam}
+        onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
+        onP2PEvent={
+          mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
+        }
+        onReady={
+          mode === "online" || mode === "spectate" || mode === "p2p-host" || mode === "p2p-join"
+            ? handleReady
+            : undefined
+        }
+        onCardDataMissing={handleCardDataMissing}
+        onNoDeck={handleNoDeck}
+        onResumeReset={handleResumeReset}
+      >
+        <GamePageContent
+          gameId={gameId}
+          mode={rawMode}
+          isOnlineMode={isOnlineMode}
+          hostGameCode={hostGameCode}
+          waitingForOpponent={waitingForOpponent}
+          opponentDisconnected={opponentDisconnected}
+          reconnectState={reconnectState}
+          showCardDataMissing={showCardDataMissing}
+          onDismissCardDataMissing={() => setShowCardDataMissing(false)}
+          resumeResetReason={resumeResetReason}
+          onDismissResumeReset={() => setResumeResetReason(null)}
+          showConcedeDialog={showConcedeDialog}
+          onShowConcedeDialog={() => setShowConcedeDialog(true)}
+          onHideConcedeDialog={() => setShowConcedeDialog(false)}
+          receivedEmote={receivedEmote}
+          timerRemaining={timerRemaining}
+          gameStartedAt={gameStartedAt}
+          terminalReason={terminalReason}
+          pendingTakeback={pendingTakeback}
+          onCloseTakebackDialog={() => setPendingTakeback(null)}
+          disconnectChoice={disconnectChoice}
+          onDismissDisconnectChoice={() => setDisconnectChoice(null)}
+          pauseReason={pauseReason}
+          isP2PHost={mode === "p2p-host"}
+          bracketViolationError={bracketViolationError}
+          onDismissBracketViolation={() => {
+            setBracketViolationError(null);
+            navigate("/setup");
+          }}
+        />
+      </GameProvider>
+    </LandscapeGameBoundary>
   );
 }
 
@@ -895,10 +893,7 @@ function GamePageContent({
   const waitingFor = useGameStore((s) => s.waitingFor);
   const lobbyProgress = useGameStore((s) => s.lobbyProgress);
   const dispatch = useGameDispatch();
-  const isMobile = useIsMobile();
   useGameViewportLock();
-  const focusedGridTemplateRows = useResolvedGridRows();
-  const splitGridTemplateRows = useResolvedSplitGridRows();
   const gameState = useGameStore((s) => s.gameState);
   const isBestOfThree = gameState?.match_config?.match_type === "Bo3";
   const draftMatchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
@@ -994,7 +989,7 @@ function GamePageContent({
   const [boardContextMenu, setBoardContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const playerId = usePlayerId();
-  const perspectivePlayerId = usePerspectivePlayerId();
+  const isMobile = useIsMobile();
   const isSpectatorMode = useSpectatorMode();
   // Card-report picker is valid in a live, participating game (never spectate).
   const canReportCard = gameState != null && !isSpectatorMode;
@@ -1049,12 +1044,6 @@ function GamePageContent({
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".
   const storeGameMode = useGameStore((s) => s.gameMode);
-  const focusedOpponent = useUiStore((s) => s.focusedOpponent);
-  const opponents = useMemo(() => {
-    return getOpponentIds(gameState, perspectivePlayerId);
-  }, [gameState, perspectivePlayerId]);
-  const activeOpponentId =
-    resolveFocusedOpponent(focusedOpponent, opponents) ?? opponents[0] ?? null;
   const seatCount = getSeatCount(gameState);
   const resolvedMultiplayerBoardLayout = resolveMultiplayerBoardLayout(
     multiplayerBoardLayout,
@@ -1069,10 +1058,6 @@ function GamePageContent({
     ? "split"
     : resolvedMultiplayerBoardLayout;
   const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, seatCount);
-  const renderFocusedOpponentTopRow = shouldRenderFocusedOpponentTopRow(
-    effectiveMultiplayerBoardLayout,
-    seatCount,
-  );
   const handleToggleMultiplayerBoardLayout = useCallback(() => {
     setMultiplayerBoardLayout(
       resolvedMultiplayerBoardLayout === "split" ? "focused" : "split",
@@ -1090,7 +1075,6 @@ function GamePageContent({
     multiplayerBoardLayout === "focused" &&
     !untapForcedSplit &&
     !multiplayerSplitLayoutNudgeDismissed;
-  const gridTemplateRows = splitBoardActive ? splitGridTemplateRows : focusedGridTemplateRows;
   const handleKickPlayer = useCallback((pid: number) => {
     const adapter = useGameStore.getState().adapter as
       | { kickPlayer?: (pid: number) => Promise<void> }
@@ -1101,22 +1085,19 @@ function GamePageContent({
     if (adapter instanceof P2PHostAdapter) adapter.requestResume();
   }, [adapter]);
 
-  // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
-  // React.memo, which shallow-compares props; without stable element
-  // references these inline JSX nodes would be new on every GamePageContent
-  // render, defeating the memo. Stable refs let GameBoard skip re-rendering
-  // when GamePageContent re-renders for reasons that don't touch these props.
-  const oppHud = useMemo(
-    () => (
+  // Keep the Tabletop HUD render callback stable so TabletopGameBoard's memoization
+  // is not defeated by unrelated GamePageContent updates.
+  const renderOpponentHud = useCallback(
+    (tabletopSeats: readonly TabletopSeatAssignment[]) => (
       <OpponentHud
         opponentName={isOnlineMode ? opponentDisplayName : undefined}
-        splitOverview={splitBoardActive}
+        tabletopSeats={tabletopSeats}
         onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
       />
     ),
-    [handleKickPlayer, isOnlineMode, opponentDisplayName, isP2PHost, splitBoardActive],
+    [handleKickPlayer, isOnlineMode, opponentDisplayName, isP2PHost],
   );
-  const playerHud = useMemo(() => <PlayerHud />, []);
+  const playerHud = useMemo(() => <PlayerHud alignNameplateToAnchor />, []);
 
   useAudioContext("battlefield");
 
@@ -1386,12 +1367,6 @@ function GamePageContent({
       ? isMobile ? "4.25rem" : "4.75rem"
       : "0.25rem",
   } as CSSProperties;
-  const playerZoneRailStyle: ZoneRailStyle = isMobile
-    ? { "--card-w": "28px", "--card-h": "39px" }
-    : { "--card-w": "clamp(45px, 4.5vw, 70px)", "--card-h": "clamp(63px, 6.3vw, 98px)" };
-  const pileSize = isMobile
-    ? { width: "38px", height: "53px" }
-    : { width: "clamp(45px, 4.5vw, 70px)", height: "clamp(63px, 6.3vw, 98px)" };
   const handleViewZone = useCallback(
     (
       zone: "graveyard" | "exile" | "library",
@@ -1536,153 +1511,76 @@ function GamePageContent({
 
       <DebugModeBanner />
 
-      {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand.
-          Board choices lift the grid above normal HUD rails, but must stay below
-          DialogHost/TargetingOverlay so confirm controls are not hidden behind
-          the player hand. Keep this ordering in GAME_Z_LAYER. */}
+      {/* One continuous Tabletop stage. Screen-space controls stay large and
+          accessible, but both hands are grounded at the near/far table edges
+          instead of reserving detached dashboard rows around the canvas. */}
       <div
-        className={`relative ${boardChoiceLayerActive && !isReconnecting ? GAME_Z_LAYER.boardChoiceGrid : GAME_Z_LAYER.board} grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
+        className={`relative ${boardChoiceLayerActive && !isReconnecting ? GAME_Z_LAYER.boardChoiceGrid : GAME_Z_LAYER.board} h-full min-w-0 overflow-hidden${isReconnecting ? " pointer-events-none" : ""}`}
         style={{
           paddingTop: "var(--game-top-overlay-offset, 0px)",
-          gridTemplateRows,
-          gridTemplateColumns: "1fr",
         }}
+        data-tabletop-game-stage
       >
-        {/* Row 1: Opponent hand + zone piles. Equal flexible side tracks keep
-            the focused hand centered on the viewport while the piles remain
-            right-aligned; split layouts render their hands inside seat panes. */}
-        <div
-          className={`relative z-20 min-w-0 w-full ${renderFocusedOpponentTopRow ? "grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]" : "flex"} ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
-          data-flex-zone="opp-row"
-        >
-          {renderFocusedOpponentTopRow && (
-            <>
-              <div aria-hidden />
-              <div className="min-w-0">
-                <OpponentHand showCards={showAiHand} />
-              </div>
-              <DraggableWidget
-                target={{ kind: "widget", key: "opponentPiles" }}
-                flexZone="opponentPiles"
-                className="flex items-start justify-self-end gap-1.5 px-1 py-1"
-                style={playerZoneRailStyle}
-              >
-                {activeOpponentId != null ? (
-                  <>
-                    <ExilePile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onClick={(launcher) =>
-                        handleViewZone("exile", activeOpponentId, launcher)
-                      }
-                    />
-                    <LibraryPile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onView={(launcher) =>
-                        handleViewZone("library", activeOpponentId, launcher)
-                      }
-                    />
-                    <GraveyardPile
-                      playerId={activeOpponentId}
-                      size={pileSize}
-                      onClick={(launcher) =>
-                        handleViewZone("graveyard", activeOpponentId, launcher)
-                      }
-                    />
-                  </>
-                ) : null}
-              </DraggableWidget>
-            </>
-          )}
-        </div>
+        <TabletopGameBoard
+          renderOpponentHud={renderOpponentHud}
+          playerHud={playerHud}
+          showOpponentCards={showAiHand}
+          onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
+          onViewZone={handleViewZone}
+        />
 
-        {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
-        <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
-          <GameBoard
-            effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
-            oppHud={oppHud}
-            playerHud={playerHud}
-            showOpponentCards={showAiHand}
-            onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
-            onViewZone={handleViewZone}
-          />
-        </div>
-
-        {/* Row 3: Player hand + zones. The hand is top-anchored in this row, so
-            if the row stretched with its (resizable) band track, resizing the
-            band would drag the hand vertically. Instead we give the row a
-            CONSTANT height equal to the DEFAULT band and pin it to the track's
-            bottom (`self-end`, the viewport edge, which never moves). The height
-            uses the shared `--game-player-row-height` contract (also consumed by
-            board-choice controls) to mirror the resolver's default track. It is
-            computed in viewport units so it ignores the LIVE (resized) track,
-            which a plain percentage on a grid item would track instead. The hand
-            thus keeps its default resting position and stays put on resize; a
-            grown band opens empty space ABOVE the row (trading with the
-            battlefield) rather than shoving the hand up. */}
+        {/* The near-edge hand floats over the table apron. It has a responsive
+            interaction band rather than a fixed page row, so battlefield space
+            remains useful on phones and tablets. */}
         <div
-          className="relative min-w-0 self-end overflow-visible"
-          style={{ height: "var(--game-player-row-height)" }}
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-30 min-w-0 overflow-visible"
+          style={{
+            height:
+              "calc(env(safe-area-inset-bottom) + clamp(7.75rem, 18dvh, 10rem))",
+          }}
           data-flex-zone="player-row"
+          data-tabletop-player-dock
         >
-          <div className="flex items-end justify-center" data-flex-zone="playerHandRow">
-            {/* Castable graveyard/exile cards now render as colored wings inside
-                PlayerHand's own fan (see ZoneFanCard), so the row is just the hand.
-                The `playerHandRow` flex-zone hook drives the mobile hand-lift
-                transform in index.css. */}
-            <PlayerHand interactionDisabled={boardChoiceLayerActive} />
-          </div>
-          <DraggableWidget
-            target={{ kind: "widget", key: "playerPiles" }}
-            flexZone="playerPiles"
-            scaleKey="playerPiles"
-            className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
-            // Anchor box-scale to the bottom-left dock corner. No left-rail
-            // offset here: this pile is absolutely positioned inside the board
-            // grid, whose padding already accounts for a left-docked log panel.
-            style={{
-              ...playerZoneRailStyle,
-              transformOrigin: "bottom left",
-            }}
+          <div
+            className="grid h-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end pb-[env(safe-area-inset-bottom)]"
+            data-flex-zone="playerHandRow"
           >
-            <div className="flex items-end gap-2">
-              <ExilePile
-                playerId={perspectivePlayerId}
-                size={pileSize}
-                onClick={(launcher) =>
-                  handleViewZone("exile", perspectivePlayerId, launcher)
-                }
-              />
-              <GraveyardPile
-                playerId={perspectivePlayerId}
-                size={pileSize}
-                onClick={(launcher) =>
-                  handleViewZone("graveyard", perspectivePlayerId, launcher)
-                }
-              />
-              <LibraryPile
-                playerId={perspectivePlayerId}
-                size={pileSize}
-                onView={(launcher) =>
-                  handleViewZone("library", perspectivePlayerId, launcher)
-                }
-              />
+            <div aria-hidden className="pointer-events-none min-w-0" />
+            <div className="pointer-events-none min-w-[var(--hand-card-w)]">
+              {/* Castable graveyard/exile cards remain colored wings inside the
+                  main hand fan; the command zone has its own adjacent dock. */}
+              <PlayerHand interactionDisabled={boardChoiceLayerActive} />
             </div>
-          </DraggableWidget>
+            {/* Keep the transparent right-side slot permeable to the Three.js
+                battlefield. The command card and desktop phase controls restore
+                pointer events only on their own surfaces. The fixed action rail
+                remains above this z-30 dock at z-45 on compact screens. */}
+            <div
+              className="pointer-events-none flex min-w-0 items-end justify-start gap-2 pb-3 pl-4"
+              data-tabletop-hand-command-slot="right"
+            >
+              <TabletopHandCommandZone playerId={playerId} seat="player" />
+              <div className="pointer-events-auto mb-20 hidden lg:block">
+                <CombatPhaseIndicator />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Bottom UI: mobile splits hand/full-control (left) from phases + pass (right). */}
+      {/* Unified Tabletop bottom UI: centered life pill and hand, independent
+          corner modes, and a compact phase/pass cluster at the lower right. */}
       <DraggableWidget
         target={{ kind: "widget", key: "actionRail" }}
         flexZone="actionRail"
         scaleKey="actionRail"
         resizeCorner="bl"
-        className="fixed z-30 flex flex-col items-end gap-1.5 max-lg:portrait:w-full max-lg:portrait:flex-row max-lg:portrait:items-end max-lg:portrait:justify-between max-lg:portrait:gap-2"
+        className="tabletop-command-shelf fixed z-[45] flex flex-col items-end gap-1.5 p-0 max-lg:portrait:w-[calc(100%-1rem-env(safe-area-inset-left)-env(safe-area-inset-right))] max-lg:portrait:flex-row max-lg:portrait:items-stretch max-lg:portrait:justify-between max-lg:portrait:gap-2"
         style={{
-          bottom: "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom))",
-          right: "calc(env(safe-area-inset-right) + var(--game-edge-right) + var(--game-right-rail-offset, 0px))",
+          bottom:
+            "calc(env(safe-area-inset-bottom) + var(--action-btn-bottom) + var(--action-btn-commander-clearance, 0rem) + 0.4rem)",
+          right:
+            "calc(var(--game-control-lower-inline) + var(--game-right-rail-offset, 0px))",
           // Anchor box-scale to the docked corner so it grows inward, not off-screen.
           transformOrigin: "bottom right",
         }}
@@ -1692,10 +1590,6 @@ function GamePageContent({
             data-mobile-action-left
             className="hidden flex-col gap-1 max-lg:portrait:flex max-lg:portrait:min-w-0"
           >
-            <div className="flex flex-col gap-1 max-lg:gap-1">
-              <MobilePhaseChip className="w-full" />
-              <HandBadge className="w-full" />
-            </div>
             <div className="flex items-center gap-1.5">
               <PriorityYieldList />
               <MayTriggerAutoChoiceList />
@@ -1710,22 +1604,9 @@ function GamePageContent({
           {showFlowHelpNudge && <FlowHelpNudge />}
           {showSandboxToolsNudge && <SandboxToolsNudge />}
           {showReportCardNudge && <ReportCardNudge />}
-          <div className="hidden max-lg:landscape:block lg:block">
-            <CombatPhaseIndicator />
-          </div>
-          {isSpectatorMode ? (
-            <TurnStatusLine />
-          ) : (
+          {!isSpectatorMode && (
             <>
-              <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
-                <TurnStatusLine />
-              </div>
               <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
-                {/* <lg only: desktop conveys phase via the PhaseDot strips in
-                    PlayerHud, which are hidden on mobile. */}
-                <MobilePhaseChip className="lg:hidden" />
-                <TurnStatusLine />
-                <HandBadge />
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
                     Full Control toggle (self-hides when no yields stand). */}
                 <PriorityYieldList />
@@ -1734,12 +1615,15 @@ function GamePageContent({
                 <MayTriggerAutoChoiceList />
                 <FullControlToggle />
               </div>
-              <ActionButton />
+              <div className="flex flex-col items-end gap-1" data-touch-action-cluster="">
+                <ActionButton />
+              </div>
             </>
           )}
         </div>
       </DraggableWidget>
 
+      <GameLogPanel />
       <MobileHandDrawer interactionDisabled={boardChoiceLayerActive} />
       <FlexEditOverlay />
 
@@ -1974,6 +1858,7 @@ function GamePageContent({
       <AnimationOverlay containerRef={containerRef} />
       {/* Multi-card top-of-library reveal (CR 701.20b), e.g. Lead the Stampede */}
       <RevealOverlay />
+      <CommanderCutInHost />
       <TurnBanner />
       <DiceRollOverlay />
       <ScryOutcomeOverlay />

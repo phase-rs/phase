@@ -2,6 +2,16 @@ import { create } from "zustand";
 import type { GameState } from "../adapter/types";
 import type { AnimationStep, PositionSnapshot } from "../animation/types";
 
+export interface CardMotionTarget {
+  rect: DOMRect;
+  rotation: number;
+}
+
+export interface ReleasedCardMotion extends CardMotionTarget {
+  velocity: { x: number; y: number };
+  intendedZone?: "Stack";
+}
+
 /**
  * Life totals to show while an animation window is open.
  *
@@ -29,6 +39,10 @@ interface AnimationStoreState {
   activeGeneration: number;
   isPlaying: boolean;
   positionRegistry: Map<number, DOMRect>;
+  cardMotionDestinations: Map<number, CardMotionTarget>;
+  zoneMotionDestinations: Map<string, CardMotionTarget>;
+  releasedCardMotions: Map<number, ReleasedCardMotion>;
+  inFlightObjectIds: Set<number>;
   animationNewState: GameState | null;
   displayedLife: DisplayedLifeTotals | null;
 }
@@ -39,6 +53,22 @@ interface AnimationStoreActions {
   captureSnapshot: () => PositionSnapshot;
   registerPosition: (objectId: number, rect: DOMRect) => void;
   getPosition: (objectId: number) => DOMRect | undefined;
+  setCardMotionDestinations: (
+    cards: Map<number, CardMotionTarget>,
+    zones: Map<string, CardMotionTarget>,
+  ) => void;
+  getCardMotionDestination: (objectId: number) => CardMotionTarget | undefined;
+  getZoneMotionDestination: (
+    playerId: number,
+    zone: string,
+  ) => CardMotionTarget | undefined;
+  setReleasedCardMotion: (
+    objectId: number,
+    motion: ReleasedCardMotion,
+  ) => void;
+  getReleasedCardMotion: (objectId: number) => ReleasedCardMotion | undefined;
+  markObjectInFlight: (objectId: number) => void;
+  clearObjectMotion: (objectId: number) => void;
   setAnimationNewState: (state: GameState | null) => void;
   /** Record an engine-reported life total whose hit has just landed on screen. */
   recordDisplayedLife: (playerId: number, life: number, engineCommitEpoch: number) => void;
@@ -53,6 +83,10 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   activeGeneration: 0,
   isPlaying: false,
   positionRegistry: new Map(),
+  cardMotionDestinations: new Map(),
+  zoneMotionDestinations: new Map(),
+  releasedCardMotions: new Map(),
+  inFlightObjectIds: new Set(),
   animationNewState: null,
   displayedLife: null,
 
@@ -116,6 +150,44 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
 
   getPosition: (objectId) => get().positionRegistry.get(objectId),
 
+  setCardMotionDestinations: (cards, zones) =>
+    set({
+      cardMotionDestinations: cards,
+      zoneMotionDestinations: zones,
+    }),
+
+  getCardMotionDestination: (objectId) =>
+    get().cardMotionDestinations.get(objectId),
+
+  getZoneMotionDestination: (playerId, zone) =>
+    get().zoneMotionDestinations.get(`${playerId}:${zone}`),
+
+  setReleasedCardMotion: (objectId, motion) =>
+    set((state) => {
+      const releasedCardMotions = new Map(state.releasedCardMotions);
+      releasedCardMotions.set(objectId, motion);
+      return { releasedCardMotions };
+    }),
+
+  getReleasedCardMotion: (objectId) =>
+    get().releasedCardMotions.get(objectId),
+
+  markObjectInFlight: (objectId) =>
+    set((state) => {
+      const inFlightObjectIds = new Set(state.inFlightObjectIds);
+      inFlightObjectIds.add(objectId);
+      return { inFlightObjectIds };
+    }),
+
+  clearObjectMotion: (objectId) =>
+    set((state) => {
+      const releasedCardMotions = new Map(state.releasedCardMotions);
+      const inFlightObjectIds = new Set(state.inFlightObjectIds);
+      releasedCardMotions.delete(objectId);
+      inFlightObjectIds.delete(objectId);
+      return { releasedCardMotions, inFlightObjectIds };
+    }),
+
   setAnimationNewState: (state) => set({ animationNewState: state }),
 
   recordDisplayedLife: (playerId, life, engineCommitEpoch) => {
@@ -138,5 +210,9 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     isPlaying: false,
     animationNewState: null,
     displayedLife: null,
+    cardMotionDestinations: new Map(),
+    zoneMotionDestinations: new Map(),
+    releasedCardMotions: new Map(),
+    inFlightObjectIds: new Set(),
   })),
 }));

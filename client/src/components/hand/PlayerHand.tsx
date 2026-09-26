@@ -1,4 +1,11 @@
-import { memo, useState, useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  memo,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform, useReducedMotion } from "framer-motion";
 import type { MotionValue, PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -8,6 +15,10 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
 import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import {
+  useAnimationStore,
+  type ReleasedCardMotion,
+} from "../../stores/animationStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -18,6 +29,7 @@ import { dispatchAction } from "../../game/dispatch.ts";
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import type { GameObject, ManaCost, ObjectId } from "../../adapter/types.ts";
 import {
+  castActionsForObject,
   collectObjectActions,
   resolveDirectPlayOrCastAction,
   resolveSingleActionDispatch,
@@ -45,11 +57,13 @@ import { CompanionFanCard } from "./CompanionFanCard.tsx";
 import {
   handFanGeometry,
   handFanVerticalMetrics,
+  MOBILE_HAND_FAN_LIFT_Y,
   playerHandFanSizingStyle,
 } from "./handFanPresentation.ts";
-import { useHandScrubPreview } from "./useHandScrubPreview.ts";
-import { MobileHeldHandCard } from "./MobileHeldHandCard.tsx";
+import { TabletopCardFace } from "../tabletop3d/TabletopCardFace.tsx";
 import { StormCopyBadge } from "./StormCopyBadge.tsx";
+import { useHandScrubPreview } from "./useHandScrubPreview.ts";
+import { CastableCardGlow } from "./CastableCardGlow.tsx";
 
 // Stable empty lookup so an undefined `objects` (pre-game) never busts the
 // organizer's filter memo with a fresh `{}` each render.
@@ -58,10 +72,10 @@ const EMPTY_STORM_COUNTS: Record<string, number> = {};
 
 // The whole-row fan geometry — the overlap / tilt / arc that lays hand cards
 // (plus the castable exile / graveyard "wings") out as one held hand — now
-// lives in the shared `card/fanGeometry` module. Every viewport uses the same
-// wider, flatter profile so the hand silhouette stays consistent; responsive
-// sizing caps the whole fan to the viewport, while mobile keeps its drawer as
-// the interaction surface. `k` is a card's absolute position across the row:
+// lives in the shared `card/fanGeometry` module. Mobile keeps the same shallow
+// silhouette as desktop, but overlaps cards more tightly so large hands avoid
+// both lower pile lanes. `k` is a card's absolute position
+// across the row:
 // exile cards
 // occupy [0, E), hand cards [E, E + H), graveyard [E + H, N). With no wings
 // (E === 0, N === H) a hand card at index i sits at k === i, so the hand keeps
@@ -93,17 +107,38 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
   const prospectiveStormCounts = useGameStore(
     (s) => s.gameState?.derived?.prospective_storm_counts ?? EMPTY_STORM_COUNTS,
   );
-  const mobileHandGesture = useUiStore((s) => s.mobileHandGesture);
   // Use dispatchAction (animation pipeline) instead of store dispatch
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
-  const setMobileHandOpen = useUiStore((s) => s.setMobileHandOpen);
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
   const [expanded, setExpanded] = useState(false);
+  const expandedRef = useRef(false);
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
   const [draggingCardId, setDraggingCardId] = useState<number | null>(null);
   const interactionWasDisabledRef = useRef(false);
+
+  // Mobile's first card tap lifts the fan so the full card faces are reachable.
+  // Dismiss that transient lift when the next pointer interaction starts outside
+  // the hand. Previously only the hand container itself could toggle the lift;
+  // its cards cover nearly the whole hit area, so an iPhone user could raise the
+  // fan and then have no practical way to lower it again.
+  useEffect(() => {
+    if (!isMobile || !expanded) return;
+
+    const collapseOutsideHand = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && handContainerRef.current?.contains(target)) return;
+
+      expandedRef.current = false;
+      setExpanded(false);
+      setSelectedCardId(null);
+      inspectObject(null);
+    };
+
+    document.addEventListener("pointerdown", collapseOutsideHand, true);
+    return () => document.removeEventListener("pointerdown", collapseOutsideHand, true);
+  }, [expanded, inspectObject, isMobile]);
 
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const manaPaymentPreviewRequestId = useRef(0);
@@ -122,6 +157,15 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
 
   const playableObjectIds = useMemo(() => {
     return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
+  }, [legalActionsByObject]);
+  const castableObjectIds = useMemo(() => {
+    return new Set(
+      Object.keys(legalActionsByObject ?? {})
+        .map(Number)
+        .filter((objectId) =>
+          castActionsForObject(legalActionsByObject, objectId).length > 0
+        ),
+    );
   }, [legalActionsByObject]);
 
   // Display-only organizing of the player's own hand: persisted sort + ephemeral
@@ -180,14 +224,17 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
   );
 
   const playCard = useCallback(
-    (objectId: number) => {
-      if (!hasPriority || !objects) return;
+    (
+      objectId: number,
+      releasedMotion?: ReleasedCardMotion,
+    ): boolean => {
+      if (!hasPriority || !objects) return false;
       const obj = objects[objectId];
-      if (!obj) return;
+      if (!obj) return false;
 
       const allActions = collectObjectActions(legalActionsByObject, objectId as ObjectId);
 
-      if (allActions.length === 0) return;
+      if (allActions.length === 0) return false;
       inspectObject(null);
       // #506: a lone card-consuming action (cycling / Channel — its cost
       // discards the card, CR 702.29a) must surface the choice modal so the
@@ -195,9 +242,39 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       // decision authority.
       const auto = resolveSingleActionDispatch(allActions, obj);
       if (auto) {
-        dispatchAction(auto);
+        const directPlayOrCast =
+          resolveDirectPlayOrCastAction(legalActionsByObject, obj) === auto;
+        if (directPlayOrCast) {
+          const element = handContainerRef.current?.querySelector<HTMLElement>(
+            `[data-hand-card][data-object-id="${objectId}"]`,
+          );
+          const rect = releasedMotion?.rect
+            ?? element?.getBoundingClientRect();
+          if (rect) {
+            const motion = releasedMotion ?? {
+              rect,
+              rotation: Number(element?.dataset.handRotation) || 0,
+              velocity: { x: 0, y: 0 },
+            };
+            useAnimationStore.getState().setReleasedCardMotion(
+              objectId,
+              {
+                ...motion,
+                intendedZone:
+                  auto.type === "PlayLand"
+                    ? undefined
+                    : "Stack",
+              },
+            );
+          }
+        }
+        void dispatchAction(auto).catch(() => {
+          useAnimationStore.getState().clearObjectMotion(objectId);
+        });
+        return directPlayOrCast;
       } else {
         setPendingAbilityChoice({ objectId: objectId as ObjectId, actions: allActions });
+        return false;
       }
     },
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
@@ -450,8 +527,27 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       // Play branch (unchanged from the existing implementation).
       if (!hasPriority) return false;
       if (info.offset.y >= HAND_DRAG_PLAY_THRESHOLD) return false;
-      playCard(objectId);
-      return true;
+      const cardElement =
+        handContainerRef.current?.querySelector<HTMLElement>(
+          `[data-hand-card][data-object-id="${objectId}"]`,
+        );
+      const rect = cardElement?.getBoundingClientRect();
+      const didPlay = playCard(
+        objectId,
+        rect
+          ? {
+              rect,
+              rotation:
+                (Number(cardElement?.dataset.handRotation) || 0)
+                + Math.max(-11, Math.min(11, info.velocity.x * 0.011)),
+              velocity: {
+                x: info.velocity.x,
+                y: info.velocity.y,
+              },
+            }
+          : undefined,
+      );
+      return didPlay;
     },
     [hasPriority, playCard, hand, playerId, pendingObjectId, organizeActive, interactionDisabled, arrowOpacity, arrowRotateRaw, insertionSlotMV, draggingIndexMV],
   );
@@ -468,8 +564,13 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
         });
         return;
       }
-      if (isMobile) {
-        setMobileHandOpen(true);
+      // Read the transient lift through a ref so this callback stays stable
+      // while the wrapper moves. Passing a new callback through every memoized
+      // HandCard forced Framer's `layout` projection to re-run mid-lift and
+      // could strand the tapped card above its resting transform on iOS.
+      if (isMobile && !expandedRef.current) {
+        expandedRef.current = true;
+        setExpanded(true);
         return;
       }
       if (!hasPriority) return;
@@ -477,7 +578,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
       setSelectedCardId(objectId);
       inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
     },
-    [isMobile, hasPriority, inspectObject, setMobileHandOpen],
+    [isMobile, hasPriority, inspectObject],
   );
 
   const handleCardDoubleClick = useCallback(
@@ -492,27 +593,40 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
 
   const handleContainerClick = useCallback(
     (e: React.MouseEvent) => {
-      // A completed hold-and-scrub produces a synthetic click after pointerup.
-      // Consume only that click; ordinary short taps still open the drawer.
-      if (consumeHandScrubClick()) return;
-      // On mobile the fanned cards are `pointer-events-none` (the drawer is the
-      // interaction surface), so every tap in the hand area falls through to this
-      // container — or to the inner lift wrapper, which bubbles here. Any such tap
-      // opens the full-hand drawer. This MUST run before the target===currentTarget
-      // guard below: the lift wrapper makes `e.target` the wrapper rather than the
-      // container, so the guard alone would swallow taps that land over a card.
+      // Mobile's only fan-specific interaction is Tabletop's first-tap lift. The
+      // cards themselves stay on the same HandCard drag/cast path as desktop.
       if (isMobile) {
-        setMobileHandOpen(true);
+        setSelectedCardId(null);
+        setExpanded((prev) => {
+          const next = !prev;
+          expandedRef.current = next;
+          return next;
+        });
         return;
       }
       // Desktop: only a click on the empty container area (card clicks stop
       // propagation) toggles the hand lift.
       if (e.target === e.currentTarget) {
         setSelectedCardId(null);
-        setExpanded((prev) => !prev);
+        setExpanded((prev) => {
+          const next = !prev;
+          expandedRef.current = next;
+          return next;
+        });
       }
     },
-    [consumeHandScrubClick, isMobile, setMobileHandOpen],
+    [isMobile],
+  );
+  const handleContainerClickCapture = useCallback(
+    (event: React.MouseEvent) => {
+      // Run before a HandCard's stopPropagation. A completed hold generates a
+      // compatibility click on that child; consuming it in capture phase keeps
+      // the persistent preview open without also lifting or selecting the card.
+      if (!consumeHandScrubClick()) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [consumeHandScrubClick],
   );
 
   const handleDragStart = useCallback(
@@ -577,37 +691,47 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
   const handSize = handObjects.length;
   const exileCount = exileCards.length;
   const totalFanCards = exileCount + handSize + graveyardCards.length + companionCount;
-  const verticalMetrics = handFanVerticalMetrics(isCompactHeight);
-  const fan = handFanGeometry(totalFanCards, "--hand-card-w", verticalMetrics.arcScale);
+  const fanPresentation = isMobile ? "mobile" : "desktop";
+  const verticalMetrics = handFanVerticalMetrics(false, 1, fanPresentation);
+  const fan = handFanGeometry(
+    totalFanCards,
+    "--hand-card-w",
+    verticalMetrics.arcScale,
+    fanPresentation,
+  );
 
   return (
     <>
       <div
       ref={handContainerRef}
       data-player-hand
-      className={`relative flex items-end justify-center overflow-visible px-4 py-1 ${
+      className={`pointer-events-none relative flex items-end justify-center overflow-visible px-4 py-1 ${
         isCompactHeight ? "min-h-[40px]" : "min-h-[calc(var(--card-h)*0.7)]"
       } ${isMobile ? "touch-none" : ""} ${interactionDisabled ? "pointer-events-none" : ""}`}
       style={{
         perspective: "800px",
-        ...playerHandFanSizingStyle(totalFanCards),
+        ...playerHandFanSizingStyle(totalFanCards, fanPresentation),
         zIndex: draggingCardId != null || expanded ? 40 : undefined,
       }}
       {...handScrubHandlers}
+      onClickCapture={handleContainerClickCapture}
       onClick={handleContainerClick}
       onMouseLeave={() => {
-        setExpanded(false);
+        if (!isMobile) {
+          expandedRef.current = false;
+          setExpanded(false);
+        }
         setSelectedCardId(null);
       }}
     >
       {/* Hand organizer (desktop): a compact popover to sort / hide-filter the
           player's own hand for DISPLAY only. Gated on the TRUE hand count
           (`handCardIds`, not the post-filter `handObjects`) so a filter that
-          hides every card can still be cleared. Hidden on mobile, where the
-          drawer carries the same controls. The wrapper stops click propagation
-          so opening it never toggles the hand-lift. */}
+          hides every card can still be cleared. Hidden on mobile to preserve
+          the touch area. The wrapper stops click propagation so opening it
+          never toggles the hand-lift. */}
       {!isMobile && handCardIds.length > 0 && (
-        <div className="absolute right-2 top-0 z-50" onClick={(e) => e.stopPropagation()}>
+        <div className="pointer-events-auto absolute right-2 top-0 z-50" onClick={(e) => e.stopPropagation()}>
           <PopoverMenu ariaLabel={t("hand.organizeLabel")} menuWidthPx={220}>
             {() => (
               <div className="flex flex-col gap-2 px-3 py-2">
@@ -644,10 +768,24 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
           so pointer-move updates never re-render these memoized cards — do not
           lift the hovered slot into React state. */}
       <motion.div
-        className="flex items-end justify-center"
-        animate={{ y: expanded ? -50 : 0 }}
+        className="relative flex items-end justify-center"
+        data-player-hand-lift
+        data-player-hand-expanded={expanded ? "true" : "false"}
+        animate={{ y: expanded ? (isMobile ? MOBILE_HAND_FAN_LIFT_Y : -50) : 0 }}
         transition={{ duration: 0.25 }}
       >
+        {handSize === 0 && (
+          <div
+            aria-hidden
+            className="pointer-events-none invisible absolute bottom-0 left-1/2"
+            data-player-hand-empty-anchor
+            style={{
+              width: "var(--hand-card-w)",
+              height: "var(--hand-card-h)",
+              transform: `translate(-50%, ${verticalMetrics.restingY}px)`,
+            }}
+          />
+        )}
         <AnimatePresence>
           {/* Exile wing (left): absolute fan positions 0 .. E-1. Cast-only —
               never reorder targets. Keep their stacking level non-negative:
@@ -671,6 +809,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
                 zIndex={j}
                 theme={ZONE_THEME.exile}
                 hasPriority={hasPriority}
+                enableHover={!isMobile}
                 isSelected={selectedCardId === obj.id}
                 onPlay={playCard}
                 onDragStart={previewManaPayment}
@@ -685,18 +824,13 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
           {handObjects.map((obj, i) => {
           // Hand cards occupy absolute fan positions E .. E+H-1.
           const k = exileCount + i;
-          const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
+          const isCastable = hasPriority && castableObjectIds.has(Number(obj.id));
 
           return (
             <HandCard
               key={obj.id}
               objectId={obj.id}
-              cardName={obj.name}
-              oracleId={obj.printed_ref?.oracle_id}
-              faceName={obj.printed_ref?.face_name}
               manaCost={obj.mana_cost}
-              backFaceManaCost={obj.back_face?.mana_cost}
-              unimplementedMechanics={obj.unimplemented_mechanics}
               index={i}
               handSize={handObjects.length}
               insertionSlotMV={insertionSlotMV}
@@ -707,10 +841,10 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
               restingY={verticalMetrics.restingY}
               hoverY={verticalMetrics.hoverY}
               marginLeft={i === 0 ? 0 : fan.overlap}
-              isPlayable={isPlayable}
+              isCastable={isCastable}
+              enableHover={!isMobile}
               isSelected={selectedCardId === obj.id}
               hasPriority={hasPriority}
-              isMobile={isMobile}
               stormCopyCount={prospectiveStormCounts[String(obj.id)]}
               onDragEnd={handleDragEnd}
               onDrag={handleDrag}
@@ -744,6 +878,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
                 zIndex={handSize + j}
                 theme={ZONE_THEME.graveyard}
                 hasPriority={hasPriority}
+                enableHover={!isMobile}
                 isSelected={selectedCardId === obj.id}
                 onPlay={playCard}
                 onDragStart={previewManaPayment}
@@ -764,6 +899,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
               key="companion"
               companion={companion}
               canActivate={canActivateCompanion}
+              enableHover={!isMobile}
               theme={ZONE_THEME.companion}
               rotation={fan.rotation(exileCount + handSize + graveyardCards.length)}
               arcOffset={fan.arc(exileCount + handSize + graveyardCards.length)}
@@ -827,31 +963,13 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
         </motion.div>
       )}
       </div>
-      <MobileHeldHandCard
-        gesture={mobileHandGesture}
-        object={
-          mobileHandGesture && objects[mobileHandGesture.objectId]
-            ? objects[mobileHandGesture.objectId]
-            : null
-        }
-        stormCopyCount={
-          mobileHandGesture
-            ? prospectiveStormCounts[String(mobileHandGesture.objectId)]
-            : undefined
-        }
-      />
     </>
   );
 }
 
 interface HandCardProps {
   objectId: number;
-  cardName: string;
-  oracleId?: string;
-  faceName?: string;
   manaCost: ManaCost;
-  backFaceManaCost?: ManaCost;
-  unimplementedMechanics?: string[];
   index: number;
   handSize: number;
   insertionSlotMV: MotionValue<number>;
@@ -862,11 +980,11 @@ interface HandCardProps {
   restingY: number;
   hoverY: number;
   marginLeft: string | number;
-  isPlayable: boolean;
+  isCastable: boolean;
+  enableHover: boolean;
   isSelected: boolean;
   isDragging: boolean;
   hasPriority: boolean;
-  isMobile: boolean;
   stormCopyCount?: number;
   onDragStart: (id: number) => void;
   onDragStop: () => void;
@@ -880,12 +998,7 @@ interface HandCardProps {
 
 const HandCard = memo(function HandCard({
   objectId,
-  cardName,
-  oracleId,
-  faceName,
   manaCost,
-  backFaceManaCost,
-  unimplementedMechanics,
   index,
   handSize,
   insertionSlotMV,
@@ -896,11 +1009,11 @@ const HandCard = memo(function HandCard({
   restingY,
   hoverY,
   marginLeft,
-  isPlayable,
+  isCastable,
+  enableHover,
   isSelected,
   isDragging,
   hasPriority,
-  isMobile,
   stormCopyCount,
   onDragStart: onDragStartProp,
   onDragStop,
@@ -913,11 +1026,17 @@ const HandCard = memo(function HandCard({
 }: HandCardProps) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setDragging = useUiStore((s) => s.setDragging);
-  const isMobileDragged = useUiStore(
-    (s) =>
-      s.mobileHandGesture?.phase === "drag"
-      && s.mobileHandGesture.objectId === objectId,
+  const isMotionOwned = useAnimationStore(
+    (state) =>
+      state.releasedCardMotions.has(objectId)
+      || state.inFlightObjectIds.has(objectId),
   );
+  const isMobileDragged = useUiStore(
+    (state) =>
+      state.mobileHandGesture?.phase === "drag"
+      && state.mobileHandGesture.objectId === objectId,
+  );
+  const isHandSourceOwned = isMotionOwned || isMobileDragged;
 
   // Slide-apart displacement: derive this card's signed x offset from the shared
   // insertion signal. useTransform updates imperatively when the MotionValues
@@ -933,6 +1052,18 @@ const HandCard = memo(function HandCard({
   );
   const displaceSpring = useSpring(displaceTarget, { stiffness: 550, damping: 70 });
   const displaceX = shouldReduceMotion ? displaceTarget : displaceSpring;
+  const dragRollTarget = useMotionValue(0);
+  const dragPitchTarget = useMotionValue(0);
+  const dragRoll = useSpring(dragRollTarget, {
+    stiffness: 175,
+    damping: 17,
+    mass: 0.68,
+  });
+  const dragPitch = useSpring(dragPitchTarget, {
+    stiffness: 185,
+    damping: 18,
+    mass: 0.68,
+  });
 
   // Inner-edge highlights: when this card flanks the active slot, light up the
   // edge facing the gap. The card to the LEFT of the gap lights its RIGHT edge;
@@ -959,8 +1090,18 @@ const HandCard = memo(function HandCard({
   // free-cast permissions such as Omniscience); falls back to the printed cost.
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
   const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
-  const backFace = useBackFaceSpellCost(objectId, backFaceManaCost);
   const playedRef = useRef(false);
+  const cardElementRef = useRef<HTMLDivElement>(null);
+
+  // Successful drops hide the source DOM node before Framer Motion gets a
+  // chance to paint its snap-back frame. If the engine rejects the action and
+  // motion ownership is released while the card remains in hand, restore that
+  // node so it can be interacted with again.
+  useEffect(() => {
+    if (isMotionOwned) return;
+    cardElementRef.current?.style.removeProperty("visibility");
+    playedRef.current = false;
+  }, [isMotionOwned]);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
@@ -968,22 +1109,16 @@ const HandCard = memo(function HandCard({
     setPreviewSticky(true);
   });
 
-  const glowClass = hasPriority
-    ? isPlayable
-      ? "shadow-[0_0_16px_4px_rgba(34,211,238,0.6)] ring-2 ring-cyan-400"
-      : ""
-    : "";
-
   // `rotation`, `arcOffset` and `marginLeft` come from the parent's whole-row
   // `fanGeometry` (sized by hand + wing count) so the hand stays continuous with
   // any castable wings. `index`/`handSize` remain purely for the reorder system.
+  // The resting fan transform belongs to this outer node, while direct dragging
+  // belongs to the inner node. Framer's drag gesture owns x/y MotionValues even
+  // for a tap with no travel; sharing those values with the resting `animate.y`
+  // let a touch reset the card to y=0 and strand it above the fan.
 
   return (
     <motion.div
-      data-card-hover
-      data-hand-card
-      data-hand-rotation={rotation}
-      data-object-id={objectId}
       layout
       initial={{ opacity: 0, y: restingY + 10 }}
       animate={{
@@ -992,49 +1127,16 @@ const HandCard = memo(function HandCard({
         rotate: rotation,
       }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: hoverY + arcOffset, scale: 1.08, zIndex: 30 }}
-      whileDrag={{ scale: 1.05, zIndex: 9999 }}
+      whileHover={enableHover ? { y: hoverY + arcOffset, scale: 1.08, zIndex: 30 } : undefined}
       transition={{
         delay: index * 0.03,
         duration: 0.25,
         layout: { duration: 0.15, delay: 0 },
       }}
-      drag
-      dragConstraints={false}
-      dragElastic={0}
-      dragSnapToOrigin={!playedRef.current}
-      onDragStart={() => {
-        playedRef.current = false;
-        setDragging(true);
-        inspectObject(null);
-        onDragStartProp(objectId);
-      }}
-      onDrag={(_event, info) => onDrag(objectId, info)}
-      onDragEnd={(event, info) => {
-        setDragging(false);
-        onDragStop();
-        const didPlay = onDragEnd(objectId, event, info);
-        if (didPlay) {
-          playedRef.current = true;
-        }
-      }}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (longPressFired.current) { longPressFired.current = false; return; }
-        onClick(objectId, e);
-      }}
-      onDoubleClick={(e) => {
-        e.stopPropagation();
-        onDoubleClick(objectId);
-      }}
-      onMouseEnter={() => onMouseEnter(objectId)}
-      onMouseLeave={onMouseLeave}
-      data-hand-held-source={isMobileDragged || undefined}
-      aria-hidden={isMobileDragged || undefined}
-      className={`relative cursor-pointer leading-[0] select-none ${
-        isMobileDragged ? "w-0 overflow-hidden opacity-0" : ""
+      className={`relative leading-[0] select-none ${
+        isMotionOwned ? "invisible" : ""
       } ${
-        isMobile ? "pointer-events-none" : ""
+        isMobileDragged ? "w-0 overflow-hidden opacity-0" : ""
       }`}
       style={{
         marginLeft: isMobileDragged ? 0 : marginLeft,
@@ -1043,43 +1145,116 @@ const HandCard = memo(function HandCard({
         // whose plain indices can exceed 20.
         zIndex: isDragging ? 9999 : isSelected ? handSize + 20 : index,
       }}
-      {...longPressHandlers}
     >
       <motion.div
-        className={`relative rounded-lg ${glowClass} ${isSelected ? "ring-2 ring-cyan-400" : ""}`}
-        style={{ x: displaceX }}
+        ref={cardElementRef}
+        data-card-hover
+        data-hand-card
+        data-hand-rotation={rotation}
+        data-object-id={objectId}
+        data-hand-held-source={isHandSourceOwned || undefined}
+        data-hand-hover-enabled={enableHover ? "true" : "false"}
+        aria-hidden={isHandSourceOwned || undefined}
+        drag
+        dragConstraints={false}
+        dragElastic={0.045}
+        dragMomentum={false}
+        dragSnapToOrigin={!playedRef.current}
+        whileDrag={{
+          scale: 1.14,
+          zIndex: 9999,
+          filter: "drop-shadow(0 24px 24px rgba(0,0,0,0.62))",
+        }}
+        onDragStart={() => {
+          playedRef.current = false;
+          dragRollTarget.set(0);
+          dragPitchTarget.set(0);
+          setDragging(true);
+          inspectObject(null);
+          onDragStartProp(objectId);
+        }}
+        onDrag={(_event, info) => {
+          if (!shouldReduceMotion) {
+            dragRollTarget.set(
+              Math.max(-11, Math.min(11, info.velocity.x * 0.011)),
+            );
+            dragPitchTarget.set(
+              Math.max(-6.5, Math.min(6.5, -info.velocity.y * 0.007)),
+            );
+          }
+          onDrag(objectId, info);
+        }}
+        onDragEnd={(event, info) => {
+          setDragging(false);
+          const didPlay = onDragEnd(objectId, event, info);
+          if (didPlay) {
+            playedRef.current = true;
+            // Motion-store ownership reaches React on the next render. Suppress
+            // this physical source immediately so the released card continues
+            // from the exact drop pose instead of flashing back in the fan.
+            cardElementRef.current?.style.setProperty(
+              "visibility",
+              "hidden",
+            );
+          }
+          dragRollTarget.set(0);
+          dragPitchTarget.set(0);
+          onDragStop();
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (longPressFired.current) { longPressFired.current = false; return; }
+          onClick(objectId, e);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          onDoubleClick(objectId);
+        }}
+        onMouseEnter={() => onMouseEnter(objectId)}
+        onMouseLeave={onMouseLeave}
+        className="pointer-events-auto relative cursor-pointer"
+        {...(enableHover ? longPressHandlers : {})}
       >
-        <CardImage
-          cardName={cardName}
-          size="normal"
-          oracleId={oracleId}
-          faceName={faceName}
-          unimplementedMechanics={unimplementedMechanics}
-          className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"
-        />
-        {stormCopyCount !== undefined && (
-          <StormCopyBadge count={stormCopyCount} variant="fan" />
-        )}
-        {/* Inner-edge drop highlights. Always rendered, normally invisible; their
-            opacity is driven by MotionValues so the glow toggles without a
-            re-render. They sit inside the displaced + rotated card, so they track
-            the slid-apart edge and the fan tilt. */}
         <motion.div
-          aria-hidden
-          className="pointer-events-none absolute inset-y-0 left-0 w-[3px] rounded-full bg-ember-bright shadow-[0_0_10px_3px_rgba(251,146,60,0.85)]"
-          style={{ opacity: leftEdgeOpacity }}
-        />
-        <motion.div
-          aria-hidden
-          className="pointer-events-none absolute inset-y-0 right-0 w-[3px] rounded-full bg-ember-bright shadow-[0_0_10px_3px_rgba(251,146,60,0.85)]"
-          style={{ opacity: rightEdgeOpacity }}
-        />
-        {/* @container overlay sized to the card (absolute inset-0 takes width
-            from the card wrapper, so container-type can't collapse it); lets the
-            pips scale in cqi with --hand-card-w instead of a fixed px size. */}
-        <div className="pointer-events-none absolute inset-0 @container">
-          <ManaCostPips cost={displayCost} isReduced={isReduced} backFace={backFace} size="fluid" />
-        </div>
+          className={`relative isolate rounded-lg ${isSelected ? "ring-1 ring-[#d8cfb2]/75" : ""}`}
+          style={{
+            x: displaceX,
+            rotate: shouldReduceMotion ? 0 : dragRoll,
+            rotateX: shouldReduceMotion ? 0 : dragPitch,
+            transformPerspective: 800,
+            transformOrigin: "50% 82%",
+          }}
+        >
+          {hasPriority && isCastable && (
+            <CastableCardGlow className="z-0" />
+          )}
+          <TabletopCardFace
+            objectId={objectId}
+            displayCost={displayCost}
+            isCostReduced={isReduced}
+            className="relative z-10"
+          />
+          {stormCopyCount !== undefined && (
+            <StormCopyBadge count={stormCopyCount} variant="fan" />
+          )}
+          {/* Inner-edge drop highlights. Always rendered, normally invisible; their
+              CSS opacity baseline prevents a first-paint/hover flash, while the
+              MotionValues override it during a reorder without a re-render. They sit
+              inside the displaced + rotated card, so they track the slid-apart edge
+              and the fan tilt. */}
+          <motion.div
+            aria-hidden
+            data-hand-insertion-edge="left"
+            className="pointer-events-none absolute inset-y-0 left-0 w-[3px] rounded-full bg-ember-bright opacity-0 shadow-[0_0_10px_3px_rgba(251,146,60,0.85)]"
+            style={{ opacity: leftEdgeOpacity }}
+          />
+          <motion.div
+            aria-hidden
+            data-hand-insertion-edge="right"
+            className="pointer-events-none absolute inset-y-0 right-0 w-[3px] rounded-full bg-ember-bright opacity-0 shadow-[0_0_10px_3px_rgba(251,146,60,0.85)]"
+            style={{ opacity: rightEdgeOpacity }}
+          />
+        </motion.div>
       </motion.div>
     </motion.div>
   );
@@ -1099,6 +1274,7 @@ interface ZoneFanCardProps {
   zIndex: number;
   theme: ZoneTheme;
   hasPriority: boolean;
+  enableHover: boolean;
   isSelected: boolean;
   onPlay: (objectId: number) => void;
   onDragStart: (objectId: number) => void;
@@ -1130,6 +1306,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
   zIndex,
   theme,
   hasPriority,
+  enableHover,
   isSelected,
   onPlay,
   onDragStart,
@@ -1153,6 +1330,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
   // Suppress dragSnapToOrigin only when the flick actually cast the card, so a
   // short/sideways drag springs back into the wing instead of flying off.
   const playedRef = useRef(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   return (
     <motion.div
@@ -1170,65 +1348,76 @@ const ZoneFanCard = memo(function ZoneFanCard({
       initial={{ opacity: 0, y: restingY + 10 }}
       animate={{ opacity: 1, y: restingY + arcOffset, rotate: rotation }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: hoverY + arcOffset, scale: 1.08, zIndex: 30 }}
-      whileDrag={{ scale: 1.05, zIndex: 9999 }}
+      whileHover={enableHover ? { y: hoverY + arcOffset, scale: 1.08, zIndex: 30 } : undefined}
       transition={{ duration: 0.25, layout: { duration: 0.15, delay: 0 } }}
-      drag
-      dragConstraints={false}
-      dragElastic={0}
-      dragSnapToOrigin={!playedRef.current}
-      onDragStart={() => {
-        playedRef.current = false;
-        setDragging(true);
-        inspectObject(null);
-        onDragStart(objectId);
-      }}
-      onDragEnd={(_event, info: PanInfo) => {
-        setDragging(false);
-        onDragStop();
-        // Cast-only: flick up past the threshold while holding priority. There
-        // is no reorder branch, so this card can never land in the hand.
-        if (hasPriority && info.offset.y < DRAG_PLAY_THRESHOLD) {
-          playedRef.current = true;
-          onPlay(objectId);
-        }
-      }}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (longPressFired.current) { longPressFired.current = false; return; }
-        onClick(objectId, e);
-      }}
-      onDoubleClick={(e) => {
-        e.stopPropagation();
-        onDoubleClick(objectId);
-      }}
+      className="relative leading-[0] select-none"
+      style={{ marginLeft, zIndex: isDragging ? 9999 : zIndex }}
       onMouseEnter={() => onMouseEnter(objectId)}
       onMouseLeave={onMouseLeave}
-      className="relative cursor-grab active:cursor-grabbing leading-[0] select-none"
-      style={{ marginLeft, zIndex }}
-      {...longPressHandlers}
     >
-      <div
-        className={`relative overflow-hidden rounded-lg border ${theme.cardBorder} ${
-          isSelected ? "ring-2 ring-cyan-400" : ""
-        }`}
+      <motion.div
+        drag
+        dragConstraints={false}
+        dragElastic={0}
+        dragSnapToOrigin={!playedRef.current}
+        whileDrag={{ scale: 1.05 }}
+        onDragStart={() => {
+          playedRef.current = false;
+          setIsDragging(true);
+          setDragging(true);
+          inspectObject(null);
+          onDragStart(objectId);
+        }}
+        onDragEnd={(_event, info: PanInfo) => {
+          setIsDragging(false);
+          setDragging(false);
+          onDragStop();
+          // Cast-only: flick up past the threshold while holding priority. There
+          // is no reorder branch, so this card can never land in the hand.
+          if (hasPriority && info.offset.y < DRAG_PLAY_THRESHOLD) {
+            playedRef.current = true;
+            onPlay(objectId);
+          }
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (longPressFired.current) { longPressFired.current = false; return; }
+          onClick(objectId, e);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          onDoubleClick(objectId);
+        }}
+        className="pointer-events-auto relative cursor-pointer"
+        {...longPressHandlers}
       >
-        <CardImage
-          cardName={cardName}
-          size="normal"
-          unimplementedMechanics={unimplementedMechanics}
-          className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"
-        />
-        {/* Per-zone translucent wash marking "castable from elsewhere". */}
-        <div className={`pointer-events-none absolute inset-0 transition-colors ${theme.overlayCard}`} />
-      </div>
-      {/* Per-zone castable glow ring (sibling of the clipped image so it isn't cropped). */}
-      <div className={`pointer-events-none absolute inset-0 rounded-lg ${theme.ring}`} />
-      {/* @container overlay sized to the card so the pips scale in cqi with
-          --hand-card-w (see the hand-card render above). */}
-      <div className="pointer-events-none absolute inset-0 @container">
-        <ManaCostPips cost={displayCost} isReduced={isReduced} backFace={backFace} size="fluid" />
-      </div>
+        <div
+          className={`relative overflow-hidden rounded-lg border ${theme.cardBorder} ${
+            isSelected ? "ring-2 ring-cyan-400" : ""
+          }`}
+        >
+          <CardImage
+            cardName={cardName}
+            size="normal"
+            unimplementedMechanics={unimplementedMechanics}
+            className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"
+          />
+          {/* Per-zone translucent wash marking "castable from elsewhere". */}
+          <div className={`pointer-events-none absolute inset-0 transition-colors ${theme.overlayCard}`} />
+        </div>
+        {/* Per-zone castable glow ring (sibling of the clipped image so it isn't cropped). */}
+        <div className={`pointer-events-none absolute inset-0 rounded-lg ${theme.ring}`} />
+        {/* @container overlay sized to the card so the pips scale in cqi with
+            --hand-card-w (see the hand-card render above). */}
+        <div className="pointer-events-none absolute inset-0 @container">
+          <ManaCostPips
+            cost={displayCost}
+            isReduced={isReduced}
+            backFace={backFace}
+            size="fluid"
+          />
+        </div>
+      </motion.div>
     </motion.div>
   );
 });

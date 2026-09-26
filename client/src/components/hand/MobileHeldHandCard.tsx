@@ -14,6 +14,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { MobileHandGesture } from "../../stores/uiStore.ts";
 import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
+import { castActionsForObject } from "../../viewmodel/cardActionChoice.ts";
 import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
@@ -36,6 +37,7 @@ export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHe
   const effectiveCost = useGameStore((s) =>
     object ? s.spellCosts[String(object.id)] : undefined,
   );
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const backFace = useBackFaceSpellCost(object?.id, object?.back_face?.mana_cost);
   const shouldReduceMotion = useReducedMotion();
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
@@ -46,24 +48,24 @@ export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHe
   const rotateTarget = useTransform(
     dragVelocityX,
     [-900, 0, 900],
-    [-5.5, 0, 5.5],
+    [-9, 0, 9],
     { clamp: true },
   );
   const rotateXTarget = useTransform(
     dragVelocityY,
     [-900, 0, 900],
-    [3.5, 0, -3.5],
+    [5.5, 0, -5.5],
     { clamp: true },
   );
   const rotate = useSpring(rotateTarget, {
-    damping: 18,
-    mass: 0.45,
-    stiffness: 260,
+    damping: 16,
+    mass: 0.7,
+    stiffness: 170,
   });
   const rotateX = useSpring(rotateXTarget, {
-    damping: 20,
-    mass: 0.45,
-    stiffness: 280,
+    damping: 17,
+    mass: 0.7,
+    stiffness: 180,
   });
   const dynamicMotionEnabled =
     animationSpeedMultiplier > 0 && !shouldReduceMotion;
@@ -86,11 +88,15 @@ export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHe
   }
 
   const { displayCost, isReduced } = spellCostDisplay(effectiveCost, object.mana_cost);
+  const isCastable = castActionsForObject(
+    legalActionsByObject,
+    object.id,
+  ).length > 0;
   const { sourceOrigin } = gesture;
   const highlightClass = gesture.castReady
     ? "ring-2 ring-amber-300 shadow-[0_0_22px_6px_rgba(251,191,36,0.72)]"
-    : gesture.playable
-      ? "ring-2 ring-cyan-400 shadow-[0_0_16px_4px_rgba(34,211,238,0.6)]"
+    : gesture.playable && isCastable
+      ? "shadow-[0_0_4px_2px_rgba(34,211,238,0.82),0_0_8px_2px_rgba(14,165,233,0.32)]"
       : "";
 
   return createPortal(
@@ -110,11 +116,11 @@ export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHe
         animationSpeedMultiplier > 0
           ? {
               opacity: 0,
-              scale: 1,
+              scale: 1.04,
             }
           : false
       }
-      animate={{ opacity: 1, scale: 1 }}
+      animate={{ opacity: 1, scale: 1.13 }}
       transition={{
         duration: (shouldReduceMotion ? 0.06 : 0.12) * animationSpeedMultiplier,
         ease: [0.22, 1, 0.36, 1],

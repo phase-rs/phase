@@ -140,48 +140,46 @@ export function GameMenu({
   return (
     <div
       ref={menuRef}
+      data-game-menu-anchor=""
       /* Row, not a column: the engine badge sits beside the menu button. The
          dropdown below is absolutely positioned, so it stays anchored to this
          container's left edge and is unaffected by the row's flow. */
       className="fixed z-40 flex items-center gap-2"
       style={{
-        // Fixed, so the board grid's rail padding does not apply — the
-        // left-dock log offset has to be added here, mirroring how the action
-        // rail consumes `--game-right-rail-offset`.
-        left: "calc(env(safe-area-inset-left) + 0.5rem + var(--game-left-rail-offset, 0px))",
-        top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.75rem)",
+        left: "calc(var(--game-menu-inline, var(--game-control-safe-left)) + var(--game-left-rail-offset, 0px))",
+        top: "calc(var(--game-control-safe-top) + var(--game-top-overlay-offset, 0px))",
       }}
     >
-      <div className="flex h-9 w-9 items-center justify-center rounded-full border border-cyan-200/45 bg-slate-950/84 shadow-[0_8px_22px_rgba(0,0,0,0.32),0_0_14px_rgba(34,211,238,0.22)] backdrop-blur-md">
-        <button
-          ref={resolvedMenuTriggerRef}
-          onClick={() => {
-            setOpen(!open);
-          }}
-          className={`flex h-7 w-7 items-center justify-center rounded-full border transition-colors ${
-            open
-              ? "border-cyan-200/80 bg-cyan-300/18 text-cyan-50"
-              : "border-white/15 bg-white/7 text-gray-100 hover:border-cyan-200/70 hover:bg-cyan-300/14"
-          }`}
-          aria-label={t("gameMenu.menu")}
-          title={t("gameMenu.menu")}
-          aria-haspopup="true"
-          aria-expanded={open}
+      <button
+        ref={resolvedMenuTriggerRef}
+        data-game-menu-button=""
+        onClick={() => {
+          setOpen(!open);
+        }}
+        className={`tabletop-liquid-glass-control relative flex h-11 w-11 shrink-0 items-center justify-center p-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35 ${
+          open
+            ? "border-cyan-200/55 text-cyan-50"
+            : "text-slate-100 hover:text-white"
+        }`}
+        aria-label={t("gameMenu.menu")}
+        title={t("gameMenu.menu")}
+        aria-haspopup="true"
+        aria-expanded={open}
+      >
+        <svg
+          aria-hidden="true"
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          className="relative z-[2] h-5 w-5"
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-            className="h-4 w-4"
-          >
-            <path
-              fillRule="evenodd"
-              d="M2 4.75A.75.75 0 0 1 2.75 4h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75ZM2 10a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm0 5.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75Z"
-              clipRule="evenodd"
-            />
-          </svg>
-        </button>
-      </div>
+          <path
+            fillRule="evenodd"
+            d="M2 4.75A.75.75 0 0 1 2.75 4h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75ZM2 10a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 10Zm0 5.25a.75.75 0 0 1 .75-.75h14.5a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75Z"
+            clipRule="evenodd"
+          />
+        </svg>
+      </button>
       <EngineModeBadge />
       {open && (
         <div

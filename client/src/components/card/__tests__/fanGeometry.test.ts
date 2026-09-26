@@ -24,6 +24,17 @@ describe("fanGeometry profiles", () => {
     expect(wide.arc(0)).toBeLessThan(compact.arc(0));
   });
 
+  it("tightens only horizontal spacing without changing the wide silhouette", () => {
+    const tight = fanGeometry(8, "--hand-card-w", "tight");
+    const wide = fanGeometry(8, "--hand-card-w", "wide");
+
+    expect(spreadFactor(8, "tight")).toBeCloseTo(4.7);
+    expect(spreadFactor(8, "tight")).toBeLessThan(spreadFactor(8, "wide"));
+    expect(tight.rotation(0)).toBeCloseTo(wide.rotation(0));
+    expect(tight.rotation(7)).toBeCloseTo(wide.rotation(7));
+    expect(tight.arc(0)).toBeCloseTo(wide.arc(0));
+  });
+
   it("keeps compact geometry as the default for constrained surfaces", () => {
     expect(fanGeometry(8).overlap).toBe(
       fanGeometry(8, "--hand-card-w", "compact").overlap,

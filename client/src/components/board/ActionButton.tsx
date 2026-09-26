@@ -85,7 +85,7 @@ export function ActionButton() {
     (s) => s.endContinuousEffectOffers,
   );
 
-  const { advanceLabel } = usePhaseInfo();
+  const { advanceLabel, compactAdvanceLabel } = usePhaseInfo();
 
   const mode = getActionButtonMode(waitingFor, stackLength, canActForWaitingState);
 
@@ -283,15 +283,22 @@ export function ActionButton() {
   const actionBlocked = actionPending;
   const idle = mode === "hidden" && !isEndingTurn;
   const blocked = idle || actionBlocked;
+  const showsPassAction =
+    (mode === "priority-empty" || idle) && !isEndingTurn && !isResolvingStack;
   const panelClassName =
-    "flex max-w-[min(32rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 rounded-[10px] border border-white/10 bg-slate-950/92 p-2 shadow-[0_12px_32px_rgba(15,23,42,0.45)] max-lg:portrait:w-full max-lg:portrait:max-w-none max-lg:portrait:flex-col max-lg:portrait:flex-nowrap max-lg:portrait:gap-1 max-lg:portrait:p-1.5 lg:max-w-none [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1 [@media(max-height:500px)]:rounded-[8px]";
-  const primaryButtonClass = "min-w-[10.5rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 lg:min-w-[12rem] [@media(max-height:500px)]:!min-w-[5.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
-  const secondaryButtonClass = "min-w-[8rem] max-lg:portrait:w-full max-lg:portrait:!min-w-0 [@media(max-height:500px)]:!min-w-[4.5rem] [@media(max-height:500px)]:!min-h-7 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
+    "flex max-w-[min(30rem,calc(100vw-1.25rem))] flex-row flex-wrap items-center justify-end gap-1.5 max-lg:portrait:grid max-lg:portrait:w-full max-lg:portrait:max-w-none max-lg:portrait:grid-cols-2 max-lg:portrait:gap-1 lg:max-w-none [@media(max-height:500px)]:gap-1";
+  const primaryButtonClass = "min-w-[9.75rem] max-lg:portrait:min-h-11 max-lg:portrait:w-full max-lg:portrait:!min-w-0 lg:min-w-[11rem] [@media(max-height:500px)]:min-w-[5.5rem] [@media(max-height:500px)]:!min-h-11 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
+  const secondaryButtonClass = "min-w-[7rem] max-lg:portrait:min-h-11 max-lg:portrait:w-full max-lg:portrait:!min-w-0 [@media(max-height:500px)]:min-w-[4.5rem] [@media(max-height:500px)]:!min-h-11 [@media(max-height:500px)]:!px-2 [@media(max-height:500px)]:!py-0.5 [@media(max-height:500px)]:!text-[10px]";
 
   return (
     <>
-      <div className={panelClassName} data-action-button-panel>
-        {mode === "combat-attackers" && (
+      <div
+        className={panelClassName}
+        data-action-button-panel
+        data-compact-pass-layout={showsPassAction ? "true" : undefined}
+        data-stack-action-layout={mode === "priority-stack" ? "true" : undefined}
+      >
+        {mode === "combat-attackers" && !isEndingTurn && (
           <>
             <button
               disabled={actionBlocked}
@@ -467,8 +474,10 @@ export function ActionButton() {
                 when the local player actually has the priority window. */}
             {!idle && (
               <button
+                data-next-phase-action=""
                 disabled={blocked}
                 onClick={() => dispatchAction({ type: "PassPriority" })}
+                aria-label={advanceLabel}
                 aria-describedby={priorityTooltipId}
                 className={gameButtonClass({
                   tone: "emerald",
@@ -477,13 +486,17 @@ export function ActionButton() {
                   className: `${primaryButtonClass} group relative`,
                 })}
               >
-                {advanceLabel}
+                <span data-advance-label-full="">{advanceLabel}</span>
+                <span aria-hidden="true" data-advance-label-compact="">
+                  {compactAdvanceLabel}
+                </span>
                 <GameplayTooltip id={priorityTooltipId}>
                   {t("actionButton.priorityTooltip")}
                 </GameplayTooltip>
               </button>
             )}
             <button
+              data-pass-action=""
               disabled={blocked}
               onClick={() =>
                 dispatchAction({
@@ -491,15 +504,21 @@ export function ActionButton() {
                   data: { mode: { type: "UntilTurnBoundary", until: "EndOfCurrentTurn" } },
                 })
               }
+              aria-label={t("actionButton.pass")}
               aria-describedby={passToEndTooltipId}
               className={`group relative ${gameButtonClass({ tone: "slate", size: "md", disabled: blocked, className: secondaryButtonClass })}`}
             >
-              <span className="flex items-center gap-1">
-                {t("actionButton.pass")}
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
-                  <path fillRule="evenodd" d="M2 10a.75.75 0 0 1 .75-.75h12.59l-2.1-1.95a.75.75 0 1 1 1.02-1.1l3.5 3.25a.75.75 0 0 1 0 1.1l-3.5 3.25a.75.75 0 1 1-1.02-1.1l2.1-1.95H2.75A.75.75 0 0 1 2 10Z" clipRule="evenodd" />
-                </svg>
-              </span>
+              <span className="sr-only">{t("actionButton.pass")}</span>
+              <svg
+                aria-hidden="true"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                className="block h-5 w-5"
+                data-pass-fast-forward-icon=""
+              >
+                <path d="M4 5.25v13.5L11.5 12 4 5.25Zm8.5 0v13.5L20 12l-7.5-6.75Z" />
+              </svg>
               <GameplayTooltip id={passToEndTooltipId} className="w-56">
                 {t("actionButton.passToEndTooltip")}
               </GameplayTooltip>

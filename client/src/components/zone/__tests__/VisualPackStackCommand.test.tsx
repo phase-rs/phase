@@ -36,6 +36,11 @@ vi.mock("../../../hooks/useResolvedCommandZoneDisplay.ts", () => ({
   useResolvedCommandZoneDisplay: () => imageMock.mode,
 }));
 
+vi.mock("../../../hooks/useEngineCardData.ts", () => ({
+  useEngineCardData: () => null,
+  useLocalizedCardName: (name: string | null) => name,
+}));
+
 vi.mock("../../../hooks/usePlayerId.ts", () => ({
   getPlayerId: () => 0,
   useCanActForWaitingState: () => true,
@@ -91,8 +96,7 @@ afterEach(() => {
 });
 
 describe("visual-pack stack and command surfaces", () => {
-  it("binds a live stack source to its current face and advances the exact normal rung", () => {
-    const advance = vi.fn();
+  it("binds a live stack source to its current face and art source", () => {
     const source = buildGameObject({
       id: 42,
       card_id: 42,
@@ -111,7 +115,7 @@ describe("visual-pack stack and command surfaces", () => {
       },
     });
     seed([source], { stack: [entry] });
-    imageMock.results.set(source.name, installedResult("stack", advance));
+    imageMock.results.set(source.name, installedResult("stack"));
 
     const { rerender } = render(
       <StackEntry
@@ -129,10 +133,8 @@ describe("visual-pack stack and command surfaces", () => {
         faceName: "Current DFC Face",
       }),
     );
-    const image = screen.getByAltText(source.name);
-    expect(image).toHaveAttribute("srcset", "stack-small.png 146w, stack-normal.png 488w");
-    fireEvent.error(image);
-    expect(advance).toHaveBeenCalledWith("stack-normal.png");
+    const liveCard = screen.getByRole("article", { name: source.name });
+    expect(liveCard).toHaveAttribute("data-tabletop-art-source", "stack-normal.png");
 
     imageMock.results.set(source.name, installedResult("stack-next"));
     rerender(
@@ -143,7 +145,10 @@ describe("visual-pack stack and command surfaces", () => {
         cardSize={{ width: 120, height: 168 }}
       />,
     );
-    expect(screen.getByAltText(source.name)).toHaveAttribute("src", "stack-next-normal.png");
+    expect(screen.getByRole("article", { name: source.name })).toHaveAttribute(
+      "data-tabletop-art-source",
+      "stack-next-normal.png",
+    );
 
     imageMock.results.set(source.name, {
       src: null,
@@ -159,7 +164,9 @@ describe("visual-pack stack and command surfaces", () => {
         cardSize={{ width: 120, height: 168 }}
       />,
     );
-    expect(screen.getByRole("img", { name: source.name })).toHaveTextContent(source.name);
+    expect(screen.getByRole("article", { name: source.name })).not.toHaveAttribute(
+      "data-tabletop-art-source",
+    );
   });
 
   it("uses only the captured token identity for a detached stack source", () => {

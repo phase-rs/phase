@@ -100,8 +100,297 @@
   --surface-card: linear-gradient(180deg, rgba(13, 18, 29, 0.88), rgba(9, 13, 24, 0.92));
   --bg-app: radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),
     linear-gradient(180deg, #040816 0%, #050b1d 36%, #02050f 100%);
+  --tabletop-ui-edge: rgba(194, 180, 143, 0.3);
+  --tabletop-ui-edge-bright: rgba(230, 216, 177, 0.16);
+  --tabletop-ui-inset: rgba(2, 5, 4, 0.46);
   --measure: 66ch;
   --measure-tight: 48ch;
+}
+
+/* Battlefield HUD material
+   -------------------------------------------------------------------------
+   The Tabletop surface is broad, painterly stone; the HUD should read as pieces
+   set into that surface rather than a second blue-glass web application. These
+   treatments deliberately use broad gradients, restrained aged-metal edges,
+   and compact architectural corners. State colors remain semantic accents. */
+.tabletop-hud-plate,
+.tabletop-opponent-tab,
+.tabletop-command-shelf,
+.tabletop-phase-plaque,
+.tabletop-control-chip,
+.tabletop-status-plaque,
+.tabletop-icon-control {
+  border-radius: 5px;
+  box-shadow:
+    inset 0 1px 0 var(--tabletop-ui-edge-bright),
+    inset 0 -1px 0 var(--tabletop-ui-inset),
+    0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+.tabletop-hud-plate,
+.tabletop-opponent-tab,
+.tabletop-phase-plaque,
+.tabletop-control-chip,
+.tabletop-status-plaque,
+.tabletop-icon-control {
+  background-color: rgba(16, 18, 15, 0.96);
+  background-image:
+    radial-gradient(circle at 18% 12%, rgba(221, 205, 164, 0.08), transparent 34%),
+    linear-gradient(105deg, rgba(255, 245, 214, 0.035), transparent 42%),
+    linear-gradient(180deg, rgba(34, 36, 30, 0.97), rgba(13, 15, 12, 0.98));
+}
+
+.tabletop-hud-plate {
+  border-radius: 9999px;
+}
+
+.tabletop-hud-plate::after,
+.tabletop-command-shelf::after {
+  position: absolute;
+  pointer-events: none;
+  content: "";
+  inset: 3px;
+  border: 1px solid rgba(224, 208, 168, 0.06);
+}
+
+.tabletop-hud-plate::after {
+  border-radius: 9999px;
+}
+
+.tabletop-command-shelf::after {
+  display: none;
+}
+
+.tabletop-command-shelf {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.tabletop-command-shelf > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Compact touch controls use the dark, optically dense glass treatment of
+   iOS system controls: a neutral tint, soft refraction highlight, and a fine
+   light rim instead of a colored gradient. */
+.tabletop-liquid-glass-control {
+  isolation: isolate;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 9999px;
+  background:
+    radial-gradient(circle at 30% 12%, rgba(255, 255, 255, 0.17), transparent 42%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.09), rgba(12, 12, 15, 0.24));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.48),
+    0 10px 28px rgba(0, 0, 0, 0.42);
+  -webkit-backdrop-filter: blur(24px) saturate(145%) brightness(0.84);
+  backdrop-filter: blur(24px) saturate(145%) brightness(0.84);
+}
+
+.tabletop-liquid-glass-control::after {
+  position: absolute;
+  pointer-events: none;
+  content: "";
+  inset: 1px;
+  z-index: 1;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: inherit;
+}
+
+.tabletop-liquid-glass-control:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+  background:
+    radial-gradient(circle at 30% 12%, rgba(255, 255, 255, 0.21), transparent 44%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(12, 12, 15, 0.29));
+}
+
+.tabletop-liquid-glass-rail {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.095), transparent 42%),
+    rgba(14, 14, 17, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.36),
+    0 9px 24px rgba(0, 0, 0, 0.32);
+  -webkit-backdrop-filter: blur(22px) saturate(140%) brightness(0.88);
+  backdrop-filter: blur(22px) saturate(140%) brightness(0.88);
+}
+
+.tabletop-control-chip,
+.tabletop-status-plaque,
+.tabletop-icon-control,
+.tabletop-phase-plaque {
+  border-color: rgba(177, 166, 137, 0.22);
+}
+
+[data-action-button-panel] > button {
+  border-radius: 4px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 244, 210, 0.1),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.32),
+    0 5px 12px rgba(0, 0, 0, 0.22);
+  letter-spacing: 0.055em;
+}
+
+[data-action-button-panel] > [data-next-phase-action],
+[data-action-button-panel] > [data-pass-action] {
+  border-radius: 9999px;
+}
+
+[data-action-button-panel] > button:only-child {
+  grid-column: 1 / -1;
+}
+
+[data-advance-label-compact] {
+  display: none;
+}
+
+@media (width >= 64rem) {
+  .tabletop-command-shelf [data-action-button-panel] {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(11rem, 1.35fr) minmax(7rem, 1fr);
+  }
+
+  .tabletop-command-shelf [data-action-button-panel] > button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .tabletop-command-shelf [data-action-button-panel][data-compact-pass-layout="true"] {
+    grid-template-columns: minmax(11rem, 1fr) 2.75rem;
+  }
+}
+
+[data-opponent-hud-rail] {
+  filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.24));
+}
+
+[data-opponent-hud-seats],
+[data-local-player-hud][data-edge-pill-layout="true"] {
+  --tabletop-identity-life-size:
+    clamp(1.125rem, min(3.8dvw, 5dvh), 1.5rem);
+  --tabletop-identity-name-size:
+    clamp(0.4rem, calc(0.325rem + 0.08vw), 0.5625rem);
+}
+
+[data-opponent-hud-seats] {
+  /* Match the local player's portrait-filled pill by default. Full-height
+     desktop canvases receive a modestly larger version below. */
+  --tabletop-opponent-pill-width: var(--tabletop-life-pill-width);
+  --tabletop-opponent-pill-height: var(--tabletop-life-pill-height);
+  --tabletop-opponent-marker-width: var(--tabletop-opponent-pill-width);
+}
+
+@media (min-width: 64rem) and (min-height: 42rem) {
+  [data-opponent-hud-seats] {
+    --tabletop-opponent-pill-height:
+      clamp(3rem, calc(2rem + 1vw), 4.25rem);
+    --tabletop-opponent-pill-width:
+      calc(var(--tabletop-opponent-pill-height) * 2.0833);
+    --tabletop-opponent-marker-width: var(--tabletop-opponent-pill-width);
+    --tabletop-identity-life-size:
+      clamp(1.375rem, calc(0.95rem + 0.42vw), 1.75rem);
+    --tabletop-identity-name-size:
+      clamp(0.5rem, calc(0.375rem + 0.12vw), 0.6875rem);
+  }
+}
+
+.tabletop-opponent-seat-marker {
+  width: var(--tabletop-opponent-marker-width);
+}
+
+.tabletop-opponent-seat-portrait {
+  isolation: isolate;
+  overflow: visible;
+  width: var(--tabletop-opponent-pill-width);
+  height: var(--tabletop-opponent-pill-height);
+  border-radius: 9999px;
+  contain: layout size;
+}
+
+.tabletop-opponent-seat-avatar {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 100%;
+  min-height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: inherit;
+}
+
+.tabletop-opponent-seat-avatar > img {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+/* Mobile browsers do not all expose the same CSS viewport while zoomed,
+   installed, or using a high-DPR landscape screen. Coarse-pointer phones can
+   therefore satisfy a nominal desktop width even though their usable height is
+   phone-sized. Cap the seat marker with both axes so the portrait stays a HUD
+   token instead of becoming a battlefield-sized image. */
+@media (pointer: coarse) and (max-width: 80rem),
+  (pointer: coarse) and (max-height: 50rem) {
+  [data-opponent-hud-seats] {
+    --tabletop-opponent-pill-width: var(--tabletop-life-pill-width);
+    --tabletop-opponent-pill-height: var(--tabletop-life-pill-height);
+    --tabletop-opponent-marker-width: var(--tabletop-opponent-pill-width);
+  }
+
+  [data-opponent-hud-seats],
+  [data-local-player-hud][data-edge-pill-layout="true"] {
+    --tabletop-identity-life-size:
+      clamp(1.125rem, min(3.8dvw, 5dvh), 1.5rem);
+    --tabletop-identity-name-size:
+      clamp(0.4rem, min(1vw, 1.6dvh), 0.5rem);
+  }
+}
+
+.tabletop-opponent-seat-life {
+  font-size: var(--tabletop-identity-life-size);
+}
+
+.tabletop-opponent-seat-name {
+  font-size: var(--tabletop-identity-name-size);
+}
+
+.tabletop-opponent-seat-statuses {
+  max-width: var(--tabletop-opponent-marker-width);
+}
+
+.tabletop-opponent-tab {
+  overflow: visible;
+}
+
+.tabletop-opponent-tab:focus-visible,
+.tabletop-icon-control:focus-visible,
+.tabletop-control-chip:focus-visible,
+.tabletop-hud-plate:focus-visible {
+  outline: 2px solid rgba(164, 220, 218, 0.75);
+  outline-offset: 2px;
+}
+
+/* iPad and other coarse-pointer layouts can share the denser desktop
+   composition, but their interactive targets must remain finger-sized. */
+@media (pointer: coarse) {
+  .tabletop-phase-plaque button,
+  .tabletop-icon-control,
+  .tabletop-control-chip,
+  [data-action-button-panel] > button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
 }
 
 /* Raised top-lit glass card surface (the gradient companion to bg-surface-*). */
@@ -134,6 +423,30 @@
   --action-btn-bottom: 0.75rem;
   --action-btn-right: 3.5rem;
   --game-edge-right: 0.75rem;
+  /* Full-bleed tabletop art may extend beneath curved display corners, but fixed
+     controls must remain inside the device's dynamic safe area. `max()` keeps
+     a normal 12px margin on rectangular displays without adding extra space
+     to the larger inset Safari reports for rounded iPhone/iPad hardware. */
+  --game-control-safe-left: max(0.75rem, env(safe-area-inset-left, 0px));
+  --game-control-safe-right: max(0.75rem, env(safe-area-inset-right, 0px));
+  --game-control-safe-top: max(0.75rem, env(safe-area-inset-top, 0px));
+  --game-control-safe-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+  /* Lower-corner controls sit below the camera housing, so the full-width
+     landscape safe rectangle is unnecessarily conservative. Use the larger
+     horizontal hardware inset for both sides so rotating the Dynamic Island
+     cannot make one cluster hug the glass more tightly than the other. */
+  --game-control-lower-inline: clamp(
+    0.75rem,
+    max(
+      env(safe-area-inset-left, 0px),
+      env(safe-area-inset-right, 0px)
+    ),
+    1.5rem
+  );
+  /* Shared touch identity silhouette. Both the local and opponent life
+     portraits consume these dimensions so their shape cannot drift. */
+  --tabletop-life-pill-width: clamp(5.5rem, min(18dvw, 24dvh), 6.25rem);
+  --tabletop-life-pill-height: clamp(2.75rem, min(8dvw, 12dvh), 3rem);
   --game-mobile-hand-lift: 0rem;
   --game-player-row-height: min(calc(0.18 * (100dvh - var(--game-top-overlay-offset, 0px))), 150px);
   --game-board-choice-bottom: calc(
@@ -408,7 +721,62 @@ select.select-dark option {
   }
 }
 
+/* Castable commanders carry a restrained gold heat haze behind the card. The
+   printed frame stays untouched; three wisps drift upward without taking input. */
+.tabletop-command-castable-aura {
+  box-shadow:
+    0 1px 3px 1.5px rgb(245 158 11 / 48%),
+    0 0 6px 1.5px rgb(251 191 36 / 30%);
+  filter: blur(1px);
+}
+
+.tabletop-command-castable-steam {
+  position: absolute;
+  bottom: 8%;
+  width: 18%;
+  height: 58%;
+  border-radius: 999px;
+  background: linear-gradient(0deg, rgb(251 191 36 / 34%), rgb(254 240 138 / 5%));
+  filter: blur(6px);
+  opacity: 0;
+  animation: tabletop-command-steam 2.7s ease-in-out infinite;
+}
+
+.tabletop-command-castable-steam--one {
+  left: 21%;
+}
+
+.tabletop-command-castable-steam--two {
+  left: 43%;
+  animation-delay: -0.9s;
+}
+
+.tabletop-command-castable-steam--three {
+  left: 64%;
+  animation-delay: -1.8s;
+}
+
+@keyframes tabletop-command-steam {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 8%, 0) scaleX(0.72);
+  }
+  34% {
+    opacity: 0.48;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(10%, -38%, 0) scaleX(1.18);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .tabletop-command-castable-steam {
+    animation: none;
+    opacity: 0.16;
+    transform: translate3d(0, -8%, 0);
+  }
+
   .menu-scene::before {
     animation: none;
     opacity: 0.08;
@@ -521,12 +889,15 @@ select.select-dark option {
   }
 }
 
-/* Landscape phones: very short viewport needs aggressive card shrink
-   and repositioned fixed UI elements */
+/* Landscape phones keep card faces large enough for their title, cost, and
+   upper rules text to survive high-DPR rasterization. The wide fan already
+   overlaps cards to fit the viewport, so shrinking every card to 75% only
+   destroys legibility without buying useful battlefield space. */
 @media (max-height: 500px) {
   :root {
-    --card-viewport-scale: 0.75;
-    --art-crop-viewport-scale: 0.7;
+    --card-viewport-scale: 0.95;
+    --art-crop-viewport-scale: 0.9;
+    --hand-card-scale: 1.45;
     --action-btn-bottom: 0.25rem;
     --action-btn-right: 3rem;
     --game-edge-right: 0.375rem;
@@ -549,22 +920,314 @@ select.select-dark option {
   }
 }
 
+[data-hud-plate-art] {
+  display: none;
+}
+
+/* Pin the passive local Tabletop nameplate to the physical bottom-center edge at
+   every resolution. This intentionally ignores the safe area: the plate is
+   presentation, while the hand cards remain lifted into the interaction-safe
+   area. Only actual HUD controls and a nameplate promoted to a legal player-
+   target button accept pointer input. */
+[data-tabletop-screen-space-ui="player-hud"] [data-local-player-hud] {
+  align-items: flex-end;
+  padding-bottom: 0;
+  pointer-events: none;
+}
+
+[data-tabletop-screen-space-ui="player-hud"] [data-local-player-hud] button,
+[data-tabletop-screen-space-ui="player-hud"] [data-local-player-hud] input,
+[data-tabletop-screen-space-ui="player-hud"] [data-local-player-hud] select,
+[data-tabletop-screen-space-ui="player-hud"] [data-local-player-hud] [role="button"] {
+  pointer-events: auto;
+}
+
+/* The battlefield uses one compact Tabletop HUD composition on phone, tablet,
+   and desktop. Pointer capability still controls hover/touch behavior, not the
+   placement or silhouette of static HUD elements. */
+@media all {
+  [data-game-menu-anchor] {
+    --game-menu-inline: var(--game-control-lower-inline);
+  }
+
+  [data-touch-action-cluster] {
+    width: 100%;
+  }
+
+  [data-tabletop-screen-space-ui="player-hud"] {
+    position: fixed !important;
+    right: 0;
+    left: 0;
+    bottom: 0 !important;
+    width: 100vw;
+    z-index: 40;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] {
+    --mobile-player-hud-body-height:
+      clamp(2.25rem, min(6dvw, 10dvh), 2.5rem);
+    --mobile-player-hud-body-width:
+      clamp(3.5rem, calc(var(--mobile-player-hud-body-height) * 1.55), 4rem);
+    --player-phase-rail-height:
+      calc(var(--mobile-player-hud-body-height) - 0.5rem);
+    --player-phase-dot-size:
+      calc(var(--player-phase-rail-height) - 0.125rem);
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate] {
+    isolation: isolate;
+    width: var(--mobile-player-hud-body-width);
+    min-height: 0;
+    height: var(--mobile-player-hud-body-height);
+    overflow: hidden;
+    padding: 0;
+    gap: 0;
+    border-radius: 9999px;
+    clip-path: none;
+    z-index: 2;
+    filter: drop-shadow(0 4px 9px rgba(0, 0, 0, 0.42));
+  }
+
+  [data-major-phase-stop-rail] {
+    display: grid;
+    grid-template-columns:
+      calc(var(--player-phase-dot-size) * 3)
+      var(--mobile-player-hud-body-width)
+      calc(var(--player-phase-dot-size) * 3);
+    width: auto;
+    max-width: none;
+    height: var(--player-phase-rail-height);
+    min-height: var(--player-phase-rail-height);
+    justify-content: center;
+    gap: 0;
+    margin: 0;
+    padding: 0 0.25rem;
+    border-bottom: 0;
+    border-radius: 9999px 9999px 0 0;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.13),
+      0 -4px 18px rgba(0, 0, 0, 0.26);
+  }
+
+  [data-player-hud-phase-stop-rail] {
+    bottom: 0;
+  }
+
+  [data-phase-stop-rail-section] {
+    display: flex;
+    width: calc(var(--player-phase-dot-size) * 3);
+    height: 100%;
+    align-items: center;
+    justify-content: space-evenly;
+  }
+
+  [data-phase-stop-rail-center-gap] {
+    display: block;
+    width: var(--mobile-player-hud-body-width);
+    height: 100%;
+  }
+
+  [data-major-phase-stop-rail] [data-phase-stop-dot] {
+    width: var(--player-phase-dot-size) !important;
+    height: var(--player-phase-dot-size) !important;
+    flex: 0 0 var(--player-phase-dot-size);
+    border-radius: 9999px;
+  }
+
+  [data-advance-label-compact] {
+    display: inline;
+  }
+
+  [data-advance-label-full] {
+    display: none;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate]::after {
+    display: none;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-avatar] {
+    display: none;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-art] {
+    display: block;
+    z-index: 0;
+    opacity: 1;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-art] > img {
+    object-position: center 22%;
+    filter: saturate(1.02) contrast(1.05);
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-art][data-avatar-fallback="true"] {
+    background:
+      radial-gradient(circle at 42% 26%, color-mix(in srgb, currentColor 54%, white 12%), transparent 48%),
+      linear-gradient(145deg, color-mix(in srgb, currentColor 34%, #111318), #090a0c);
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-profile-fallback] {
+    padding: 0.45rem 0.38rem 0;
+    color: rgba(255, 255, 255, 0.28);
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-art]::after {
+    position: absolute;
+    content: "";
+    inset: 0;
+    background:
+      radial-gradient(circle at 50% 42%, transparent 22%, rgba(5, 8, 7, 0.28) 78%),
+      linear-gradient(180deg, rgba(255, 244, 207, 0.04), rgba(4, 7, 6, 0.36));
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-content] {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    height: 100%;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 0;
+    overflow: hidden;
+    transform: none;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95);
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-label] {
+    position: static;
+    order: 2;
+    width: 76%;
+    height: auto;
+    padding: 0;
+    margin: 0;
+    overflow: visible;
+    clip: auto;
+    border: 0;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-label] > [aria-hidden] {
+    display: none;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-label-text] {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    font-size: var(--tabletop-identity-name-size);
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-overflow: ellipsis;
+    text-align: center;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 1);
+    white-space: nowrap;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-hud-plate-primary] {
+    order: 1;
+    flex: 0 0 auto;
+    gap: 0;
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-life-total-value] {
+    padding: 0;
+    font-size: var(--tabletop-identity-life-size);
+    font-weight: 900;
+    line-height: 0.9;
+    color: rgb(245, 245, 244);
+    text-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.98),
+      0 0 8px rgba(0, 0, 0, 0.72);
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-player-hud-corner-controls] {
+    left: var(--game-control-lower-inline);
+    bottom: var(--game-control-safe-bottom);
+  }
+
+  [data-local-player-hud][data-edge-pill-layout="true"] [data-player-hud-undo-control] {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    right: var(--game-control-safe-right);
+    top: var(--game-control-safe-top);
+  }
+
+  /* The persistent Full Control toggle belongs with the other always-present
+     corner modes, not in the transient priority/combat action rail. */
+  [data-flex-zone="actionRail"] [data-full-control-toggle] {
+    display: none;
+  }
+
+  /* The compact lower-right glass rail owns phase stops on edge layouts. */
+  [data-combat-phase-indicator] {
+    display: none;
+  }
+}
+
+/* Dock one compact row of advance/pass actions at every landscape resolution.
+   The phase-stop groups now flank the centered local life badge. */
+@media (orientation: landscape) {
+  [data-touch-action-cluster] {
+    width: clamp(10.25rem, 18dvw, 11.5rem);
+    max-width: calc(100vw - 0.5rem);
+  }
+
+  [data-flex-zone="actionRail"] [data-action-button-panel] {
+    display: grid;
+    width: 100%;
+    max-width: none;
+    grid-template-columns: minmax(0, 1.55fr) minmax(0, 0.85fr);
+    align-items: stretch;
+    gap: 0.3125rem;
+  }
+
+  [data-flex-zone="actionRail"] [data-action-button-panel][data-compact-pass-layout="true"] {
+    grid-template-columns: minmax(0, 1fr) 2.75rem;
+  }
+
+  /* Resolve and Resolve All are peers. Giving both columns equal room keeps
+     the latter legible on compact Android landscape viewports instead of
+     squeezing it into the narrow secondary-action column. */
+  [data-flex-zone="actionRail"] [data-action-button-panel][data-stack-action-layout="true"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  [data-flex-zone="actionRail"] [data-action-button-panel] > button {
+    width: 100%;
+    min-width: 0 !important;
+    min-height: 2.75rem;
+    padding-inline: 0.5rem;
+    font-size: 0.625rem;
+    line-height: 1.1;
+  }
+
+  [data-flex-zone="actionRail"] [data-action-button-panel][data-compact-pass-layout="true"] > [data-pass-action] {
+    padding-inline: 0;
+  }
+}
+
 /* Mobile PORTRAIT only: lift the fanned hand above the fixed bottom action
    rail and split the dock into left/right clusters. Landscape (<lg) keeps the
    desktop-style right-anchored rail; short landscape viewports are handled by
    the existing max-height:500px compact styles. `width < 64rem` matches
    Tailwind v4's `max-lg:` boundary exactly (strict <, rem-based). */
-@media (width < 64rem) and (orientation: portrait) {
+  @media (width < 64rem) and (orientation: portrait) {
   :root {
-    --game-mobile-hand-lift: 1rem;
+    --game-mobile-hand-lift: 9rem;
+    --game-mobile-pile-lift: 17rem;
     --game-player-row-height: min(calc(0.24 * (100dvh - var(--game-top-overlay-offset, 0px))), 190px);
-    --game-mobile-pile-lift: 16rem;
     --game-mobile-command-lift: 0.5rem;
-    --game-mobile-player-hud-lift: 0.5rem;
+    --game-mobile-player-hud-lift: 12.75rem;
     --game-mobile-player-hud-shift-x: 1.125rem;
   }
 
   [data-flex-zone="playerHandRow"] {
+    /* The middle grid column is independently centered over the player HUD.
+       Only lift the row here: any horizontal translation also moves the hand
+       away from the pinned nameplate. */
     transform: translateY(calc(-1 * var(--game-mobile-hand-lift)));
   }
 
@@ -614,34 +1277,97 @@ select.select-dark option {
     flex-direction: row !important;
     align-items: flex-end !important;
     justify-content: space-between !important;
-    padding-left: calc(env(safe-area-inset-left) + var(--game-edge-right, 0.75rem));
-    padding-right: calc(env(safe-area-inset-right) + var(--game-edge-right, 0.75rem));
+    padding-left: var(--game-control-lower-inline);
+    padding-right: var(--game-control-lower-inline);
     transform-origin: bottom center !important;
   }
 
-  [data-mobile-action-left],
+  [data-mobile-action-left] {
+    width: 42%;
+  }
+
   [data-mobile-action-right] {
-    width: min(calc((100vw - 3rem) / 2), 9.5rem);
+    width: 56%;
+  }
+
+  [data-opponent-hud-rail] {
+    gap: 0.25rem;
+    padding-inline: max(0.25rem, env(safe-area-inset-left));
+  }
+
+  [data-opponent-tab] {
+    min-width: 0;
+  }
+
+  [data-action-button-panel] > button {
+    min-height: 2.75rem;
+    padding-inline: 0.45rem;
+    line-height: 1.15;
   }
 }
 
-/* iOS reserves the landscape bottom edge for the Home/App Switcher gesture.
-   A website or installed PWA cannot suppress that system gesture, so keep the
-   fanned hand's touch surface above its safe-area inset. The 1.25rem floor also
-   protects browser-mode layouts where WebKit reports a transient zero inset. */
+/* Keep the mobile command card at the physical lower edge on the hand's right.
+   Its transparent slot never intercepts the Three.js battlefield, while the
+   fixed z-45 action rail remains above this z-30 dock for reliable controls. */
+@media (width < 64rem) {
+  /* Tuck the card slightly back toward the fan and let it trail naturally
+     through the bottom edge. This is a positional cut, not an overflow crop,
+     so its visible crown still owns inspection and drag interactions. */
+  [data-tabletop-hand-command-zone="player"] {
+    margin-left: 0.5rem;
+    transform: translate(
+      calc(var(--hand-card-w) * -0.18),
+      calc(var(--hand-card-h) * 0.58)
+    );
+  }
+}
+
 @media (width < 64rem) and (orientation: landscape) {
+  /* The command card deliberately trails through the near edge. On compact
+     landscape viewports its visible crown shares the lower-right lane with
+     transient game actions, so reserve that crown's height before positioning
+     Next/Pass (and the equivalent stack-resolution actions). */
+  body:has([data-tabletop-hand-command-zone="player"])
+    [data-flex-zone="actionRail"]:has([data-action-button-panel]) {
+    --action-btn-commander-clearance:
+      clamp(3rem, calc(var(--hand-card-h) * 0.44), 4rem);
+  }
+
+  [data-tabletop-hand-command-zone="player"] {
+    transform: translate(
+      calc(var(--hand-card-w) * -0.18),
+      calc(var(--hand-card-h) * 0.64)
+    );
+  }
+
   [data-flex-zone="playerHandRow"] {
-    transform: translateY(calc(-1 * max(env(safe-area-inset-bottom), 1.25rem)));
+    transform: translateY(
+      calc(-1 * max(env(safe-area-inset-bottom), 1.25rem))
+    );
   }
 }
 
 @media (width < 64rem) and (max-aspect-ratio: 10/11) {
   :root {
-    --game-mobile-hand-lift: 3.25rem;
-    --game-mobile-pile-lift: 18.5rem;
+    --game-mobile-hand-lift: 9.5rem;
+    --game-mobile-pile-lift: 18rem;
     --game-mobile-command-lift: 0.75rem;
-    --game-mobile-player-hud-lift: 1.25rem;
+    --game-mobile-player-hud-lift: 13rem;
     --game-mobile-player-hud-shift-x: 1.5rem;
+  }
+}
+
+@media (width < 30rem) and (orientation: portrait) {
+  [data-opponent-hud-seats] {
+    --tabletop-opponent-row-top: calc(env(safe-area-inset-top) + 0.5rem);
+  }
+
+  [data-opponent-tab] .tabletop-opponent-avatar {
+    display: none;
+  }
+
+  [data-mobile-phase-label] {
+    display: none;
   }
 }
 
@@ -720,7 +1446,7 @@ select.select-dark option {
   --art-crop-h: calc(var(--art-crop-w) * 0.75);
 }
 
-/* Horizontal card strip: cards sized by viewport height for Arena-style horizontal scroll.
+/* Horizontal card strip: cards sized by viewport height for Tabletop-style horizontal scroll.
    Cards get an explicit height derived from viewport so they're large and readable.
    Width follows from the 5:7 aspect ratio. */
 .zone-viewer-strip [role="img"],

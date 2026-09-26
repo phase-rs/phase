@@ -1,4 +1,9 @@
 {
+  "landscapeGate": {
+    "title": "Gira el dispositivo",
+    "description": "El campo de batalla está disponible en modo horizontal en teléfonos y tabletas.",
+    "exit": "Volver al menú"
+  },
   "playerLatency": {"host":"Anfitrión","waiting":"Esperando","value":"{{ms}} ms","description":"Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."},
   "abilityBlock": {
     "badge": "Bloqueada",
@@ -135,6 +140,14 @@
     "holdCtrlFront": "Mantén Ctrl para la cara frontal",
     "holdCtrlFlip": "Mantén Ctrl para girar",
     "flip": "Girar",
+    "detailAriaLabel": "Detalles de la carta: {{name}}",
+    "closeDetails": "Cerrar detalles de la carta",
+    "detailViewOptions": "Vista de detalles de la carta",
+    "detailView": {
+      "live": "En juego",
+      "original": "Original",
+      "parse": "Análisis"
+    },
     "report": "Informar de un problema",
     "reported": "Informado ✓",
     "altParsedAbilities": "Alt: habilidades analizadas",
@@ -2436,6 +2449,20 @@
     "EndCombat": "Fin del combate",
     "PostCombatMain": "Fase principal 2",
     "End": "Paso final",
+    "Cleanup": "Limpieza"
+  },
+  "phaseNameCompact": {
+    "Untap": "Enderezar",
+    "Upkeep": "Mantenimiento",
+    "Draw": "Robar",
+    "PreCombatMain": "Principal 1",
+    "BeginCombat": "Combate",
+    "DeclareAttackers": "Atacantes",
+    "DeclareBlockers": "Bloqueadores",
+    "CombatDamage": "Daño",
+    "EndCombat": "Fin combate",
+    "PostCombatMain": "Principal 2",
+    "End": "Final",
     "Cleanup": "Limpieza"
   },
   "counterMoveDistribution": {

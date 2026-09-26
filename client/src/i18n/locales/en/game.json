@@ -1,4 +1,9 @@
 {
+  "landscapeGate": {
+    "title": "Rotate your device",
+    "description": "Battlefield play is available in landscape mode on phones and tablets.",
+    "exit": "Back to menu"
+  },
   "playerLatency": {"host":"Host","waiting":"Waiting","value":"{{ms}} ms","description":"Round-trip latency to the host. A missing reply does not disconnect the game."},
   "abilityBlock": {
     "badge": "Blocked",
@@ -135,6 +140,14 @@
     "holdCtrlFront": "Hold Ctrl for front face",
     "holdCtrlFlip": "Hold Ctrl to flip",
     "flip": "Flip",
+    "detailAriaLabel": "Card details: {{name}}",
+    "closeDetails": "Close card details",
+    "detailViewOptions": "Card detail view",
+    "detailView": {
+      "live": "Live",
+      "original": "Original",
+      "parse": "Parse"
+    },
     "report": "Report a problem",
     "reported": "Reported ✓",
     "altParsedAbilities": "Alt: parsed abilities",
@@ -2474,6 +2487,20 @@
     "EndCombat": "End Combat",
     "PostCombatMain": "Main Phase 2",
     "End": "End Step",
+    "Cleanup": "Cleanup"
+  },
+  "phaseNameCompact": {
+    "Untap": "Untap",
+    "Upkeep": "Upkeep",
+    "Draw": "Draw",
+    "PreCombatMain": "Main 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attackers",
+    "DeclareBlockers": "Blockers",
+    "CombatDamage": "Damage",
+    "EndCombat": "End Combat",
+    "PostCombatMain": "Main 2",
+    "End": "End",
     "Cleanup": "Cleanup"
   },
   "counterMoveDistribution": {
