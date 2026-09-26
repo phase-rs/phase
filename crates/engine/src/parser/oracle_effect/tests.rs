@@ -4257,7 +4257,7 @@ fn normalize_verb_token_does_not_invent_stems_for_unknown_verbs() {
 ///
 /// Feeds the parser the un-tilde'd "named X" text the way production
 /// sees it after `normalize_card_name_refs`' `"named ~"` → `"named
-/// CardName"` restore (`oracle_util.rs:1553`). Asserting the literal
+/// CardName"` restore. Asserting the literal
 /// `FilterProp::Named { name }` value catches a regression in that
 /// restore step, which would otherwise produce `name: "~"` at parse
 /// time and silently mis-match against records whose `name` is the
@@ -34718,7 +34718,9 @@ fn parse_quantity_comparison_greater_than_dynamic() {
     assert!(matches!(
         rhs,
         QuantityExpr::Ref {
-            qty: QuantityRef::StartingLifeTotal
+            qty: QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            }
         }
     ));
 }
@@ -34760,7 +34762,9 @@ fn parse_condition_text_life_greater_than_starting() {
             },
             comparator: Comparator::GT,
             rhs: QuantityExpr::Ref {
-                qty: QuantityRef::StartingLifeTotal
+                qty: QuantityRef::StartingLifeTotal {
+                    player: PlayerScope::Controller,
+                }
             },
         }
     ));

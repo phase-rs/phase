@@ -8876,8 +8876,16 @@ pub enum QuantityRef {
     /// Controller's life total minus the format's starting life total.
     /// Used for "N or more life more than your starting life total" conditions.
     LifeAboveStarting,
-    /// CR 103.4: The format's starting life total (20 for Standard, 40 for Commander, etc.).
-    StartingLifeTotal,
+    /// CR 103.4: The format's starting life total for `player` (20 for Standard,
+    /// 40 for Commander or Archenemy, etc.). Legacy serialized unit values
+    /// default to `Controller`.
+    StartingLifeTotal {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 701.57a: The mana-value limit `N` of the discover that fired the
     /// current "whenever you discover" trigger — read from
     /// `GameState::last_discover_value`. Curator of Sun's Creation: "discover
@@ -9779,6 +9787,7 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -9787,7 +9796,6 @@ impl QuantityRef {
             | QuantityRef::TokensCreatedThisTurn { player, .. }
             | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
             QuantityRef::LifeAboveStarting
-            | QuantityRef::StartingLifeTotal
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
             | QuantityRef::TriggeringScryBottomCount
@@ -10888,16 +10896,14 @@ pub enum PlayerFilter {
     /// CR 402.1 (hand) / CR 119.1 (life) / CR 122.1f (poison) / CR 404.1
     /// (graveyard): Each player satisfying `relation` whose scalar player
     /// attribute `attr`, read PER CANDIDATE PLAYER, satisfies `comparator`
-    /// against `value`. `attr` is the per-player-scalar `QuantityRef` subset
-    /// (`HandSize` / `LifeTotal` / `GraveyardSize` / `PlayerCounter`) — read
-    /// directly off the candidate `Player` at runtime, never via the
-    /// controller-scoped quantity resolver, so its embedded `PlayerScope` /
-    /// `CountScope` carries no game-state meaning here.
+    /// against `value`. `attr` uses the per-player scalar reader (which can
+    /// consult game state for team life or ledger-backed values), so its
+    /// embedded `PlayerScope` / `CountScope` does not choose another player.
     ///
     /// Covers "opponents who have N or more poison counters" (Glissa's
     /// Retriever) and "your opponents with N or more cards in hand"
-    /// (Wolfcaller's Howl). `value` is the controller-relative threshold,
-    /// resolved once per evaluation (candidate-independent).
+    /// (Wolfcaller's Howl). `value` keeps the ability controller and source,
+    /// while `ScopedPlayer` binds to each candidate during evaluation.
     ///
     /// `attr` and `value` are boxed to break the `QuantityExpr →
     /// QuantityRef::PlayerCount → PlayerFilter::PlayerAttribute →
@@ -35154,6 +35160,32 @@ mod tests {
             serde_json::from_str::<QuantityRef>(r#"{"type":"DistinctColorsAmongPermanents"}"#)
                 .is_err(),
             "the population key must stay required under both tags",
+        );
+    }
+
+    #[test]
+    fn starting_life_total_scope_defaults_for_legacy_json_and_round_trips() {
+        let legacy: QuantityRef = serde_json::from_str(r#"{"type":"StartingLifeTotal"}"#)
+            .expect("legacy unit payload defaults to controller scope");
+        assert_eq!(
+            legacy,
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("serializes legacy controller payload"),
+            r#"{"type":"StartingLifeTotal"}"#,
+            "controller scope must preserve the legacy serialized shape",
+        );
+
+        let scoped = QuantityRef::StartingLifeTotal {
+            player: PlayerScope::ScopedPlayer,
+        };
+        let json = serde_json::to_string(&scoped).expect("serializes scoped payload");
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).expect("scoped payload round-trips"),
+            scoped,
         );
     }
 

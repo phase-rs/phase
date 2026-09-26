@@ -9200,7 +9200,9 @@ mod tests {
                 // Oketra's Last Mercy, Resolute Archangel.
                 "Your life total becomes equal to your starting life total.",
                 QuantityExpr::Ref {
-                    qty: QuantityRef::StartingLifeTotal,
+                    qty: QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::Controller,
+                    },
                 },
             ),
             (

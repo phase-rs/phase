@@ -4062,16 +4062,23 @@ fn parse_life_gained_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// CR 103.4: Parse "your/their starting life total". Format-global constant —
-/// "their" is grammatically anaphoric to "a player" but resolves identically.
+/// CR 103.4: Parse "your/their starting life total". "Their" is scoped to
+/// the candidate player; "your" remains bound to the ability controller.
 fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    value(
-        QuantityRef::StartingLifeTotal,
-        alt((
+    alt((
+        value(
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            },
             tag::<_, _, OracleError<'_>>("your starting life total"),
+        ),
+        value(
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            },
             tag("their starting life total"),
-        )),
-    )
+        ),
+    ))
     .parse(input)
 }
 
@@ -9310,7 +9317,12 @@ mod tests {
     #[test]
     fn test_parse_their_starting_life_total() {
         let (rest, q) = parse_quantity_ref("their starting life total").unwrap();
-        assert_eq!(q, QuantityRef::StartingLifeTotal);
+        assert_eq!(
+            q,
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }
+        );
         assert_eq!(rest, "");
     }
 

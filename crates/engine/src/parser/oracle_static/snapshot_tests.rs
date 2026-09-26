@@ -25,6 +25,15 @@ fn static_conditional_as_long_as() {
 }
 
 #[test]
+fn elenda_life_threshold_static() {
+    let def = parse_static_line(
+        "Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.",
+    )
+    .expect("Elenda's life-threshold static must parse");
+    insta::assert_json_snapshot!("elenda_life_threshold_static", &def);
+}
+
+#[test]
 fn static_granted_keyword() {
     let def = parse_static_line("Creatures you control have flying.").unwrap();
     insta::assert_json_snapshot!(def);
