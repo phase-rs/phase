@@ -167,6 +167,14 @@ fn public_concession_refuses_stale_sacrifice_before_any_payment() {
                 .unwrap();
             assert!(prompt(&runner, (1, 1)).contains(&fodder));
             assert_eq!(runner.state().objects[&fodder].controller, P0);
+            assert!(!prompt(&runner, (1, 1)).contains(&source));
+            let before = serde_json::to_value(runner.state()).unwrap();
+            assert!(matches!(
+                apply(runner.state_mut(), P0, GameAction::SelectCards { cards: vec![source] }),
+                Err(EngineError::InvalidAction(ref text))
+                    if text == "Selected permanent not eligible for sacrifice"
+            ));
+            assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
             if concede {
                 // CR 104.3a + CR 800.4a: Concession removes the owned Aura during the payment prompt.
                 apply(
@@ -201,7 +209,7 @@ fn public_concession_refuses_stale_sacrifice_before_any_payment() {
                     },
                 );
                 assert!(
-                    matches!(result, Err(EngineError::InvalidAction(ref text)) if text == "Selected permanent not eligible for sacrifice")
+                    matches!(result, Err(EngineError::ActionNotAllowed(ref text)) if text == "Selected permanent no longer eligible for sacrifice")
                 );
                 assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
             } else {
@@ -265,7 +273,13 @@ fn unselected_advertised_control_loss_keeps_lawful_full_selection() {
     assert_eq!(prompt(&runner, (1, 1)), advertised);
     let live = find_eligible_sacrifice_targets(runner.state(), P0, source, &filter);
     assert!(live.contains(&retained) && !live.contains(&lost));
-    refuse_unchanged(&mut runner, P0, vec![lost]);
+    let before = serde_json::to_value(runner.state()).unwrap();
+    assert!(matches!(
+        apply(runner.state_mut(), P0, GameAction::SelectCards { cards: vec![lost] }),
+        Err(EngineError::ActionNotAllowed(ref text))
+            if text == "Selected permanent no longer eligible for sacrifice"
+    ));
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
     runner
         .act(GameAction::SelectCards {
             cards: vec![retained],
@@ -974,7 +988,7 @@ fn selected_keyword_sacrifice_revalidates_its_current_quality() {
                 let before = serde_json::to_value(runner.state()).unwrap();
                 assert!(
                     matches!(apply(runner.state_mut(), P0, GameAction::SelectCards { cards: vec![fodder] }),
-                    Err(EngineError::InvalidAction(ref text)) if text == "Selected permanent not eligible for sacrifice")
+                    Err(EngineError::ActionNotAllowed(ref text)) if text == "Selected permanent no longer eligible for sacrifice")
                 );
                 assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
             }
@@ -1053,7 +1067,7 @@ fn additional_variable_sacrifice_keeps_announced_bound_after_control_loss() {
             let before = serde_json::to_value(runner.state()).unwrap();
             assert!(
                 matches!(apply(runner.state_mut(), P0, GameAction::SelectCards { cards: vec![retained, lost] }),
-                Err(EngineError::InvalidAction(ref text)) if text == "Selected permanent not eligible for sacrifice")
+                Err(EngineError::ActionNotAllowed(ref text)) if text == "Selected permanent no longer eligible for sacrifice")
             );
             assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
         } else {
