@@ -10177,6 +10177,14 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
         // least one complete forage mode is currently available.
         Effect::Forage => !forage::can_forage(state, ability),
+        // CR 608.2d: "you may transform/convert ~. If you do, …" cannot be
+        // chosen once the transform is impossible — accepting would record a
+        // performed effect for a no-op and still run the "If you do" rider
+        // (Megatron, Tyrant).
+        Effect::Transform {
+            target: TargetFilter::SelfRef,
+            ..
+        } => transform_effect::optional_self_transform_is_impossible(state, ability),
         Effect::PayCost {
             cost: cost @ AbilityCost::TapCreatures { .. },
             payer,
@@ -14801,9 +14809,8 @@ fn resolve_chain_body(
         && !optionality_is_per_iteration(state, ability)
         && optional_effect_is_infeasible(state, ability);
 
-    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction,
-    // exact object selection, or "put that card" move with no card does not
-    // happen. Route each outcome through the existing
+    // CR 608.2c + CR 608.2d: An infeasible optional instruction in this
+    // dispatch does not happen. Route each outcome through the existing
     // decline authority instead of merely suppressing the prompt and falling
     // through to `resolve_effect`: a missing exact parent could consume an
     // unrelated inherited target, while another current-legality failure (such
@@ -14812,13 +14819,16 @@ fn resolve_chain_body(
     // decline instead of surfacing an unsatisfiable waiting state. The decline path preserves the printed
     // tail semantics: dependent "if you do" riders stay gated while independent
     // sequential siblings and explicit decline branches continue. Other
-    // infeasible optional effects (PutChosenCounter/RemoveCounter) retain their
-    // established resolver no-op.
+    // infeasible optional effects retain their established resolver no-op.
     let auto_decline_infeasible_optional = matches!(
         &ability.effect,
         Effect::CastFromZone { .. }
             | Effect::ChangeZone { .. }
             | Effect::MoveCounters { .. }
+            | Effect::Transform {
+                target: TargetFilter::SelfRef,
+                ..
+            }
             | Effect::ChooseObjectsIntoTrackedSet {
                 cardinality: Some(ObjectSelectionCardinality::Exactly { .. }),
                 ..

@@ -3496,15 +3496,50 @@ fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, Quantit
     Ok((rest, QuantityRef::PlayerCount { filter }))
 }
 
+/// CR 119.3 (+ CR 601.2f for the cost reductions): "for each 1 life … this
+/// turn" counts the life each player lost or gained this turn, not the number
+/// of objects or a single triggering event.
+/// The phrase tables `parse_life_lost_ref` / `parse_life_gained_ref` are not
+/// reused here: they also accept the duration-stripped "life you lost", which
+/// after "1 " is `parse_for_each_one_life_changed`'s event-scoped class. This
+/// grammar requires the literal "this turn", so it never claims that class.
+fn parse_for_each_one_life_changed_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("1 life "), tag("one life "))).parse(input)?;
+    let (rest, player) = alt((
+        value(
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Sum,
+            },
+            tag("your opponents have "),
+        ),
+        value(PlayerScope::Controller, tag("you ")),
+    ))
+    .parse(rest)?;
+    alt((
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: player.clone(),
+            },
+            tag("lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeGainedThisTurn { player },
+            tag("gained this turn"),
+        ),
+    ))
+    .parse(rest)
+}
+
 /// CR 119.3 + CR 603.2c: "1 life you gained" / "1 life you lost" — the per-1
 /// multiplier in a "for each 1 life you gained/lost" clause on a
 /// `Whenever you gain/lose life` trigger. The triggering `GameEvent::LifeChanged`
 /// carries the gained/lost magnitude, which `EventContextAmount` resolves via
 /// `extract_amount_from_event` (`game/targeting.rs`: `LifeChanged` => `amount.abs()`).
 /// The leading "1 "/"one " disambiguates from the duration class "life you
-/// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`, which has no
-/// "1 ") and from Blood Tyrant's "1 life lost or gained this way" (no "you";
-/// handled by the `TrackedSetSize` "this way" block).
+/// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`), whose
+/// "for each 1 life ... this turn" form `parse_for_each_one_life_changed_this_turn`
+/// claims first, and from Blood Tyrant's "1 life lost or gained this way" (no
+/// "you"; handled by the `TrackedSetSize` "this way" block).
 fn parse_for_each_one_life_changed(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((tag("1 life you "), tag("one life you "))).parse(input)?;
     value(
@@ -5037,7 +5072,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_recipient_attack_count,
         parse_for_each_spells_before_triggering_spell,
         alt((
-            parse_for_each_one_life_changed,
+            alt((
+                parse_for_each_one_life_changed_this_turn,
+                parse_for_each_one_life_changed,
+            )),
             alt((
                 parse_for_each_opponents_life_change,
                 parse_lost_game_player_count,
@@ -6925,6 +6963,7 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_quantity::parse_for_each_clause;
     use crate::types::ability::{
         AggregateFunction, ControllerRef, FilterProp, ObjectProperty, PlayerFilter, QuantityRef,
         SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
@@ -8726,6 +8765,50 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 119.3: "for each 1 life … this turn" (and its spelled-out "one life"
+    /// form) is the per-player life history, not the triggering event's amount.
+    #[test]
+    fn parse_for_each_one_life_changed_this_turn_reads_life_history() {
+        let opponents = PlayerScope::Opponent {
+            aggregate: AggregateFunction::Sum,
+        };
+        for prefix in ["1", "one"] {
+            for (tail, expected) in [
+                (
+                    "life your opponents have lost this turn",
+                    QuantityRef::LifeLostThisTurn {
+                        player: opponents.clone(),
+                    },
+                ),
+                (
+                    "life your opponents have gained this turn",
+                    QuantityRef::LifeGainedThisTurn {
+                        player: opponents.clone(),
+                    },
+                ),
+                (
+                    "life you lost this turn",
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                ),
+                (
+                    "life you gained this turn",
+                    QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                ),
+            ] {
+                let clause = format!("{prefix} {tail}");
+                assert_eq!(
+                    parse_for_each_clause(&clause),
+                    Some(expected),
+                    "{clause:?} must read this turn's life history",
+                );
+            }
+        }
     }
 
     #[test]

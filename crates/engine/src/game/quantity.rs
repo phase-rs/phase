@@ -4569,9 +4569,10 @@ fn resolve_ref(
             })
             .map(u32_to_i32_saturating)
             .unwrap_or(0),
-        // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
+        // CR 119.3 + CR 800.4i: Life lost this turn, including departed players,
+        // scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
-            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
+            resolve_per_player_life_history(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_lost_this_turn)
             })
         }
@@ -5863,9 +5864,10 @@ fn resolve_ref(
         QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
             usize_to_i32_saturating(p.bending_types_this_turn.len())
         }),
-        // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
+        // CR 119.3 + CR 800.4i: Life gained this turn, including departed players,
+        // scoped via PlayerScope (Π-4).
         QuantityRef::LifeGainedThisTurn { player } => {
-            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
+            resolve_per_player_life_history(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_gained_this_turn)
             })
         }
@@ -8350,7 +8352,8 @@ where
             .map_or(0, &mut extract),
         // CR 104.3 + CR 104.5 + CR 800.4: a player who has left the game is
         // excluded from the aggregate population, same as
-        // `resolve_player_count`'s candidate loop — an eliminated player's
+        // `resolve_player_count`'s candidate loop (outside its life-history
+        // filters, `player_filter_reads_life_history`) — an eliminated player's
         // scalar must not inflate a `Max`/`Min`/`Sum` read over the
         // remaining, still-in-the-game players (Sokenzan Renegade: an
         // eliminated player's larger hand must not out-rank the live
@@ -8390,6 +8393,76 @@ where
             )
         }
     }
+}
+
+/// CR 119.3 + CR 800.4i: `resolve_per_player_scalar` for the life a player
+/// lost or gained this turn. That tally records actions already taken, which an
+/// effect can still find after the player left the game (CR 800.4i): the rulings on Neheb, the Eternal, Rakdos, Lord of Riots, Belbe,
+/// Corrupted Observer, Teysa, Opulent Oligarch and Kaito, Bane of Nightmares
+/// count an opponent's loss of life even after that opponent lost the game. So
+/// the `Opponent` and `AllPlayers` aggregates fold over departed players too;
+/// the single-player scopes are `resolve_per_player_scalar`'s. The player-count
+/// twin ("each opponent who lost life this turn") is
+/// `player_filter_reads_life_history`.
+fn resolve_per_player_life_history<F>(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    mut extract: F,
+) -> i32
+where
+    F: FnMut(&crate::types::player::Player) -> i32,
+{
+    match scope {
+        // CR 102.3: opponents are the players not on the controller's team, so
+        // a Two-Headed Giant teammate's life change never counts.
+        PlayerScope::Opponent { aggregate } => aggregate_over_players(
+            state
+                .players
+                .iter()
+                .filter(|p| crate::game::players::is_opponent(state, controller, p.id)),
+            *aggregate,
+            &mut extract,
+        ),
+        PlayerScope::AllPlayers { aggregate, exclude } => {
+            let excluded_id = exclude.as_deref().and_then(|ex| {
+                resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
+            });
+            aggregate_over_players(
+                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                *aggregate,
+                &mut extract,
+            )
+        }
+        // Single-player scopes name one player; whether that player is still
+        // in the game is `resolve_per_player_scalar`'s question.
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, extract)
+        }
+    }
+}
+
+/// CR 119.3 + CR 800.4i: "each opponent who lost / gained life this turn"
+/// counts a player who has since left the game, for the reason
+/// `resolve_per_player_life_history` gives (Belbe, Teysa and Kaito rulings).
+/// In the generic player loop, every other filter counts only players still in
+/// the game.
+fn player_filter_reads_life_history(filter: &PlayerFilter) -> bool {
+    matches!(
+        filter,
+        PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife
+    )
 }
 
 /// CR 101.4 + CR 608.2d: `resolve_per_player_scalar` for a scalar that some
@@ -8851,8 +8924,8 @@ pub(crate) fn resolve_player_count(
     ctx: QuantityContext,
 ) -> i32 {
     let source_id = ctx.source;
-    // CR 104.3: eliminated players are excluded from the generic player loop
-    // below (`!p.is_eliminated`), so count them on a dedicated path.
+    // CR 104.3: the generic player loop below excludes eliminated players
+    // (outside its life-history filters), so count them on a dedicated path.
     if matches!(filter, PlayerFilter::HasLostTheGame) {
         return usize_to_i32_saturating(state.players.iter().filter(|p| p.is_eliminated).count());
     }
@@ -8875,7 +8948,7 @@ pub(crate) fn resolve_player_count(
             .players
             .iter()
             .filter(|p| {
-                !p.is_eliminated
+                (!p.is_eliminated || player_filter_reads_life_history(filter))
                     && match filter {
                         PlayerFilter::Controller => p.id == controller,
                         PlayerFilter::Opponent => p.id != controller,
@@ -8890,11 +8963,15 @@ pub(crate) fn resolve_player_count(
                                 |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
                             )
                         }
+                        // CR 102.3: a Two-Headed Giant teammate is not an
+                        // opponent, whatever its life history.
                         PlayerFilter::OpponentLostLife => {
-                            p.id != controller && p.life_lost_this_turn > 0
+                            crate::game::players::is_opponent(state, controller, p.id)
+                                && p.life_lost_this_turn > 0
                         }
                         PlayerFilter::OpponentGainedLife => {
-                            p.id != controller && p.life_gained_this_turn > 0
+                            crate::game::players::is_opponent(state, controller, p.id)
+                                && p.life_gained_this_turn > 0
                         }
                         // Handled by the early return above; unreachable here.
                         PlayerFilter::HasLostTheGame => false,
