@@ -1199,6 +1199,62 @@ describe("draft store workspace authority", () => {
     localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
   });
 
+  it("refuses an empty persisted stage game ID, then retries a valid stage", async () => {
+    vi.useRealTimers();
+    const draftId = "empty-stage-game";
+    const run: DraftRunState = {
+      format: "run", results: [], playerDeck: ["Player"], opponentDeck: ["Opponent"],
+      usedBotSeats: [1], booster_pack_pool: [],
+      activeMatch: { draftId, gameId: "same-stage", format: "run",
+        resultCountAtLaunch: 0, botSeat: 1, opponentDeck: ["Opponent"] },
+    };
+    const emptyGameRun: DraftRunState = {
+      ...run, activeMatch: { ...run.activeMatch!, gameId: "" },
+    };
+    const actualPersistence = await vi.importActual<typeof import("../../services/quickDraftPersistence")>(
+      "../../services/quickDraftPersistence",
+    );
+    localStorage.setItem(ACTIVE_QUICK_DRAFT_KEY, JSON.stringify({
+      id: draftId, setCode: "custom-cube", difficulty: 2, kind: "Quick",
+      phase: "playing", pickCount: 40, updatedAt: Date.now(),
+    }));
+    await actualPersistence.saveDraftRun(draftId, emptyGameRun);
+    persistence.inspectActiveQuickDraftLifecycle.mockImplementation(() =>
+      actualPersistence.inspectActiveQuickDraftLifecycle("inspect"));
+    persistence.loadDraftRun.mockImplementation(() => actualPersistence.loadDraftRun(draftId));
+    persistence.loadQuickDraftSession.mockResolvedValue(null);
+
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({
+      status: "unavailable", draftId, reason: "Saved draft run is unavailable",
+    });
+    expect(useDraftStore.getState()).toMatchObject({ draftId, runState: null });
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(emptyGameRun);
+    expect(localStorage.getItem(ACTIVE_QUICK_DRAFT_KEY)).not.toBeNull();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    expect(await useDraftStore.getState().resumeDraft()).toEqual({ status: "resumed", draftId });
+    expect(useDraftStore.getState()).toMatchObject({ phase: "playing", runState: run });
+    await actualPersistence.saveDraftRun(draftId, emptyGameRun);
+    const navigate = vi.fn();
+    await expect(useDraftStore.getState().launchNextMatch(navigate)).rejects.toThrow("Saved draft run is unavailable");
+    expect(await actualPersistence.loadDraftRun(draftId)).toEqual(emptyGameRun);
+    expect(formatGate.evaluate).not.toHaveBeenCalled();
+    expect(persistence.publishStagedDraftMatch).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(persistence.cleanupQuickDraftLifecycle).not.toHaveBeenCalled();
+
+    await actualPersistence.saveDraftRun(draftId, run);
+    await useDraftStore.getState().launchNextMatch(navigate);
+    expect(formatGate.evaluate).toHaveBeenCalledTimes(2);
+    expect(persistence.publishStagedDraftMatch).toHaveBeenCalledWith(expect.objectContaining({
+      draftId, gameId: "same-stage",
+    }));
+    expect(navigate).toHaveBeenCalledWith(expect.stringContaining("/game/same-stage?"));
+    await actualPersistence.clearDraftRun(draftId);
+    localStorage.removeItem(ACTIVE_QUICK_DRAFT_KEY);
+  });
+
   it("refuses a persisted stage owned by another draft on resume and launch", async () => {
     vi.useRealTimers();
     const draftId = "stage-owner";

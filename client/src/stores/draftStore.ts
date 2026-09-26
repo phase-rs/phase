@@ -966,7 +966,7 @@ export function isCoherentUnresolvedDraftStage(run: DraftRunState, draftId: stri
     && run.opponentDeck.every((card) => typeof card === "string")
     && Array.isArray(run.usedBotSeats)
     && typeof stage.draftId === "string" && stage.draftId === draftId
-    && typeof stage.gameId === "string" && stage.gameId === gameId
+    && typeof stage.gameId === "string" && stage.gameId.length > 0 && stage.gameId === gameId
     && stage.format === run.format
     && Number.isInteger(stage.resultCountAtLaunch)
     && stage.resultCountAtLaunch === run.results.length
