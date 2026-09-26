@@ -5,13 +5,26 @@ import { FEED_REGISTRY } from "../data/feedRegistry";
 import {
   ACTIVE_DECK_KEY,
   STORAGE_KEY_PREFIX,
+  captureSavedDeck,
   loadDeckOrigins,
   loadFeedSubscriptions,
+  profileReplacementGeneration,
   removeDeckMeta,
+  removeSavedDeckData,
+  requireSavedDeckUnchanged,
   saveDeckOrigins,
   saveFeedSubscriptions,
   stampDeckMeta,
+  writeSavedDeckData,
 } from "../constants/storage";
+import {
+  SavedDeckLibraryBusyError,
+  withSavedDeckLibrary,
+  withSavedDeckLibraryOrSkip,
+  type SavedDeckTxn,
+  type SavedDeckTxnFailure,
+  type SavedDeckTxnResult,
+} from "./savedDeckTransaction";
 import {
   getCachedFeed,
   hydrateFeedCache,
@@ -144,7 +157,7 @@ export function feedDeckToParsedDeck(deck: FeedDeck): ParsedDeck {
   });
 }
 
-function syncFeedDecksToStorage(feed: Feed): void {
+function syncFeedDecksToStorage(txn: SavedDeckTxn, feed: Feed): void {
   const origins = loadDeckOrigins();
 
   // Add/update decks from the feed
@@ -154,7 +167,7 @@ function syncFeedDecksToStorage(feed: Feed): void {
 
     if (existingOrigin === feed.id) {
       // Origin matches this feed — overwrite (feed is authoritative)
-      localStorage.setItem(key, JSON.stringify(feedDeckToParsedDeck(deck)));
+      writeSavedDeckData(txn, deck.name, JSON.stringify(feedDeckToParsedDeck(deck)));
     } else if (existingOrigin) {
       // Origin is a different feed — skip
       continue;
@@ -163,8 +176,8 @@ function syncFeedDecksToStorage(feed: Feed): void {
       continue;
     } else {
       // New deck — write it
-      localStorage.setItem(key, JSON.stringify(feedDeckToParsedDeck(deck)));
-      stampDeckMeta(deck.name, 0);
+      writeSavedDeckData(txn, deck.name, JSON.stringify(feedDeckToParsedDeck(deck)));
+      stampDeckMeta(txn, deck.name, 0);
     }
 
     origins[deck.name] = feed.id;
@@ -174,8 +187,8 @@ function syncFeedDecksToStorage(feed: Feed): void {
   const feedDeckNames = new Set(feed.decks.map((d) => d.name));
   for (const [deckName, feedId] of Object.entries(origins)) {
     if (feedId === feed.id && !feedDeckNames.has(deckName)) {
-      localStorage.removeItem(STORAGE_KEY_PREFIX + deckName);
-      removeDeckMeta(deckName);
+      removeSavedDeckData(txn, deckName);
+      removeDeckMeta(txn, deckName);
       delete origins[deckName];
 
       // Clear active deck if it was removed
@@ -186,6 +199,27 @@ function syncFeedDecksToStorage(feed: Feed): void {
   }
 
   saveDeckOrigins(origins);
+}
+
+/**
+ * Runs `publish` inside `withSavedDeckLibraryOrSkip` unless, by the time the body runs, this initialization has
+ * been aborted or a profile replacement (`backup.ts::applyBackup` bumps the generation) has superseded it.
+ * Everything a sync makes visible — the cached feed, its decks, its subscription record — goes in `publish`, so a
+ * superseded or skipped sync shows none of it. The transaction awaits `publish`'s result while holding the
+ * library lock, so return a pending cache write wrapped, not bare.
+ */
+function publishUnlessSuperseded<T>(
+  signal: AbortSignal | undefined,
+  replacement: number,
+  publish: (txn: SavedDeckTxn) => T,
+): Promise<SavedDeckTxnResult<T, SavedDeckTxnFailure>> {
+  return withSavedDeckLibraryOrSkip((txn) => {
+    throwIfAborted(signal);
+    if (profileReplacementGeneration() !== replacement) {
+      throw new DOMException("Feed initialization superseded by a profile replacement", "AbortError");
+    }
+    return publish(txn);
+  }, "run-unguarded");
 }
 
 // --- Public API ---
@@ -200,11 +234,19 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
   throwIfAborted(signal);
 
   const subs = loadFeedSubscriptions();
+  const replacement = profileReplacementGeneration();
 
   if (!allowRefresh) {
     for (const sub of subs) {
       const cached = getCachedFeed(sub.sourceId);
-      if (cached) syncFeedDecksToStorage(cached);
+      if (!cached) continue;
+      await publishUnlessSuperseded(signal, replacement, (txn) => {
+        // `cached` was read before this call ever requested the library lock, so a concurrent
+        // unsubscribe() may have already dropped this subscription by the time the lock is
+        // granted. Re-check under the lock rather than publishing an unsubscribed feed's decks.
+        if (!loadFeedSubscriptions().some((s) => s.sourceId === sub.sourceId)) return;
+        syncFeedDecksToStorage(txn, cached);
+      });
     }
     return;
   }
@@ -224,19 +266,27 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
       // fetched feed.id differs from the registry.
       const feedId = source.id;
       const normalizedFeed = { ...feed, id: feedId, format: source.format ?? feed.format };
-      const cachePersistence = setCachedFeed(feedId, normalizedFeed);
-      syncFeedDecksToStorage(normalizedFeed);
-
-      subs.push({
-        sourceId: feedId,
-        url: source.url,
-        type: "bundled",
-        subscribedAt: Date.now(),
-        lastRefreshedAt: Date.now(),
-        lastVersion: feed.version,
+      const published = await publishUnlessSuperseded(signal, replacement, (txn) => {
+        const cachePersistence = setCachedFeed(feedId, normalizedFeed);
+        syncFeedDecksToStorage(txn, normalizedFeed);
+        // Re-read the current list under the lock rather than writing back the `subs` snapshot
+        // loaded before the loop started — a concurrent subscribe()/unsubscribe() may have
+        // committed while this fetch was in flight.
+        const currentSubs = loadFeedSubscriptions();
+        if (!currentSubs.some((s) => s.sourceId === feedId)) {
+          currentSubs.push({
+            sourceId: feedId,
+            url: source.url,
+            type: "bundled",
+            subscribedAt: Date.now(),
+            lastRefreshedAt: Date.now(),
+            lastVersion: feed.version,
+          });
+          saveFeedSubscriptions(currentSubs);
+        }
+        return { cachePersistence };
       });
-      saveFeedSubscriptions(subs);
-      await cachePersistence;
+      if (published.status === "committed") await published.value.cachePersistence;
     } catch (err) {
       if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) throw err;
       console.error(`Failed to initialize feed "${source.id}":`, err);
@@ -256,7 +306,13 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
     const isStale = now - sub.lastRefreshedAt >= FEED_STALE_AFTER_MS;
     const bundled = sub.type === "bundled";
     if (!bundled && !isStale && cached) {
-      syncFeedDecksToStorage(cached);
+      await publishUnlessSuperseded(signal, replacement, (txn) => {
+        // `cached` was read before this call ever requested the library lock, so a concurrent
+        // unsubscribe() may have already dropped this subscription by the time the lock is
+        // granted. Re-check under the lock rather than publishing an unsubscribed feed's decks.
+        if (!loadFeedSubscriptions().some((s) => s.sourceId === sub.sourceId)) return;
+        syncFeedDecksToStorage(txn, cached);
+      });
       continue;
     }
 
@@ -265,21 +321,41 @@ export async function initializeFeeds({ allowRefresh = true, signal }: Initializ
       throwIfAborted(signal);
       const registrySource = FEED_REGISTRY.find((r) => r.id === sub.sourceId);
       const normalizedFeed = { ...feed, id: sub.sourceId, format: registrySource?.format ?? feed.format };
-      const cachePersistence = setCachedFeed(sub.sourceId, normalizedFeed);
-      syncFeedDecksToStorage(normalizedFeed);
-      const feedChanged = cached?.updated !== normalizedFeed.updated;
-      const metadataChanged = sub.lastVersion !== feed.version || sub.error !== undefined;
-      sub.lastVersion = feed.version;
-      if (isStale || feedChanged) sub.lastRefreshedAt = Date.now();
-      if (sub.error !== undefined) sub.error = undefined;
-      if (isStale || feedChanged || metadataChanged) saveFeedSubscriptions(subs);
-      await cachePersistence;
+      const published = await publishUnlessSuperseded(signal, replacement, (txn) => {
+        // Same reasoning as the auto-subscribe loop above: re-read under the lock and update only
+        // this feed's entry, so a concurrent subscribe()/unsubscribe() isn't clobbered by writing
+        // back the pre-fetch `subs` snapshot. Look this up BEFORE publishing anything — if this
+        // feed was unsubscribed while the fetch was in flight, there's no entry left to update,
+        // and the cache/decks a plain lookup-after-publish would have just written back must
+        // never become visible for a feed with no subscription.
+        const currentSubs = loadFeedSubscriptions();
+        const currentSub = currentSubs.find((s) => s.sourceId === sub.sourceId);
+        if (!currentSub) return { cachePersistence: Promise.resolve() };
+
+        const cachePersistence = setCachedFeed(sub.sourceId, normalizedFeed);
+        syncFeedDecksToStorage(txn, normalizedFeed);
+        const feedChanged = cached?.updated !== normalizedFeed.updated;
+        const metadataChanged = currentSub.lastVersion !== feed.version || currentSub.error !== undefined;
+        currentSub.lastVersion = feed.version;
+        if (isStale || feedChanged) currentSub.lastRefreshedAt = Date.now();
+        if (currentSub.error !== undefined) currentSub.error = undefined;
+        if (isStale || feedChanged || metadataChanged) saveFeedSubscriptions(currentSubs);
+        return { cachePersistence };
+      });
+      if (published.status === "committed") await published.value.cachePersistence;
     } catch (err) {
       if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) throw err;
       // Fall back to cached data
       const cached = getCachedFeed(sub.sourceId);
       if (cached) {
-        syncFeedDecksToStorage(cached);
+        await publishUnlessSuperseded(signal, replacement, (txn) => {
+          // Same re-check as the other cached-only publishes above: `cached` was read after the
+          // failed fetch but before this call requested the library lock, so a concurrent
+          // unsubscribe() may have already dropped this subscription by the time the lock is
+          // granted.
+          if (!loadFeedSubscriptions().some((s) => s.sourceId === sub.sourceId)) return;
+          syncFeedDecksToStorage(txn, cached);
+        });
       }
     }
   }
@@ -297,51 +373,59 @@ export async function subscribe(sourceOrUrl: string): Promise<Feed> {
 
   const feed = await fetchFeed(url);
 
-  await setCachedFeed(feed.id, feed);
-  syncFeedDecksToStorage(feed);
+  const { cachePersistence } = await withSavedDeckLibrary((txn) => {
+    const cachePersistence = setCachedFeed(feed.id, feed);
+    syncFeedDecksToStorage(txn, feed);
 
-  const subs = loadFeedSubscriptions();
-  const existing = subs.find((s) => s.sourceId === feed.id);
-  if (existing) {
-    existing.lastRefreshedAt = Date.now();
-    existing.lastVersion = feed.version;
-    existing.error = undefined;
-  } else {
-    subs.push({
-      sourceId: feed.id,
-      url,
-      type,
-      subscribedAt: Date.now(),
-      lastRefreshedAt: Date.now(),
-      lastVersion: feed.version,
-    });
-  }
+    const subs = loadFeedSubscriptions();
+    const existing = subs.find((s) => s.sourceId === feed.id);
+    if (existing) {
+      existing.lastRefreshedAt = Date.now();
+      existing.lastVersion = feed.version;
+      existing.error = undefined;
+    } else {
+      subs.push({
+        sourceId: feed.id,
+        url,
+        type,
+        subscribedAt: Date.now(),
+        lastRefreshedAt: Date.now(),
+        lastVersion: feed.version,
+      });
+    }
+    saveFeedSubscriptions(subs);
 
-  saveFeedSubscriptions(subs);
+    return { cachePersistence };
+  });
+  await cachePersistence;
   return feed;
 }
 
-export function unsubscribe(feedId: string): void {
-  const origins = loadDeckOrigins();
+export async function unsubscribe(feedId: string): Promise<void> {
+  await withSavedDeckLibrary((txn) => {
+    const origins = loadDeckOrigins();
 
-  // Remove all decks belonging to this feed
-  for (const [deckName, originFeedId] of Object.entries(origins)) {
-    if (originFeedId === feedId) {
-      localStorage.removeItem(STORAGE_KEY_PREFIX + deckName);
-      removeDeckMeta(deckName);
-      delete origins[deckName];
+    // Remove all decks belonging to this feed
+    for (const [deckName, originFeedId] of Object.entries(origins)) {
+      if (originFeedId === feedId) {
+        removeSavedDeckData(txn, deckName);
+        removeDeckMeta(txn, deckName);
+        delete origins[deckName];
 
-      if (localStorage.getItem(ACTIVE_DECK_KEY) === deckName) {
-        localStorage.removeItem(ACTIVE_DECK_KEY);
+        if (localStorage.getItem(ACTIVE_DECK_KEY) === deckName) {
+          localStorage.removeItem(ACTIVE_DECK_KEY);
+        }
       }
     }
-  }
 
-  saveDeckOrigins(origins);
-  removeCachedFeed(feedId);
+    saveDeckOrigins(origins);
 
-  const subs = loadFeedSubscriptions().filter((s) => s.sourceId !== feedId);
-  saveFeedSubscriptions(subs);
+    // Remove the cache and subscription entry inside the same lock hold as the deck removal
+    // above, so another holder (e.g. a refresh queued behind this lock) can never observe the
+    // decks already gone but the subscription still present, or vice versa.
+    removeCachedFeed(feedId);
+    saveFeedSubscriptions(loadFeedSubscriptions().filter((s) => s.sourceId !== feedId));
+  });
 }
 
 export function listSubscriptions(): FeedSubscription[] {
@@ -365,17 +449,39 @@ export async function refreshFeed(feedId: string): Promise<Feed> {
 
   try {
     const feed = await fetchFeed(sub.url);
-    await setCachedFeed(feed.id, feed);
-    syncFeedDecksToStorage(feed);
+    const { cachePersistence } = await withSavedDeckLibrary((txn) => {
+      // The fetch above ran unlocked, so a concurrent subscribe()/unsubscribe() may have
+      // committed while it was in flight. Re-read the subscription list under the lock and
+      // update only this feed's entry — writing back the pre-fetch `subs` snapshot loaded
+      // above would silently discard that concurrent change.
+      const currentSubs = loadFeedSubscriptions();
+      const currentSub = currentSubs.find((s) => s.sourceId === feedId);
+      if (!currentSub) {
+        // Unsubscribed while the fetch was in flight — nothing left to refresh or publish.
+        return { cachePersistence: Promise.resolve() };
+      }
 
-    sub.lastRefreshedAt = Date.now();
-    sub.lastVersion = feed.version;
-    sub.error = undefined;
-    saveFeedSubscriptions(subs);
+      const cachePersistence = setCachedFeed(feed.id, feed);
+      syncFeedDecksToStorage(txn, feed);
+
+      currentSub.lastRefreshedAt = Date.now();
+      currentSub.lastVersion = feed.version;
+      currentSub.error = undefined;
+      saveFeedSubscriptions(currentSubs);
+
+      return { cachePersistence };
+    });
+    await cachePersistence;
     return feed;
   } catch (err) {
-    sub.error = err instanceof Error ? err.message : String(err);
-    saveFeedSubscriptions(subs);
+    if (!(err instanceof SavedDeckLibraryBusyError)) {
+      const currentSubs = loadFeedSubscriptions();
+      const currentSub = currentSubs.find((s) => s.sourceId === feedId);
+      if (currentSub) {
+        currentSub.error = err instanceof Error ? err.message : String(err);
+        saveFeedSubscriptions(currentSubs);
+      }
+    }
     throw err;
   }
 }
@@ -389,6 +495,7 @@ export async function refreshAllFeeds(): Promise<Map<string, Feed | Error>> {
       const feed = await refreshFeed(sub.sourceId);
       results.set(sub.sourceId, feed);
     } catch (err) {
+      if (err instanceof SavedDeckLibraryBusyError) throw err;
       results.set(sub.sourceId, err instanceof Error ? err : new Error(String(err)));
     }
   }
@@ -396,28 +503,29 @@ export async function refreshAllFeeds(): Promise<Map<string, Feed | Error>> {
   return results;
 }
 
-export function adoptFeedDeck(deckName: string, newName?: string): string {
-  const origins = loadDeckOrigins();
-  const targetName = newName ?? deckName;
+export function adoptFeedDeck(deckName: string, newName?: string): Promise<string> {
+  const source = captureSavedDeck(deckName);
+  return withSavedDeckLibrary((txn) => {
+    requireSavedDeckUnchanged(txn, source);
+    const origins = loadDeckOrigins();
+    const targetName = newName ?? deckName;
 
-  if (newName && newName !== deckName) {
-    // Copy deck data to new name
-    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
-    if (raw) {
-      localStorage.setItem(STORAGE_KEY_PREFIX + targetName, raw);
-      stampDeckMeta(targetName);
+    if (newName && newName !== deckName) {
+      // Copy deck data to new name
+      writeSavedDeckData(txn, targetName, source.raw!);
+      stampDeckMeta(txn, targetName);
     }
-  }
 
-  // Remove feed origin tracking (deck is now user-owned)
-  delete origins[deckName];
-  if (newName && newName !== deckName) {
-    // Don't track the new name either
-    delete origins[targetName];
-  }
-  saveDeckOrigins(origins);
+    // Remove feed origin tracking (deck is now user-owned)
+    delete origins[deckName];
+    if (newName && newName !== deckName) {
+      // Don't track the new name either
+      delete origins[targetName];
+    }
+    saveDeckOrigins(origins);
 
-  return targetName;
+    return targetName;
+  });
 }
 
 export function getFeedDecksByFeed(): Map<string, string[]> {

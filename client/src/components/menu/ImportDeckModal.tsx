@@ -4,7 +4,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "./buttonStyles";
-import { STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../../constants/storage";
+import { freeDeckName, listSavedDeckNames, stampDeckMeta, writeSavedDeckData } from "../../constants/storage";
+import { withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { attemptSavedDeckWrite } from "../../services/savedDeckWriteFailure";
 import {
   assignOathbreakerSlots,
   deriveImportedDeckName,
@@ -21,6 +23,7 @@ import {
 } from "../../services/engineRuntime";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useEffectiveOffline } from "../../stores/connectivityStore";
+import { useImportSession, type ImportSession } from "./importSession";
 
 // Frontend-authored error messages from deckUrlImport.ts arrive as translation
 // keys prefixed `importDeck.`. Worker-authored messages flow through as-is
@@ -32,7 +35,7 @@ type ImportTab = "paste" | "url" | "file";
 interface ImportDeckModalProps {
   open: boolean;
   onClose: () => void;
-  onImported: (name: string, deckNames: string[]) => void;
+  onImported: (name: string, deckNames: string[], session: ImportSession) => void;
 }
 
 interface PendingOathbreakerImport {
@@ -46,16 +49,6 @@ interface PendingOathbreakerImport {
 
 const GENERIC_IMPORTED_NAMES = new Set(["Imported Deck", "Untitled Deck"]);
 
-function uniqueDeckName(baseName: string, existingNames: string[]): string {
-  const existing = new Set(existingNames);
-  if (!existing.has(baseName)) return baseName;
-
-  for (let i = 2; ; i++) {
-    const candidate = `${baseName} ${i}`;
-    if (!existing.has(candidate)) return candidate;
-  }
-}
-
 function resolveImportDeckName(
   manualName: string,
   content: string,
@@ -63,14 +56,10 @@ function resolveImportDeckName(
   fallbackName?: string,
 ): string {
   const trimmedManual = manualName.trim();
-  if (trimmedManual) return uniqueDeckName(trimmedManual, listSavedDeckNames());
+  if (trimmedManual) return trimmedManual;
 
   const derivedName = deriveImportedDeckName(content, deck);
-  const baseName =
-    fallbackName && GENERIC_IMPORTED_NAMES.has(derivedName)
-      ? fallbackName
-      : derivedName;
-  return uniqueDeckName(baseName, listSavedDeckNames());
+  return fallbackName && GENERIC_IMPORTED_NAMES.has(derivedName) ? fallbackName : derivedName;
 }
 
 function initialSignatureSpell(deck: ParsedDeck, candidates: string[]): string {
@@ -99,23 +88,28 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
   const [oathbreakerSetupLoading, setOathbreakerSetupLoading] = useState(false);
   const [oathbreakerSetupError, setOathbreakerSetupError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const importSession = useImportSession(open);
 
-  const finishImport = (name: string) => {
-    onImported(name, listSavedDeckNames());
-    resetAndClose();
+  const finishImport = (name: string, started: number) => {
+    const session = importSession.stateOf(started);
+    onImported(name, listSavedDeckNames(), session);
+    if (session === "open") resetAndClose();
     showNotification({
       title: t("importDeck.importedSuccessTitle"),
       description: t("importDeck.importedSuccessDescription", { name }),
     });
   };
 
-  const persistImport = (name: string, deck: ParsedDeck, format?: "Oathbreaker") => {
-    localStorage.setItem(
-      STORAGE_KEY_PREFIX + name,
-      JSON.stringify(format ? { ...deck, format } : deck),
+  const persistImport = async (started: number, baseName: string, deck: ParsedDeck, format?: "Oathbreaker") => {
+    const saved = await attemptSavedDeckWrite("import", () =>
+      withSavedDeckLibrary((txn) => {
+        const name = freeDeckName(txn, baseName);
+        writeSavedDeckData(txn, name, JSON.stringify(format ? { ...deck, format } : deck));
+        stampDeckMeta(txn, name);
+        return name;
+      }),
     );
-    stampDeckMeta(name);
-    finishImport(name);
+    if (saved.ok) finishImport(saved.value, started);
   };
 
   const signatureCandidatesFor = async (deck: ParsedDeck, oathbreaker: string): Promise<string[]> => {
@@ -132,7 +126,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     return policy.type === "Required" ? policy.data.candidates : [];
   };
 
-  const stageOathbreakerImport = async (deck: ParsedDeck, name: string) => {
+  const stageOathbreakerImport = async (started: number, deck: ParsedDeck, name: string) => {
     const candidateNames = Array.from(new Set([
       ...deck.main.map((entry) => entry.name),
       ...(deck.commander ?? []),
@@ -143,6 +137,9 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
         eligible: await isCardCommanderEligibleForFormat(candidate, "Oathbreaker"),
       })),
     );
+    // The modal that started this eligibility check may have been dismissed
+    // (and possibly reopened) while it waited: don't open its setup step then.
+    if (importSession.stateOf(started) !== "open") return;
     const oathbreakerCandidates = eligibility
       .filter(({ eligible }) => eligible)
       .map(({ candidate }) => candidate);
@@ -169,17 +166,17 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     });
   };
 
-  const stageImport = async (content: string, fallbackName?: string): Promise<boolean> => {
+  const stageImport = async (started: number, content: string, fallbackName?: string): Promise<boolean> => {
     const deck = await resolveCommander(detectAndParseDeck(content));
     if (!parsedDeckHasCards(deck)) return false;
 
     const name = resolveImportDeckName(deckName, content, deck, fallbackName);
     if (!importAsOathbreaker) {
-      persistImport(name, deck);
+      await persistImport(started, name, deck);
       return true;
     }
 
-    await stageOathbreakerImport(deck, name);
+    await stageOathbreakerImport(started, deck, name);
     return true;
   };
 
@@ -206,10 +203,11 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     }
   };
 
-  const confirmOathbreakerImport = () => {
+  const confirmOathbreakerImport = async () => {
     const pending = pendingOathbreakerImport;
     if (!pending?.oathbreaker || !pending.signatureSpell) return;
-    persistImport(
+    await persistImport(
+      importSession.begin(),
       pending.name,
       assignOathbreakerSlots(pending.deck, pending.oathbreaker, pending.signatureSpell),
       "Oathbreaker",
@@ -221,7 +219,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     setPasteError(null);
     setPasteLoading(true);
     try {
-      if (!(await stageImport(pasteText))) {
+      if (!(await stageImport(importSession.begin(), pasteText))) {
         setPasteError(t("importDeck.errorNoCards"));
       }
     } catch {
@@ -236,9 +234,10 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     if (!trimmed || urlLoading) return;
     setUrlError(null);
     setUrlLoading(true);
+    const started = importSession.begin();
     try {
       const content = await fetchDeckFromUrl(trimmed);
-      if (!(await stageImport(content))) {
+      if (!(await stageImport(started, content))) {
         setUrlError(t("importDeck.errorNoCards"));
       }
     } catch (err) {
@@ -252,13 +251,14 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const started = importSession.begin();
     const reader = new FileReader();
     reader.onload = async () => {
       setFileError(null);
       const content = reader.result as string;
       const fallbackName = file.name.replace(/\.(dck|dec|txt)$/i, "");
       try {
-        if (!(await stageImport(content, fallbackName))) {
+        if (!(await stageImport(started, content, fallbackName))) {
           setFileError(t("importDeck.errorNoCards"));
         }
       } catch {

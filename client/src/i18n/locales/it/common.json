@@ -423,5 +423,25 @@
       "no-turn": "Nessun relay TURN fornito",
       "aborted": "Richiesta annullata"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Un'altra scheda di Phase è occupata. Chiudi le altre schede di Phase e riprova.",
+    "title": {
+      "save": "Impossibile salvare il mazzo",
+      "clone": "Impossibile clonare il mazzo",
+      "import": "Impossibile importare il mazzo",
+      "delete": "Impossibile eliminare il mazzo",
+      "organize": "Impossibile aggiornare l'organizzazione dei mazzi",
+      "updateFeeds": "Impossibile aggiornare i feed dei mazzi",
+      "restore": "Impossibile ripristinare il backup",
+      "applyCloud": "Impossibile applicare i mazzi cloud",
+      "autosaveDraft": "Impossibile salvare automaticamente il mazzo del draft"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase non è riuscito ad accedere all'archiviazione del browser. Riprova in un momento."
+  },
+  "savedDeckChanged": {
+    "description": "Questo mazzo è cambiato prima che la tua azione venisse eseguita, quindi non è stato modificato nulla. Controlla il mazzo e riprova."
   }
 }

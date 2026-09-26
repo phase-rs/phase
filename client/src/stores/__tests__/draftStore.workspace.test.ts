@@ -25,7 +25,14 @@ import {
   createDefaultDraftWorkspacePreferences,
   setArrivingCardBoardPreferences,
 } from "../../components/draft/workspace/workspacePreferences";
-import { DRAFT_WORKSPACE_PREFERENCES_KEY } from "../../constants/storage";
+import {
+  DRAFT_WORKSPACE_PREFERENCES_KEY,
+  getDeckMeta,
+  listSavedDeckNames,
+  loadSavedDeck,
+  loadSavedDeckFormat,
+  STORAGE_KEY_PREFIX,
+} from "../../constants/storage";
 import {
   projectWorkspaceLandCounts,
   projectWorkspaceMainDeck,
@@ -88,6 +95,14 @@ import {
   useDraftStore,
   type DraftPickOutcome,
 } from "../draftStore";
+import {
+  awaitSavedDeckLibraryIdle,
+  installFifoWebLocks,
+  resetSavedDeckLibraryForTests,
+  uninstallWebLocks,
+} from "../../test/helpers/webLocks";
+import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { useAppNotificationStore } from "../appToastStore";
 
 function card(instanceId: string, name = instanceId): DraftCardInstance {
   return {
@@ -1735,5 +1750,205 @@ describe("draft store workspace authority", () => {
       run: expect.objectContaining({ booster_pack_pool: pool }),
       payload: expect.objectContaining({ booster_pack_pool: pool }),
     }));
+  });
+
+  describe("draft deck autosave", () => {
+    beforeEach(async () => {
+      // Real timers for this block: fake-indexeddb schedules through setImmediate, which the
+      // outer `beforeEach`'s vi.useFakeTimers() would otherwise stall, including inside the
+      // saved-deck transaction the autosave runs under during the test body.
+      vi.useRealTimers();
+      installFifoWebLocks();
+      await resetSavedDeckLibraryForTests();
+      useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+    });
+    afterEach(() => {
+      uninstallWebLocks();
+      localStorage.clear();
+    });
+
+    it("saves a quick draft submission as the Quick Draft autosave", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(loadSavedDeck("[Autosave] Quick Draft")?.main).toEqual([{ name: "Bolt", count: 1 }]);
+      expect(loadSavedDeckFormat("[Autosave] Quick Draft")).toBe("Limited");
+      expect(getDeckMeta("[Autosave] Quick Draft")?.autosaveSlot).toBe("Quick");
+    });
+
+    it("keeps a drafted sideboard card in the autosave when a virtual card of the same name is in the main deck", async () => {
+      await start([card("bolt", "Bolt"), card("dplains", "Plains")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      useDraftStore.getState().setWorkspacePlacement("dplains", { zone: "sideboard", row: 0, column: 0, order: 0 });
+      useDraftStore.getState().addBasicLand("Plains");
+      wasm.submit_deck.mockReturnValue({
+        ...view([card("bolt", "Bolt"), card("dplains", "Plains")]),
+        status: "Pairing",
+      });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(wasm.submit_deck).toHaveBeenLastCalledWith(JSON.stringify(["Bolt", "Plains"]), JSON.stringify([]));
+      const saved = loadSavedDeck("[Autosave] Quick Draft");
+      expect(saved?.main).toEqual(expect.arrayContaining([
+        { name: "Bolt", count: 1 }, { name: "Plains", count: 1 },
+      ]));
+      expect(saved?.sideboard).toEqual([{ name: "Plains", count: 1 }]);
+    });
+
+    it("saves a solo sealed submission as the Sealed autosave", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+      const sealedView = { ...view([card("bolt", "Bolt")]), kind: "Sealed" as const, status: "Deckbuilding" as const };
+      wasm.start_sealed_draft.mockReturnValue(sealedView);
+      await useDraftStore.getState().startSealedDraft("pool", "TST", "Test", 2);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...sealedView, status: "Pairing" });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBe("Sealed");
+    });
+
+    it("saves a solo cube submission as the Cube Draft autosave, not the Quick Draft one", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
+      const cubeView = view([card("bolt", "Bolt")]);
+      wasm.start_quick_cube_draft.mockReturnValue(cubeView);
+      await useDraftStore.getState().startCubeDraft("cube", "Cube", {
+        pod_size: 8, pack_count: 3, cards_per_pack: 15, min_deck_size: 40,
+        addable_cards: { policy: "StandardBasics", custom: [] },
+      }, 2);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...cubeView, status: "Pairing" });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(getDeckMeta("[Autosave] Cube Draft")?.autosaveSlot).toBe("Cube");
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Quick Draft")).toBeNull();
+    });
+
+    it("still resolves the submission when the autosave write throws", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+      // A stub object (rather than spying `Storage.prototype.setItem`) is used
+      // deliberately.
+      const backing = new Map<string, string>();
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i)!;
+        backing.set(key, localStorage.getItem(key)!);
+      }
+      let setItemCalls = 0;
+      vi.stubGlobal("localStorage", {
+        get length() { return backing.size; },
+        key: (index: number) => [...backing.keys()][index] ?? null,
+        getItem: (key: string) => backing.get(key) ?? null,
+        removeItem: (key: string) => { backing.delete(key); },
+        setItem: (key: string, value: string) => {
+          setItemCalls += 1;
+          if (key.startsWith(STORAGE_KEY_PREFIX)) {
+            throw new DOMException("Quota exceeded", "QuotaExceededError");
+          }
+          backing.set(key, value);
+        },
+        clear: () => { backing.clear(); },
+      });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      await expect(useDraftStore.getState().submitDeck()).resolves.toBeUndefined();
+      await awaitSavedDeckLibraryIdle();
+      await vi.waitFor(() =>
+        expect(warnSpy).toHaveBeenCalledWith("[draftDeckAutosave] autosave failed:", expect.anything()),
+      );
+
+      expect(useDraftStore.getState().phase).toBe("launching");
+      expect(listSavedDeckNames()).toEqual([]);
+      expect(setItemCalls).toBeGreaterThan(0);
+      vi.unstubAllGlobals();
+    });
+
+    it("writes no autosave when the submission is rejected", async () => {
+      await start([card("bolt", "Bolt")]);
+      wasm.submit_deck.mockImplementationOnce(() => { throw new Error("engine rejected submission"); });
+
+      await expect(useDraftStore.getState().submitDeck()).rejects.toThrow("engine rejected submission");
+
+      expect(listSavedDeckNames()).toEqual([]);
+    });
+
+    it("the submission resolves while the autosave waits for the library", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      let settled = false;
+      void useDraftStore.getState().submitDeck().then(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect((await navigator.locks.query()).pending).toHaveLength(1);
+
+      releaseHolder();
+      await holder;
+      await awaitSavedDeckLibraryIdle();
+      expect(loadSavedDeck("[Autosave] Quick Draft")).not.toBeNull();
+    });
+
+    it("shows a busy toast when the autosave is skipped by a lock-wait timeout, and the submission still resolves", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+      setSavedDeckTxnLockWaitForTests(50);
+
+      await expect(useDraftStore.getState().submitDeck()).resolves.toBeUndefined();
+
+      await vi.waitFor(() => {
+        expect(useAppNotificationStore.getState().notification).toEqual({
+          title: "Couldn't autosave your draft deck",
+          description: "Another Phase tab is busy. Close other Phase tabs and try again.",
+        });
+      });
+
+      setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+      releaseHolder();
+      await holder;
+    });
+
+    it("shows no toast when the autosave commits", async () => {
+      await start([card("bolt", "Bolt")]);
+      useDraftStore.getState().setWorkspacePlacement("bolt", { zone: "deck", row: 0, column: 0, order: 0 });
+      wasm.submit_deck.mockReturnValue({ ...view([card("bolt", "Bolt")]), status: "Pairing" });
+
+      await useDraftStore.getState().submitDeck();
+      await awaitSavedDeckLibraryIdle();
+
+      expect(loadSavedDeck("[Autosave] Quick Draft")).not.toBeNull();
+      expect(useAppNotificationStore.getState().notification).toBeNull();
+    });
   });
 });

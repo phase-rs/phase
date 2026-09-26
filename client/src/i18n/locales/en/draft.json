@@ -729,5 +729,15 @@
     "leave": "Leave",
     "startDraft": "Start Draft",
     "waitingForHost": "Waiting for host to start the draft..."
+  },
+  "deckAutosave": {
+    "deckName": "[Autosave] {{format}}",
+    "slotQuick": "Quick Draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Cube Draft",
+    "slotPremier": "Premier Draft",
+    "slotTraditional": "Traditional Draft",
+    "slotCommanderDraft": "Commander Draft",
+    "slotWinston": "Winston Draft"
   }
 }

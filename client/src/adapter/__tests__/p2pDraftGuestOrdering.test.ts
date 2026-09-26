@@ -120,6 +120,12 @@ const workspace: DraftWorkspaceState = {
   virtualBasics: [{ instanceId: "virtual-island", name: "Island" }],
 };
 
+/** Narrows a captured pre-encode message to the deck-submission variant. */
+function asDeckSubmission(message: DraftP2PMessage): Extract<DraftP2PMessage, { type: "draft_submit_deck" }> {
+  if (message.type !== "draft_submit_deck") throw new Error("Expected a draft_submit_deck message");
+  return message;
+}
+
 function pauseNextEncoding() {
   const started = deferred();
   const resume = deferred();
@@ -249,6 +255,59 @@ describe("P2P draft guest receive ordering", () => {
       type: "deckSubmissionAcknowledged", submissionId: command.submissionId, view: acknowledgedView,
     });
     expect(guest.view).toEqual(nextView);
+  });
+
+  it("does not report a recovered acceptance for a caller-awaited submission", async () => {
+    const { guest, conn, events } = createGuest({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const initialized = guest.initialize();
+    await conn.receiveRaw(rawMessage(welcome(view(1))));
+    await initialized;
+    events.length = 0;
+
+    const submitted = guest.submitDeck(["Island"], []);
+    await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+    const command = await decodeDraftWireMessage(conn.sentRaw[1]!);
+    if (command.type !== "draft_submit_deck") throw new Error("Expected draft deck submission");
+
+    const acknowledgedView = { ...view(2), status: "Deckbuilding" as const };
+    await conn.receiveRaw(rawMessage({
+      type: "draft_deck_submit_ack", submissionId: command.submissionId, view: acknowledgedView,
+    }));
+    await submitted;
+
+    expect(events).toContainEqual({
+      type: "deckSubmissionAcknowledged", submissionId: command.submissionId, view: acknowledgedView,
+    });
+    expect(events.some((event) => event.type === "recoveredDeckSubmissionAccepted")).toBe(false);
+  });
+
+  it("reports a replayed submission's payload once the host accepts it after reconnect", async () => {
+    const { guest, conn, events } = createGuest(
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "guest-token" },
+    );
+    const stored: PersistedDraftDeckSubmission = {
+      hostPeerId: "phase2-ABCDE", roomCode: "ABCDE", draftCode: "draft-xyz", draftToken: "guest-token",
+      submissionId: "sub-1", mainDeck: ["Island"], commanders: [], timestamp: Date.now(),
+    };
+    persistence.loadDraftDeckSubmission.mockResolvedValueOnce(stored);
+
+    const initialized = guest.initialize();
+    await conn.receiveRaw(rawMessage(firstContact("reconnect", view(1))));
+    await initialized;
+    await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+    const replay = await decodeDraftWireMessage(conn.sentRaw[1]!);
+    expect(replay).toEqual({
+      type: "draft_submit_deck", submissionId: "sub-1", mainDeck: ["Island"], commanders: [],
+    });
+
+    const acknowledgedView = { ...view(2), status: "Pairing" as const };
+    await conn.receiveRaw(rawMessage({
+      type: "draft_deck_submit_ack", submissionId: "sub-1", view: acknowledgedView,
+    }));
+
+    expect(events).toContainEqual({
+      type: "recoveredDeckSubmissionAccepted", mainDeck: ["Island"], commanders: [], view: acknowledgedView,
+    });
   });
 
   it("settles a durable deck receipt without publishing its view after a connection error", async () => {
@@ -600,6 +659,234 @@ describe("P2P draft guest receive ordering", () => {
     expect(persistence.saveDraftDeckSubmission).toHaveBeenCalledOnce();
     expect(newestConn.sentRaw).toHaveLength(2);
     expect(guest.view).toEqual(acknowledgedView);
+  });
+
+  it("reports one recovered acceptance for a duplicate ack while a stalled replay attempt is still in flight", async () => {
+    const middleConn = new FakeDraftDataConnection();
+    middleConn.open = false;
+    const connect = vi.fn().mockReturnValueOnce(middleConn);
+    const stored: PersistedDraftDeckSubmission = {
+      hostPeerId: "phase2-ABCDE", roomCode: "ABCDE", draftCode: "draft-xyz", draftToken: "guest-token",
+      submissionId: "sub-1", mainDeck: ["Island"], commanders: [], timestamp: Date.now(),
+    };
+    const { guest, conn, events } = createGuest(
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "guest-token" },
+      { connect } as never,
+    );
+    const initialized = guest.initialize();
+    await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(1));
+    persistence.loadDraftDeckSubmission.mockResolvedValueOnce(stored);
+    // Arm the pause only after the handshake frame itself is on the wire, so
+    // it catches the replay the reconnect ack below triggers, not the frame.
+    const encoding = pauseNextEncoding();
+    await conn.receiveRaw(rawMessage(firstContact("reconnect", view(1))));
+    await initialized;
+    await encoding.started;
+    expect(encoding.encode).toHaveBeenCalledExactlyOnceWith({
+      type: "draft_submit_deck", submissionId: "sub-1", mainDeck: ["Island"], commanders: [],
+    });
+
+    // Reconnect a second time while the first session's replay is stalled.
+    persistence.loadDraftDeckSubmission.mockResolvedValueOnce(stored);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    conn.simulateClose();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(connect).toHaveBeenCalledExactlyOnceWith("phase2-ABCDE", PEER_CONNECT_OPTIONS);
+    middleConn.simulateOpen();
+    await vi.advanceTimersByTimeAsync(0);
+    await middleConn.receiveRaw(rawMessage(firstContact("reconnect", view(2))));
+    await vi.advanceTimersByTimeAsync(0);
+    // sentRaw[0] is the reconnect frame; [1] is this session's own (unstalled) replay.
+    expect(middleConn.sentRaw).toHaveLength(2);
+    await expect(decodeDraftWireMessage(middleConn.sentRaw[1]!)).resolves.toEqual({
+      type: "draft_submit_deck", submissionId: "sub-1", mainDeck: ["Island"], commanders: [],
+    });
+
+    const acknowledgedView = { ...view(3), status: "Pairing" as const };
+    const ackMessage = rawMessage({
+      type: "draft_deck_submit_ack", submissionId: "sub-1", view: acknowledgedView,
+    });
+    await middleConn.receiveRaw(ackMessage);
+    await vi.advanceTimersByTimeAsync(0);
+    // The host re-acks duplicate submissions: deliver a second, identical ack.
+    await middleConn.receiveRaw(ackMessage);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const recovered = events.filter((event) => event.type === "recoveredDeckSubmissionAccepted");
+    expect(recovered).toEqual([
+      { type: "recoveredDeckSubmissionAccepted", mainDeck: ["Island"], commanders: [], view: acknowledgedView },
+    ]);
+
+    // The stalled first session's send now fails against its closed connection,
+    // but the waiter is already acknowledged, so it must not surface as an error.
+    encoding.resume();
+    await encoding.finished;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.some((event) => (
+      event.type === "error" && event.message === "Draft connection is not open"
+    ))).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it("resolves the caller with no recovered event when its send fails after the host already acknowledged", async () => {
+    const middleConn = new FakeDraftDataConnection();
+    middleConn.open = false;
+    const connect = vi.fn().mockReturnValueOnce(middleConn);
+    const { guest, conn, events } = createGuest(
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+      { connect } as never,
+    );
+    const initialized = guest.initialize();
+    await conn.receiveRaw(rawMessage(welcome(view(1))));
+    await initialized;
+
+    const encoding = pauseNextEncoding();
+    const submitted = guest.submitDeck(["Island"], []);
+    const settled = vi.fn();
+    void submitted.then(
+      () => settled("fulfilled"),
+      (error: unknown) => settled(error),
+    );
+    await encoding.started;
+    const submission = asDeckSubmission(encoding.encode.mock.calls[0]![0]);
+    persistence.loadDraftDeckSubmission.mockResolvedValueOnce({
+      hostPeerId: "phase2-ABCDE", roomCode: "ABCDE", draftCode: "draft-xyz", draftToken: "guest-token",
+      submissionId: submission.submissionId, mainDeck: submission.mainDeck, commanders: submission.commanders,
+      timestamp: Date.now(),
+    });
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    conn.simulateClose();
+    await vi.advanceTimersByTimeAsync(1000);
+    middleConn.simulateOpen();
+    await vi.advanceTimersByTimeAsync(0);
+    await middleConn.receiveRaw(rawMessage(firstContact("reconnect", view(2))));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(middleConn.sentRaw).toHaveLength(2);
+    await expect(decodeDraftWireMessage(middleConn.sentRaw[1]!)).resolves.toEqual(submission);
+
+    const acknowledgedView = { ...view(3), status: "Pairing" as const };
+    await middleConn.receiveRaw(rawMessage({
+      type: "draft_deck_submit_ack", submissionId: submission.submissionId, view: acknowledgedView,
+    }));
+    await vi.advanceTimersByTimeAsync(0);
+    // Reach guard: the caller's own send is still stalled and unsettled, while
+    // the ack already routed to it (deckSubmissionAcknowledged, not the
+    // recovered-only event, since this waiter's callerAttempts is nonzero).
+    expect(settled).not.toHaveBeenCalled();
+    expect(events).toContainEqual({
+      type: "deckSubmissionAcknowledged", submissionId: submission.submissionId, view: acknowledgedView,
+    });
+
+    encoding.resume();
+    await encoding.finished;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(settled).toHaveBeenCalledExactlyOnceWith("fulfilled");
+    expect(events.some((event) => event.type === "recoveredDeckSubmissionAccepted")).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it("reports acceptance for a replayed submission acknowledged as its session fails", async () => {
+    const { guest, conn, events } = createGuest(
+      { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "guest-token" },
+    );
+    const stored: PersistedDraftDeckSubmission = {
+      hostPeerId: "phase2-ABCDE", roomCode: "ABCDE", draftCode: "draft-xyz", draftToken: "guest-token",
+      submissionId: "sub-1", mainDeck: ["Island"], commanders: [], timestamp: Date.now(),
+    };
+    persistence.loadDraftDeckSubmission.mockResolvedValueOnce(stored);
+    const initialized = guest.initialize();
+    await conn.receiveRaw(rawMessage(firstContact("reconnect", view(1))));
+    await initialized;
+    events.length = 0;
+    await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+    const replay = await decodeDraftWireMessage(conn.sentRaw[1]!);
+    if (replay.type !== "draft_submit_deck") throw new Error("Expected a replayed deck submission");
+
+    const outboxCleared = deferred();
+    persistence.clearDraftDeckSubmission.mockReturnValueOnce(outboxCleared.promise);
+    const acknowledgedView = { ...view(2), status: "Pairing" as const };
+    const received = conn.receiveRaw(rawMessage({
+      type: "draft_deck_submit_ack", submissionId: replay.submissionId, view: acknowledgedView,
+    }));
+    await vi.waitFor(() => expect(persistence.clearDraftDeckSubmission).toHaveBeenCalledWith(
+      "phase2-ABCDE", replay.submissionId,
+    ));
+
+    conn.simulateError(new Error("Transport failed"));
+    outboxCleared.resolve();
+    await received;
+
+    expect(events).toContainEqual({
+      type: "recoveredDeckSubmissionAccepted", mainDeck: ["Island"], commanders: [], view: acknowledgedView,
+    });
+    expect(events.some((event) => event.type === "viewUpdated")).toBe(false);
+  });
+
+  it("leaves acceptance to the replay when the caller's own send fails before any acknowledgement", async () => {
+    const middleConn = new FakeDraftDataConnection();
+    middleConn.open = false;
+    const connect = vi.fn().mockReturnValueOnce(middleConn);
+    const { guest, conn, events } = createGuest(
+      { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+      { connect } as never,
+    );
+    const initialized = guest.initialize();
+    await conn.receiveRaw(rawMessage(welcome(view(1))));
+    await initialized;
+
+    const encoding = pauseNextEncoding();
+    const submitted = guest.submitDeck(["Island"], []);
+    const settled = vi.fn();
+    void submitted.then(
+      () => settled("fulfilled"),
+      (error: unknown) => settled(error),
+    );
+    await encoding.started;
+    expect(encoding.encode).toHaveBeenCalledExactlyOnceWith({
+      type: "draft_submit_deck", submissionId: expect.any(String), mainDeck: ["Island"], commanders: [],
+    });
+    const submission = asDeckSubmission(encoding.encode.mock.calls[0]![0]);
+    persistence.loadDraftDeckSubmission.mockResolvedValueOnce({
+      hostPeerId: "phase2-ABCDE", roomCode: "ABCDE", draftCode: "draft-xyz", draftToken: "guest-token",
+      submissionId: submission.submissionId, mainDeck: submission.mainDeck, commanders: submission.commanders,
+      timestamp: Date.now(),
+    });
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    conn.simulateClose();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(connect).toHaveBeenCalledExactlyOnceWith("phase2-ABCDE", PEER_CONNECT_OPTIONS);
+    middleConn.simulateOpen();
+    await vi.advanceTimersByTimeAsync(0);
+    await middleConn.receiveRaw(rawMessage(firstContact("reconnect", view(2))));
+    await vi.advanceTimersByTimeAsync(0);
+    // sentRaw[0] is the reconnect frame itself; [1] is the replay it triggers.
+    expect(middleConn.sentRaw).toHaveLength(2);
+    await expect(decodeDraftWireMessage(middleConn.sentRaw[1]!)).resolves.toEqual(submission);
+
+    // Resume the caller's stalled send now, before any acknowledgement: the
+    // connection it targets is already closed, so it rejects.
+    encoding.resume();
+    await encoding.finished;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledExactlyOnceWith(new Error("Draft connection is not open"));
+
+    const acknowledgedView = { ...view(3), status: "Pairing" as const };
+    await middleConn.receiveRaw(rawMessage({
+      type: "draft_deck_submit_ack", submissionId: submission.submissionId, view: acknowledgedView,
+    }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const recovered = events.filter((event) => event.type === "recoveredDeckSubmissionAccepted");
+    expect(recovered).toEqual([
+      { type: "recoveredDeckSubmissionAccepted", mainDeck: ["Island"], commanders: [], view: acknowledgedView },
+    ]);
+
+    vi.useRealTimers();
   });
 
   it("still reports an active handshake persistence failure", async () => {

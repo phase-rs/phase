@@ -468,7 +468,7 @@ export interface DraftLobbyMetadata {
   setCode: string;
   /**
    * Draft kind, as the serialized name of a `DraftKind`. Deliberately not
-   * enumerated here: `DRAFT_KINDS` in `adapter/draft-adapter.ts` is the single
+   * enumerated here: `DRAFT_KINDS` in `adapter/draftKinds.ts` is the single
    * authority, and a second enumeration in a doc comment goes stale silently
    * (this one already had, naming three of the then-five kinds).
    */

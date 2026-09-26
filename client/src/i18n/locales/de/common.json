@@ -423,5 +423,25 @@
       "no-turn": "Kein TURN-Relay bereitgestellt",
       "aborted": "Anfrage abgebrochen"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Ein anderer Phase-Tab ist gerade beschäftigt. Schließe andere Phase-Tabs und versuche es erneut.",
+    "title": {
+      "save": "Deck konnte nicht gespeichert werden",
+      "clone": "Deck konnte nicht geklont werden",
+      "import": "Deck konnte nicht importiert werden",
+      "delete": "Deck konnte nicht gelöscht werden",
+      "organize": "Deck-Organisation konnte nicht aktualisiert werden",
+      "updateFeeds": "Deck-Feeds konnten nicht aktualisiert werden",
+      "restore": "Sicherung konnte nicht wiederhergestellt werden",
+      "applyCloud": "Cloud-Decks konnten nicht übernommen werden",
+      "autosaveDraft": "Draft-Deck konnte nicht automatisch gespeichert werden"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase konnte nicht auf den Browser-Speicher zugreifen. Versuche es gleich noch einmal."
+  },
+  "savedDeckChanged": {
+    "description": "Dieses Deck hat sich geändert, bevor deine Aktion ausgeführt wurde, daher wurde nichts geändert. Prüfe das Deck und versuche es erneut."
   }
 }

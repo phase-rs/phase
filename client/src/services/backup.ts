@@ -13,17 +13,20 @@
  */
 import {
   ACTIVE_DECK_KEY,
+  bumpProfileReplacementGeneration,
   DECK_FOLDERS_KEY,
   DECK_METADATA_KEY,
   DRAFT_WORKSPACE_PREFERENCES_KEY,
   FEED_DECK_ORIGINS_KEY,
   FEED_SUBSCRIPTIONS_KEY,
+  isDraftAutosaveSlot,
   isUserOwnedStorageKey,
   PREFERENCES_KEY,
   STORAGE_KEY_PREFIX,
   type DeckFolder,
   type DeckMeta,
 } from "../constants/storage";
+import { withSavedDeckLibrary, type SavedDeckTxn } from "./savedDeckTransaction";
 import type { FeedSubscription } from "../types/feed";
 
 /** Versioned envelope. Future shapes go in a `PhaseBackupV2 | …` union. */
@@ -69,12 +72,16 @@ export function mergeDeckCollections(
 ): PhaseBackupV1 {
   const decks = { ...local.decks };
   const cloudDeckNames = new Map<string, string>();
+  // Cloud names the local profile already held (byte-identical), so a
+  // marker on the cloud metadata entry must not confer autosave ownership.
+  const heldLocally = new Set<string>();
 
   for (const [name, raw] of Object.entries(cloud.decks)) {
     const existing = decks[name];
     if (existing === undefined || existing === raw) {
       decks[name] = raw;
       cloudDeckNames.set(name, name);
+      if (existing === raw) heldLocally.add(name);
       continue;
     }
 
@@ -94,6 +101,7 @@ export function mergeDeckCollections(
     cloud.deckMetadata,
     cloudDeckNames,
     folderIds,
+    heldLocally,
   );
   const feedDeckOrigins = mergeDeckRecord(
     local.feedDeckOrigins,
@@ -135,8 +143,33 @@ function isDeckMeta(value: unknown): value is DeckMeta {
   return (
     (value.lastPlayedAt === undefined || typeof value.lastPlayedAt === "number") &&
     (value.folderId === undefined || typeof value.folderId === "string") &&
-    (value.starred === undefined || typeof value.starred === "boolean")
+    (value.starred === undefined || typeof value.starred === "boolean") &&
+    (value.autosaveSlot === undefined || isDraftAutosaveSlot(value.autosaveSlot))
   );
+}
+
+/**
+ * Strip draft-autosave ownership from every entry in `names` inside a raw
+ * deck-metadata JSON blob, so foreign metadata can never hand autosave
+ * ownership to a deck the local profile already held. Returns `raw`
+ * unchanged when it is `null`, `names` is empty, or `raw` fails to parse as
+ * a record — `applyBackup`'s own `writeValidated` call handles an
+ * unparseable value as it already does today.
+ */
+function withoutAutosaveOwnership(raw: string | null, names: ReadonlySet<string>): string | null {
+  if (raw === null || names.size === 0) return raw;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!isRecord(value)) return raw;
+  for (const name of names) {
+    const entry = value[name];
+    if (isRecord(entry)) delete entry.autosaveSlot;
+  }
+  return JSON.stringify(value);
 }
 
 function isDeckFolder(value: unknown): value is DeckFolder {
@@ -195,6 +228,7 @@ function mergeDeckMetadata(
   cloudRaw: string | null,
   cloudDeckNames: ReadonlyMap<string, string>,
   folderIds: ReadonlyMap<string, string>,
+  heldLocally: ReadonlySet<string>,
 ): string | null {
   const local = parseRecord(localRaw, isDeckMeta);
   const cloud = parseRecord(cloudRaw, isDeckMeta);
@@ -204,7 +238,11 @@ function mergeDeckMetadata(
     const mergedName = cloudDeckNames.get(name);
     if (mergedName === undefined || local[mergedName] !== undefined) continue;
     const folderId = meta.folderId === undefined ? undefined : (folderIds.get(meta.folderId) ?? meta.folderId);
-    local[mergedName] = { ...meta, ...(folderId === undefined ? {} : { folderId }) };
+    const entry: DeckMeta = { ...meta, ...(folderId === undefined ? {} : { folderId }) };
+    // The local profile already held this deck: cloud metadata may describe
+    // the cloud device's own autosave slot, which must not transfer here.
+    if (heldLocally.has(name)) delete entry.autosaveSlot;
+    local[mergedName] = entry;
   }
   return JSON.stringify(local);
 }
@@ -408,6 +446,7 @@ function isParseableJson(raw: string | null): boolean {
  * re-hydrate from the new localStorage contents.
  */
 export function applyBackup(
+  txn: SavedDeckTxn,
   backup: PhaseBackupV1,
   mode: ImportMode,
 ): ImportResult {
@@ -418,6 +457,21 @@ export function applyBackup(
       if (key && isUserOwnedStorageKey(key)) toRemove.push(key);
     }
     for (const key of toRemove) localStorage.removeItem(key);
+  }
+
+  // Every deck name this profile held before importing, in merge mode. A
+  // backup's metadata can mark a name absent from its own `decks` (orphaned
+  // or foreign metadata); stripping only the names the import loop below
+  // skips would leave that marker in place and hand autosave ownership to
+  // whatever local deck already carries the name.
+  const localDeckNamesBeforeImport = new Set<string>();
+  if (mode === "merge") {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(STORAGE_KEY_PREFIX)) {
+        localDeckNamesBeforeImport.add(key.slice(STORAGE_KEY_PREFIX.length));
+      }
+    }
   }
 
   let decksImported = 0;
@@ -462,11 +516,20 @@ export function applyBackup(
     backup.draftWorkspacePreferences ?? null,
     true,
   );
-  writeValidated(DECK_METADATA_KEY, backup.deckMetadata, true);
+  writeValidated(
+    DECK_METADATA_KEY,
+    withoutAutosaveOwnership(backup.deckMetadata, localDeckNamesBeforeImport),
+    true,
+  );
   writeValidated(DECK_FOLDERS_KEY, backup.deckFolders ?? null, true);
   writeValidated(ACTIVE_DECK_KEY, backup.activeDeck, false);
   writeValidated(FEED_SUBSCRIPTIONS_KEY, backup.feedSubscriptions, true);
   writeValidated(FEED_DECK_ORIGINS_KEY, backup.feedDeckOrigins, true);
+
+  // A feed sync already queued behind this transaction's lock
+  // (`feedService.ts::publishUnlessSuperseded`) must detect this replacement and
+  // skip instead of overwriting restored subscriptions with stale data.
+  bumpProfileReplacementGeneration(txn);
 
   return { decksImported, decksSkippedMalformed, preferencesReplaced, malformedKeys };
 }
@@ -491,5 +554,5 @@ export async function importBackupFromFile(
       "File is not a phase backup, or its version is not supported.",
     );
   }
-  return applyBackup(parsed, mode);
+  return withSavedDeckLibrary((txn) => applyBackup(txn, parsed, mode));
 }

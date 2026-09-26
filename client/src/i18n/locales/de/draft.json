@@ -721,5 +721,15 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Autospeicherung] {{format}}",
+    "slotQuick": "Quick Draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Cube Draft",
+    "slotPremier": "Premier-Draft",
+    "slotTraditional": "Traditional-Draft",
+    "slotCommanderDraft": "Commander-Draft",
+    "slotWinston": "Winston-Draft"
   }
 }

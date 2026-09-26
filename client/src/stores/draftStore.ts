@@ -12,6 +12,7 @@ import {
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
+import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import {
   cancelLlmDraftRun,
   collectLlmDraftResponses,
@@ -39,6 +40,7 @@ import {
   addVirtualBasic,
   projectDeckNames,
   projectWorkspaceMainDeck,
+  projectWorkspacePartition,
   removeVirtualBasic,
 } from "../components/draft/workspace/workspaceProjection";
 import type {
@@ -47,6 +49,7 @@ import type {
   DraftZone,
 } from "../components/draft/workspace/types";
 import { BASIC_LAND_NAMES } from "../constants/game";
+import { autosaveDraftDeck } from "../services/draftDeckAutosave";
 import {
   cleanupQuickDraftLifecycle,
   drainQuickDraftPersistence,
@@ -1007,7 +1010,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
   },
 
   startCubeDraft: (cubeListText, cubeName, settings, difficulty) => startLocalDraft({
-    setCode: "custom-cube",
+    setCode: CUSTOM_CUBE_SET_CODE,
     setName: cubeName,
     difficulty,
     kind: "Quick",
@@ -1306,12 +1309,13 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     }
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
+    const partition = projectWorkspacePartition(state.workspaceState, state.view.pool);
     try {
       const view = await withDraftEngineOperation((lease) => {
         if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration || revision !== workspaceRevision) {
           throw new Error("Stale draft deck submission");
         }
-        return lease.submitDeck(projectDeckNames(state.workspaceState!, state.view!.pool), []);
+        return lease.submitDeck(partition.mainDeck, []);
       });
       if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration) return;
       retireExclusive(token);
@@ -1324,6 +1328,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         },
         persistence: "schedule",
       });
+      void autosaveDraftDeck({ view: state.view, setCode: state.selectedSet, partition, commanders: [] });
     } catch (error) {
       retireExclusive(token);
       throw error;

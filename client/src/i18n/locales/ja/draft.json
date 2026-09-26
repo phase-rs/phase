@@ -782,5 +782,15 @@
     "leave": "退出",
     "startDraft": "ドラフトを開始",
     "waitingForHost": "ホストがドラフトを開始するのを待っています…"
+  },
+  "deckAutosave": {
+    "deckName": "[自動保存] {{format}}",
+    "slotQuick": "クイック・ドラフト",
+    "slotSealed": "シールド",
+    "slotCube": "キューブ・ドラフト",
+    "slotPremier": "プレミア・ドラフト",
+    "slotTraditional": "トラディショナル・ドラフト",
+    "slotCommanderDraft": "統率者ドラフト",
+    "slotWinston": "ウィンストン・ドラフト"
   }
 }

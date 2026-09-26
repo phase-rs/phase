@@ -1,7 +1,23 @@
+import { DRAFT_KINDS } from "../adapter/draftKinds";
 import { isCommanderBracket, type CommanderBracket } from "../types/bracket";
 import type { FeedSubscription } from "../types/feed";
 import { repairParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { projectSavedDeckSpecialSlots } from "../services/savedDeckProjection";
+import {
+  savedDeckTxnGate,
+  withSavedDeckLibrary,
+  withSavedDeckLibraryOrSkip,
+  SavedDeckChangedError,
+  type SavedDeckTxn,
+  type SavedDeckTxnResult,
+} from "../services/savedDeckTransaction";
+
+/** Every draft-autosave slot: one per draft kind, plus solo cube drafts (which run as kind `Quick`). */
+export const DRAFT_AUTOSAVE_SLOTS = [...DRAFT_KINDS, "Cube"] as const;
+export type DraftAutosaveSlot = (typeof DRAFT_AUTOSAVE_SLOTS)[number];
+export function isDraftAutosaveSlot(value: unknown): value is DraftAutosaveSlot {
+  return DRAFT_AUTOSAVE_SLOTS.some((slot) => slot === value);
+}
 
 /** Prefix for saved deck data in localStorage. Full key: `${STORAGE_KEY_PREFIX}${deckName}` */
 export const STORAGE_KEY_PREFIX = "phase-deck:";
@@ -84,6 +100,36 @@ export const LLM_ENDPOINTS_KEY = "phase-llm-endpoints";
 export const DRAFT_WORKSPACE_PREFERENCES_KEY = "phase-draft-workspace-preferences";
 
 /**
+ * localStorage key for a per-device counter bumped by `bumpProfileReplacementGeneration`,
+ * called only from `backup.ts::applyBackup` — reached via cloud sync's apply-remote
+ * and apply-merged paths (`cloudSyncStore.ts`), manual backup-file import
+ * (`backup.ts::importBackupFromFile`), and the legacy-storage migration
+ * (`legacyMigration.ts`). `feedService.ts` captures this before waiting on
+ * the saved-deck library lock and compares after re-acquiring it, so a feed
+ * sync queued behind one of these replacements can detect it and skip.
+ *
+ * Deliberately NOT part of {@link isUserOwnedStorageKey}: syncing this counter
+ * would let a remote profile apply overwrite the very value used to detect a
+ * profile replacement, defeating the guard it exists to provide.
+ */
+export const PROFILE_REPLACEMENT_KEY = "phase-profile-replacement";
+
+/** Current profile-replacement generation (see {@link PROFILE_REPLACEMENT_KEY}). */
+export function profileReplacementGeneration(): number {
+  return Number(localStorage.getItem(PROFILE_REPLACEMENT_KEY) ?? 0);
+}
+
+/**
+ * Bump the profile-replacement generation. Requires a {@link SavedDeckTxn} so it
+ * can only run inside a saved-deck library transaction body, alongside the
+ * profile replacement it accompanies.
+ */
+export function bumpProfileReplacementGeneration(txn: SavedDeckTxn): void {
+  void txn;
+  localStorage.setItem(PROFILE_REPLACEMENT_KEY, String(profileReplacementGeneration() + 1));
+}
+
+/**
  * Single authority for "is this localStorage key part of the user's portable
  * profile?" — the decks, preferences, metadata, active-deck pointer, and feed
  * state that `buildBackup`/`applyBackup` round-trip and that cloud sync mirrors.
@@ -113,6 +159,8 @@ export interface DeckMeta {
   folderId?: string;
   /** Whether the deck is starred (pinned above folders in the library). */
   starred?: boolean;
+  /** The draft-autosave slot that owns this deck. */
+  autosaveSlot?: DraftAutosaveSlot;
 }
 
 /** A user-created folder for organizing saved decks. Folders are flat
@@ -147,21 +195,31 @@ function loadMetadataStore(): Record<string, DeckMeta> {
   }
 }
 
-function saveMetadataStore(store: Record<string, DeckMeta>): void {
+function saveMetadataStore(txn: SavedDeckTxn, store: Record<string, DeckMeta>): void {
+  void txn;
   localStorage.setItem(DECK_METADATA_KEY, JSON.stringify(store));
 }
 
-/** Stamp metadata for a deck. Call whenever a deck is saved or seeded. */
-export function stampDeckMeta(deckName: string, addedAt?: number): void {
+/** Remove draft-autosave ownership: the autosave will no longer overwrite or rename this deck. */
+export function clearDeckAutosaveMarker(txn: SavedDeckTxn, deckName: string): void {
+  const store = loadMetadataStore();
+  if (store[deckName]?.autosaveSlot === undefined) return;
+  delete store[deckName].autosaveSlot;
+  saveMetadataStore(txn, store);
+}
+
+/** Stamp metadata for a deck saved or seeded by anything other than the draft autosave, and clear any autosave ownership. */
+export function stampDeckMeta(txn: SavedDeckTxn, deckName: string, addedAt?: number): void {
   const store = loadMetadataStore();
   if (!store[deckName]) {
     store[deckName] = { addedAt: addedAt ?? Date.now() };
-    saveMetadataStore(store);
+    saveMetadataStore(txn, store);
   }
+  clearDeckAutosaveMarker(txn, deckName);
 }
 
 /** Update the lastPlayedAt timestamp for a deck. Call when starting a game. */
-export function touchDeckPlayed(deckName: string): void {
+export function touchDeckPlayed(txn: SavedDeckTxn, deckName: string): void {
   if (isRandomDeckSelection(deckName)) return;
   const store = loadMetadataStore();
   const existing = store[deckName];
@@ -171,7 +229,7 @@ export function touchDeckPlayed(deckName: string): void {
     addedAt: existing?.addedAt ?? Date.now(),
     lastPlayedAt: Date.now(),
   };
-  saveMetadataStore(store);
+  saveMetadataStore(txn, store);
 }
 
 /**
@@ -181,37 +239,108 @@ export function touchDeckPlayed(deckName: string): void {
  * the source has no metadata — the caller's `stampDeckMeta` then seeds a
  * fresh entry under the new name.
  */
-export function migrateDeckMeta(oldName: string, newName: string): void {
+export function migrateDeckMeta(txn: SavedDeckTxn, oldName: string, newName: string): void {
   if (oldName === newName) return;
   const store = loadMetadataStore();
   const src = store[oldName];
   if (!src) return;
   store[newName] = { ...src };
   delete store[oldName];
-  saveMetadataStore(store);
+  saveMetadataStore(txn, store);
   notifyDecksChanged();
 }
 
+/** The first of `baseName`, `candidate(2)`, `candidate(3)`, … not in `takenNames`. */
+export function uniqueDeckName(
+  baseName: string,
+  takenNames: Iterable<string>,
+  candidate: (index: number) => string = (index) => `${baseName} ${index}`,
+): string {
+  const taken = new Set(takenNames);
+  if (!taken.has(baseName)) return baseName;
+  for (let i = 2; ; i++) {
+    const next = candidate(i);
+    if (!taken.has(next)) return next;
+  }
+}
+
+/** `uniqueDeckName` against the library as the transaction that will write the name sees it. */
+export function freeDeckName(
+  txn: SavedDeckTxn,
+  baseName: string,
+  candidate?: (index: number) => string,
+): string {
+  void txn;
+  return uniqueDeckName(baseName, listSavedDeckNames(), candidate);
+}
+
+/** A saved deck's stored data, read when the user chose an action on it. */
+export interface SavedDeckSnapshot {
+  readonly name: string;
+  /** `null` when no deck was saved under `name`. */
+  readonly raw: string | null;
+}
+
+/** Read the deck saved under `deckName` before waiting for the library lock; pass the result into the transaction. */
+export function captureSavedDeck(deckName: string): SavedDeckSnapshot {
+  return { name: deckName, raw: localStorage.getItem(STORAGE_KEY_PREFIX + deckName) };
+}
+
+/** Whether `deck.name` still holds the deck `deck` captured. Metadata is not compared, so organizing or playing a deck does not make it a different deck. */
+export function savedDeckUnchanged(txn: SavedDeckTxn, deck: SavedDeckSnapshot): boolean {
+  void txn;
+  return deck.raw !== null && localStorage.getItem(STORAGE_KEY_PREFIX + deck.name) === deck.raw;
+}
+
+/** Throw `SavedDeckChangedError`, before anything is written, unless `savedDeckUnchanged`. */
+export function requireSavedDeckUnchanged(txn: SavedDeckTxn, deck: SavedDeckSnapshot): void {
+  if (!savedDeckUnchanged(txn, deck)) throw new SavedDeckChangedError(deck.name);
+}
+
+/** Write a saved deck's data, returning the snapshot of what was written. */
+export function writeSavedDeckData(txn: SavedDeckTxn, deckName: string, raw: string): SavedDeckSnapshot {
+  void txn;
+  localStorage.setItem(STORAGE_KEY_PREFIX + deckName, raw);
+  return { name: deckName, raw };
+}
+
+/** Remove a saved deck's data. */
+export function removeSavedDeckData(txn: SavedDeckTxn, deckName: string): void {
+  void txn;
+  localStorage.removeItem(STORAGE_KEY_PREFIX + deckName);
+}
+
+/** Move a saved deck from `oldName` to `newName`: removes `oldName`'s data, carries its metadata
+ *  (`migrateDeckMeta`), and repoints the active deck. The caller writes `newName`'s data. */
+export function moveSavedDeck(txn: SavedDeckTxn, oldName: string, newName: string): void {
+  if (oldName === newName) return;
+  removeSavedDeckData(txn, oldName);
+  migrateDeckMeta(txn, oldName, newName);
+  if (localStorage.getItem(ACTIVE_DECK_KEY) === oldName) {
+    localStorage.setItem(ACTIVE_DECK_KEY, newName);
+  }
+}
+
 /** Assign a deck to a folder, or pass `null` to move it to Unfiled. */
-export function setDeckFolder(deckName: string, folderId: string | null): void {
+export function setDeckFolder(txn: SavedDeckTxn, deckName: string, folderId: string | null): void {
   const store = loadMetadataStore();
   const meta = store[deckName] ?? { addedAt: Date.now() };
   if (folderId === null) delete meta.folderId;
   else meta.folderId = folderId;
   store[deckName] = meta;
-  saveMetadataStore(store);
+  saveMetadataStore(txn, store);
   notifyDecksChanged();
 }
 
 /** Toggle a deck's starred flag. Returns the resulting starred state. */
-export function toggleDeckStar(deckName: string): boolean {
+export function toggleDeckStar(txn: SavedDeckTxn, deckName: string): boolean {
   const store = loadMetadataStore();
   const meta = store[deckName] ?? { addedAt: Date.now() };
   const starred = !meta.starred;
   if (starred) meta.starred = true;
   else delete meta.starred;
   store[deckName] = meta;
-  saveMetadataStore(store);
+  saveMetadataStore(txn, store);
   notifyDecksChanged();
   return starred;
 }
@@ -222,17 +351,19 @@ export function getDeckMeta(deckName: string): DeckMeta | null {
 }
 
 /** Remove metadata for a deleted deck. */
-export function removeDeckMeta(deckName: string): void {
+export function removeDeckMeta(txn: SavedDeckTxn, deckName: string): void {
   const store = loadMetadataStore();
   delete store[deckName];
-  saveMetadataStore(store);
+  saveMetadataStore(txn, store);
 }
 
-/** Delete a saved deck from localStorage, clearing metadata and active-deck if needed. */
-export function deleteDeck(deckName: string): void {
-  localStorage.removeItem(STORAGE_KEY_PREFIX + deckName);
-  removeDeckMeta(deckName);
-  if (localStorage.getItem(ACTIVE_DECK_KEY) === deckName) {
+/** Delete the saved deck `deck` captured, clearing its metadata and the active-deck pointer if it names it.
+ *  Throws SavedDeckChangedError, writing nothing, if the name no longer holds that deck. */
+export function deleteDeck(txn: SavedDeckTxn, deck: SavedDeckSnapshot): void {
+  requireSavedDeckUnchanged(txn, deck);
+  removeSavedDeckData(txn, deck.name);
+  removeDeckMeta(txn, deck.name);
+  if (localStorage.getItem(ACTIVE_DECK_KEY) === deck.name) {
     localStorage.removeItem(ACTIVE_DECK_KEY);
   }
 }
@@ -249,6 +380,89 @@ export function listSavedDeckNames(): string[] {
   return names.sort();
 }
 
+/** Write a draft autosave into `slot` as a saved-deck library transaction, and return the deck name used or why it was skipped.
+ *  Overwrites only the deck carrying `slot`, moving it to the first free name among `label`, `label (2)`, …; never overwrites another deck. */
+export function writeDraftAutosaveDeck(
+  slot: DraftAutosaveSlot,
+  label: string,
+  data: string,
+): Promise<SavedDeckTxnResult<string>> {
+  return withSavedDeckLibraryOrSkip(async (txn) => {
+    const store = loadMetadataStore();
+    const owners = Object.entries(store)
+      .filter(([name, meta]) => meta.autosaveSlot === slot && localStorage.getItem(STORAGE_KEY_PREFIX + name) !== null)
+      .map(([name]) => name)
+      .sort();
+    const current = owners.includes(label) ? label : owners[0];
+    const name = uniqueDeckName(
+      label,
+      listSavedDeckNames().filter((n) => n !== current),
+      (i) => `${label} (${i})`,
+    );
+
+    const pause = savedDeckTxnGate("draft-autosave-after-owner-selection");
+    if (pause) await pause;
+
+    // Write the data first: if this throws (e.g. quota), nothing else has changed.
+    writeSavedDeckData(txn, name, data);
+
+    if (current !== undefined && current !== name) {
+      moveSavedDeck(txn, current, name);
+    }
+
+    const nextStore = loadMetadataStore();
+    // An orphaned marker at `name` (no deck key, so not an owner) must not carry its stale metadata forward
+    // when there is no owner to move: this write starts a fresh entry, not a continuation of that orphan.
+    nextStore[name] = current === undefined
+      ? { addedAt: Date.now(), autosaveSlot: slot }
+      : { ...nextStore[name], addedAt: nextStore[name]?.addedAt ?? Date.now(), autosaveSlot: slot };
+    for (const other of owners) {
+      if (other === current) continue;
+      delete nextStore[other]?.autosaveSlot;
+    }
+    saveMetadataStore(txn, nextStore);
+
+    return name;
+  }, "skip");
+}
+
+/**
+ * Save the deck builder's deck as `nextName`. When renamed, move it from `previous.name` only if
+ * that name still holds the deck `previous` captured; otherwise leave that name's deck alone. The
+ * check reads `savedDeckRef` under the lock, not just `previous`: when an earlier queued save or
+ * clone to that same name has already committed by the time this transaction runs, its write is
+ * what `previous` should be compared against, not the value captured back at this click.
+ *
+ * On success, `savedDeckRef` is updated to this write's snapshot only if `claimsEditor` (checked
+ * again after the write) still says so — a Load that switched the editor to a different deck
+ * while this save waited owns the ref, not this save's now-stale claim to it.
+ */
+export function saveBuilderDeck(
+  previous: SavedDeckSnapshot | null,
+  savedDeckRef: { current: SavedDeckSnapshot | null },
+  claimsEditor: () => boolean,
+  nextName: string,
+  data: string,
+): Promise<SavedDeckSnapshot> {
+  return withSavedDeckLibrary(async (txn) => {
+    const live = savedDeckRef.current;
+    const effective = claimsEditor() && previous && live && live.name === previous.name ? live : previous;
+    if (effective && effective.name !== nextName && savedDeckUnchanged(txn, effective)) {
+      // If nextName already names another deck, the writeSavedDeckData below overwrites
+      // its data (pre-existing Save behavior) and moveSavedDeck's metadata
+      // carry likewise replaces its metadata — both correctly reflect the
+      // surviving deck's identity now living under nextName.
+      moveSavedDeck(txn, effective.name, nextName);
+    }
+    const saved = writeSavedDeckData(txn, nextName, data);
+    const pause = savedDeckTxnGate("builder-save-after-data-write");
+    if (pause) await pause;
+    stampDeckMeta(txn, nextName);
+    if (claimsEditor()) savedDeckRef.current = saved;
+    return saved;
+  });
+}
+
 // --- Folder registry helpers ---
 
 function loadFolderStore(): DeckFolder[] {
@@ -260,7 +474,8 @@ function loadFolderStore(): DeckFolder[] {
   }
 }
 
-function saveFolderStore(folders: DeckFolder[]): void {
+function saveFolderStore(txn: SavedDeckTxn, folders: DeckFolder[]): void {
+  void txn;
   localStorage.setItem(DECK_FOLDERS_KEY, JSON.stringify(folders));
   notifyDecksChanged();
 }
@@ -277,33 +492,33 @@ export function listFolders(): DeckFolder[] {
  * folder, or `null` when the name is blank. Duplicate names are permitted —
  * folders are identified by `id`, not name.
  */
-export function createFolder(name: string): DeckFolder | null {
+export function createFolder(txn: SavedDeckTxn, name: string): DeckFolder | null {
   const trimmed = name.trim().slice(0, MAX_FOLDER_NAME_LENGTH);
   if (!trimmed) return null;
   const folders = loadFolderStore();
   const order = folders.reduce((max, f) => Math.max(max, f.order), -1) + 1;
   const folder: DeckFolder = { id: crypto.randomUUID(), name: trimmed, order };
   folders.push(folder);
-  saveFolderStore(folders);
+  saveFolderStore(txn, folders);
   return folder;
 }
 
 /** Rename a folder in place. No-op when the id is unknown or name is blank. */
-export function renameFolder(id: string, name: string): void {
+export function renameFolder(txn: SavedDeckTxn, id: string, name: string): void {
   const trimmed = name.trim().slice(0, MAX_FOLDER_NAME_LENGTH);
   if (!trimmed) return;
   const folders = loadFolderStore();
   const folder = folders.find((f) => f.id === id);
   if (!folder) return;
   folder.name = trimmed;
-  saveFolderStore(folders);
+  saveFolderStore(txn, folders);
 }
 
 /**
  * Delete a folder. Member decks are reassigned to Unfiled (never deleted).
  * Metadata is updated first so a single notify carries a consistent state.
  */
-export function deleteFolder(id: string): void {
+export function deleteFolder(txn: SavedDeckTxn, id: string): void {
   const folders = loadFolderStore();
   if (!folders.some((f) => f.id === id)) return;
   const store = loadMetadataStore();
@@ -314,8 +529,8 @@ export function deleteFolder(id: string): void {
       changed = true;
     }
   }
-  if (changed) saveMetadataStore(store);
-  saveFolderStore(folders.filter((f) => f.id !== id));
+  if (changed) saveMetadataStore(txn, store);
+  saveFolderStore(txn, folders.filter((f) => f.id !== id));
 }
 
 /**
@@ -377,7 +592,8 @@ export function loadSavedDeckBracket(deckName: string): CommanderBracket | null 
  * `null` removes the field. Acts as a no-op when the deck does not exist;
  * the deck builder is responsible for the initial save before tagging.
  */
-export function saveSavedDeckBracket(deckName: string, bracket: CommanderBracket | null): void {
+export function saveSavedDeckBracket(txn: SavedDeckTxn, deckName: string, bracket: CommanderBracket | null): void {
+  void txn;
   const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
   if (!raw) return;
   try {

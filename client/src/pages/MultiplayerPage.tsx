@@ -20,6 +20,7 @@ import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
+import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import { expandParsedDeck } from "../services/deckParser";
@@ -563,7 +564,7 @@ function MultiplayerPageContent({
         }
       }
 
-      touchDeckPlayed(deckName);
+      void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, deckName), "run-unguarded");
 
       if (action.type === "host") {
         const deck = expandDeck();
