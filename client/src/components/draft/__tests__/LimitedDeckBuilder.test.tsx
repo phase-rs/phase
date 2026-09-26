@@ -971,7 +971,7 @@ describe("LimitedDeckBuilder", () => {
   });
 
   it.each(["desktop", "tablet-portrait", "phone-portrait"] as const)(
-    "gates a 40-card Limited workspace on the current engine verdict in %s",
+    "passes a 40-card Limited workspace through a rejected engine verdict in %s",
     async (responsiveLayout) => {
       const reason = "Can't be in a deck or sideboard unless the game is played for ante: Contract from Below";
       const submit = vi.fn();
@@ -1000,10 +1000,9 @@ describe("LimitedDeckBuilder", () => {
           onRemoveBasicLand: () => {},
         };
       };
-      compatibilityHarness.evaluate.mockImplementation(async (deck: { main: Array<{ name: string }> }) =>
-        deck.main.some((entry) => entry.name === "Contract from Below")
-          ? { ...compatibleResult(), selected_format_compatible: false, selected_format_reasons: [reason] }
-          : compatibleResult());
+      compatibilityHarness.evaluate.mockResolvedValue({
+        ...compatibleResult(), selected_format_compatible: false, selected_format_reasons: [reason],
+      });
       const { rerender } = render(
         <LimitedDeckBuilder local={local(true)} responsiveLayout={responsiveLayout} showSuggestions={false} />,
       );
@@ -1014,24 +1013,22 @@ describe("LimitedDeckBuilder", () => {
           sideboard: [],
           commander: [],
         },
-        { selectedFormat: "Limited", selectedMatchType: "Bo1", draftSetCodes: ["TST"] },
+        { selectedFormat: null, draftSetCodes: ["TST"] },
       ));
-      expect(await screen.findByRole("alert")).toHaveTextContent(reason);
       const button = screen.getByRole("button", { name: "Submit Deck" });
-      expect(button).toBeDisabled();
+      expect(button).toBeEnabled();
       fireEvent.click(button);
-      expect(submit).not.toHaveBeenCalled();
+      await waitFor(() => expect(submit).toHaveBeenCalledWith([]));
 
       rerender(<LimitedDeckBuilder local={local(false)} responsiveLayout={responsiveLayout} showSuggestions={false} />);
       await waitFor(() => expect(button).toBeEnabled());
-      expect(screen.queryByRole("alert")).toBeNull();
       fireEvent.click(button);
-      await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+      await waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
     },
   );
 
   it.each(["pending", "unavailable", "unknown"] as const)(
-    "does not admit a Limited deck while compatibility is %s",
+    "admits a Limited deck while compatibility is %s",
     async (outcome) => {
       if (outcome === "pending") compatibilityHarness.evaluate.mockImplementation(() => new Promise(() => {}));
       if (outcome === "unavailable") compatibilityHarness.evaluate.mockRejectedValue(new Error("worker unavailable"));
@@ -1048,12 +1045,9 @@ describe("LimitedDeckBuilder", () => {
       />);
       await waitFor(() => expect(compatibilityHarness.evaluate).toHaveBeenCalled());
       const button = screen.getByRole("button", { name: "Submit Deck" });
-      expect(button).toBeDisabled();
+      expect(button).toBeEnabled();
       fireEvent.click(button);
-      expect(submit).not.toHaveBeenCalled();
-      expect(await screen.findByText(outcome === "pending"
-        ? "Checking deck compatibility..."
-        : "Deck compatibility is unavailable right now — try again before submitting.")).toBeInTheDocument();
+      await waitFor(() => expect(submit).toHaveBeenCalledWith([]));
     },
   );
 });
@@ -1633,7 +1627,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   it.each(["Quick", "Sealed", "Premier", "Traditional"] as const)(
-    "requires a positive Limited verdict before %s submission",
+    "passes non-Commander %s submission through the compatibility evaluator",
     async (kind) => {
       const submitSpy = vi.fn();
       render(
@@ -1655,7 +1649,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
       expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
         expect.objectContaining({ main: [{ count: 1, name: "Wind Drake" }] }),
-        { selectedFormat: "Limited", selectedMatchType: "Bo1", draftSetCodes: [] },
+        { selectedFormat: null, draftSetCodes: [] },
       );
     },
   );
@@ -1789,8 +1783,8 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]));
   });
 
-  it("gates workspace Limited submission when the engine requires no commanders", async () => {
-    const submitSpy = vi.fn();
+  it("passes fixed-pool Limited submission through when no commanders are required", async () => {
+    const submitSideboard = vi.fn();
     const fixture = workspaceDeckFixture();
     render(
       <LimitedDeckBuilder
@@ -1804,11 +1798,10 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           workspace: fixture.workspace,
           preferences: createDefaultDraftWorkspacePreferences(),
           interactionLocked: false,
+          capabilities: { kind: "fixed-pool" },
           onWorkspaceChange: () => {},
           onPreferencesChange: () => {},
-          onSubmitDeck: submitSpy,
-          onAddBasicLand: () => {},
-          onRemoveBasicLand: () => {},
+          onSubmitDeck: submitSideboard,
         }}
         responsiveLayout="desktop"
         showSuggestions={false}
@@ -1818,7 +1811,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     const submit = screen.getByRole("button", { name: "Submit Deck" });
     await waitFor(() => expect(submit).not.toBeDisabled());
     fireEvent.click(submit);
-    await waitFor(() => expect(submitSpy).toHaveBeenCalledWith([]));
+    await waitFor(() => expect(submitSideboard).toHaveBeenCalledWith([]));
     expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
       expect.objectContaining({
         main: [
@@ -1826,7 +1819,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
           { count: 1, name: "Vehicle Commander" },
         ],
       }),
-      { selectedFormat: "Limited", selectedMatchType: "Bo1", draftSetCodes: ["CMM"] },
+      { selectedFormat: null, draftSetCodes: ["CMM"] },
     );
   });
 

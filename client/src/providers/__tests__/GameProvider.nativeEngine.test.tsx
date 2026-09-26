@@ -1207,12 +1207,18 @@ describe("GameProvider native AI routing", () => {
     };
     const key = `phase:draft-deck:commander-${playerCount}`;
     sessionStorage.setItem(key, JSON.stringify(payload));
+    gameStoreState.initGame.mockImplementationOnce((...args: unknown[]) => {
+      if (args[7] === "strict") return Promise.reject(new Error("strict write rejected"));
+      return Promise.resolve();
+    });
     render(<GameProvider gameId={`commander-${playerCount}`} mode="ai" source="multiplayer" playerCount={playerCount}><div /></GameProvider>);
     await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
     expect(getSharedAdapter).toHaveBeenCalled();
     expect(gameStoreState.initGame.mock.calls[0][2]).toEqual(payload);
     expect(gameStoreState.initGame.mock.calls[0][4]).toBe(playerCount);
+    expect(gameStoreState.initGame.mock.calls[0][7]).toBe("best-effort");
     expect(sessionStorage.getItem(key)).toBeNull();
+    expect(createGameLoopController).toHaveBeenCalledOnce();
     expect(nativeAdapterInitialize).not.toHaveBeenCalled();
     expect(ensureNativeEngine).not.toHaveBeenCalled();
     expect(loadDraftRun).not.toHaveBeenCalled();

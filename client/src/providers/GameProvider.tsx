@@ -1519,7 +1519,16 @@ export function GameProvider({
             if (cancelled) return;
             if (!matchesPublishedDraftPayload(deckList, run)) throw unavailableDraftStage();
           }
-          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer, "strict");
+          await initGame(
+            gameId,
+            adapter,
+            deckList,
+            formatConfig,
+            playerCount,
+            matchConfig,
+            firstPlayer,
+            soloDraft ? "strict" : "best-effort",
+          );
           if (cancelled) return;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai", difficulty,

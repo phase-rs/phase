@@ -324,6 +324,8 @@ describe("DraftPodPage workspace", () => {
     expect(deckbuilder.onAutoSuggestLands).toBe(store.state.autoSuggestLands);
     await deckbuilder.onAutoSuggestLands?.();
     expect(store.state.autoSuggestLands).toHaveBeenCalledOnce();
+    await deckbuilder.onSubmitDeck([]);
+    expect(store.state.submitDeck).toHaveBeenCalledWith([]);
   });
 
   it("forwards the engine commander requirement independently of draft kind", () => {
