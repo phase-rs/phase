@@ -1,4 +1,4 @@
-import { memo, useRef } from "react";
+import { memo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -16,6 +16,9 @@ interface CompanionFanCardProps {
   /** Whether the global `CompanionToHand` special action is currently legal.
    *  A display affordance derived by the parent — never a mode flag. */
   canActivate: boolean;
+  /** Desktop pointer affordance. Disabled on touch layouts because WebKit can
+   *  retain a synthesized hover after a tap and leave the card raised. */
+  enableHover: boolean;
   theme: ZoneTheme;
   rotation: number;
   arcOffset: number;
@@ -38,6 +41,7 @@ interface CompanionFanCardProps {
 const CompanionFanCard = memo(function CompanionFanCard({
   companion,
   canActivate,
+  enableHover,
   theme,
   rotation,
   arcOffset,
@@ -53,6 +57,7 @@ const CompanionFanCard = memo(function CompanionFanCard({
   // Suppress dragSnapToOrigin only when the flick actually activated, so a
   // short/sideways drag springs back into the fan instead of flying off.
   const playedRef = useRef(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   const activate = () => dispatchAction({ type: "CompanionToHand" });
 
@@ -62,67 +67,73 @@ const CompanionFanCard = memo(function CompanionFanCard({
       initial={{ opacity: 0, y: restingY + 10 }}
       animate={{ opacity: 1, y: restingY + arcOffset, rotate: rotation }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: hoverY + arcOffset, scale: 1.08, zIndex: 30 }}
-      whileDrag={{ scale: 1.05, zIndex: 9999 }}
+      whileHover={enableHover ? { y: hoverY + arcOffset, scale: 1.08, zIndex: 30 } : undefined}
       transition={{ duration: 0.25, layout: { duration: 0.15, delay: 0 } }}
-      drag={canActivate}
-      dragConstraints={false}
-      dragElastic={0}
-      dragSnapToOrigin={!playedRef.current}
-      onDragStart={() => {
-        playedRef.current = false;
-        setDragging(true);
-      }}
-      onDragEnd={(_event, info: PanInfo) => {
-        setDragging(false);
-        // Cast-only: flick up past the threshold. Legality is already gated by
-        // `canActivate` (drag is disabled otherwise), so no extra check here.
-        if (info.offset.y < DRAG_PLAY_THRESHOLD) {
-          playedRef.current = true;
-          activate();
-        }
-      }}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (canActivate) activate();
-      }}
-      className={`relative cursor-pointer leading-[0] select-none ${
+      className={`relative leading-[0] select-none ${
         canActivate ? "" : "cursor-default"
       }`}
-      style={{ marginLeft, zIndex }}
+      style={{ marginLeft, zIndex: isDragging ? 9999 : zIndex }}
       title={
         canActivate
           ? t("zone.companionActivate", { name: cardName })
           : t("zone.companionTitle", { name: cardName })
       }
     >
-      <div
-        className={`relative overflow-hidden rounded-lg border ${theme.cardBorder}`}
+      <motion.div
+        drag={canActivate}
+        dragConstraints={false}
+        dragElastic={0}
+        dragSnapToOrigin={!playedRef.current}
+        whileDrag={{ scale: 1.05 }}
+        onDragStart={() => {
+          playedRef.current = false;
+          setIsDragging(true);
+          setDragging(true);
+        }}
+        onDragEnd={(_event, info: PanInfo) => {
+          setIsDragging(false);
+          setDragging(false);
+          // Cast-only: flick up past the threshold. Legality is already gated by
+          // `canActivate` (drag is disabled otherwise), so no extra check here.
+          if (info.offset.y < DRAG_PLAY_THRESHOLD) {
+            playedRef.current = true;
+            activate();
+          }
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (canActivate) activate();
+        }}
+        className="pointer-events-auto relative cursor-pointer"
       >
-        {src ? (
-          <img
-            src={src}
-            {...getCardImageSrcSetProps(src, rungs)}
-            alt={cardName}
-            draggable={false}
-            className="!h-[var(--hand-card-h)] !w-[var(--hand-card-w)] object-cover"
-            onError={() => advanceFailedSource?.(src)}
-          />
-        ) : (
-          <div className="h-[var(--hand-card-h)] w-[var(--hand-card-w)] bg-gray-700" />
+        <div
+          className={`relative overflow-hidden rounded-lg border ${theme.cardBorder}`}
+        >
+          {src ? (
+            <img
+              src={src}
+              {...getCardImageSrcSetProps(src, rungs)}
+              alt={cardName}
+              draggable={false}
+              className="!h-[var(--hand-card-h)] !w-[var(--hand-card-w)] object-cover"
+              onError={() => advanceFailedSource?.(src)}
+            />
+          ) : (
+            <div className="h-[var(--hand-card-h)] w-[var(--hand-card-w)] bg-gray-700" />
+          )}
+          {/* Translucent wash marking the companion affordance. */}
+          <div className={`pointer-events-none absolute inset-0 transition-colors ${theme.overlayCard}`} />
+        </div>
+        {/* Identity badge — required so the purple companion card never reads as
+            just another purple exile wing. */}
+        <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 rounded-sm bg-purple-700 px-1.5 py-px text-[8px] font-bold text-purple-100 shadow">
+          {t("zone.companion")}
+        </div>
+        {/* Activatable glow ring (sibling of the clipped image so it isn't cropped). */}
+        {canActivate && (
+          <div className={`pointer-events-none absolute inset-0 rounded-lg ${theme.ring}`} />
         )}
-        {/* Translucent wash marking the companion affordance. */}
-        <div className={`pointer-events-none absolute inset-0 transition-colors ${theme.overlayCard}`} />
-      </div>
-      {/* Identity badge — required so the purple companion card never reads as
-          just another purple exile wing. */}
-      <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 rounded-sm bg-purple-700 px-1.5 py-px text-[8px] font-bold text-purple-100 shadow">
-        {t("zone.companion")}
-      </div>
-      {/* Activatable glow ring (sibling of the clipped image so it isn't cropped). */}
-      {canActivate && (
-        <div className={`pointer-events-none absolute inset-0 rounded-lg ${theme.ring}`} />
-      )}
+      </motion.div>
     </motion.div>
   );
 });

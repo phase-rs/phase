@@ -95,6 +95,15 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useEngineCardData: () => null,
 }));
 
+// This suite exercises the normal-image source ladder owned by CardPreview.
+// The Tabletop client normally replaces a current live face with a separately
+// tested canvas composition, so force the static branch here and keep the
+// source/error lifecycle observable as an <img>.
+vi.mock("../../../viewmodel/cardProps.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../viewmodel/cardProps.ts")>()),
+  publicName: () => "__static-image-lifecycle__",
+}));
+
 function WarmNormalTile() {
   const image = useCardImage("Beta Card", {
     size: "normal",

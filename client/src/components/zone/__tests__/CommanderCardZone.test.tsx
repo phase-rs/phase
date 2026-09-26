@@ -15,6 +15,7 @@ import {
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
+import { TabletopHandCommandZone } from "../../tabletop3d/TabletopHandCommandZone.tsx";
 import { CommandDock } from "../CommandDock.tsx";
 import { CommanderCardZone } from "../CommanderCardZone.tsx";
 
@@ -29,6 +30,7 @@ vi.mock("../../../hooks/useResolvedCommandZoneDisplay.ts", () => ({
 const localizedNames = vi.hoisted(() => new Map<string, string>());
 
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
+  useEngineCardData: () => null,
   useLocalizedCardName: (name: string | null) => localizedNames.get(name ?? "") ?? name,
 }));
 
@@ -187,6 +189,52 @@ describe("CommanderCardZone commander ninjutsu (issue #5239)", () => {
     // must still inspect, not cast — the ninjutsu branch must not hijack it.
     expect(dispatchAction).not.toHaveBeenCalled();
     expect(useUiStore.getState().inspectedObjectId).toBe(COMMANDER_ID);
+  });
+
+  it("uses the hand renderer and gold aura for an actionable hand-dock commander", () => {
+    seedStores([castAction()]);
+
+    const { container } = render(
+      <CommanderCardZone playerId={0} handPresentation />,
+    );
+
+    expect(container.querySelector("[data-hand-command-card]")).toBeInTheDocument();
+    expect(container.querySelector("[data-commander-cast-aura]"))
+      .toHaveClass("-inset-px", "rounded-[4.4%/3.2%]");
+    expect(container.querySelectorAll(".tabletop-command-castable-steam"))
+      .toHaveLength(3);
+  });
+
+  it("renders the complete mobile hand commander without a clipped viewport", () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+    seedStores([castAction()]);
+
+    try {
+      const { container } = render(
+        <TabletopHandCommandZone playerId={0} seat="player" />,
+      );
+
+      expect(
+        container.querySelector("[data-tabletop-hand-command-card-viewport]"),
+      ).not.toBeInTheDocument();
+      expect(container.querySelector("[data-hand-command-card]"))
+        .not.toHaveAttribute("data-mobile-art-crop");
+      expect(
+        container.querySelector("[data-tabletop-hand-command-zone='player']"),
+      ).toHaveClass("pointer-events-none", "ml-5");
+      expect(
+        container.querySelector("[data-tabletop-hand-command-zone='player']"),
+      ).toHaveAttribute("data-tabletop-hand-command-side", "right");
+      expect(container.querySelector("[data-hand-command-card]"))
+        .toHaveClass("pointer-events-auto");
+    } finally {
+      cleanup();
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalWidth,
+      });
+    }
   });
 
   it("renders an Oathbreaker signature spell from the command zone", () => {

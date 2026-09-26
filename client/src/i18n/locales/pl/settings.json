@@ -181,6 +181,9 @@
   },
   "multiplayer": {
     "title": "Tryb wieloosobowy",
+    "opponentView": "Widok przeciwnika",
+    "followActiveOpponent": "Śledź aktywnego przeciwnika",
+    "followActiveOpponentDescription": "Automatycznie pokazuje przeciwnika, którego trwa tura.",
     "displayName": "Nazwa wyświetlana",
     "displayNamePlaceholder": "Wprowadź swoją nazwę",
     "serverSelectionNote": "Wybór serwera został przeniesiony do poczekalni — otwórz Tryb wieloosobowy i użyj plakietki serwera (lub „Wybierz serwer” w trybie P2P), aby zmieniać regiony, skonfigurować własną instancję lub przetestować połączenie."

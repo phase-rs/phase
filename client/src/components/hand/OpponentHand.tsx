@@ -104,7 +104,7 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
         })}
       </AnimatePresence>
       {cardCount > 5 && (
-        <span className="ml-2 rounded bg-gray-700 px-1.5 py-0.5 text-xs font-medium text-gray-300">
+        <span className="ml-2 min-w-6 rounded-full border border-white/10 bg-[#0a1320]/88 px-1.5 py-0.5 text-center text-xs font-semibold tabular-nums text-slate-200 shadow-lg backdrop-blur">
           {cardCount}
         </span>
       )}

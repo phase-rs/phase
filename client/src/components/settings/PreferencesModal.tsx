@@ -185,6 +185,7 @@ export function PreferencesModal({
   const collapseLands = usePreferencesStore((s) => s.collapseLands);
   const collapseSupport = usePreferencesStore((s) => s.collapseSupport);
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
+  const followActiveOpponent = usePreferencesStore((s) => s.followActiveOpponent);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const priorityPassingMode = usePreferencesStore((s) => s.priorityPassingMode);
   const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
@@ -197,6 +198,7 @@ export function PreferencesModal({
   const setCollapseLands = usePreferencesStore((s) => s.setCollapseLands);
   const setCollapseSupport = usePreferencesStore((s) => s.setCollapseSupport);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
+  const setFollowActiveOpponent = usePreferencesStore((s) => s.setFollowActiveOpponent);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
   const setPriorityPassingMode = usePreferencesStore((s) => s.setPriorityPassingMode);
   const setExperimentalTournamentsEnabled = usePreferencesStore((s) => s.setExperimentalTournamentsEnabled);
@@ -829,6 +831,25 @@ export function PreferencesModal({
 
               {activeTab === "multiplayer" && (
                 <SettingsSection title={t("multiplayer.title")}>
+                  <SettingGroup label={t("multiplayer.opponentView")}>
+                    <label className="flex min-h-11 items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={followActiveOpponent}
+                        onChange={(event) =>
+                          setFollowActiveOpponent(event.target.checked)
+                        }
+                        className="mt-1 accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("multiplayer.followActiveOpponent")}
+                        <span className="mt-0.5 block text-xs leading-relaxed text-slate-400">
+                          {t("multiplayer.followActiveOpponentDescription")}
+                        </span>
+                      </span>
+                    </label>
+                  </SettingGroup>
+
                   <SettingGroup label={t("multiplayer.displayName")}>
                       <input
                         type="text"

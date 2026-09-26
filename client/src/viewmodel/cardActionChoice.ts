@@ -84,29 +84,36 @@ export function resolveSingleActionDispatch(
   return requiresConfirmation(actions[0], object) ? null : actions[0];
 }
 
+/** True only for engine-authored actions that cast a card as a spell. */
+export function isCastAction(action: GameAction): boolean {
+  return action.type === "CastSpell"
+    || action.type === "CastSpellForFree"
+    || action.type === "CastSpellAsSneak"
+    || action.type === "CastSpellAsWebSlinging"
+    || action.type === "CastSpellAsMiracle"
+    || action.type === "CastSpellAsMadness"
+    || action.type === "PlayFaceDown";
+}
+
+export function castActionsForObject(
+  legalActionsByObject: Record<string, GameAction[]> | undefined,
+  objectId: ObjectId,
+): GameAction[] {
+  return collectObjectActions(legalActionsByObject, objectId).filter(isCastAction);
+}
+
 /**
  * Filter `legalActionsByObject` entries for a zone-viewable card to the
- * play-or-cast actions only.
- *
- * Engine authority — covers Adventure, Foretell, Plot, Suspend, Warp, and any
- * future exile-cast permission (cast-family variants), plus `PlayLand` for
- * Future Sight / Bolas's Citadel / Magus of the Future top-of-library land
- * plays. The frontend renders whatever the engine reports — no per-mechanic
- * permission inspection.
+ * play-or-cast actions only. This includes engine-authored cast actions plus
+ * the distinct PlayLand special action. Spell highlights deliberately use
+ * castActionsForObject instead.
  */
 export function playOrCastActionsForObject(
   legalActionsByObject: Record<string, ObjectAction[]> | undefined,
   objectId: ObjectId,
 ): ObjectAction[] {
-  return collectObjectActions(legalActionsByObject, objectId).filter((a) =>
-    a.type === "CastSpell"
-    || a.type === "CastSpellForFree"
-    || a.type === "CastSpellAsSneak"
-    || a.type === "CastSpellAsWebSlinging"
-    || a.type === "CastSpellAsMiracle"
-    || a.type === "CastSpellAsMadness"
-    || a.type === "PlayFaceDown"
-    || a.type === "PlayLand"
+  return collectObjectActions(legalActionsByObject, objectId).filter(
+    (action) => action.type === "PlayLand" || isCastAction(action),
   );
 }
 

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 
 const MOVE_THRESHOLD = 10;
+/** Fast enough to feel responsive while still distinct from an ordinary tap. */
+export const CARD_PREVIEW_LONG_PRESS_DELAY_MS = 300;
 
 interface UseLongPressOptions {
   delay?: number;
@@ -18,7 +20,7 @@ export function useLongPress(
   callback: () => void,
   options?: UseLongPressOptions,
 ) {
-  const { delay = 500 } = options ?? {};
+  const { delay = CARD_PREVIEW_LONG_PRESS_DELAY_MS } = options ?? {};
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firedRef = useRef(false);
   const startPos = useRef<{ x: number; y: number } | null>(null);

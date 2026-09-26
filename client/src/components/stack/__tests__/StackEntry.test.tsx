@@ -120,6 +120,7 @@ describe("StackEntry", () => {
     expect(screen.getByAltText("X")).toBeInTheDocument();
     expect(screen.getAllByAltText("R")).toHaveLength(2);
     expect(screen.queryByAltText("2")).not.toBeInTheDocument();
+    expect(document.querySelector('[data-stack-card-state="settled"]')).toBeInTheDocument();
   });
 
   it("raises its entry after a long press", () => {

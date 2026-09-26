@@ -1,4 +1,9 @@
 {
+  "landscapeGate": {
+    "title": "Obróć urządzenie",
+    "description": "Pole bitwy jest dostępne w orientacji poziomej na telefonach i tabletach.",
+    "exit": "Wróć do menu"
+  },
   "playerLatency": {"host":"Host","waiting":"Oczekiwanie","value":"{{ms}} ms","description":"Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."},
   "abilityBlock": {
     "badge": "Zablokowana",
@@ -135,6 +140,14 @@
     "holdCtrlFront": "Przytrzymaj Ctrl, aby zobaczyć przednią stronę",
     "holdCtrlFlip": "Przytrzymaj Ctrl, aby odwrócić",
     "flip": "Odwróć",
+    "detailAriaLabel": "Szczegóły karty: {{name}}",
+    "closeDetails": "Zamknij szczegóły karty",
+    "detailViewOptions": "Widok szczegółów karty",
+    "detailView": {
+      "live": "W grze",
+      "original": "Oryginał",
+      "parse": "Analiza"
+    },
     "report": "Zgłoś problem",
     "reported": "Zgłoszono ✓",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
@@ -2436,6 +2449,20 @@
     "EndCombat": "Koniec walki",
     "PostCombatMain": "Główna faza 2",
     "End": "Krok końcowy",
+    "Cleanup": "Sprzątanie"
+  },
+  "phaseNameCompact": {
+    "Untap": "Odwracanie",
+    "Upkeep": "Utrzymanie",
+    "Draw": "Dobieranie",
+    "PreCombatMain": "Główna 1",
+    "BeginCombat": "Walka",
+    "DeclareAttackers": "Atakujący",
+    "DeclareBlockers": "Blokujący",
+    "CombatDamage": "Obrażenia",
+    "EndCombat": "Koniec walki",
+    "PostCombatMain": "Główna 2",
+    "End": "Koniec",
     "Cleanup": "Sprzątanie"
   },
   "counterMoveDistribution": {

@@ -22,7 +22,7 @@ export function useCardHover(objectId: number | null, previewSource?: PreviewSou
   const { handlers: longPressHandlers, firedRef } = useLongPress(
     useCallback(() => {
       if (objectId != null) {
-        // Long-press is an explicit-intent gesture (already a 400ms hold), so it
+        // Long-press is an explicit-intent gesture (already a brief hold), so it
         // bypasses the configurable hover latency and shows the sticky preview now
         // — and setting it synchronously avoids orphaning previewSticky.
         inspectObject(objectId, undefined, "immediate", "cursor", previewSource);

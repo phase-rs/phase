@@ -58,7 +58,7 @@ export function TurnStatusLine() {
     <div
       role="status"
       aria-live="polite"
-      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_8px_20px_rgba(15,23,42,0.38)] ${tone} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
+      className={`tabletop-status-plaque group relative flex min-h-8 max-w-[min(22rem,calc(100vw-1.25rem))] items-center border px-3 py-1 text-[11px] font-medium tracking-wide ${tone} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
     >
       <span
         aria-hidden
@@ -168,7 +168,7 @@ REASON_ICON_PATHS.thinking = REASON_ICON_PATHS.priority;
 /** Reason glyph for the overlap badge. Strips the `status.reason.` namespace and
  *  looks up the shared path set; unmapped or absent reasons fall back to the
  *  generic hourglass. Purely decorative — the words live in the tooltip. */
-function ReasonIcon({ reasonKey }: { reasonKey?: string }) {
+export function ReasonIcon({ reasonKey }: { reasonKey?: string }) {
   const name = reasonKey?.replace("status.reason.", "") ?? "";
   const glyph = REASON_ICON_PATHS[name] ?? REASON_ICON_PATHS.priority;
   return (
@@ -184,5 +184,44 @@ function ReasonIcon({ reasonKey }: { reasonKey?: string }) {
     >
       {glyph}
     </svg>
+  );
+}
+
+/**
+ * Compact decision/priority glyph intended to ride directly on a player's
+ * portrait. The seat color identifies who owns the window; the reason glyph
+ * distinguishes ordinary priority from stack, combat, and targeting choices.
+ */
+export function PriorityMarker({
+  active,
+  reasonKey,
+  seatColor,
+  title,
+  className = "",
+}: {
+  active: boolean;
+  reasonKey?: string;
+  seatColor: string;
+  title?: string;
+  className?: string;
+}) {
+  if (!active) return null;
+
+  return (
+    <span
+      role={title ? "img" : undefined}
+      aria-label={title}
+      aria-hidden={title ? undefined : true}
+      title={title}
+      className={`pointer-events-none flex h-6 w-6 items-center justify-center rounded-full border-2 border-stone-950 bg-stone-950 text-white shadow-[0_0_0_2px_rgba(255,255,255,0.2),0_0_16px_rgba(0,0,0,0.7)] ${className}`}
+      style={{
+        color: seatColor,
+        boxShadow: `0 0 0 2px ${seatColor}aa, 0 0 16px ${seatColor}88, 0 5px 12px rgba(0,0,0,0.62)`,
+      }}
+    >
+      <span className="animate-pulse">
+        <ReasonIcon reasonKey={reasonKey} />
+      </span>
+    </span>
   );
 }

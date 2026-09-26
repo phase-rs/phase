@@ -5,7 +5,7 @@ export interface PlainBackgroundConfig {
 }
 
 export const PLAIN_BACKGROUNDS: PlainBackgroundConfig[] = [
-  { id: "plain_slate",     label: "Slate",     css: "#1e293b" },
+  { id: "plain_slate",     label: "Slate",     css: "#0c1420" },
   { id: "plain_midnight",  label: "Midnight",  css: "#0b1220" },
   { id: "plain_charcoal",  label: "Charcoal",  css: "#18181b" },
   { id: "plain_forest",    label: "Forest",    css: "#14532d" },

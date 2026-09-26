@@ -279,7 +279,7 @@ function buildDefaultPreferences(): PreferencesState {
     hudLayout: "inline",
     followActiveOpponent: true,
     logPanelLastChoice: "open",
-    boardBackground: "auto-wubrg",
+    boardBackground: "plain_slate",
     customBackgroundUrl: "",
     vfxQuality: "full",
     animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
@@ -890,7 +890,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          via the shallow merge, preserving the prior presentation.
       // v28 → v29: Add the sacrificial-mana-aware automatic mode. Existing
       //          values remain valid; malformed persisted values normalize to
-      //          the legacy automatic behavior below.
+      //          the legacy automatic behavior below. The Tabletop experiment
+      //          also migrates its board to the neutral Slate background.
       // v29 → v30: Add draftCardPreviewMode; legacy stores default to "none"
       //          via the shallow merge.
       // v30 → v31: Add draftDoubleClickConfirmPick; legacy stores default to
@@ -1085,6 +1086,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
                 ? "SkipLowUseWindows"
                 : "Standard",
           };
+        }
+
+        if (version < 29 && migrated.boardBackground === "auto-wubrg") {
+          migrated = { ...migrated, boardBackground: "plain_slate" };
         }
 
         // v29 → v30: Existing focused-layout profiles are the conservative

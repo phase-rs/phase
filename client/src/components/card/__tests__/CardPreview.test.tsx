@@ -111,7 +111,9 @@ describe("CardPreview chosen attributes", () => {
     expect(preview).not.toBeNull();
     expect(preview?.style.bottom).toBe("0px");
     expect(preview?.style.transformOrigin).toBe("50% 100%");
-    expect(screen.getByAltText("Pithing Needle").parentElement!).toHaveClass(
+    const liveCard = screen.getByRole("article", { name: "Pithing Needle" });
+    expect(liveCard).toHaveAttribute("data-tabletop-live-card-mode", "inspection");
+    expect(liveCard.parentElement).toHaveClass(
       "w-[clamp(190px,18vw,300px)]",
     );
     source.remove();
@@ -258,7 +260,9 @@ describe("CardPreview chosen attributes", () => {
     const preview = container.querySelector<HTMLElement>("[data-card-preview]");
     expect(preview).not.toBeNull();
     expect(preview?.style.bottom).toBe("");
-    expect(screen.getByAltText("Pithing Needle")).not.toHaveClass(
+    const liveCard = screen.getByRole("article", { name: "Pithing Needle" });
+    expect(liveCard).toHaveAttribute("data-tabletop-live-card-mode", "inspection");
+    expect(liveCard.parentElement).not.toHaveClass(
       "w-[clamp(190px,18vw,300px)]",
     );
     source.remove();
@@ -335,8 +339,10 @@ describe("CardPreview chosen attributes", () => {
       />,
     );
 
-    expect(screen.getByAltText("Second Card")).toHaveAttribute(
-      "src",
+    const liveCard = screen.getByRole("article", { name: "Second Card" });
+    expect(liveCard).toHaveAttribute("data-tabletop-live-card-mode", "inspection");
+    expect(liveCard).toHaveAttribute(
+      "data-tabletop-art-source",
       "oracle-second.png",
     );
     expect(document.querySelectorAll("[data-card-preview]")).toHaveLength(1);
@@ -355,7 +361,9 @@ describe("CardPreview chosen attributes", () => {
 
     render(<CardPreview cardName="Pithing Needle" position={{ x: 20, y: 20 }} />);
 
-    expect(screen.getByAltText("Pithing Needle")).toBeInTheDocument();
+    expect(
+      screen.getByRole("article", { name: "Pithing Needle" }),
+    ).toHaveAttribute("data-tabletop-live-card-mode", "inspection");
     expect(screen.queryByText("Chosen")).not.toBeInTheDocument();
     expect(screen.queryByText("Card name: Lightning Bolt")).not.toBeInTheDocument();
   });
@@ -383,7 +391,7 @@ describe("CardPreview chosen attributes", () => {
 
     render(<CardPreview cardName="Pithing Needle" position={{ x: 20, y: 20 }} />);
 
-    expect(screen.getByText("Flying")).toBeInTheDocument();
+    expect(screen.getAllByText("Flying").length).toBeGreaterThan(0);
     expect(screen.getByText("Ward").closest("[aria-describedby]")).not.toBeNull();
     expect(screen.getAllByAltText("2").length).toBeGreaterThan(0);
     expect(screen.getByText(/creatures with flying or reach/)).toBeInTheDocument();
@@ -777,7 +785,8 @@ describe("CardPreview nameless permanent", () => {
         faceName: "Greenhouse",
       }),
     );
-    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+    expect(screen.getByRole("article")).toHaveAttribute(
+      "data-tabletop-art-source",
       "greenhouse-oracle-id.png",
     );
   });

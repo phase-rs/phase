@@ -427,7 +427,7 @@ export const PermanentCard = memo(function PermanentCard({
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
     useCallback(() => {
-      inspectObject(objectId);
+      inspectObject(objectId, undefined, "immediate");
       setPreviewSticky(true);
     }, [inspectObject, setPreviewSticky, objectId]),
   );
@@ -761,9 +761,6 @@ export const PermanentCard = memo(function PermanentCard({
       // exile-link expansion.
       selectObject(objectId);
       showAttachmentFan();
-    } else if (isMobile) {
-      inspectObject(objectId);
-      setPreviewSticky(true);
     } else {
       selectObject(isSelected ? null : objectId);
     }

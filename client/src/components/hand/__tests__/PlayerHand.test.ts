@@ -13,6 +13,8 @@ import {
 import {
   HAND_FAN_HOVER_Y,
   HAND_FAN_RESTING_Y,
+  MOBILE_HAND_FAN_LIFT_Y,
+  MOBILE_HAND_FAN_RESTING_Y,
   handFanGeometry,
   handFanVerticalMetrics,
   playerHandFanSizingStyle,
@@ -27,6 +29,26 @@ describe("player hand fan presentation", () => {
     expect(fan.arc(0)).toBeCloseTo(32);
   });
 
+  it("tightens a normal mobile hand inward", () => {
+    const mobileFan = handFanGeometry(7, "--hand-card-w", 1, "mobile");
+
+    expect(mobileFan.overlap).toBe("calc(var(--hand-card-w) * -0.35)");
+    expect(mobileFan.rotation(0)).toBeCloseTo(-12);
+    expect(mobileFan.rotation(6)).toBeCloseTo(12);
+    expect(mobileFan.arc(0)).toBeCloseTo(31.5);
+  });
+
+  it("accordions overflow hands into the reserved mobile lane", () => {
+    const mobileFan = handFanGeometry(12, "--hand-card-w", 1, "mobile");
+
+    expect(mobileFan.overlap).toBe(
+      "calc(var(--hand-card-w) * -0.6636363636363636)",
+    );
+    expect(playerHandFanSizingStyle(12, "mobile")).toMatchObject({
+      "--hand-card-w": "min(calc(var(--card-w) * var(--hand-card-scale)), 16.17vw)",
+    });
+  });
+
   it("caps a large hand to the viewport width budget", () => {
     expect(playerHandFanSizingStyle(20)).toMatchObject({
       "--hand-card-w": "min(calc(var(--card-w) * var(--hand-card-scale)), 16.73vw)",
@@ -34,17 +56,32 @@ describe("player hand fan presentation", () => {
     });
   });
 
+  it("uses a modest whole-hand lift for the mobile tap state", () => {
+    expect(MOBILE_HAND_FAN_LIFT_Y).toBeLessThan(0);
+    expect(MOBILE_HAND_FAN_LIFT_Y).toBeGreaterThan(-50);
+  });
+
   it("keeps resting cards lower than their hover position", () => {
     expect(HAND_FAN_RESTING_Y).toBeGreaterThan(HAND_FAN_HOVER_Y);
+  });
+
+  it("shows a shallower resting ribbon on mobile than on larger screens", () => {
+    const desktopMetrics = handFanVerticalMetrics(false, 1, "desktop");
+    const mobileMetrics = handFanVerticalMetrics(false, 1, "mobile");
+
+    expect(MOBILE_HAND_FAN_RESTING_Y).toBeGreaterThan(HAND_FAN_RESTING_Y);
+    expect(mobileMetrics.restingY).toBeGreaterThan(desktopMetrics.restingY);
+    expect(mobileMetrics.hoverY).toBe(desktopMetrics.hoverY);
+    expect(mobileMetrics.arcScale).toBe(desktopMetrics.arcScale);
   });
 
   it("scales the complete vertical fan depth for compact-height screens", () => {
     const compactMetrics = handFanVerticalMetrics(true);
     const compactFan = handFanGeometry(8, "--hand-card-w", compactMetrics.arcScale);
 
-    expect(compactMetrics.restingY).toBe(24);
-    expect(compactMetrics.hoverY).toBe(19);
-    expect(compactFan.arc(0)).toBeCloseTo(16);
+    expect(compactMetrics.restingY).toBeCloseTo(37.8);
+    expect(compactMetrics.hoverY).toBeCloseTo(34.2);
+    expect(compactFan.arc(0)).toBeCloseTo(28.8);
   });
 });
 
