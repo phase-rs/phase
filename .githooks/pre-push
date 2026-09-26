@@ -31,7 +31,10 @@ tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
 echo "  [cards] oracle-gen"
-cargo run --profile tool --bin oracle-gen --features cli -- data/ --stats --names-out "$tmpdir/card-names.json" > "$tmpdir/card-data.json"
+cargo run --profile tool --bin oracle-gen --features cli -- data/ --stats \
+  --names-out "$tmpdir/card-names.json" \
+  --output "$tmpdir/card-data.json" \
+  --provenance-out "$tmpdir/card-data.provenance.json"
 
 echo "  [cards] card-data-validate"
 cargo run --profile tool --bin card-data-validate -- "$tmpdir/card-data.json"
@@ -39,6 +42,7 @@ cargo run --profile tool --bin card-data-validate -- "$tmpdir/card-data.json"
 echo "  [cards] coverage-report"
 mkdir -p "$tmpdir/data"
 cp "$tmpdir/card-data.json" "$tmpdir/data/card-data.json"
+cp "$tmpdir/card-data.provenance.json" "$tmpdir/data/card-data.provenance.json"
 cp "$tmpdir/card-names.json" "$tmpdir/data/card-names.json"
 cargo run --profile tool --bin coverage-report -- "$tmpdir/data" --all > "$tmpdir/coverage-data.json"
 

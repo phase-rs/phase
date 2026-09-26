@@ -1,15 +1,47 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
+use engine::database::card_data_provenance::CardDataProvenance;
 use engine::database::CardDatabase;
 use engine::game::coverage::{
     analyze_coverage, audit_resolver_features, audit_silent_drops, parse_warning_pattern,
     CardCoverageResult, CoverageSummary, GapDetail, ParsedItem,
 };
 use engine::parser::oracle_ir::diagnostic::{OracleDiagnostic, OracleItemId, OracleSourceSpan};
+use engine::parser::oracle_ir::trace::sha256_bytes;
 use engine::types::card::CardFace;
 use serde::Serialize;
+
+fn read_card_data_provenance(
+    data_root: &Path,
+    card_data_bytes: &[u8],
+) -> Result<CardDataProvenance, String> {
+    let path = data_root.join("card-data.provenance.json");
+    let provenance = CardDataProvenance::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "CARD_DATA_PROVENANCE_MISSING: {} was not found",
+                path.display()
+            )
+        } else {
+            format!(
+                "CARD_DATA_PROVENANCE_MISMATCH: failed to read {}: {error}",
+                path.display()
+            )
+        }
+    })?;
+    let actual_card_data_sha256 = sha256_bytes(card_data_bytes);
+    if !provenance.hashes_are_well_formed()
+        || provenance.card_data_sha256 != actual_card_data_sha256
+    {
+        return Err(format!(
+            "CARD_DATA_PROVENANCE_MISMATCH: {} does not describe the exact card-data.json bytes",
+            path.display()
+        ));
+    }
+    Ok(provenance)
+}
 
 #[derive(Debug, Serialize)]
 struct WarningDrilldown {
@@ -275,6 +307,7 @@ fn main() {
             gap_bundles: vec![],
             parse_warning_patterns: vec![],
             diagnostics: Default::default(),
+            source_corpus_hash: None,
         };
         println!("{}", serde_json::to_string_pretty(&empty).unwrap());
         process::exit(0);
@@ -282,6 +315,24 @@ fn main() {
 
     // Load via CardDatabase::from_export() using the pre-processed card-data.json
     let export_path = path.join("card-data.json");
+    let card_data_bytes = match std::fs::read(&export_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!(
+                "Error loading card database from {}: {}",
+                export_path.display(),
+                e
+            );
+            process::exit(1);
+        }
+    };
+    let provenance = match read_card_data_provenance(&path, &card_data_bytes) {
+        Ok(provenance) => provenance,
+        Err(error) => {
+            eprintln!("{error}");
+            process::exit(2);
+        }
+    };
     let db = match CardDatabase::from_export(&export_path) {
         Ok(db) => db,
         Err(e) => {
@@ -303,6 +354,7 @@ fn main() {
                 gap_bundles: vec![],
                 parse_warning_patterns: vec![],
                 diagnostics: Default::default(),
+                source_corpus_hash: None,
             };
             println!("{}", serde_json::to_string_pretty(&empty).unwrap());
             process::exit(1);
@@ -310,6 +362,13 @@ fn main() {
     };
 
     let mut summary = analyze_coverage(&db);
+    // Keep the artifact self-describing. The regression comparator uses face
+    // support/gap/parser fields; set/rarity/rulings sidecars only enrich
+    // metadata and set rollups, so AtomicCards is the corpus identity here.
+    // The hash comes from oracle-gen's provenance sidecar, which records the
+    // exact selected source bytes rather than guessing from a nearby default
+    // path file.
+    summary.source_corpus_hash = Some(provenance.source_corpus_sha256);
 
     // Populate per-category diagnostic counts for JSON output (D-08).
     {

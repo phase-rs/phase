@@ -623,6 +623,11 @@ pub struct CoverageSummary {
     /// Per-category diagnostic counts for regression ratcheting (D-08).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub diagnostics: BTreeMap<String, usize>,
+    /// SHA-256 identity of the external MTGJSON corpus used to produce the
+    /// coverage artifact. This is deliberately separate from the generated
+    /// `card_data_hash`, which also changes when parser/engine code changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_corpus_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -7053,6 +7058,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         gap_bundles,
         parse_warning_patterns,
         diagnostics: BTreeMap::new(),
+        source_corpus_hash: None,
     }
 }
 

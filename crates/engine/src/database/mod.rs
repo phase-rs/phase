@@ -1,5 +1,6 @@
 pub mod augment;
 pub mod bracket_lists;
+pub mod card_data_provenance;
 pub mod card_db;
 pub mod contraptions;
 pub mod embalm_eternalize;
