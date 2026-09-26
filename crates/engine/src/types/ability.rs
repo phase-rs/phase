@@ -8821,6 +8821,41 @@ fn quantity_ref_from_value<E: serde::de::Error>(
     }
 }
 
+/// CR 115.1 + CR 601.2c: Whether a target-bound player zone count declares
+/// its own target announcement or rides another announcement.
+///
+/// `Explicit` ("target player's …", "target opponent's …") is a distinct
+/// instance of the word "target" (CR 115.3): it surfaces its own target slot
+/// and is never rebound to an enclosing anchor by the scope-rewrite walkers.
+/// `Anaphoric` ("their …", "that player's …") reuses an announced or
+/// event-bound choice: it surfaces no slot of its own when a primary player
+/// choice is declared, and the walkers rebind it to the enclosing anchor
+/// (`ScopedPlayer`, `SourceChosenPlayer`).
+///
+/// Instance-sharing resolution (Tibalt, the Fiend-Blooded −4: "deals damage
+/// equal to the number of cards in target player's hand to that player"):
+/// the recipient anaphor inherits the count's instance, so the damage rebind
+/// (`rebind_dead_event_player_damage_recipient`) flips the count
+/// `Explicit→Anaphoric` — one announcement, read by both. The flip runs only
+/// outside triggers, so explicit counts in trigger bodies always keep their
+/// binding.
+///
+/// `Default` is `Anaphoric`: pre-binding payloads (saved games, stale
+/// card-data) predate the distinction, and every printed card behaves
+/// correctly under "assume shared" — no printed card declares two separate
+/// player-count instances. Deserializing old data as `Explicit` would
+/// surface a spurious second slot on anaphoric-plus-primary shapes (Balor
+/// mode 3); `Anaphoric` preserves observed behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CountBinding {
+    /// The count declares its own instance of "target" (CR 115.1).
+    Explicit,
+    /// The count reuses an announced or event-bound player choice (CR 115.3:
+    /// not a separate instance of "target", so no separate announcement).
+    #[default]
+    Anaphoric,
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -9078,7 +9113,28 @@ pub enum QuantityRef {
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
-    TargetZoneCardCount { zone: ZoneRef },
+    TargetZoneCardCount {
+        zone: ZoneRef,
+        /// CR 109.4 + CR 115.1 / CR 102.2: legality scope of the count's
+        /// announcement slot — `TargetPlayer` ("target player's ...") or
+        /// `TargetOpponent` ("target opponent's ..."). The scope exists ONLY
+        /// to size the slot's legal-target set, mirroring the
+        /// `ControllerRef::{TargetPlayer, TargetOpponent}` legality-scope
+        /// pair; whether the count declares its own announcement is the
+        /// orthogonal `binding` axis below. The parser always emits one of
+        /// the two `Target*` values; `TargetOpponent` is the serde default
+        /// so pre-scope payloads keep their opponent-slot behavior.
+        #[serde(
+            default = "target_zone_count_scope_default",
+            skip_serializing_if = "is_target_zone_count_scope_default"
+        )]
+        scope: ControllerRef,
+        /// CR 115.1 + CR 601.2c: whether this count declares its own target
+        /// announcement (`Explicit`) or rides another announcement
+        /// (`Anaphoric`). See [`CountBinding`].
+        #[serde(default, skip_serializing_if = "is_count_binding_default")]
+        binding: CountBinding,
+    },
     /// CR 700.5: Devotion to one or more colors.
     Devotion { colors: DevotionColors },
     /// CR 205.2a: Count distinct card types (CoreType) across a parameterized
@@ -10561,6 +10617,18 @@ fn is_player_relation_all(relation: &PlayerRelation) -> bool {
     matches!(relation, PlayerRelation::All)
 }
 
+fn target_zone_count_scope_default() -> ControllerRef {
+    ControllerRef::TargetOpponent
+}
+
+fn is_target_zone_count_scope_default(scope: &ControllerRef) -> bool {
+    matches!(scope, ControllerRef::TargetOpponent)
+}
+
+fn is_count_binding_default(binding: &CountBinding) -> bool {
+    matches!(binding, CountBinding::Anaphoric)
+}
+
 /// CR 108.3 + CR 109.4: Which possession relation binds a player to an object.
 ///
 /// A parameter, not a variant pair. The codebase already proliferates this axis
@@ -11205,6 +11273,20 @@ impl QuantityExpr {
             }
             QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
         }
+    }
+
+    /// Returns true if this expression reads a
+    /// `QuantityRef::TargetZoneCardCount` anywhere in its tree — i.e. its
+    /// value is the number of cards in a zone of the ability's announced
+    /// player target ("the number of cards in target opponent's hand",
+    /// Recurring Insight). Delegates to `any_ref`, which visits every
+    /// expression form exhaustively — a new `QuantityExpr` variant forces
+    /// `any_ref` (and therefore this predicate) to account for it rather
+    /// than silently defaulting to false. Used by the damage parser (CR
+    /// 115.1 recipient rebind) and the target-slot builder to prove a
+    /// clause declares a player target.
+    pub fn contains_target_zone_card_count(&self) -> bool {
+        self.any_ref(&mut |reference| matches!(reference, QuantityRef::TargetZoneCardCount { .. }))
     }
 
     /// Construct an `UpTo { max }` expression, debug-asserting the
@@ -33401,8 +33483,22 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> Vec<TargetRef> {
+        self.live_object_targets_excluding(state, None)
+    }
+
+    /// Live announced targets minus the announced entry at `excluded` (a
+    /// separately announced quantity slot serving the magnitude, not receipt —
+    /// CR 115.1 + CR 601.2c). `None` is exactly [`Self::live_object_targets`].
+    pub fn live_object_targets_excluding(
+        &self,
+        state: &crate::types::game_state::GameState,
+        excluded: Option<usize>,
+    ) -> Vec<TargetRef> {
         self.targets
             .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != excluded)
+            .map(|(_, target)| target)
             .filter(|target| match target {
                 TargetRef::Object(id) => self.target_pin_is_current(*id, state),
                 TargetRef::Player(_) => true,
@@ -36088,6 +36184,71 @@ mod tests {
             .count_expr()
             .expect("count slot present")
             .contains_vote_count());
+    }
+
+    #[test]
+    fn contains_target_zone_card_count_finds_nested_ref() {
+        let direct = QuantityExpr::Ref {
+            qty: QuantityRef::TargetZoneCardCount {
+                zone: ZoneRef::Hand,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Explicit,
+            },
+        };
+        assert!(direct.contains_target_zone_card_count());
+        let wrapped = QuantityExpr::DivideRounded {
+            inner: Box::new(direct),
+            divisor: 2,
+            rounding: RoundingMode::Down,
+        };
+        assert!(wrapped.contains_target_zone_card_count());
+        assert!(!QuantityExpr::Fixed { value: 3 }.contains_target_zone_card_count());
+        assert!(!QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+        .contains_target_zone_card_count());
+    }
+
+    #[test]
+    fn target_zone_card_count_binding_serde_defaults_to_anaphoric() {
+        // Pre-binding payloads (saved games, stale card-data) carry no
+        // binding key; they must load as Anaphoric ("assume shared"),
+        // preserving observed single-slot behavior on every printed card.
+        let old: QuantityRef = serde_json::from_value(serde_json::json!({
+            "type": "TargetZoneCardCount",
+            "zone": "Hand",
+            "scope": "TargetPlayer",
+        }))
+        .expect("old payload loads");
+        assert_eq!(
+            old,
+            QuantityRef::TargetZoneCardCount {
+                zone: ZoneRef::Hand,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
+            }
+        );
+        // Anaphoric is the default: skipped on serialize.
+        let value = serde_json::to_value(&old).expect("serialize");
+        assert!(
+            value.get("binding").is_none(),
+            "default binding must be skipped, got {value}"
+        );
+        // Explicit round-trips.
+        let explicit = QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Hand,
+            scope: ControllerRef::TargetOpponent,
+            binding: CountBinding::Explicit,
+        };
+        let value = serde_json::to_value(&explicit).expect("serialize");
+        assert_eq!(
+            value.get("binding").and_then(|b| b.as_str()),
+            Some("Explicit")
+        );
+        let back: QuantityRef = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(back, explicit);
     }
 
     #[test]

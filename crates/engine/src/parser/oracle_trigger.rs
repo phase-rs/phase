@@ -2103,6 +2103,25 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             crate::parser::oracle_effect::rewrite_player_quantity_refs_to_source_chosen(ability);
         }
     }
+    // Sword of War and Peace class (issue #9280 follow-up): damage-done
+    // triggers scope "that player" to the event player (`TriggeringPlayer`
+    // via `relative_player_scope_for_condition`), so an anaphoric zone count
+    // in an event-anchored effect ("their hand") needs no announced choice.
+    // Without this, the `TargetPlayer`-scoped count surfaces an any-player
+    // companion slot; with more than one legal player the trigger stalls at
+    // target selection and the event-bound damage never resolves. Gated to
+    // damage modes because only there is `scoped_player` bound to the count's
+    // referent (the damaged player) at resolution.
+    if modifiers.relative_player_scope == Some(ControllerRef::TriggeringPlayer)
+        && matches!(
+            def.mode,
+            TriggerMode::DamageDone | TriggerMode::DamageDoneOnce
+        )
+    {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_event_anchored_zone_counts_to_scoped(ability);
+        }
+    }
     if let Some(ability) = execute.as_deref_mut() {
         rewrite_each_other_player_scope_for_any_caster_spell_triggers(
             &def,

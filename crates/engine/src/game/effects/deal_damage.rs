@@ -183,6 +183,25 @@ fn resolve_effect_recipients(
     // Tier C exclusion list warns about (its 14 Controller/Owner-only cards are
     // additionally denied pins upstream, so this can only ever fail safe).
     if !ability.targets.is_empty() {
+        // CR 115.1 + CR 601.2c (MED1): a separately announced quantity slot
+        // serves the magnitude, not receipt — the count-source takes no
+        // damage. Absolute announced index, so the exclusion composes with the
+        // positional `[1..]` split below (never the other way round, per the
+        // pin-ordering rule there). `None` for every shape without a separate
+        // player-typed quantity slot, leaving all existing callers unchanged.
+        let excluded = crate::game::ability_utils::quantity_slot_player_ordinal(
+            &ability.targets,
+            Some(ability),
+        )
+        .and_then(|ordinal| {
+            ability
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| matches!(target, TargetRef::Player(_)))
+                .nth(ordinal)
+                .map(|(index, _)| index)
+        });
         if skip_first_target && ability.targets.len() > 1 {
             // The positional split runs on the RAW list and the pin filter is
             // applied AFTER it — never the other way round. `[1..]` encodes slot
@@ -192,14 +211,18 @@ fn resolve_effect_recipients(
             // to this file's own positional convention.
             return ability.targets[1..]
                 .iter()
-                .filter(|target| match target {
-                    TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
-                    TargetRef::Player(_) => true,
+                .enumerate()
+                .filter(|(offset, target)| {
+                    Some(offset + 1) != excluded
+                        && match target {
+                            TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
+                            TargetRef::Player(_) => true,
+                        }
                 })
-                .cloned()
+                .map(|(_, target)| target.clone())
                 .collect();
         }
-        return ability.live_object_targets(state);
+        return ability.live_object_targets_excluding(state, excluded);
     }
     match target_filter {
         TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],

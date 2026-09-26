@@ -13,9 +13,10 @@ use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
     AbilityUseTally, AttachSelection, AttachmentKind, CardSelectionMode, CastCostModifier,
-    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, DigRestOrder, ExcessRecipient,
-    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
+    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, CountBinding, DigRestOrder,
+    ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    PerpetualModification, PileSource, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility,
+    VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -28657,6 +28658,8 @@ fn cut_your_losses_mill_half_their_library_rounded_down() {
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::TargetZoneCardCount {
                             zone: ZoneRef::Library,
+                            scope: ControllerRef::TargetPlayer,
+                            binding: CountBinding::Anaphoric,
                         },
                     }),
                     divisor: 2,
@@ -65960,6 +65963,275 @@ fn a_cast_this_way_gate_defers_a_consequence_but_never_a_casting_property() {
         !wraps_a_spell_cast_delayed_trigger(&property),
         "\"you cast it without paying its mana cost\" describes HOW the cast happens \
          (CR 601.2) and must not be deferred past it"
+    );
+}
+
+/// Issue #6856 contract pin: "Draw cards equal to the number of cards in
+/// target opponent's hand" (Recurring Insight) lowers to a controller-drawn
+/// `Draw` whose count reads the ability's player target
+/// (`TargetZoneCardCount { Hand, TargetOpponent, Explicit }`). The opponent
+/// slot itself is surfaced at runtime by `quantity_ref_target_slot_spec`
+/// (ability_utils) — this test pins the shape that contract relies on.
+#[test]
+fn recurring_insight_draw_count_reads_target_opponents_hand() {
+    let def = parse_effect_chain(
+        "Draw cards equal to the number of cards in target opponent's hand.",
+        AbilityKind::Spell,
+    );
+    let Effect::Draw { count, target } = &*def.effect else {
+        panic!("expected a Draw head, got {:?}", def.effect);
+    };
+    assert_eq!(*target, TargetFilter::Controller, "the caster draws");
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetOpponent,
+                    binding: CountBinding::Explicit,
+                },
+            }
+        ),
+        "the count reads the announced opponent's hand, got {count:?}",
+    );
+    assert!(def.sub_ability.is_none(), "single-link clause");
+}
+
+/// Issue #6856 (Tibalt, the Fiend-Blooded [-4]): "deals damage equal to the
+/// number of cards in target player's hand to that player" declares its
+/// recipient — the dead `TriggeringPlayer` anaphor rebinds to `Player` so
+/// announcement prompts and the amount reads the same choice. Instance
+/// sharing: the recipient inherits the count's instance, so the count flips
+/// `Explicit→Anaphoric` (one announcement, no second slot).
+#[test]
+fn tibalt_fiend_blooded_minus_four_targets_announced_player() {
+    let def = parse_effect_chain(
+        "Tibalt deals damage equal to the number of cards in target player's hand to that player.",
+        AbilityKind::Spell,
+    );
+    let Effect::DealDamage { amount, target, .. } = &*def.effect else {
+        panic!("expected a DealDamage head, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Player,
+        "the announced player is dealt the damage"
+    );
+    assert!(
+        matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetPlayer,
+                    binding: CountBinding::Anaphoric,
+                },
+            }
+        ),
+        "the amount reads the announced player's hand, got {amount:?}",
+    );
+}
+
+/// MED1 (issue #9280 review): "Separate Instances deals damage equal to the
+/// number of cards in target opponent's hand to target player" declares TWO
+/// CR 601.2c instances — an `Explicit` count plus a `Player` recipient.
+/// Synthetic sentence (zero printed cards pair a separate recipient with a
+/// separate count source); pins the shape the two-slot cast test relies on.
+#[test]
+fn separate_damage_instances_parse_to_explicit_count_and_player_recipient() {
+    let def = parse_effect_chain(
+        "Separate Instances deals damage equal to the number of cards in target opponent's hand to target player.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !matches!(*def.effect, Effect::Unimplemented { .. }),
+        "the MED1 sentence must lower, got {:?}",
+        def.effect
+    );
+    let Effect::DealDamage { amount, target, .. } = &*def.effect else {
+        panic!("expected a DealDamage head, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Player,
+        "the recipient is a declared player choice"
+    );
+    assert!(
+        matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    scope: ControllerRef::TargetOpponent,
+                    binding: CountBinding::Explicit,
+                },
+            }
+        ),
+        "the amount is an Explicit count, got {amount:?}",
+    );
+}
+
+/// MED2 (issue #9280 review): the scope-rewrite walkers rebind only
+/// anaphoric counts. An explicit "target player's/opponent's …" count
+/// declares its own CR 601.2c instance and must survive every walker for
+/// the slot machinery. Each walker gets an explicit-survives pin plus an
+/// anaphoric-rewrites pin; the walker under test is invoked directly so
+/// the pins cover the guard, not trigger-gate routing.
+#[test]
+fn rewrite_player_scope_refs_keeps_explicit_count() {
+    let mut def = parse_effect_chain(
+        "Draw cards equal to the number of cards in target opponent's hand.",
+        AbilityKind::Spell,
+    );
+    rewrite_player_scope_refs(&mut def);
+    let Effect::Draw { count, .. } = &*def.effect else {
+        panic!("expected a Draw head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    binding: CountBinding::Explicit,
+                    ..
+                },
+            }
+        ),
+        "explicit count must survive rewrite_player_scope_refs, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_player_scope_refs_rebinds_anaphoric_count() {
+    let mut def = parse_effect_chain(
+        "Target player mills half their library, rounded down.",
+        AbilityKind::Spell,
+    );
+    rewrite_player_scope_refs(&mut def);
+    let Effect::Mill { count, .. } = &*def.effect else {
+        panic!("expected a Mill head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded { inner, .. }
+                if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            scope: crate::types::ability::CountScope::ScopedPlayer,
+                            ..
+                        },
+                    }
+                )
+        ),
+        "anaphoric count must rebind to ScopedPlayer, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_player_quantity_refs_keeps_explicit_count() {
+    let mut def = parse_effect_chain(
+        "Draw cards equal to the number of cards in target opponent's hand.",
+        AbilityKind::Spell,
+    );
+    rewrite_player_quantity_refs_to_source_chosen(&mut def);
+    let Effect::Draw { count, .. } = &*def.effect else {
+        panic!("expected a Draw head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    binding: CountBinding::Explicit,
+                    ..
+                },
+            }
+        ),
+        "explicit count must survive rewrite_player_quantity_refs_to_source_chosen, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_player_quantity_refs_rebinds_anaphoric_count() {
+    let mut def = parse_effect_chain(
+        "Target player mills half their library, rounded down.",
+        AbilityKind::Spell,
+    );
+    rewrite_player_quantity_refs_to_source_chosen(&mut def);
+    let Effect::Mill { count, .. } = &*def.effect else {
+        panic!("expected a Mill head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded { inner, .. }
+                if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            scope:
+                                crate::types::ability::CountScope::SourceChosenPlayer,
+                            ..
+                        },
+                    }
+                )
+        ),
+        "anaphoric count must rebind to SourceChosenPlayer, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_event_player_quantity_refs_keeps_explicit_count() {
+    let mut def = parse_effect_chain(
+        "Draw cards equal to the number of cards in target opponent's hand.",
+        AbilityKind::Spell,
+    );
+    rewrite_event_player_quantity_refs_to_scoped(&mut def);
+    let Effect::Draw { count, .. } = &*def.effect else {
+        panic!("expected a Draw head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    binding: CountBinding::Explicit,
+                    ..
+                },
+            }
+        ),
+        "explicit count must survive rewrite_event_player_quantity_refs_to_scoped, got {count:?}",
+    );
+}
+
+#[test]
+fn rewrite_event_player_quantity_refs_rebinds_anaphoric_count() {
+    let mut def = parse_effect_chain(
+        "Target player mills half their library, rounded down.",
+        AbilityKind::Spell,
+    );
+    rewrite_event_player_quantity_refs_to_scoped(&mut def);
+    let Effect::Mill { count, .. } = &*def.effect else {
+        panic!("expected a Mill head, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded { inner, .. }
+                if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            scope: crate::types::ability::CountScope::ScopedPlayer,
+                            ..
+                        },
+                    }
+                )
+        ),
+        "anaphoric count must rebind to ScopedPlayer, got {count:?}",
     );
 }
 

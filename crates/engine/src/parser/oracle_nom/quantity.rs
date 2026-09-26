@@ -27,10 +27,11 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, Comparator,
-    ControllerRef, CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate,
-    PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
-    ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    ControllerRef, CountBinding, CountScope, DamageChannel, DamageKindFilter, DevotionColors,
+    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+    SubtypeExclusion, TargetFilter, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -301,7 +302,7 @@ pub fn parse_max_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// The inner expression is any quantity this module can recognize — either a
 /// standard [`parse_quantity_ref`] (e.g. `"its power"`, `"your life total"`) or
 /// a possessive reference resolved against the current target (e.g.
-/// `"their library"` → `TargetZoneCardCount { zone: Library }`). The parser
+/// `"their library"` → `TargetZoneCardCount { zone: Library, scope: TargetPlayer, binding: Anaphoric }`). The parser
 /// accepts an optional `, rounded up` / `, rounded down` / `, round up` /
 /// `, round down` suffix. If absent, the expression defaults to
 /// [`RoundingMode::Down`] as a safe fallback — CR 107.1a requires Oracle text
@@ -382,7 +383,7 @@ fn parse_half_rounded_inner(input: &str) -> OracleResult<'_, QuantityExpr> {
 ///
 /// | Possessive | Quantity | Maps to |
 /// |------------|----------|---------|
-/// | "their"    | library/hand/graveyard | `TargetZoneCardCount { zone }` |
+/// | "their"    | library/hand/graveyard | `TargetZoneCardCount { zone, scope: TargetPlayer, binding: Anaphoric }` |
 /// | "their"    | life total / life      | `TargetLifeTotal` |
 /// | "his or her" | life total / life    | `TargetLifeTotal` |
 /// | "your"     | library/hand/graveyard | `ZoneCardCount` (Controller scope) |
@@ -413,18 +414,24 @@ fn parse_their_tail(input: &str) -> OracleResult<'_, QuantityRef> {
         value(
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Library,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("library"),
         ),
         value(
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("hand"),
         ),
         value(
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Graveyard,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             },
             tag("graveyard"),
         ),
@@ -535,7 +542,11 @@ fn parse_cards_in_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> 
     let (rest, _) = tag("the cards in ").parse(input)?;
     alt((
         map(preceded(tag("their "), parse_zone_ref_singular), |zone| {
-            QuantityRef::TargetZoneCardCount { zone }
+            QuantityRef::TargetZoneCardCount {
+                zone,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
+            }
         }),
         map(preceded(tag("your "), parse_zone_ref_singular), |zone| {
             QuantityRef::ZoneCardCount {
@@ -2582,7 +2593,11 @@ fn parse_number_of_cards_in_target_zone(input: &str) -> OracleResult<'_, Quantit
     let (rest, _) = tag("cards in ").parse(input)?;
     let (rest, _) = alt((tag("their "), tag("that player's "))).parse(rest)?;
     map(parse_zone_ref_singular, |zone| {
-        QuantityRef::TargetZoneCardCount { zone }
+        QuantityRef::TargetZoneCardCount {
+            zone,
+            scope: ControllerRef::TargetPlayer,
+            binding: CountBinding::Anaphoric,
+        }
     })
     .parse(rest)
 }
@@ -2602,15 +2617,59 @@ fn parse_number_of_cards_in_all_players_hands(input: &str) -> OracleResult<'_, Q
     ))
 }
 
-/// CR 115.1 + CR 115.7: Parse "target opponent's <zone>" / "target player's <zone>"
-/// possessive into a `TargetZoneCardCount`. Used as a target-bound branch of
-/// `parse_zone_card_count` for "card in target opponent's hand" expressions
-/// (Jeska's Will mode 1). Does not consume the leading "card in " — the caller
-/// has already stripped that prefix and is positioned at the possessive.
+/// CR 115.1: Parse "target opponent's <zone>" / "target player's <zone>"
+/// possessive into a `TargetZoneCardCount`, preserving which announced player
+/// the count reads via the `scope` legality axis (`TargetOpponent` /
+/// `TargetPlayer` — runtime-read-identical, slot-legality-distinct). Used as
+/// a target-bound branch of `parse_zone_card_count` for "card in target
+/// opponent's hand" expressions (Jeska's Will mode 1). Does not consume the
+/// leading "card in " — the caller has already stripped that prefix and is
+/// positioned at the possessive.
 fn parse_target_player_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = alt((tag("target opponent's "), tag("target player's "))).parse(input)?;
+    let (rest, scope) = alt((
+        value(ControllerRef::TargetOpponent, tag("target opponent's ")),
+        value(ControllerRef::TargetPlayer, tag("target player's ")),
+    ))
+    .parse(input)?;
     let (rest, zone) = parse_zone_ref_singular(rest)?;
-    Ok((rest, QuantityRef::TargetZoneCardCount { zone }))
+    Ok((
+        rest,
+        QuantityRef::TargetZoneCardCount {
+            zone,
+            scope,
+            binding: CountBinding::Explicit,
+        },
+    ))
+}
+
+/// CR 115.1: the target possessive's restriction survives
+/// lowering — "target opponent's ..." scopes to the announced opponent,
+/// "target player's ..." to any announced player. Runtime resolution is
+/// identical for both; only the companion slot's legality differs.
+#[test]
+fn target_player_possessive_zone_preserves_opponent_vs_player_scope() {
+    let (rest, opponent_qty) =
+        parse_target_player_possessive_zone("target opponent's hand").unwrap();
+    assert_eq!(rest, "");
+    assert_eq!(
+        opponent_qty,
+        QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Hand,
+            scope: crate::types::ability::ControllerRef::TargetOpponent,
+            binding: CountBinding::Explicit,
+        }
+    );
+    let (rest, player_qty) =
+        parse_target_player_possessive_zone("target player's graveyard").unwrap();
+    assert_eq!(rest, "");
+    assert_eq!(
+        player_qty,
+        QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Graveyard,
+            scope: crate::types::ability::ControllerRef::TargetPlayer,
+            binding: CountBinding::Explicit,
+        }
+    );
 }
 
 /// CR 303.4m + CR 613.4c: Parse recipient-relative hand counts such as
@@ -10032,6 +10091,8 @@ mod tests {
             q,
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");
@@ -10044,6 +10105,8 @@ mod tests {
             q,
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");
@@ -12043,6 +12106,8 @@ mod tests {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Library,
+                        scope: crate::types::ability::ControllerRef::TargetPlayer,
+                        binding: CountBinding::Anaphoric,
                     },
                 }),
                 divisor: 2,
@@ -12178,6 +12243,8 @@ mod tests {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Library,
+                        scope: crate::types::ability::ControllerRef::TargetPlayer,
+                        binding: CountBinding::Anaphoric,
                     },
                 }),
                 divisor: 2,
@@ -12222,6 +12289,8 @@ mod tests {
             q,
             QuantityRef::TargetZoneCardCount {
                 zone: ZoneRef::Hand,
+                scope: crate::types::ability::ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
             }
         );
         assert_eq!(rest, "");

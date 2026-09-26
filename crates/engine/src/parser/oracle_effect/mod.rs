@@ -32966,6 +32966,36 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
     }
 }
 
+/// Apply `f` to every [`QuantityRef`] leaf in a [`QuantityExpr`] tree.
+/// Companion to [`each_quantity_expr_mut`]: that visitor reaches the
+/// top-level expressions of an `Effect`, this one descends into them, so
+/// callers that rewrite refs (the scope-rebind walkers below, the damage
+/// recipient rebind in `lower.rs`) share one traversal instead of
+/// hand-rolling the recursion per call site. The match is exhaustive over
+/// `QuantityExpr` (no wildcard) so a new expression form breaks compilation
+/// here rather than silently escaping every rewrite.
+pub(crate) fn each_quantity_ref_mut(expr: &mut QuantityExpr, f: &mut impl FnMut(&mut QuantityRef)) {
+    match expr {
+        QuantityExpr::Ref { qty } => f(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => each_quantity_ref_mut(inner, f),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                each_quantity_ref_mut(inner, f);
+            }
+        }
+        QuantityExpr::UpTo { max } => each_quantity_ref_mut(max, f),
+        QuantityExpr::Power { exponent, .. } => each_quantity_ref_mut(exponent, f),
+        QuantityExpr::Difference { left, right } => {
+            each_quantity_ref_mut(left, f);
+            each_quantity_ref_mut(right, f);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
 /// CR 109.4 + CR 608.2c: Apply `f` to every `TargetFilter` reachable through
 /// the common target-bearing fields of an `Effect`. Companion to
 /// `each_quantity_expr_mut`; used by callers that need to rewrite target slots
@@ -33354,40 +33384,45 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
         }
     }
 
-    fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::LifeTotal {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+    fn rewrite_quantity_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                QuantityRef::HandSize {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::HandSize {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+            }
+            QuantityRef::HandSize {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                // CR 119.3 + CR 109.5 + CR 608.2c: "the life they/that player lost
-                // this turn" under a per-opponent `player_scope` loop binds to the
-                // iterating player, the same rebind the analogous
-                // `LifeTotal`/`HandSize` arms above perform for "their life"/"their
-                // hand". The leaf combinator emits `Target`; this walker (run only
-                // on `player_scope`-bearing defs) maps it to `ScopedPlayer`. A
-                // purely targeted clause (Blitzwing — no `player_scope`) never
-                // reaches this walker, so its `Target` survives to read the
-                // targeted opponent's own life lost.
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::LifeLostThisTurn {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+            }
+            // CR 119.3 + CR 109.5 + CR 608.2c: "the life they/that player lost
+            // this turn" under a per-opponent `player_scope` loop binds to the
+            // iterating player, the same rebind the analogous
+            // `LifeTotal`/`HandSize` arms above perform for "their life"/"their
+            // hand". The leaf combinator emits `Target`; this walker (run only
+            // on `player_scope`-bearing defs) maps it to `ScopedPlayer`. A
+            // purely targeted clause (Blitzwing — no `player_scope`) never
+            // reaches this walker, so its `Target` survives to read the
+            // targeted opponent's own life lost.
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == crate::types::ability::CountBinding::Anaphoric =>
+            {
+                match zone {
                     crate::types::ability::ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::ScopedPlayer,
@@ -33416,29 +33451,15 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                     // form at least lets a targeting ability resolve
                     // correctly.
                     crate::types::ability::ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_quantity_expr(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_quantity_expr(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_quantity_expr(left);
-                rewrite_quantity_expr(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_quantity_ref)
+    });
     // CR 109.5: Explicit All scopes retain Controller for their ScopedPlayer rewrite;
     // inherited opponent-decline nodes have no local scope and still rebind here.
     if !matches!(def.player_scope, Some(PlayerFilter::All))
@@ -33561,24 +33582,29 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
 /// whose condition names "the chosen player's" phase step (The Rack) to read
 /// the source's persisted `ChosenAttribute::Player`.
 pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDefinition) {
-    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
 
-    fn rewrite_qty(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal { player }
-                | QuantityRef::HandSize { player }
-                | QuantityRef::LifeLostThisTurn { player }
-                | QuantityRef::LifeGainedThisTurn { player }
-                | QuantityRef::PartySize { player }
-                    if matches!(
-                        *player,
-                        PlayerScope::Target | PlayerScope::ScopedPlayer | PlayerScope::Controller
-                    ) =>
-                {
-                    *player = PlayerScope::SourceChosenPlayer;
-                }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if matches!(
+                    *player,
+                    PlayerScope::Target | PlayerScope::ScopedPlayer | PlayerScope::Controller
+                ) =>
+            {
+                *player = PlayerScope::SourceChosenPlayer;
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
                     ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::SourceChosenPlayer,
@@ -33593,29 +33619,15 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
                         };
                     }
                     ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_qty(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_qty(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_qty(left);
-                rewrite_qty(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_ref)
+    });
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_player_quantity_refs_to_source_chosen(sub);
     }
@@ -33625,21 +33637,26 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
 }
 
 pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefinition) {
-    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
 
-    fn rewrite_qty(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal { player }
-                | QuantityRef::HandSize { player }
-                | QuantityRef::LifeLostThisTurn { player }
-                | QuantityRef::LifeGainedThisTurn { player }
-                | QuantityRef::PartySize { player }
-                    if *player == PlayerScope::Target =>
-                {
-                    *player = PlayerScope::ScopedPlayer;
-                }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if *player == PlayerScope::Target =>
+            {
+                *player = PlayerScope::ScopedPlayer;
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
                     ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::ScopedPlayer,
@@ -33655,34 +33672,86 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
                     }
                     // No scoped-player equivalent for exile counts; leave as-is.
                     ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_qty(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_qty(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_qty(left);
-                rewrite_qty(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_ref)
+    });
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_event_player_quantity_refs_to_scoped(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_event_player_quantity_refs_to_scoped(else_branch);
+    }
+}
+
+/// CR 603.2 + CR 608.2c + CR 115.1: Lower an event-anchored anaphoric zone
+/// count to a scoped-player read. In a damage-done trigger whose recipient is
+/// the event player ("... deals damage to that player equal to the number of
+/// cards in their hand" — Sword of War and Peace), "their" is bound to the
+/// damaged player by the triggering event: no player choice is announced, so
+/// the count must not surface a companion announcement slot (the slot builder
+/// reads `TargetZoneCardCount` as proof of a declared target, and an
+/// any-player slot with more than one legal player stalls the trigger at
+/// target selection). Only anaphoric counts (`CountBinding::Anaphoric`) are
+/// rewritten — an explicit "target player's/opponent's ..." count declares
+/// its own announcement and stays for the slot machinery — and only inside
+/// effects whose own player anchor is the event player (`TriggeringPlayer`),
+/// so a genuinely announced recipient keeps its slot. Zone mapping mirrors
+/// `rewrite_event_player_quantity_refs_to_scoped` (exile has no scoped
+/// equivalent and is left as-is).
+pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefinition) {
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
+
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery —
+            // scope alone cannot tell them apart (both use `TargetPlayer`).
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
+                    ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        }
+                    }
+                    ZoneRef::Library | ZoneRef::Graveyard => {
+                        *qty = QuantityRef::ZoneCardCount {
+                            zone: zone.clone(),
+                            card_types: Vec::new(),
+                            scope: CountScope::ScopedPlayer,
+                            filter: None,
+                        };
+                    }
+                    // No scoped-player equivalent for exile counts; leave as-is.
+                    ZoneRef::Exile => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_effect(effect: &mut Effect) {
+        if matches!(effect.target_filter(), Some(TargetFilter::TriggeringPlayer)) {
+            each_quantity_expr_mut(effect, &mut |expr| {
+                each_quantity_ref_mut(expr, &mut rewrite_ref)
+            });
+        }
+    }
+
+    rewrite_effect(&mut def.effect);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_event_anchored_zone_counts_to_scoped(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_event_anchored_zone_counts_to_scoped(else_branch);
     }
 }
 

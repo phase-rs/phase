@@ -2583,18 +2583,20 @@ impl<'a> SpellCast<'a> {
         )?;
 
         // Intent the driver matches as it walks slots. Object targets are
-        // always consumed one per slot. Player declarations are consumed only
-        // by a multi-target run so `.target_players(&[a, b])` can express two
-        // distinct targets while a single declaration remains reusable across
-        // independent modal slots.
+        // always consumed one per slot. Player declarations are consumed in
+        // order per prompt sequence so `.target_players(&[a, b])` can express
+        // two distinct targets; a single declaration remains reusable across
+        // independent modal slots via the `declared_players` fallback in
+        // `pick_slot_target`.
         let mut remaining_objects: Vec<ObjectId> = target_objects;
         // CR 603.3d: triggered-ability targets are chosen after the trigger is
         // put on the stack, independently of the spell's own target slots.
-        // Keep a separate object-intent pool so the same declared object can
+        // Keep separate intent pools so the same declared object or player can
         // satisfy a trigger target and a later resolution target.
         let mut remaining_trigger_objects = remaining_objects.clone();
         let declared_players: Vec<PlayerId> = target_players;
-        let mut remaining_multi_target_players = declared_players.clone();
+        let mut remaining_spell_players = declared_players.clone();
+        let mut remaining_trigger_players = declared_players.clone();
         let mut remaining_cost_objects: Vec<ObjectId> = cost_objects;
 
         // CR 601.2a: the spell leaves hand only at stack commit. Captured when
@@ -2821,7 +2823,6 @@ impl<'a> SpellCast<'a> {
                 }
                 // CR 601.2c: declare one target per slot, in written order.
                 WaitingFor::TargetSelection {
-                    pending_cast,
                     target_slots,
                     selection,
                     ..
@@ -2830,11 +2831,7 @@ impl<'a> SpellCast<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_objects,
-                        pending_cast
-                            .ability
-                            .multi_target
-                            .as_ref()
-                            .map(|_| &mut remaining_multi_target_players),
+                        &mut remaining_spell_players,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -2845,9 +2842,9 @@ impl<'a> SpellCast<'a> {
                     )?;
                 }
                 // CR 603.3d: triggered abilities choose targets after they are
-                // put on the stack. Their object intents are independent of
-                // the spell's target slots, while player intents remain
-                // reusable across both prompts.
+                // put on the stack. Their intents are independent of the
+                // spell's target slots, while a single declared player remains
+                // reusable across both prompts via the fallback.
                 WaitingFor::TriggerTargetSelection {
                     target_slots,
                     selection,
@@ -2857,7 +2854,7 @@ impl<'a> SpellCast<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_trigger_objects,
-                        None,
+                        &mut remaining_trigger_players,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -3067,17 +3064,18 @@ impl<'a> CastCommit<'a> {
 /// matching CR 601.2c (targets declared one per slot, in written order).
 ///
 /// Object intent is *consumed* (each declared object satisfies at most one
-/// slot, so distinct exile/destroy targets never alias). A multi-target run
-/// consumes player declarations in order when available; otherwise, player
-/// intent is reusable, letting the same declared player satisfy independent
-/// modal slots (e.g. Kozilek's Command mode 1 scries *and* draws for the same
-/// target player).
+/// slot, so distinct exile/destroy targets never alias). Player declarations
+/// are likewise consumed in order, so `.target_players(&[a, b])` fills two
+/// same-type slots with `a` then `b`. When no remaining declaration is legal
+/// for the slot, player intent is reusable, letting the same declared player
+/// satisfy independent modal slots (e.g. Kozilek's Command mode 1 scries
+/// *and* draws for the same target player).
 /// Falls back to `None` for optional slots; panics for an unsatisfiable
 /// required slot.
 fn pick_slot_target(
     slot: &crate::types::game_state::TargetSelectionSlot,
     remaining_objects: &mut Vec<ObjectId>,
-    remaining_multi_target_players: Option<&mut Vec<PlayerId>>,
+    remaining_players: &mut Vec<PlayerId>,
     declared_players: &[PlayerId],
     slot_index: usize,
 ) -> Option<TargetRef> {
@@ -3087,13 +3085,11 @@ fn pick_slot_target(
     {
         return Some(TargetRef::Object(remaining_objects.remove(pos)));
     }
-    if let Some(remaining_players) = remaining_multi_target_players {
-        if let Some(pos) = remaining_players
-            .iter()
-            .position(|&player| slot.legal_targets.contains(&TargetRef::Player(player)))
-        {
-            return Some(TargetRef::Player(remaining_players.remove(pos)));
-        }
+    if let Some(pos) = remaining_players
+        .iter()
+        .position(|&player| slot.legal_targets.contains(&TargetRef::Player(player)))
+    {
+        return Some(TargetRef::Player(remaining_players.remove(pos)));
     }
     if let Some(&player) = declared_players
         .iter()
@@ -3387,6 +3383,7 @@ impl<'a> AbilityActivation<'a> {
 
         let mut remaining_objects: Vec<ObjectId> = target_objects;
         let declared_players: Vec<PlayerId> = target_players;
+        let mut remaining_players = declared_players.clone();
 
         // CR 602.2b: the ability is on the stack at the post-announcement
         // Priority window — capture the hand baseline there (mirrors SpellCast).
@@ -3426,7 +3423,7 @@ impl<'a> AbilityActivation<'a> {
                     let choice = pick_slot_target(
                         slot,
                         &mut remaining_objects,
-                        None,
+                        &mut remaining_players,
                         &declared_players,
                         selection.current_slot,
                     );
@@ -3599,10 +3596,11 @@ fn drive_resolution(
     runner: &mut GameRunner,
     policy: &ResolutionPolicy,
 ) -> Result<Vec<GameEvent>, EngineError> {
-    // Object intent is consumed per slot; player intent is reusable. Mirrors
-    // the SpellCast cast-time loop.
+    // Object intent is consumed per slot; player intent is consumed in
+    // order with a reusable fallback. Mirrors the SpellCast cast-time loop.
     let mut remaining_objects: Vec<ObjectId> = policy.targets_objects.clone();
     let declared_players: &[PlayerId] = &policy.targets_players;
+    let mut remaining_players: Vec<PlayerId> = policy.targets_players.clone();
     let mut discard_cards = policy.discard_cards.clone();
     let mut effect_zone_cards = policy.effect_zone_cards.clone();
     let mut events = Vec::new();
@@ -3671,7 +3669,7 @@ fn drive_resolution(
                 let choice = pick_slot_target(
                     slot,
                     &mut remaining_objects,
-                    None,
+                    &mut remaining_players,
                     declared_players,
                     selection.current_slot,
                 );
@@ -3693,7 +3691,7 @@ fn drive_resolution(
                 let choice = pick_slot_target(
                     slot,
                     &mut remaining_objects,
-                    None,
+                    &mut remaining_players,
                     declared_players,
                     selection.current_slot,
                 );

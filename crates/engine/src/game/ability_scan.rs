@@ -2343,7 +2343,13 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        QuantityRef::TargetZoneCardCount { zone: _ } => Axes::NONE,
+        // `binding` selects which announced choice the count reads; it reads
+        // no game state itself, so the axis verdict is unchanged.
+        QuantityRef::TargetZoneCardCount {
+            zone: _,
+            scope: _,
+            binding: _,
+        } => Axes::NONE,
         QuantityRef::Devotion { .. } => Axes {
             event: false,
             sibling: true,

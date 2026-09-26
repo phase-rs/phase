@@ -3693,7 +3693,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
                     .as_ref()
                     .is_some_and(|f| target_filter_reads_zone(f, zone))
         }
-        QuantityRef::TargetZoneCardCount { zone: zone_ref } => {
+        QuantityRef::TargetZoneCardCount { zone: zone_ref, .. } => {
             zone_ref_denotes_zone(zone_ref, zone)
         }
         // Filter-based object counts read `zone` iff their filter is zone-scoped
