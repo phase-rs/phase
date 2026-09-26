@@ -5935,7 +5935,9 @@ fn bhaal_myrkul_half_starting_life_static_has_typed_condition_no_dynamic_qty_war
                 assert!(matches!(
                     inner.as_ref(),
                     QuantityExpr::Ref {
-                        qty: QuantityRef::StartingLifeTotal
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::Controller,
+                        }
                     }
                 ));
             }

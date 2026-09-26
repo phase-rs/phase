@@ -7528,7 +7528,9 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
                 assert_eq!(
                     **inner,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::StartingLifeTotal,
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::Controller,
+                        },
                     },
                     "DivideRounded.inner must be Ref(StartingLifeTotal), got {inner:?}",
                 );
