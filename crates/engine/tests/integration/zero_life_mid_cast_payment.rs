@@ -475,11 +475,118 @@ fn replacement_choice_after_a_mana_ability_paid_the_last_life_stays_open() {
         })
         .expect("activate Mana Confluence");
     // CR 605.3b + CR 616.1: the replacement's choice is part of paying the mana
-    // ability's cost, so no one has priority yet. Answering it isn't driven
-    // here: on this path a separate, pre-existing defect (logged on its own)
-    // re-charges the life after the rider resolves and asks again, looping at
-    // any life total.
+    // ability's cost, so no one has priority yet.
     assert_rider_open_at_zero_life(&runner);
+
+    // CR 118.3b + CR 119.4: the life was paid when the rider's choice opened;
+    // answering it gains 1 life and the activation continues without paying
+    // (or asking) again.
+    let mut events = runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("gain 1 life")
+        .events;
+    assert_eq!(runner.life(P0), 1);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { player, .. } if player == P0
+        ),
+        "the rider must not reopen; the activation asks for its color next, got {:?}",
+        runner.state().waiting_for
+    );
+    events.extend(choose_black(&mut runner));
+
+    // CR 605.3b: the mana ability resolves and adds its mana.
+    assert!(black_mana_added(&events), "{events:?}");
+    assert_eq!(runner.life(P0), 1);
+    assert!(!eliminated(&runner));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+#[test]
+fn mana_ability_life_cost_awaiting_replacement_ordering_is_paid_exactly_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 10);
+    let confluence = scenario
+        .add_land_from_oracle(P0, "Mana Confluence", MANA_CONFLUENCE)
+        .id();
+    scenario
+        .add_creature(P0, "Life-Loss Modifiers", 0, 1)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .description("Double".to_string()),
+        )
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::Plus { value: 1 })
+                .description("Plus one".to_string()),
+        );
+    let mut runner = scenario.build();
+
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: confluence,
+            ability_index: 0,
+        })
+        .expect("activate Mana Confluence")
+        .events;
+    // CR 616.1: the life payment waits for its replacements to be ordered;
+    // nothing is deducted yet.
+    assert_eq!(runner.life(P0), 10);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("order the replacements")
+            .events,
+    );
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseManaColor { .. }
+    ) {
+        events.extend(choose_black(&mut runner));
+    }
+
+    // The ordered payment is delivered once, and the activation finishes.
+    let losses: Vec<i32> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *player_id == P0 && *amount < 0 => Some(*amount),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        losses.len(),
+        1,
+        "the life cost is paid exactly once: {losses:?}"
+    );
+    assert_eq!(runner.life(P0), 10 + losses[0]);
+    assert!(black_mana_added(&events), "{events:?}");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
 }
 
 #[test]
