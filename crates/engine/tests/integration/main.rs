@@ -1078,6 +1078,7 @@ mod multi_layer_continuous_effect;
 mod multi_upkeep_triggers_suspend;
 mod multiface_composite_name_resolution;
 mod must_attack_player_attribution;
+mod must_be_blocked_blocker_prompt;
 mod mutable_pupa_perpetual_keyword_mirror;
 mod mycoloth_upkeep_trigger;
 mod myrkul_crew_phase1_incarnation;

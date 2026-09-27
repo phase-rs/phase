@@ -332,6 +332,7 @@ mod tests {
                     valid_block_targets: std::collections::HashMap::new(),
                     block_requirements: std::collections::HashMap::new(),
                     blocker_constraints: Default::default(),
+                    must_be_blocked_targets: Default::default(),
                 },
                 &dummy_action
             ),
