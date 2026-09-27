@@ -5396,7 +5396,7 @@ mod tests {
                 source_id: trigger_source,
                 ability: Box::new(ability),
                 condition: None,
-                trigger_event: Some(trigger_event),
+                trigger_event: Some(trigger_event.clone()),
                 description: Some("hidden-zone trigger".to_string()),
                 source_name: "Watcher".to_string(),
                 subject_match_count: None,
@@ -5423,20 +5423,28 @@ mod tests {
         );
         assert!(label.contains("Hidden Card"));
 
-        // CR 400.2 + CR 402.3: the viewer-less client envelope must derive
-        // trigger context from the same unseated projection as its state half.
-        let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, None))
-            .expect("serialize unseated client envelope");
-        let serialized = wire.to_string();
-        assert!(
-            !serialized.contains("Secret Card"),
-            "unseated client envelope must not reveal the library card"
-        );
-        let wire_label = wire["derived"]["stack_entry_details"]["900"]["trigger_context"][0]
-            ["label"]
-            .as_str()
-            .expect("serialized trigger context label");
-        assert!(wire_label.contains("Hidden Card"));
+        // CR 400.2 + CR 402.3: each serialized event carrier and its derived
+        // display must honor the same hidden-object decision for seated and
+        // unseated observers.
+        state
+            .stack_trigger_event_batches
+            .insert(ObjectId(900), vec![trigger_event.clone()]);
+        state.resolving_stack_entry = state.stack.front().cloned();
+        state.current_trigger_event = Some(trigger_event.clone());
+        state.current_trigger_events.push(trigger_event);
+        for viewer in [None, Some(PlayerId(0))] {
+            let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer))
+                .expect("serialize client envelope");
+            assert!(
+                !wire.to_string().contains("Secret Card"),
+                "client envelope must not reveal the library card to {viewer:?}"
+            );
+            let wire_label = wire["derived"]["stack_entry_details"]["900"]["trigger_context"][0]
+                ["label"]
+                .as_str()
+                .expect("serialized trigger context label");
+            assert!(wire_label.contains("Hidden Card"));
+        }
     }
 
     /// Wire-format round-trip: the JSON produced from `ClientGameStateRef`

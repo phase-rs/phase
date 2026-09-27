@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::types::action_rejection::ActionRejection;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{
-    CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, WaitingFor, ZoneChangeRecord,
+    CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, StackEntryKind, WaitingFor,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1110,7 +1111,6 @@ pub(crate) fn proposer_hidden_view(state: &GameState, proposer: PlayerId) -> Gam
 fn redact_activation_records(filtered: &mut GameState) {
     use crate::types::game_state::{
         CollectEvidenceResume, DeferredLifeCostResume, PendingCast, PendingCostMoveResume,
-        StackEntryKind,
     };
     fn clear(pending: &mut PendingCast) {
         pending.ability.activation_record = None;
@@ -1516,6 +1516,33 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // viewer who could not identify the canonical object. Otherwise the object
     // is hidden but its journal still leaks the same card name/LKI.
     hidden_zone_change_ids.extend(staged_hidden_identity_ids);
+    // CR 400.2 + CR 402.3: stack trigger events retain independent LKI records.
+    // Apply the same hidden-object decision used by the zone-change journal
+    // before either the state or its derived stack context reaches a client.
+    for entry in filtered
+        .stack
+        .iter_mut()
+        .chain(filtered.resolving_stack_entry.iter_mut())
+    {
+        if let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(event),
+            ..
+        } = &mut entry.kind
+        {
+            redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+        }
+    }
+    for events in filtered.stack_trigger_event_batches.values_mut() {
+        for event in events {
+            redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+        }
+    }
+    if let Some(event) = filtered.current_trigger_event.as_mut() {
+        redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+    }
+    for event in &mut filtered.current_trigger_events {
+        redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
+    }
     filtered.zone_changes_this_turn = filtered
         .zone_changes_this_turn
         .iter()
@@ -3221,6 +3248,17 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     Arc::make_mut(&mut obj.base_static_definitions).clear();
     obj.base_color.clear();
     obj.base_printed_ref = None;
+}
+
+fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<ObjectId>) {
+    if let GameEvent::ZoneChanged {
+        object_id, record, ..
+    } = event
+    {
+        if hidden_ids.contains(object_id) {
+            redact_zone_change_record(record);
+        }
+    }
 }
 
 fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRecord) {
