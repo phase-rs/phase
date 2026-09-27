@@ -359,6 +359,13 @@ pub fn apply_resolved_ledger_edit(
             // CR 602.2 + CR 601.2i: the record and its history length are a
             // pair; a legacy command carries neither and appends nothing.
             match (record, expected_turn_history_len) {
+                (Some(record), Some(_)) if record.source != *source => {
+                    // CR 602.2: the record must describe the activation this
+                    // command counts, not another source's.
+                    return Err(
+                        ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch,
+                    );
+                }
                 (Some(record), Some(expected_len)) => {
                     let actual = state
                         .abilities_activated_this_turn_by_player
@@ -847,5 +854,29 @@ mod tests {
             );
             assert!(state == before, "{label}: nothing changes");
         }
+    }
+
+    /// CR 602.2: a record for a different source than the command counts is
+    /// refused at apply, before any counter moves.
+    #[test]
+    fn an_activation_record_for_another_source_is_refused_at_apply() {
+        let mut state = GameState::new_two_player(7);
+        let source = activation_source(&mut state);
+        let mut record = journal_record(&state, source);
+        apply_resolved_ledger_edit(
+            &mut state,
+            &activation_command(source, 0, Some(record.clone()), Some(0)),
+        )
+        .expect("reach guard: the matching record replays");
+        record.source = ObjectId(source.0 + 1);
+        let before = state.clone();
+        assert_eq!(
+            apply_resolved_ledger_edit(
+                &mut state,
+                &activation_command(source, 1, Some(record), Some(1)),
+            ),
+            Err(ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch)
+        );
+        assert!(state == before, "nothing changes");
     }
 }

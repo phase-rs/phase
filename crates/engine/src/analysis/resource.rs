@@ -8095,6 +8095,9 @@ pub(crate) fn project_object_for_loop(object: &mut crate::game::game_object::Gam
 
 fn project_out_resources(state: &GameState) -> GameState {
     bump_loop_detect_cost(|cost| cost.projected_clones += 1);
+    // Read from the unprojected state: the cost gates judge recorded facts
+    // against the live statics, before any object is projected below.
+    let observable_journal = crate::game::casting::cost_observable_activation_journal(state);
     let mut s = state.normalize_for_loop();
 
     for player in &mut s.players {
@@ -8191,12 +8194,14 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.spells_cast_this_turn_by_player.clear();
     s.spells_cast_this_game.clear();
     s.spells_cast_this_game_by_player.clear();
-    // CR 602.2: the per-turn activation journal is the activation analog of the
-    // cast journal above and is pumped the same way. Its one reader is a "first
-    // activated ability you activate each turn" cost gate, which does not block
-    // repetition: once a turn's first qualifying activation is recorded, every
-    // later row leaves that gate's answer unchanged.
-    s.abilities_activated_this_turn_by_player.clear();
+    // CR 602.2 + CR 611.3a: the per-turn activation journal is the activation
+    // analog of the cast journal above, and every row of it is pumped history
+    // EXCEPT the one fact a "first activated ability … each turn" cost reads:
+    // each such modifier's first qualifying row. That is kept (see
+    // `cost_observable_activation_journal`), so a period that spends a one-time
+    // discount compares UNEQUAL and can never be certified as repeatable, while
+    // periods after it keep the same row and still compare equal.
+    *s.abilities_activated_this_turn_by_player = observable_journal;
     // CR 400 (zones) / CR 603.6a (ETB) / CR 701.21 (sacrifice) / CR 111 (tokens):
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
@@ -9470,6 +9475,73 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&c, &d),
             "an unrestricted ability's tally is pure history and must be projected out (EQUAL)"
+        );
+    }
+
+    /// CR 611.3a + CR 732.2a: a "first activated ability … each turn" discount
+    /// (Professor Hojo) is one-time within the turn, so a period that SPENDS it
+    /// must not compare modulo-equal to one that hasn't: a certificate over that
+    /// period would repeat the one-time discount. The journal is projected to
+    /// the modifier's first qualifying row. PAIRED CONTROLS: without the
+    /// once-per-turn modifier the same pair is pure history (EQUAL), and two
+    /// positions after the discount was spent share that row (EQUAL).
+    #[test]
+    fn a_spent_first_activation_discount_breaks_modulo_equality() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::ability::TargetRef;
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let board = |with_hojo: bool| {
+            let mut s = GameScenario::new_n_player(2, 7);
+            s.at_phase(Phase::PreCombatMain);
+            let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+            let src = s
+                .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+                .id();
+            if with_hojo {
+                s.add_creature_from_oracle(PlayerId(0), "Professor Hojo", 2, 2, HOJO);
+            }
+            (s.build().state().clone(), own, src)
+        };
+        let row = |state: &GameState, own: ObjectId, src: ObjectId| {
+            crate::game::casting::capture_activation_record_from(
+                state,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")
+        };
+        let journaled = |state: &GameState, rows: Vec<_>| {
+            let mut next = state.clone();
+            next.abilities_activated_this_turn_by_player
+                .insert(PlayerId(0), im::Vector::from(rows));
+            next.players[1].life -= 1; // the projected-out resource gain
+            next
+        };
+
+        // Negative: before vs after the discount is spent => UNEQUAL.
+        let (a, own, src) = board(true);
+        let first = row(&a, own, src);
+        let spent = journaled(&a, vec![first.clone()]);
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &spent),
+            "a period that spends the one-time discount must compare UNEQUAL"
+        );
+        // Control: two positions after it was spent keep the same first row.
+        let later = journaled(&spent, vec![first.clone(), first.clone()]);
+        assert!(
+            loop_states_equal_modulo_resources(&spent, &later),
+            "after the discount is spent, later rows are pure history (EQUAL)"
+        );
+
+        // Control: no once-per-turn modifier reads the journal => EQUAL.
+        let (c, own, src) = board(false);
+        let d = journaled(&c, vec![row(&c, own, src)]);
+        assert!(
+            loop_states_equal_modulo_resources(&c, &d),
+            "without a reader the journal is pure history (EQUAL)"
         );
     }
 

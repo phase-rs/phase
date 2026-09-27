@@ -3200,24 +3200,26 @@ pub(crate) fn parse_static_line_inner(
     // ("power-up", "exhaust", "boast", "outlast"); the static runtime gate
     // (`apply_static_activated_ability_cost_reduction`) matches the activating
     // ability's `AbilityTag::keyword_str()`. The `<subject>` filter is routed
-    // through `parse_type_phrase_folding`, which handles the "other" self-exclusion.
+    // through `parse_ability_source_subject`, which handles the "other"
+    // self-exclusion and declines a subject it can't consume whole (CR 602.2: an
+    // unread qualifier must not widen the modifier to every such ability).
     //   - Hulk / Gamma Goliath: "Power-up abilities of other creatures you control…"
     //   - Boom Scholar: "Exhaust abilities of other permanents you control…"
-    if let Some(((keyword, subject, targets, amount), _)) =
+    if let Some(((keyword, affected, targets, amount), _)) =
         nom_on_lower(tp.original, tp.lower, |i| {
             let (i, keyword) = parse_taggable_ability_keyword(i)?;
             let (i, _) = tag(" abilities of ").parse(i)?;
             let (i, subject) = take_until(" cost ").parse(i)?;
             let (_, (subject, targets)) = split_ability_target_restriction(subject)?;
+            let (_, affected) = parse_ability_source_subject(subject.trim())?;
             let (i, _) = tag(" cost ").parse(i)?;
             let (i, amount) =
                 nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
                     .parse(i)?;
             let (i, _) = tag(" less to activate").parse(i)?;
-            Ok((i, (keyword, subject.to_string(), targets, amount)))
+            Ok((i, (keyword, affected, targets, amount)))
         })
     {
-        let (affected, _rest) = parse_type_phrase_folding(&subject);
         return Some(
             StaticDefinition::new(StaticMode::ReduceAbilityCost {
                 mode: CostModifyMode::Reduce,

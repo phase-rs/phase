@@ -1372,6 +1372,25 @@ fn a_fresh_target_gated_activation_settles_an_open_carrier() {
 /// carrier at all is refused, not priced without its target-gated modifiers.
 #[test]
 fn a_carrierless_target_gated_activation_is_refused_at_settlement() {
+    // Reach guard: the same board and target settle when the carrier is kept.
+    {
+        let (mut control, src, merfolk, _, _) = sacrifice_board(4);
+        act(
+            &mut control,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        act(
+            &mut control,
+            GameAction::SelectTargets {
+                targets: vec![object(merfolk)],
+            },
+        )
+        .expect("reach guard: with its carrier the target settles");
+    }
     let (mut r, src, merfolk, _, _) = sacrifice_board(4);
     act(
         &mut r,
@@ -1392,7 +1411,12 @@ fn a_carrierless_target_gated_activation_is_refused_at_settlement() {
             targets: vec![object(merfolk)],
         },
     );
-    assert!(refused.is_err(), "{refused:?}");
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("has no cost carrier")),
+        "refused by the carrier-less settlement check: {refused:?}"
+    );
     assert_eq!(pool(&r, P0), 4);
     assert_eq!(stack_len(&r), 0);
 }
@@ -2001,6 +2025,10 @@ fn a_self_rider_condition_the_engine_cannot_price_with_targets_is_refused() {
         .id();
     mana(&mut s, P0, 8);
     let mut r = s.build();
+    assert!(
+        can_activate_ability_now(r.state(), P0, src, 0),
+        "reach guard: without the rider the same board is offered"
+    );
     set_cost_rider(
         &mut r,
         src,
@@ -2019,12 +2047,19 @@ fn a_self_rider_condition_the_engine_cannot_price_with_targets_is_refused() {
         "not offered"
     );
     let before = serde_json::to_value(r.state()).unwrap();
-    assert!(r
-        .act(GameAction::ActivateAbility {
+    let refused = act(
+        &mut r,
+        GameAction::ActivateAbility {
             source_id: src,
             ability_index: 0,
-        })
-        .is_err());
+        },
+    );
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("depends on its target in a way that can't be determined")),
+        "refused by the unpriceable-rider check: {refused:?}"
+    );
     assert_eq!(serde_json::to_value(r.state()).unwrap(), before);
 }
 
@@ -3039,4 +3074,183 @@ fn a_journaled_source_that_moves_to_a_hidden_zone_is_not_exposed() {
         "authoritative: the row names its source"
     );
     assert_projections_carry_no_records(&r, &[P0, P1, p2], "hidden source");
+}
+
+// ---------------------------------------------------------------------------
+// Round 6.
+// ---------------------------------------------------------------------------
+
+/// CR 601.2f + CR 118.7: a self rider that RAISES the cost by an amount read
+/// from the target has no finite worst case before targets exist. That bound is
+/// carried as unbounded, never folded into mana arithmetic: the offer is still
+/// decided (here, alongside a reduction and a colored shard, which is where a
+/// `u32::MAX` raise overflowed), and settlement prices the committed target.
+fn target_mana_value_raise_paid(target_mana_value: u32) -> (bool, usize) {
+    use engine::types::ability::{CostReduction, ObjectScope, QuantityExpr, QuantityRef};
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let target = s
+        .add_creature(P1, "Target", 2, 2)
+        .with_mana_cost(ManaCost::generic(target_mana_value))
+        .id();
+    s.add_artifact_from_oracle(P0, "Unfloored Reducer", ONE_LESS_UNFLOORED);
+    let src = s
+        .add_creature_from_oracle(P0, "Raiser", 1, 1, "{1}{R}: Tap target creature.")
+        .id();
+    s.with_mana_pool(
+        P0,
+        std::iter::once(ManaUnit::new(
+            ManaColor::Red.into(),
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ))
+        .chain(
+            (0..6).map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new())),
+        )
+        .collect(),
+    );
+    let mut r = s.build();
+    unsick(&mut r, src);
+    set_cost_rider(
+        &mut r,
+        src,
+        Some(CostReduction {
+            mode: CostModifyMode::Raise,
+            amount_per: 1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            },
+            condition: None,
+        }),
+    );
+    let offered = can_activate_ability_now(r.state(), P0, src, 0);
+    let before = pool(&r, P0);
+    act(
+        &mut r,
+        GameAction::ActivateAbility {
+            source_id: src,
+            ability_index: 0,
+        },
+    )
+    .expect("the activation starts");
+    if matches!(r.state().waiting_for, WaitingFor::TargetSelection { .. }) {
+        act(
+            &mut r,
+            GameAction::SelectTargets {
+                targets: vec![object(target)],
+            },
+        )
+        .expect("the target settles");
+    }
+    finish(&mut r, &[]);
+    (offered, before - pool(&r, P0))
+}
+
+#[test]
+fn an_unbounded_target_dependent_raise_is_offered_and_priced_at_settlement() {
+    // {1}{R} + the target's mana value, - {1} (the reducer).
+    assert_eq!(target_mana_value_raise_paid(0), (true, 1), "MV 0: {{R}}");
+    assert_eq!(
+        target_mana_value_raise_paid(3),
+        (true, 4),
+        "MV 3: {{3}}{{R}}"
+    );
+}
+
+/// CR 601.2c + CR 601.2f + CR 109.4: a self rider whose count reads its target
+/// through a player predicate nested in a typed filter
+/// (`FilterProp::ControllerMatches` of the target's controller: "{1} less for
+/// each creature the target's controller controls") must not be priced before
+/// its target exists, and settlement can't bind that predicate to the target
+/// either, so it is refused. The same rider anchored on its controller ("for
+/// each creature you control") reads no target and is priced as usual.
+fn controller_matches_rider_board(
+    player: engine::types::ability::PlayerFilter,
+) -> (GameRunner, ObjectId, ObjectId) {
+    use engine::types::ability::{
+        CostReduction, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+    };
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_creature(P0, "Own", 1, 1);
+    let theirs = s.add_creature(P1, "Theirs", 1, 1).id();
+    s.add_creature(P1, "Theirs Two", 1, 1);
+    let src = s
+        .add_artifact_from_oracle(P0, "Tapper", "{3}: Tap target creature.")
+        .id();
+    mana(&mut s, P0, 8);
+    let mut r = s.build();
+    assert!(
+        can_activate_ability_now(r.state(), P0, src, 0),
+        "reach guard: without the rider the board is offered"
+    );
+    set_cost_rider(
+        &mut r,
+        src,
+        Some(CostReduction {
+            mode: CostModifyMode::Reduce,
+            amount_per: 1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::ControllerMatches {
+                            player: Box::new(player),
+                        },
+                    ])),
+                },
+            },
+            condition: None,
+        }),
+    );
+    (r, src, theirs)
+}
+
+#[test]
+fn a_rider_count_filtered_by_the_targets_controller_is_never_priced_without_it() {
+    use engine::types::ability::PlayerFilter;
+    // Target-positive: refused, not priced at {3} as if no target existed.
+    let (mut r, src, _) =
+        controller_matches_rider_board(PlayerFilter::ParentObjectTargetController);
+    assert!(
+        !can_activate_ability_now(r.state(), P0, src, 0),
+        "not offered"
+    );
+    let refused = act(
+        &mut r,
+        GameAction::ActivateAbility {
+            source_id: src,
+            ability_index: 0,
+        },
+    );
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("depends on its target in a way that can't be determined")),
+        "refused by the unpriceable-rider check: {refused:?}"
+    );
+    assert_eq!(pool(&r, P0), 8);
+
+    // Target-negative: "for each creature you control" (one) ? {3} - {1}.
+    let (mut r, src, theirs) = controller_matches_rider_board(PlayerFilter::Controller);
+    let before = pool(&r, P0);
+    act(
+        &mut r,
+        GameAction::ActivateAbility {
+            source_id: src,
+            ability_index: 0,
+        },
+    )
+    .expect("the activation starts");
+    act(
+        &mut r,
+        GameAction::SelectTargets {
+            targets: vec![object(theirs)],
+        },
+    )
+    .expect("the target settles");
+    finish(&mut r, &[]);
+    assert_eq!(before - pool(&r, P0), 2, "priced as usual");
 }

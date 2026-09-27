@@ -2,13 +2,13 @@ use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
     AdditionalCost, BoardWideCostModifier, CardPlayMode, CardSelectionMode, CardTypeSetSource,
-    CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification,
-    ControllerRef, CostObjectCount, CostPaidObjectSnapshot, CostReduction, CounterCostSelection,
-    Duration, Effect, EffectKind, FilterProp, GameRestriction, ModalSelectionCondition,
-    ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr,
-    QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition,
-    StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType, CombatRelationSubject,
+    ContinuousModification, ControllerRef, CostObjectCount, CostPaidObjectSnapshot, CostReduction,
+    CounterCostSelection, Duration, Effect, EffectKind, FilterProp, GameRestriction,
+    ModalSelectionCondition, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
+    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
+    RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
@@ -25797,16 +25797,18 @@ pub(crate) fn loyalty_ability_gains_mana_tax(
         source_id,
         TargetGating::Independent,
     );
-    modifiers.raise_total = modifiers.raise_total.saturating_add(
-        collect_activation_cost_modifiers(
-            state,
-            ability_def,
-            player,
-            source_id,
-            TargetGating::AnyTargets,
-        )
-        .raise_total,
+    let any = collect_activation_cost_modifiers(
+        state,
+        ability_def,
+        player,
+        source_id,
+        TargetGating::AnyTargets,
     );
+    // An unbounded target-read raise can add mana for some target.
+    if any.raise_unbounded {
+        return true;
+    }
+    modifiers.raise_total = modifiers.raise_total.saturating_add(any.raise_total);
     let probe = fold_activation_cost(base, modifiers.raise_total, &modifiers.reductions, None);
     !matches!(probe, AbilityCost::Loyalty { .. })
 }
@@ -25862,12 +25864,36 @@ pub(crate) struct ActivationCostModifiers {
     /// any reduction, and raises only ever grow the generic component, so only
     /// their sum is observable.
     pub(crate) raise_total: u32,
+    /// CR 601.2f + CR 118.7: only under `TargetGating::AnyTargets`, a
+    /// target-gated raise whose amount is read from the target, so it has no
+    /// finite bound before targets exist. Kept out of `raise_total` so no
+    /// unbounded amount is ever folded into mana arithmetic: the worst case is
+    /// then undecided, not a number.
+    pub(crate) raise_unbounded: bool,
     /// Every applying reduction, in canonical collection order: the ability's own
     /// rider, then battlefield statics, then duration-scoped continuous effects.
     pub(crate) reductions: Vec<CostReductionEntry>,
 }
 
 impl ActivationCostModifiers {
+    /// CR 601.2f: route a modification whose amount has no bound before targets
+    /// exist. An unbounded raise is recorded as such; an unbounded reduction is
+    /// the best case, which removes every generic mana the floors allow (the
+    /// reduction arithmetic clamps, so `u32::MAX` means exactly "all of it").
+    fn push_unbounded(
+        &mut self,
+        mode: CostModifyMode,
+        provenance: ReductionProvenance,
+        display_name: &str,
+    ) {
+        match mode {
+            CostModifyMode::Raise => self.raise_unbounded = true,
+            CostModifyMode::Reduce => {
+                self.push(mode, u32::MAX, 0, provenance, display_name);
+            }
+            CostModifyMode::Minimum => {}
+        }
+    }
     /// CR 118.7: route one resolved modification in its static's direction.
     fn push(
         &mut self,
@@ -25897,7 +25923,7 @@ impl ActivationCostModifiers {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.raise_total == 0 && self.reductions.is_empty()
+        self.raise_total == 0 && !self.raise_unbounded && self.reductions.is_empty()
     }
 }
 
@@ -25968,19 +25994,25 @@ pub(crate) fn collect_activation_cost_modifiers(
                 .then(|| {
                     let count =
                         super::quantity::resolve_quantity(state, &rider.count, player, source_id);
-                    (rider.amount_per as i32 * count).max(0) as u32
+                    RiderAmount::Exact((rider.amount_per as i32 * count).max(0) as u32)
                 })
         };
-        if let Some(delta) = delta {
+        match delta {
             // CR 601.2f + CR 118.7: self-referential text uses the same
             // Reduce/Raise axis as external ability-cost statics, and is unfloored.
-            modifiers.push(
+            Some(RiderAmount::Exact(delta)) => modifiers.push(
                 rider.mode,
                 delta,
                 0,
                 ReductionProvenance::AbilityCostRider,
                 source_name,
-            );
+            ),
+            Some(RiderAmount::UnboundedByTargets) => modifiers.push_unbounded(
+                rider.mode,
+                ReductionProvenance::AbilityCostRider,
+                source_name,
+            ),
+            None => {}
         }
     }
 
@@ -26007,11 +26039,15 @@ pub(crate) fn collect_activation_cost_modifiers(
 }
 
 fn ability_cost_reduction_is_target_dependent(reduction: &CostReduction) -> bool {
+    cost_reduction_reads_targets(reduction, TargetRead::Any)
+}
+
+fn cost_reduction_reads_targets(reduction: &CostReduction, read: TargetRead) -> bool {
     reduction
         .condition
         .as_ref()
-        .is_some_and(parsed_condition_reads_targets)
-        || quantity_expr_reads_target_object(&reduction.count)
+        .is_some_and(|condition| parsed_condition_reads_targets(condition, read))
+        || quantity_expr_reads_target_object(&reduction.count, read)
 }
 
 // CR 601.2c + CR 602.2b + CR 115.1: the classifiers below decide whether an
@@ -26022,43 +26058,66 @@ fn ability_cost_reduction_is_target_dependent(reduction: &CostReduction) -> bool
 // before any target exists, which is a silent misprice. So the two enums a rider is
 // built from, `QuantityRef` and `ParsedCondition`, are matched EXHAUSTIVELY: a new
 // variant fails to compile here until someone decides whether it reads a target.
-// The smaller scope types they carry are matched exhaustively for the same reason.
-// `TargetFilter` follows the repo's convention for filter predicates (explicit
-// recursion, `_ => false`; compare `TargetFilter::references_cost_paid_object`),
-// naming each variant that is relative to a chosen target.
+// The smaller scope types they carry are matched exhaustively for the same reason,
+// and so are `TargetFilter` and its `FilterProp`s, the leaves every filter-scoped
+// count and condition recurses into.
 //
-// Measured on the corpus: of the 83 printed self cost riders, exactly 2 carry any
+// Measured on the corpus: of the 84 printed self cost riders, exactly 2 carry any
 // target reference (Dragonfire Blade, Raft Security Officer), both on targeted
 // abilities, and both were already classified as target-dependent before these
-// classifiers were widened. So widening them changes no current card.
+// classifiers were widened. Neither reads through a newly covered shape (a
+// player predicate, a typed-filter property) nor an unbindable one, so widening
+// them changes no current card.
 
-fn parsed_condition_reads_targets(condition: &ParsedCondition) -> bool {
+/// Which reads of an activation's chosen targets a classifier reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetRead {
+    /// Every read: the question "must this wait for the committed targets?".
+    Any,
+    /// Only reads target settlement can't bind: a player filter anchored on a
+    /// parent target (`PlayerFilter::ParentObjectTarget*`), which the filter
+    /// matcher resolves without the ability's targets. A rider that reads its
+    /// target this way can't be priced, so it is refused, never priced wrong.
+    Unbindable,
+}
+
+impl TargetRead {
+    /// Whether a read that settlement DOES bind (an object or player scope,
+    /// a controller reference, a parent-target filter) is reported.
+    fn includes_bindable(self) -> bool {
+        matches!(self, TargetRead::Any)
+    }
+}
+
+fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead) -> bool {
     match condition {
         // CR 115.1: the condition is ABOUT the chosen targets.
-        ParsedCondition::SpellTargetsFilter { .. } => true,
+        ParsedCondition::SpellTargetsFilter { .. } => read.includes_bindable(),
         ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
-            quantity_expr_reads_target_object(lhs) || quantity_expr_reads_target_object(rhs)
+            quantity_expr_reads_target_object(lhs, read)
+                || quantity_expr_reads_target_object(rhs, read)
         }
         ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
-            quantity_ref_reads_target_object(lhs) || quantity_ref_reads_target_object(rhs)
+            quantity_ref_reads_target_object(lhs, read)
+                || quantity_ref_reads_target_object(rhs, read)
         }
         ParsedCondition::ControlsCreatureWithKeyword { controller, .. } => {
-            controller_ref_reads_chosen_target(controller)
+            controller_ref_reads_chosen_target(controller, read)
         }
         ParsedCondition::YouAttackedWithAtLeast { filter, .. }
         | ParsedCondition::YouCastSpellThisTurn { filter } => filter
             .as_ref()
-            .is_some_and(target_filter_reads_chosen_target),
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
         ParsedCondition::BattlefieldEntriesThisTurn { filter, .. } => {
-            target_filter_reads_chosen_target(filter)
+            target_filter_reads_chosen_target(filter, read)
         }
         ParsedCondition::PlayerCountAtLeast { filter, .. } => {
-            player_filter_reads_chosen_target(filter)
+            player_filter_reads_chosen_target(filter, read)
         }
-        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
-            conditions.iter().any(parsed_condition_reads_targets)
-        }
-        ParsedCondition::Not { condition } => parsed_condition_reads_targets(condition),
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => conditions
+            .iter()
+            .any(|x| parsed_condition_reads_targets(x, read)),
+        ParsedCondition::Not { condition } => parsed_condition_reads_targets(condition, read),
         // Source-, zone-, turn-history- and controller-relative facts: none names a
         // target of this activation.
         ParsedCondition::SourceInZone { .. }
@@ -26127,11 +26186,11 @@ fn parsed_condition_reads_targets(condition: &ParsedCondition) -> bool {
 
 /// Delegates the traversal to `QuantityExpr::any_ref`, so a new expression
 /// wrapper can't bypass target detection.
-fn quantity_expr_reads_target_object(expr: &QuantityExpr) -> bool {
-    expr.any_ref(&mut quantity_ref_reads_target_object)
+fn quantity_expr_reads_target_object(expr: &QuantityExpr, read: TargetRead) -> bool {
+    expr.any_ref(&mut |x| quantity_ref_reads_target_object(x, read))
 }
 
-fn quantity_ref_reads_target_object(qty: &QuantityRef) -> bool {
+fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool {
     match qty {
         // Object-relative: reads a target iff the object is the chosen target.
         QuantityRef::CountersOn { scope, .. }
@@ -26144,11 +26203,12 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectNameWordCount { scope }
         | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
-            object_scope_reads_chosen_target(scope)
+            object_scope_reads_chosen_target(scope, read)
         }
         // Player-relative: reads a target iff the player is the chosen target.
         QuantityRef::HandSize { player }
         | QuantityRef::LifeTotal { player }
+        | QuantityRef::StartingLifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
@@ -26160,23 +26220,25 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef) -> bool {
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
         | QuantityRef::CardsDiscardedThisTurn { player }
         | QuantityRef::PlayerActionsThisTurn { player, .. } => {
-            player_scope_reads_chosen_target(player)
+            player_scope_reads_chosen_target(player, read)
         }
         QuantityRef::SacrificedThisTurn { player, filter }
         | QuantityRef::BattlefieldEntriesThisTurn { player, filter }
         | QuantityRef::TokensCreatedThisTurn { player, filter } => {
-            player_scope_reads_chosen_target(player) || target_filter_reads_chosen_target(filter)
+            player_scope_reads_chosen_target(player, read)
+                || target_filter_reads_chosen_target(filter, read)
         }
         // Named for a target outright.
         QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::TargetControllerCounter { .. }
-        | QuantityRef::TargetZoneCardCount { .. } => true,
+        | QuantityRef::TargetZoneCardCount { .. } => read.includes_bindable(),
         // CR 601.2h: "mana spent to cast" the ability's target.
         QuantityRef::ManaSpentToCast { scope, .. } => {
-            matches!(
-                scope,
-                crate::types::ability::CastManaObjectScope::AbilityTarget
-            )
+            read.includes_bindable()
+                && matches!(
+                    scope,
+                    crate::types::ability::CastManaObjectScope::AbilityTarget
+                )
         }
         // Filter-scoped counts: read a target iff their filter is target-relative.
         QuantityRef::ObjectCount { filter }
@@ -26188,16 +26250,17 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => {
-            target_filter_reads_chosen_target(filter)
+            target_filter_reads_chosen_target(filter, read)
         }
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
-            target_filter_reads_chosen_target(filter)
+            target_filter_reads_chosen_target(filter, read)
         }
         QuantityRef::CounterAddedThisTurn { target, .. } => {
-            target_filter_reads_chosen_target(target)
+            target_filter_reads_chosen_target(target, read)
         }
         QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-            target_filter_reads_chosen_target(source) || target_filter_reads_chosen_target(target)
+            target_filter_reads_chosen_target(source, read)
+                || target_filter_reads_chosen_target(target, read)
         }
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::SpellsCastThisTurn { filter, .. }
@@ -26205,29 +26268,28 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
             .as_ref()
-            .is_some_and(target_filter_reads_chosen_target),
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
         QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
-            player_filter_reads_chosen_target(filter)
+            player_filter_reads_chosen_target(filter, read)
         }
         QuantityRef::BasicLandTypeCount { controller }
         | QuantityRef::CommanderManaValue { owner: controller } => {
-            controller_ref_reads_chosen_target(controller)
+            controller_ref_reads_chosen_target(controller, read)
         }
         QuantityRef::AttachmentsOnLeavingObject { controller, .. } => controller
             .as_ref()
-            .is_some_and(controller_ref_reads_chosen_target),
+            .is_some_and(|x| controller_ref_reads_chosen_target(x, read)),
         QuantityRef::PropertyAggregate(aggregate) => {
-            card_type_set_source_reads_chosen_target(aggregate.source())
+            card_type_set_source_reads_chosen_target(aggregate.source(), read)
         }
         QuantityRef::DistinctCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
-            card_type_set_source_reads_chosen_target(source)
+            card_type_set_source_reads_chosen_target(source, read)
         }
         // Game, source, event-context, resolution and turn-history values: none is
         // relative to a target of this activation.
         QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -26264,11 +26326,11 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef) -> bool {
     }
 }
 
-fn object_scope_reads_chosen_target(scope: &ObjectScope) -> bool {
+fn object_scope_reads_chosen_target(scope: &ObjectScope, read: TargetRead) -> bool {
     match scope {
         // CR 115.1 + CR 601.2c: a declared target, of this ability or of its
         // chain root.
-        ObjectScope::Target | ObjectScope::ChainRootTarget => true,
+        ObjectScope::Target | ObjectScope::ChainRootTarget => read.includes_bindable(),
         // Resolved through the effect-context referent, the cost-paid object, the
         // triggering event, or a resolution-local set: none is the declared target
         // list of this activation.
@@ -26286,12 +26348,12 @@ fn object_scope_reads_chosen_target(scope: &ObjectScope) -> bool {
     }
 }
 
-fn player_scope_reads_chosen_target(player: &PlayerScope) -> bool {
+fn player_scope_reads_chosen_target(player: &PlayerScope, read: TargetRead) -> bool {
     match player {
-        PlayerScope::Target | PlayerScope::ParentObjectTargetController => true,
+        PlayerScope::Target | PlayerScope::ParentObjectTargetController => read.includes_bindable(),
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
-            .is_some_and(player_scope_reads_chosen_target),
+            .is_some_and(|x| player_scope_reads_chosen_target(x, read)),
         PlayerScope::Controller
         | PlayerScope::ScopedPlayer
         | PlayerScope::Opponent { .. }
@@ -26303,12 +26365,12 @@ fn player_scope_reads_chosen_target(player: &PlayerScope) -> bool {
     }
 }
 
-fn controller_ref_reads_chosen_target(controller: &ControllerRef) -> bool {
+fn controller_ref_reads_chosen_target(controller: &ControllerRef, read: TargetRead) -> bool {
     match controller {
         ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
         | ControllerRef::ParentTargetController
-        | ControllerRef::ParentTargetOwner => true,
+        | ControllerRef::ParentTargetOwner => read.includes_bindable(),
         ControllerRef::You
         | ControllerRef::Opponent
         | ControllerRef::ScopedPlayer
@@ -26323,21 +26385,26 @@ fn controller_ref_reads_chosen_target(controller: &ControllerRef) -> bool {
     }
 }
 
-fn player_filter_reads_chosen_target(filter: &PlayerFilter) -> bool {
+fn player_filter_reads_chosen_target(filter: &PlayerFilter, read: TargetRead) -> bool {
     match filter {
+        // CR 109.4: a player filter anchored on a parent target. The filter
+        // matcher binds no targets for it (see `effects::matches_player_scope`),
+        // so it is the one read settlement can't price.
         PlayerFilter::ParentObjectTargetController | PlayerFilter::ParentObjectTargetOwner => true,
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_chosen_target(exclude),
+        PlayerFilter::AllExcept { exclude } => player_filter_reads_chosen_target(exclude, read),
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()
-            .is_some_and(target_filter_reads_chosen_target),
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
         PlayerFilter::ControlsCount { filter, count, .. } => {
-            target_filter_reads_chosen_target(filter) || quantity_expr_reads_target_object(count)
+            target_filter_reads_chosen_target(filter, read)
+                || quantity_expr_reads_target_object(count, read)
         }
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
-            quantity_ref_reads_target_object(attr) || quantity_expr_reads_target_object(value)
+            quantity_ref_reads_target_object(attr, read)
+                || quantity_expr_reads_target_object(value, read)
         }
         PlayerFilter::TrackedSetPossessor { filter, .. } => {
-            target_filter_reads_chosen_target(filter)
+            target_filter_reads_chosen_target(filter, read)
         }
         PlayerFilter::Controller
         | PlayerFilter::Opponent
@@ -26361,15 +26428,15 @@ fn player_filter_reads_chosen_target(filter: &PlayerFilter) -> bool {
     }
 }
 
-fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource) -> bool {
+fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource, read: TargetRead) -> bool {
     match source {
-        CardTypeSetSource::Objects { filter } => target_filter_reads_chosen_target(filter),
+        CardTypeSetSource::Objects { filter } => target_filter_reads_chosen_target(filter, read),
         CardTypeSetSource::TurnJournal { filter, .. } => filter
             .as_ref()
-            .is_some_and(target_filter_reads_chosen_target),
-        CardTypeSetSource::AnyOf { sources } => {
-            sources.iter().any(card_type_set_source_reads_chosen_target)
-        }
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .any(|x| card_type_set_source_reads_chosen_target(x, read)),
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => false,
@@ -26378,30 +26445,213 @@ fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource) -> bool 
 
 /// CR 115.1: whether a filter is relative to a chosen target of this activation,
 /// either a parent-target anaphor or a controller bound to a declared target.
-fn target_filter_reads_chosen_target(filter: &TargetFilter) -> bool {
+/// Exhaustive, like the `QuantityRef`/`ParsedCondition` classifiers above: a
+/// new filter variant must be classified before it compiles.
+fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) -> bool {
     match filter {
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner => true,
+        | TargetFilter::ParentTargetOwner => read.includes_bindable(),
         TargetFilter::Typed(TypedFilter {
+            type_filters: _,
             controller,
             properties,
-            ..
         }) => {
             controller
                 .as_ref()
-                .is_some_and(controller_ref_reads_chosen_target)
-                || properties.iter().any(|prop| {
-                    matches!(prop, FilterProp::Owned { controller } if controller_ref_reads_chosen_target(controller))
-                })
+                .is_some_and(|x| controller_ref_reads_chosen_target(x, read))
+                || properties
+                    .iter()
+                    .any(|x| filter_prop_reads_chosen_target(x, read))
         }
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(target_filter_reads_chosen_target)
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|x| target_filter_reads_chosen_target(x, read)),
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            target_filter_reads_chosen_target(filter, read)
         }
-        TargetFilter::Not { filter } => target_filter_reads_chosen_target(filter),
-        TargetFilter::TrackedSetFiltered { filter, .. } => target_filter_reads_chosen_target(filter),
-        _ => false,
+        TargetFilter::PlayerMatching { player } => player_filter_reads_chosen_target(player, read),
+        TargetFilter::StackAbility { controller, .. } => controller
+            .as_ref()
+            .is_some_and(|x| controller_ref_reads_chosen_target(x, read)),
+        TargetFilter::ChosenDamageSource { filter } => filter
+            .as_deref()
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
+        // Fixed, source-, event-, trigger-, replacement- and resolution-relative
+        // referents: none is a declared target of this activation. (`EventTarget`
+        // is the triggering event's target, not this ability's.)
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// CR 115.1: [`target_filter_reads_chosen_target`] for one typed-filter
+/// property. Exhaustive: every property that carries a controller, player
+/// filter, object filter, nested property or quantity is inspected.
+fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool {
+    match prop {
+        FilterProp::SameNameAsParentTarget => read.includes_bindable(),
+        FilterProp::CombatRelation { subject, .. } => {
+            read.includes_bindable() && matches!(subject, CombatRelationSubject::ParentTarget)
+        }
+        FilterProp::ControllerMatches { player } => player_filter_reads_chosen_target(player, read),
+        FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
+            .as_ref()
+            .is_some_and(|x| player_filter_reads_chosen_target(x, read)),
+        FilterProp::Owned { controller }
+        | FilterProp::ProtectorMatches { controller }
+        | FilterProp::AttachedToPlayer { player: controller }
+        | FilterProp::MostPrevalentCreatureTypeIn {
+            scope: controller, ..
+        } => controller_ref_reads_chosen_target(controller, read),
+        FilterProp::Attacking {
+            defender: controller,
+        }
+        | FilterProp::AttackedThisTurn {
+            defender: controller,
+        }
+        | FilterProp::HasAttachment { controller, .. }
+        | FilterProp::HasAnyAttachmentOf { controller, .. }
+        | FilterProp::NameMatchesAnyPermanent { controller } => controller
+            .as_ref()
+            .is_some_and(|x| controller_ref_reads_chosen_target(x, read)),
+        FilterProp::CanEnchant { target: filter }
+        | FilterProp::DifferentNameFrom { filter }
+        | FilterProp::DistinctFrom { reference: filter }
+        | FilterProp::TargetsOnly { filter }
+        | FilterProp::Targets { filter } => target_filter_reads_chosen_target(filter, read),
+        FilterProp::SharesQuality { reference, .. } => reference
+            .as_deref()
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
+        FilterProp::Counters { count: value, .. }
+        | FilterProp::Cmc { value, .. }
+        | FilterProp::PtComparison { value, .. } => quantity_expr_reads_target_object(value, read),
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|x| filter_prop_reads_chosen_target(x, read)),
+        FilterProp::Not { prop } => filter_prop_reads_chosen_target(prop, read),
+        // Intrinsic, source-, zone-, choice- and turn-history-relative
+        // properties: none names a target of this activation.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
     }
 }
 
@@ -26447,7 +26697,7 @@ fn parsed_condition_satisfied_with_committed_targets(
             lhs,
             comparator,
             rhs,
-        } if parsed_condition_reads_targets(condition) => {
+        } if parsed_condition_reads_targets(condition, TargetRead::Any) => {
             let chain = ability_with_chain_targets(ability);
             comparator.evaluate(
                 super::quantity::resolve_quantity_with_targets(state, lhs, &chain),
@@ -26461,7 +26711,7 @@ fn parsed_condition_satisfied_with_committed_targets(
             lhs,
             comparator,
             rhs,
-        } if parsed_condition_reads_targets(condition) => {
+        } if parsed_condition_reads_targets(condition, TargetRead::Any) => {
             let targets = flatten_targets_in_chain(ability);
             let resolve = |qty: &QuantityRef, scope: PlayerId| {
                 super::quantity::resolve_quantity_scoped_with_targets(
@@ -26505,7 +26755,7 @@ fn ability_with_chain_targets(ability: &ResolvedAbility) -> ResolvedAbility {
 ///
 /// Measured on the corpus: no printed card reaches a refused shape.
 fn cost_rider_condition_is_priceable(condition: &ParsedCondition) -> bool {
-    if !parsed_condition_reads_targets(condition) {
+    if !parsed_condition_reads_targets(condition, TargetRead::Any) {
         return true;
     }
     match condition {
@@ -26528,14 +26778,18 @@ fn cost_rider_condition_is_priceable(condition: &ParsedCondition) -> bool {
     }
 }
 
-/// Whether `ability_def`'s own cost rider can be priced (see
-/// [`cost_rider_condition_is_priceable`]).
+/// Whether `ability_def`'s own cost rider can be priced: its condition is one
+/// [`cost_rider_condition_is_priceable`] admits, and neither the condition nor
+/// the count reads the target through a read settlement can't bind
+/// ([`TargetRead::Unbindable`]).
 pub(crate) fn activation_cost_rider_is_priceable(ability_def: &AbilityDefinition) -> bool {
-    ability_def
-        .cost_reduction
-        .as_ref()
-        .and_then(|rider| rider.condition.as_ref())
-        .is_none_or(cost_rider_condition_is_priceable)
+    ability_def.cost_reduction.as_ref().is_none_or(|rider| {
+        rider
+            .condition
+            .as_ref()
+            .is_none_or(cost_rider_condition_is_priceable)
+            && !cost_reduction_reads_targets(rider, TargetRead::Unbindable)
+    })
 }
 
 /// CR 601.2c + CR 602.2b: whether an activation's cost may gain a target-gated
@@ -26642,12 +26896,16 @@ fn fold_activation_cost_for_feasibility(
         source_id,
         TargetGating::AnyTargets,
     );
-    let worst = fold_activation_cost(
-        &base,
-        independent.raise_total.saturating_add(any.raise_total),
-        &independent.reductions,
-        None,
-    );
+    // CR 601.2f: an unbounded target-read raise has no worst-case cost, so
+    // "payable at the worst" can't be shown and the window search decides.
+    let worst = (!any.raise_unbounded).then(|| {
+        fold_activation_cost(
+            &base,
+            independent.raise_total.saturating_add(any.raise_total),
+            &independent.reductions,
+            None,
+        )
+    });
     let mut best_reductions = independent.reductions.clone();
     best_reductions.extend(any.reductions);
     let best = fold_activation_cost(&base, independent.raise_total, &best_reductions, None);
@@ -26660,7 +26918,7 @@ fn fold_activation_cost_for_feasibility(
             Some(ability_index),
         )
     };
-    if payable(&worst) {
+    if let Some(worst) = worst.filter(|worst| payable(worst)) {
         ability_def.cost = Some(worst);
         return false;
     }
@@ -27253,7 +27511,7 @@ fn self_rider_target_gated_delta(
     player: PlayerId,
     source_id: ObjectId,
     gating: TargetGating<'_>,
-) -> Option<u32> {
+) -> Option<RiderAmount> {
     match gating {
         TargetGating::Independent => None,
         TargetGating::Committed(ability) => {
@@ -27268,16 +27526,28 @@ fn self_rider_target_gated_delta(
                     &rider.count,
                     &ability_with_chain_targets(ability),
                 );
-                (rider.amount_per as i32 * count).max(0) as u32
+                RiderAmount::Exact((rider.amount_per as i32 * count).max(0) as u32)
             })
         }
-        TargetGating::AnyTargets => Some(if quantity_expr_reads_target_object(&rider.count) {
-            u32::MAX
-        } else {
-            let count = super::quantity::resolve_quantity(state, &rider.count, player, source_id);
-            (rider.amount_per as i32 * count).max(0) as u32
-        }),
+        TargetGating::AnyTargets => Some(
+            if quantity_expr_reads_target_object(&rider.count, TargetRead::Any) {
+                RiderAmount::UnboundedByTargets
+            } else {
+                let count =
+                    super::quantity::resolve_quantity(state, &rider.count, player, source_id);
+                RiderAmount::Exact((rider.amount_per as i32 * count).max(0) as u32)
+            },
+        ),
     }
+}
+
+/// CR 601.2f: a self rider's amount under one [`TargetGating`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RiderAmount {
+    Exact(u32),
+    /// Only under `AnyTargets`: the count reads the target, so before targets
+    /// exist it has no finite bound (any legal target could be chosen).
+    UnboundedByTargets,
 }
 
 /// CR 601.2f: the generic reduction one activation entry applies.
@@ -27959,11 +28229,43 @@ fn earlier_activation_this_turn_qualified(
     static_controller: PlayerId,
     filter_ctx: &super::filter::FilterContext,
 ) -> bool {
-    state
+    first_qualifying_activation_this_turn(
+        state,
+        keyword,
+        exemption,
+        activator,
+        affected,
+        targets,
+        static_source_id,
+        static_controller,
+        filter_ctx,
+    )
+    .is_some()
+}
+
+/// The turn's first journal row (per activator, in activation order) that
+/// satisfies every gate of one `ReduceAbilityCost` modifier, if any.
+#[allow(clippy::too_many_arguments)]
+fn first_qualifying_activation_this_turn<'s>(
+    state: &'s GameState,
+    keyword: &str,
+    exemption: ActivationExemption,
+    activator: Option<&PlayerFilter>,
+    affected: Option<&TargetFilter>,
+    targets: Option<&TargetFilter>,
+    static_source_id: ObjectId,
+    static_controller: PlayerId,
+    filter_ctx: &super::filter::FilterContext,
+) -> Option<&'s AbilityActivationRecord> {
+    let mut players: Vec<_> = state
         .abilities_activated_this_turn_by_player
-        .values()
-        .flatten()
-        .any(|record| {
+        .iter()
+        .collect();
+    players.sort_by_key(|(player, _)| **player);
+    players
+        .into_iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .find(|record| {
             let view = ActivationView {
                 activator: record.activator,
                 source: record.source,
@@ -28013,6 +28315,97 @@ fn transient_reduce_ability_cost_present(state: &GameState) -> bool {
             )
         })
     })
+}
+
+/// CR 104.4b + CR 732.2a + CR 611.3a: the part of the activation journal a
+/// cost can observe, for a loop-equivalence projection. A "first … each turn"
+/// modifier (`frequency: OncePerTurn`) reads exactly one fact from the journal:
+/// the first row this turn that satisfies its gates, or that there is none. So
+/// that row is kept for each such modifier present, and every other row, which
+/// no cost reads, is dropped. Two positions on either side of the discount being
+/// spent then differ (so no certificate can repeat a one-time discount), while
+/// two positions after it keep the same row and still compare equal.
+pub(crate) fn cost_observable_activation_journal(
+    state: &GameState,
+) -> HashMap<PlayerId, im::Vector<AbilityActivationRecord>> {
+    if state.abilities_activated_this_turn_by_player.is_empty() {
+        return HashMap::new();
+    }
+    let mut kept: Vec<&AbilityActivationRecord> = Vec::new();
+    let mut keep_first = |reduce_mode: &StaticMode,
+                          affected: Option<&TargetFilter>,
+                          static_source_id: ObjectId,
+                          static_controller: PlayerId,
+                          ctx: &super::filter::FilterContext| {
+        let StaticMode::ReduceAbilityCost {
+            keyword,
+            exemption,
+            activator,
+            targets,
+            frequency: Some(CastFrequency::OncePerTurn),
+            ..
+        } = reduce_mode
+        else {
+            return;
+        };
+        if let Some(row) = first_qualifying_activation_this_turn(
+            state,
+            keyword,
+            *exemption,
+            activator.as_ref(),
+            affected,
+            targets.as_ref(),
+            static_source_id,
+            static_controller,
+            ctx,
+        ) {
+            if !kept.iter().any(|seen| std::ptr::eq(*seen, row)) {
+                kept.push(row);
+            }
+        }
+    };
+    if static_kind_present(state, StaticModeKind::ReduceAbilityCost) {
+        for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state)
+        {
+            let ctx = super::filter::FilterContext::from_source(state, static_source.id);
+            keep_first(
+                &def.mode,
+                def.affected.as_ref(),
+                static_source.id,
+                static_source.controller,
+                &ctx,
+            );
+        }
+    }
+    for tce in &state.transient_continuous_effects {
+        let ctx = super::filter::FilterContext::from_source_with_controller(
+            tce.source_id,
+            tce.controller,
+        );
+        for modification in &tce.modifications {
+            if let ContinuousModification::AddStaticMode { mode } = modification {
+                keep_first(
+                    mode,
+                    Some(&tce.affected),
+                    tce.source_id,
+                    tce.controller,
+                    &ctx,
+                );
+            }
+        }
+    }
+    let mut journal: HashMap<PlayerId, im::Vector<AbilityActivationRecord>> = HashMap::new();
+    for (player, rows) in state.abilities_activated_this_turn_by_player.iter() {
+        let observable: im::Vector<_> = rows
+            .iter()
+            .filter(|row| kept.iter().any(|seen| std::ptr::eq(*seen, *row)))
+            .cloned()
+            .collect();
+        if !observable.is_empty() {
+            journal.insert(*player, observable);
+        }
+    }
+    journal
 }
 
 /// CR 601.2f + CR 118.7 + CR 605.1a + CR 606.1: Resolve ONE `ReduceAbilityCost`

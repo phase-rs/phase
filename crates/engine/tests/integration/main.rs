@@ -1460,6 +1460,7 @@ mod dromokas_command_spell_prevention;
 mod duggan_private_detective_punch;
 mod dwarven_armorer_counter_choice;
 mod dynamic_x_cost_reduction;
+mod each_opponent_after_elimination_cost_rider;
 mod each_player_they_control_scope;
 mod edgar_markov_eminence_command_zone;
 mod elixir_gain_life_cards_shuffled;

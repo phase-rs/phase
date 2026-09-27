@@ -59450,7 +59450,7 @@ mod unreadable_additional_cost_is_refused_not_free {
 fn cost_rider_target_classifiers_cover_every_target_reading_shape() {
     use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric, ZoneRef};
 
-    let reads = quantity_ref_reads_target_object;
+    let reads = |qty: &QuantityRef| quantity_ref_reads_target_object(qty, TargetRead::Any);
     let target_player_filter =
         || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
     let you_filter = || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
@@ -59522,7 +59522,7 @@ fn cost_rider_target_classifiers_cover_every_target_reading_shape() {
         }),
         offset: 1,
     };
-    assert!(quantity_expr_reads_target_object(&nested));
+    assert!(quantity_expr_reads_target_object(&nested, TargetRead::Any));
 
     // ParsedCondition: newly covered arms, each beside its negative.
     assert!(parsed_condition_reads_targets(
@@ -59534,7 +59534,8 @@ fn cost_rider_target_classifiers_cover_every_target_reading_shape() {
             rhs: QuantityRef::HandSize {
                 player: PlayerScope::Controller
             },
-        }
+        },
+        TargetRead::Any
     ));
     assert!(!parsed_condition_reads_targets(
         &ParsedCondition::QuantityVsEachOpponent {
@@ -59545,34 +59546,85 @@ fn cost_rider_target_classifiers_cover_every_target_reading_shape() {
             rhs: QuantityRef::HandSize {
                 player: PlayerScope::Controller
             },
-        }
+        },
+        TargetRead::Any
     ));
     assert!(parsed_condition_reads_targets(
         &ParsedCondition::ControlsCreatureWithKeyword {
             controller: ControllerRef::TargetPlayer,
             keyword: crate::types::keywords::Keyword::Flying,
-        }
+        },
+        TargetRead::Any
     ));
     assert!(!parsed_condition_reads_targets(
         &ParsedCondition::ControlsCreatureWithKeyword {
             controller: ControllerRef::You,
             keyword: crate::types::keywords::Keyword::Flying,
-        }
+        },
+        TargetRead::Any
     ));
     assert!(parsed_condition_reads_targets(
         &ParsedCondition::PlayerCountAtLeast {
             filter: PlayerFilter::ParentObjectTargetController,
             minimum: 1,
-        }
+        },
+        TargetRead::Any
+    ));
+    // CR 109.4: target reads nested in a player predicate, through
+    // `TargetFilter::PlayerMatching` and `FilterProp::ControllerMatches`, each
+    // beside the same shape anchored on a non-target player. These are the
+    // reads settlement can't bind, so they are also the `Unbindable` ones.
+    let anchored = |player: PlayerFilter| QuantityRef::ObjectCount {
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::ControllerMatches {
+                player: Box::new(player),
+            },
+        ])),
+    };
+    let matching = |player: PlayerFilter| QuantityRef::ObjectCount {
+        filter: TargetFilter::PlayerMatching {
+            player: Box::new(player),
+        },
+    };
+    for shape in [anchored, matching] {
+        let positive = shape(PlayerFilter::ParentObjectTargetController);
+        let negative = shape(PlayerFilter::Controller);
+        assert!(reads(&positive), "{positive:?}");
+        assert!(!reads(&negative), "{negative:?}");
+        assert!(quantity_ref_reads_target_object(
+            &positive,
+            TargetRead::Unbindable
+        ));
+        assert!(!quantity_ref_reads_target_object(
+            &negative,
+            TargetRead::Unbindable
+        ));
+    }
+    // A read settlement binds is not `Unbindable`.
+    assert!(!quantity_ref_reads_target_object(
+        &QuantityRef::Power {
+            scope: ObjectScope::Target
+        },
+        TargetRead::Unbindable
+    ));
+    assert!(!quantity_ref_reads_target_object(
+        &QuantityRef::ObjectCount {
+            filter: target_player_filter()
+        },
+        TargetRead::Unbindable
     ));
     // Already covered, and still covered through `Not`.
-    assert!(parsed_condition_reads_targets(&ParsedCondition::Not {
-        condition: Box::new(ParsedCondition::SpellTargetsFilter {
-            filter: you_filter()
-        }),
-    }));
+    assert!(parsed_condition_reads_targets(
+        &ParsedCondition::Not {
+            condition: Box::new(ParsedCondition::SpellTargetsFilter {
+                filter: you_filter()
+            }),
+        },
+        TargetRead::Any
+    ));
     assert!(!parsed_condition_reads_targets(
-        &ParsedCondition::IsYourTurn
+        &ParsedCondition::IsYourTurn,
+        TargetRead::Any
     ));
 }
 

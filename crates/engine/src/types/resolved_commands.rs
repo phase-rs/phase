@@ -3270,6 +3270,7 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
                 || *expected_game_history_len == u32::MAX
         }
         ResolvedLedgerEdit::AbilityActivated {
+            source,
             expected_turn_count,
             expected_game_count,
             record,
@@ -3280,6 +3281,9 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
                 || *expected_game_count == u32::MAX
                 || record.is_some() != expected_turn_history_len.is_some()
                 || *expected_turn_history_len == Some(u32::MAX)
+                // CR 602.2: the record describes the very activation the
+                // command counts; a record for another source is malformed.
+                || record.as_ref().is_some_and(|record| record.source != *source)
         }
         ResolvedLedgerEdit::CrimeCommitted {
             expected_turn_count,
@@ -3975,5 +3979,18 @@ mod tests {
                 "{label}"
             );
         }
+        // CR 602.2: a record for another source than the command's.
+        let mut wire = paired.clone();
+        let fields = edit(&mut wire);
+        assert!(
+            fields["record"]["source"] == serde_json::json!(9),
+            "reach guard: {fields:?}"
+        );
+        wire["entries"][1]["command"]["LedgerEdit"]["edit"]["AbilityActivated"]["record"]
+            ["source"] = serde_json::json!(10);
+        assert!(
+            serde_json::from_value::<ResolvedRulesJournal>(wire).is_err(),
+            "a record for another source"
+        );
     }
 }
