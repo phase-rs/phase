@@ -439,7 +439,7 @@ describe("saveBuilderDeck under the deck's own name", () => {
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Built")).toBe("REPLACEMENT-DATA");
     expect(getDeckMeta("Built")).toEqual({ addedAt: 2000 });
     // Cleared, not rebased onto the replacement, so a retried save (same name or a rename)
-    // captures `previous = null` and writes fresh instead of moving or overwriting this deck.
+    // captures `previous = null`.
     expect(ref.current).toBeNull();
   });
 

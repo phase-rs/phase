@@ -2286,12 +2286,73 @@ describe("DeckBuilder", () => {
       const changedElsewhere = JSON.stringify({ main: [{ name: "Island", count: 40 }], sideboard: [] });
       localStorage.setItem(STORAGE_KEY_PREFIX + "D", changedElsewhere);
 
+      // Clear the notification left by P's refusal so the closing waitFor below can only be
+      // satisfied by D's own Save producing CHANGED, not by the stale value still sitting there.
+      useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+
       // If P's refusal had cleared savedDeckRef anyway, this Save of D would have no snapshot
       // to compare against and would silently overwrite the change above instead of refusing.
       await user.click(await screen.findByRole("button", { name: "remove-Counterspell" }));
       await user.click(screen.getByRole("button", { name: "Save" }));
       await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "D")).toBe(changedElsewhere);
+    });
+
+    it("a Clone made after a same-name refusal lands unfiled, not in the source's folder", async () => {
+      const user = userEvent.setup();
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "P",
+        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
+      );
+      const folderF = createFolder(testSavedDeckTxn, "F")!;
+      setDeckFolder(testSavedDeckTxn, "P", folderF.id);
+      render(
+        <DeckBuilder
+          format="Standard"
+          onFormatChange={vi.fn()}
+          initialDeckName="P"
+          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+          onSearchFiltersChange={vi.fn()}
+          onResetSearch={vi.fn()}
+        />,
+      );
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+      const holder = withSavedDeckLibrary(async (txn) => {
+        await held;
+        writeSavedDeckData(txn, "P", otherTab);
+      });
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      await user.click(screen.getByRole("button", { name: "Save" }));
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+      });
+      release();
+      await holder;
+      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+      // Reach guard: the refusal left the other writer's bytes in place before the Clone.
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+
+      await user.click(screen.getByRole("button", { name: "Clone" }));
+      await waitFor(() =>
+        expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P copy")).not.toBeNull(),
+      );
+      // Pins current behaviour: the refusal cleared savedDeckRef, so Clone's click-time folder
+      // lookup finds nothing and the copy lands unfiled, unlike a Clone of the same deck with
+      // no prior refusal (see "clones into the source's folder..." above, which lands in F).
+      expect(getDeckMeta("P copy")?.folderId).toBeUndefined();
+      // The other writer's bytes at the old name are untouched by the Clone.
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
     });
   });
 
