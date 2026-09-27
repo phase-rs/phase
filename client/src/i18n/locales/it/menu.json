@@ -131,6 +131,25 @@
       "feed": "Feed",
       "user": "Utente",
       "precon": "Precon"
+    },
+    "podRelaxation": {
+      "heading": "Adattamenti del pod",
+      "bracketDistance": "Posto {{seat}} — non era disponibile un mazzo del bracket richiesto; è stato assegnato un mazzo di Bracket {{tier}}.",
+      "bracketDistanceNoTier": "Posto {{seat}} — non era disponibile un mazzo del bracket richiesto; è stato assegnato un mazzo senza etichetta.",
+      "labelProvenance": "Posto {{seat}} — non era disponibile un mazzo con bracket dichiarato; è stato assegnato un mazzo con bracket stimato.",
+      "archetype": "Posto {{seat}} — non era disponibile un mazzo dell'archetipo richiesto.",
+      "distinctColorIdentity": "Posto {{seat}} — condivide un'identità di colore con un altro posto.",
+      "distinctCommander": "Posto {{seat}} — condivide un comandante con un altro posto."
+    },
+    "podPreviewCount": "{{n}} mazzi corrispondono alle impostazioni attuali del pod"
+  },
+  "gameProvider": {
+    "podSelectionRefused": {
+      "insufficientCandidates": "Mazzi distinti insufficienti: richiesti {{requested}} posti, {{available}} disponibili.",
+      "hardGateUnsatisfiable": "Mazzi cEDH insufficienti per un tavolo cEDH: richiesti {{requested}} posti, {{available}} disponibili.",
+      "tooManySeats": "Un tavolo cEDH può ospitare al massimo quattro giocatori (richiesti {{seats}} posti IA).",
+      "unknownCommander": "Il catalogo dei mazzi indica un comandante sconosciuto ai dati delle carte: {{name}}.",
+      "cardDataUnavailable": "La selezione dei posti IA richiede i dati delle carte, che non sono ancora stati caricati."
     }
   },
   "feedManager": {

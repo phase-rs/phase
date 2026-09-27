@@ -35,6 +35,11 @@ import type {
   BracketEstimateRequest,
 } from "../types/bracketEstimate";
 import type { DeckSignals } from "../types/deckSignals";
+import type {
+  AiDeckCandidateWire,
+  PodSelectionRequest,
+  PodSelectionResult,
+} from "../types/podSelection";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
@@ -547,6 +552,13 @@ export class EngineWorkerClient {
 
   async estimateBracketForDeck(request: BracketEstimateRequest): Promise<BracketEstimate | null> {
     return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", request });
+  }
+
+  async selectAiPod(
+    candidates: AiDeckCandidateWire[],
+    request: PodSelectionRequest,
+  ): Promise<PodSelectionResult> {
+    return this.request<PodSelectionResult>({ type: "selectAiPod", candidates, request });
   }
 
   async deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null> {

@@ -39,6 +39,12 @@ import type {
 import { isBracketEstimate } from "../types/bracketEstimate";
 import type { DeckSignals } from "../types/deckSignals";
 import { isDeckSignals } from "../types/deckSignals";
+import type {
+  AiDeckCandidateWire,
+  PodSelectionRequest,
+  PodSelectionResult,
+} from "../types/podSelection";
+import { isPodSelectionResult } from "../types/podSelection";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { classifyInitFailure } from "./init-envelope";
 import { AiWorkerPool } from "./ai-worker-pool";
@@ -959,6 +965,18 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     return this.fallback!.estimateBracketForDeck(request);
   }
 
+  async selectAiPod(
+    candidates: AiDeckCandidateWire[],
+    request: PodSelectionRequest,
+  ): Promise<PodSelectionResult> {
+    await this.initialize();
+    await this.requireCardDb();
+    if (this.engine) {
+      return this.engine.selectAiPod(candidates, request);
+    }
+    return this.fallback!.selectAiPod(candidates, request);
+  }
+
   async deckSignals(deck: BracketDeckRequest): Promise<DeckSignals | null> {
     await this.initialize();
     await this.requireCardDb();
@@ -1276,6 +1294,10 @@ interface MainThreadFallback {
     firstPlayer?: number,
   ): Promise<SubmitResult>;
   estimateBracketForDeck(request: BracketEstimateRequest): Promise<BracketEstimate | null>;
+  selectAiPod(
+    candidates: AiDeckCandidateWire[],
+    request: PodSelectionRequest,
+  ): Promise<PodSelectionResult>;
   deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
   evaluateDeckFormatGate(request: unknown): Promise<unknown>;
@@ -1518,6 +1540,13 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         if (r === null || r === undefined) return null;
         if (isBracketEstimate(r)) return r;
         throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
+      }),
+
+    selectAiPod: (candidates: AiDeckCandidateWire[], request: PodSelectionRequest) =>
+      enqueue(() => {
+        const result = wasm.selectAiPod(candidates, request);
+        if (isPodSelectionResult(result)) return result;
+        throw new Error("selectAiPod returned an invalid pod-selection result");
       }),
 
     deckSignalsForDeck: (deck: BracketDeckRequest) =>

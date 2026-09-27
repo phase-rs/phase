@@ -47,6 +47,7 @@ const mockWorkerClient = {
       color_distribution: [],
     }),
   estimateBracketForDeck: vi.fn().mockResolvedValue(null),
+  selectAiPod: vi.fn().mockResolvedValue({ ok: { seats: [], relaxations: [] } }),
   deckSignalsForDeck: vi.fn().mockResolvedValue(null),
   evaluateDeckFormatGate: vi.fn().mockResolvedValue({ compatible: true, reasons: [] }),
   customFormatFromLobbyConfig: vi.fn().mockResolvedValue({ label: "My Format" }),
@@ -541,6 +542,26 @@ describe("WasmAdapter", () => {
 
       await expect(adapter.estimateBracket(request)).rejects.toThrow("card DB error");
       expect(mockWorkerClient.estimateBracketForDeck).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("selectAiPod", () => {
+    it("selectAiPod rejects and never calls the worker when the card DB is not loaded", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("card DB error"));
+      const request = {
+        allowed: [],
+        prefer: null,
+        enforcement: "advisory" as const,
+        seats: 1,
+        constraints: [],
+        coverage_floor_pct: 0,
+        archetype: null,
+        seed: 7,
+        occupied: [],
+      };
+
+      await expect(adapter.selectAiPod([], request)).rejects.toThrow("card DB error");
+      expect(mockWorkerClient.selectAiPod).not.toHaveBeenCalled();
     });
   });
 

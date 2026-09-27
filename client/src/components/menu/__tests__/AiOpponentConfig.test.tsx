@@ -17,6 +17,30 @@ vi.mock("../../../services/aiDeckCatalog", async () => {
   };
 });
 
+vi.mock("../../../services/podSelection", async () => {
+  const actual = await vi.importActual<typeof import("../../../services/podSelection")>(
+    "../../../services/podSelection",
+  );
+  return {
+    ...actual,
+    podSelectionSeed: () => 5,
+    selectPod: vi.fn(async (candidates: Array<{ id: string }>) => ({
+      kind: "assignment",
+      assignment: {
+        seats: [{
+          seat_index: 0,
+          candidate_id: candidates[0].id,
+          tier: null,
+          provenance: null,
+          difficulty: "Medium",
+          color_identity: [],
+        }],
+        relaxations: [],
+      },
+    })),
+  };
+});
+
 let mockCandidates: AiDeckCandidate[] = [];
 
 function candidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckCandidate {
@@ -28,6 +52,8 @@ function candidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckCandi
     coveragePct: 100,
     archetype: null,
     bracket,
+    bracketProvenance: bracket === null ? null : "declared",
+    bracketDataVersion: bracket === null ? null : "test-1",
   };
 }
 
@@ -209,12 +235,14 @@ describe("AiOpponentConfig — bracket filter", () => {
     expect(screen.getByRole("group", { name: "Bracket filter" })).toBeInTheDocument();
   });
 
-  it("filter off (empty selection) keeps untagged candidates in the random pool", () => {
+  it("filter off (empty selection) keeps untagged candidates in the random pool", async () => {
     render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
-    expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(4\)/);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(4\)/);
+    });
   });
 
-  it("selecting brackets {2, 4} narrows the pool to those candidates and excludes untagged", async () => {
+  it("treats bracket filters as ranking preferences and keeps untagged fallbacks", async () => {
     const user = userEvent.setup();
     render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
 
@@ -222,7 +250,7 @@ describe("AiOpponentConfig — bracket filter", () => {
     await user.click(screen.getByRole("button", { name: "4 Optimized" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(2\)/);
+      expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(4\)/);
     });
   });
 });
