@@ -26,7 +26,7 @@ import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { reportStructuredActionRejection } from "../game/actionRejectionReporter";
 import { getPlayerId } from "../hooks/usePlayerId";
-import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersistence";
+import { loadCheckpoints, saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -327,6 +327,7 @@ interface GameStoreActions {
     playerCount?: number,
     matchConfig?: MatchConfig,
     firstPlayer?: number,
+    initialSave?: "best-effort" | "strict",
   ) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
@@ -542,7 +543,7 @@ export const useGameStore = create<GameStore>()(
       return accepted;
     },
 
-    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer) => {
+    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer, initialSave = "best-effort") => {
       // Clear the display-only stack-pacing tracker so a fast-churning end to a
       // prior game can't bleed stale resolution rate into this game's opening
       // pacing (rematch started within the throughput window).
@@ -573,6 +574,14 @@ export const useGameStore = create<GameStore>()(
       // gate, and it drops any leftover in-flight commit from a prior match.
       const snapshot = await adapter.getSnapshot();
       const state = snapshot.state;
+      if (initialSave === "strict") {
+        try {
+          await saveAuthoritativeGameStrict(gameId, adapter, state);
+        } catch (error) {
+          if (get().adapter === adapter) set({ adapter: null });
+          throw error;
+        }
+      }
       const initLogEntries = (initResult.log_entries ?? []).map((entry, i) => ({
         ...entry,
         seq: i,
@@ -609,7 +618,7 @@ export const useGameStore = create<GameStore>()(
           restoredStackAutomation: null,
         },
       });
-      void saveAuthoritativeGame(gameId, adapter, state);
+      if (initialSave === "best-effort") void saveAuthoritativeGame(gameId, adapter, state);
     },
 
     resumeGame: async (gameId, adapter, savedState) => {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::types::action_rejection::ActionRejection;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{
-    CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, WaitingFor,
+    CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -108,6 +108,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -874,9 +875,9 @@ pub(crate) fn identity_projection_for_viewer(
 
     // CR 406.3: A card exiled face down can't be examined by any player
     // except when an instruction allows it. Two modeled look-permission classes:
-    // Foretell (the owner may look, CR 702.143e) and Hideaway (CR 702.75a — the
-    // controller of the permanent that exiled the card may look, keyed on the
-    // dedicated `ExileLinkKind::HideawayLookable` link). Every other face-down
+    // Foretell (the owner may look, CR 702.143e) and look links (CR 406.3 +
+    // CR 702.75a — the link's live rule or its latched players may look, keyed
+    // on the dedicated `ExileLinkKind::HideawayLookable` link). Every other face-down
     // exile class — including plain `TrackedBySource` exiles that grant no
     // look-permission (Bomat Courier's "(You can't look at it.)", Necropotence,
     // Asmodeus) — fails closed and redacts the card for every viewer.
@@ -891,19 +892,13 @@ pub(crate) fn identity_projection_for_viewer(
                 }
                 // CR 702.143e: foretold card — its owner may look.
                 let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
-                // CR 702.75a + CR 607.2a: the controller of the permanent that
-                // exiled this card under Hideaway may look at it. Keyed on the
+                // CR 406.3 + CR 702.75a: a look link's live rule or its latch of
+                // every player once admitted lets them look. Keyed on the
                 // dedicated `HideawayLookable` link kind so plain
                 // `TrackedBySource` face-down exiles that grant no look-permission
                 // (Bomat Courier, Necropotence, Asmodeus) stay redacted.
-                let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
-                    link.exiled_id == *obj_id
-                        && link.kind == crate::types::game_state::ExileLinkKind::HideawayLookable
-                        && state
-                            .objects
-                            .get(&link.source_id)
-                            .is_some_and(|src| can_view_private_for_player(src.controller))
-                });
+                let hideaway_lookable_by_viewer =
+                    look_link_lets_view(state, *obj_id, &can_view_private_for_player);
                 // CR 406.3a + CR 406.3b: a player who holds an active
                 // play-from-exile grant for this face-down card may look at it —
                 // the grant that lets them cast it is the same authority that
@@ -1024,6 +1019,87 @@ pub(crate) fn proposer_hidden_view(state: &GameState, proposer: PlayerId) -> Gam
 /// Returns a filtered copy of the game state for the given viewer.
 /// Hides all opponents' hand contents and all library contents except where the
 /// viewer is explicitly allowed to see them.
+/// CR 602.2 + CR 601.2c: the activation journal and every in-flight
+/// activation's captured record are engine authority, cleared from every
+/// viewer projection. A record exists only between an activation's
+/// announcement and its placement (the placement authority takes it before the
+/// push), so its carriers are exactly the carriers of an in-flight activation.
+/// Each serialized one is cleared here, explicitly:
+///
+/// - the turn journal (`abilities_activated_this_turn_by_player`);
+/// - `GameState::pending_cast`, and every prompt that carries a `PendingCast`
+///   (`pending_cast_mut`, including a `PayCost` resume and a casting
+///   `CollectEvidenceChoice`);
+/// - a paused cost move (`pending_cost_move_resume`: a cast/activation root, a
+///   sacrifice or mill payment, collected evidence, or a loyalty tail);
+/// - a deferred life-cost payment (`pending_deferred_life_cost_resume`);
+/// - every activated ability on the stack (a second line of defense).
+///
+/// The two resume carriers are also dropped wholesale later in this
+/// projection; clearing their records here keeps the redaction local to one
+/// place. `pending_discard_for_cost` is never serialized. Mana abilities carry
+/// no record at all (they are not journaled).
+fn redact_activation_records(filtered: &mut GameState) {
+    use crate::types::game_state::{
+        CollectEvidenceResume, DeferredLifeCostResume, PendingCast, PendingCostMoveResume,
+        StackEntryKind,
+    };
+    fn clear(pending: &mut PendingCast) {
+        pending.ability.activation_record = None;
+    }
+    filtered.abilities_activated_this_turn_by_player.clear();
+    if let Some(pending) = filtered.pending_cast.as_deref_mut() {
+        clear(pending);
+    }
+    if let Some(pending) = filtered.waiting_for.pending_cast_mut() {
+        clear(pending);
+    }
+    if let Some(resume) = filtered.pending_cost_move_resume.as_mut() {
+        match resume {
+            PendingCostMoveResume::Cast { pending, .. }
+            | PendingCostMoveResume::SacrificeForCost { pending, .. } => {
+                if let Some(pending) = pending.as_deref_mut() {
+                    clear(pending);
+                }
+            }
+            PendingCostMoveResume::ActivationMillPayment { pending, .. } => clear(pending),
+            PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
+                CollectEvidenceResume::Casting { pending_cast, .. } => clear(pending_cast),
+                CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => {}
+            },
+            PendingCostMoveResume::LoyaltyActivation { resolved, .. } => {
+                resolved.activation_record = None;
+            }
+            // Resolution-time payments and non-activation roots: no activation
+            // is in flight in any of these.
+            PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::DelveManaPayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => {}
+        }
+    }
+    if let Some(resume) = filtered.pending_deferred_life_cost_resume.as_mut() {
+        match resume {
+            DeferredLifeCostResume::Cast { pending, .. } => {
+                if let Some(pending) = pending.as_deref_mut() {
+                    clear(pending);
+                }
+            }
+            DeferredLifeCostResume::PayAmount { .. } | DeferredLifeCostResume::ManaRoot { .. } => {}
+        }
+    }
+    for entry in filtered.stack.iter_mut() {
+        if let StackEntryKind::ActivatedAbility { ability, .. } = &mut entry.kind {
+            ability.activation_record = None;
+        }
+    }
+}
+
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
     // This clone is a display snapshot, never rules authority: the ~20 private
@@ -1053,6 +1129,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         pending.activation_trigger_collection = None;
         redact_parent_target_iteration_members(&mut pending.ability);
     }
+    redact_activation_records(&mut filtered);
     redact_waiting_for_iteration_members(&mut filtered.waiting_for);
     filtered = project_paid_cast_cleanup_authority(&filtered);
     // Interaction capability authority is trusted persistence state. Viewer
@@ -2576,6 +2653,11 @@ fn event_visible_to_viewer(
 ) -> bool {
     let can_view_private_for_player =
         |player: PlayerId| viewer_has_private_access_to_player(state, viewer, player);
+    let search_audience = |record: &ZoneChangeRecord| {
+        record
+            .trigger_source_context()
+            .and_then(|context| hidden_search_viewers.get(&context.identity.reference))
+    };
 
     match event {
         GameEvent::HiddenSearchViewed { audience, .. } => audience.contains(&viewer),
@@ -2658,16 +2740,20 @@ fn event_visible_to_viewer(
         // the same resolution is still producing events.  The record's
         // event-time source context is the only durable marker; the live object
         // has already cleared its exile face-down designation on zone exit.
+        // CR 708.5 + CR 406.3: a face-down move out of the hand reaches only
+        // the viewers who may look at the card, unless the hidden-search
+        // audience already decides it.
         GameEvent::ZoneChanged {
             object_id,
-            from: Some(Zone::Exile),
+            from: Some(from @ (Zone::Exile | Zone::Hand)),
             to,
             record,
             ..
         } if record
             .trigger_source_context
             .as_ref()
-            .is_some_and(|context| context.face_down) =>
+            .is_some_and(|context| context.face_down)
+            && (*from == Zone::Exile || search_audience(record).is_none()) =>
         {
             // Once a hidden-search card arrives face-up in a public zone, the
             // departure is public even when its source incarnation was learned
@@ -2681,17 +2767,7 @@ fn event_visible_to_viewer(
             {
                 return true;
             }
-            let Some(audience) = record
-                .trigger_source_context()
-                .map(|context| context.identity.reference)
-                .and_then(|identity| hidden_search_viewers.get(&identity))
-            else {
-                // A face-down Exile departure without hidden-search audience
-                // evidence is an ordinary public face-down Exile move
-                // (foretell/hideaway), not a hidden-search event.
-                return true;
-            };
-            if audience.contains(&viewer) {
+            if search_audience(record).is_some_and(|audience| audience.contains(&viewer)) {
                 return true;
             }
             match to {
@@ -2797,17 +2873,38 @@ fn face_down_exile_visible_to_viewer(
     obj: &crate::game::game_object::GameObject,
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
-    use crate::types::game_state::ExileLinkKind;
     let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
-    let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
+    foretell_ok || look_link_lets_view(state, object_id, can_view_private_for_player)
+}
+
+/// CR 406.3 + CR 702.75a: a look link lets the viewer look at face-down exiled
+/// `object_id` if its live rule admits them now or they are latched.
+fn look_link_lets_view(
+    state: &GameState,
+    object_id: ObjectId,
+    can_view_private_for_player: &impl Fn(PlayerId) -> bool,
+) -> bool {
+    state.exile_links.iter().any(|link| {
+        let crate::types::game_state::ExileLinkKind::HideawayLookable {
+            grant,
+            lookers,
+            source_incarnation,
+        } = &link.kind
+        else {
+            return false;
+        };
         link.exiled_id == object_id
-            && link.kind == ExileLinkKind::HideawayLookable
-            && state
-                .objects
-                .get(&link.source_id)
-                .is_some_and(|src| can_view_private_for_player(src.controller))
-    });
-    foretell_ok || hideaway_lookable_by_viewer
+            && (lookers
+                .iter()
+                .any(|player| can_view_private_for_player(*player))
+                || crate::game::exile_links::look_grant_admits(
+                    state,
+                    link.source_id,
+                    *grant,
+                    *source_incarnation,
+                )
+                .is_some_and(can_view_private_for_player))
+    })
 }
 
 /// CR 708.5: `viewer` may look at face-down permanent `obj_id` they do not

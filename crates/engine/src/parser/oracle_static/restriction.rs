@@ -3411,6 +3411,7 @@ pub(crate) fn try_parse_spend_any_color_to_activate_abilities(
         StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: Some(activation_source_filter),
+            concession: crate::types::ability::ManaSpendPermission::AnyColor,
         })
         .affected(TargetFilter::Player)
         .description(text.to_string()),
@@ -3437,10 +3438,9 @@ pub(crate) fn try_parse_filtered_spend_any_type_to_cast(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
-    // CR 609.4b: "you may"/"you can" surface, then "spend mana of any type to
-    // cast ". The "mana of any type" wording (vs "any color") is the spell-cast
-    // any-type concession; the runtime treats both as `any_color` in
-    // mana_payment.rs (any mana satisfies a colored requirement).
+    // CR 609.4b + CR 118.14: "you may"/"you can" surface, then "spend mana of
+    // any type to cast ". The "mana of any type" wording (vs "any color") is the
+    // spell-cast any-type concession: at payment it also covers `{C}`.
     let rest = nom_tag_lower(text, lower, "you may spend mana of any type to cast ")
         .or_else(|| nom_tag_lower(text, lower, "you can spend mana of any type to cast "))?;
 
@@ -3485,11 +3485,13 @@ pub(crate) fn try_parse_filtered_spend_any_type_to_cast(
         StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
             spell_filter: Some(filter),
             activation_source_filter: None,
+            // CR 118.14: "mana of any type" — colorless included.
+            concession: crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
         })
         // For the filtered (`Some`) path `affected` is documentation-only:
         // controller-scoping is enforced at runtime by the explicit
         // `obj.controller != player_id` gate in
-        // `player_can_spend_as_any_color_for_spell_object`, which never reads
+        // `player_mana_spend_permission_for_spell_object`, which never reads
         // `def.affected`. Kept for intent + structural parity with the
         // board-wide (`None`) form, which DOES consult `affected`.
         .affected(TargetFilter::Controller)
@@ -4067,6 +4069,7 @@ mod spend_any_color_to_activate_abilities_tests {
             StaticMode::SpendManaAsAnyColor {
                 spell_filter: None,
                 activation_source_filter: Some(TargetFilter::Typed(typed)),
+                concession: crate::types::ability::ManaSpendPermission::AnyColor,
             } => {
                 assert!(typed.type_filters.contains(&TypeFilter::Creature));
                 assert_eq!(typed.controller, Some(ControllerRef::You));
@@ -4091,6 +4094,7 @@ mod spend_any_color_to_activate_abilities_tests {
             StaticMode::SpendManaAsAnyColor {
                 spell_filter: None,
                 activation_source_filter: Some(TargetFilter::SelfRef),
+                concession: crate::types::ability::ManaSpendPermission::AnyColor,
             }
         ));
     }
@@ -4311,6 +4315,7 @@ mod filtered_spend_any_type_tests {
             StaticMode::SpendManaAsAnyColor {
                 spell_filter: Some(TargetFilter::Typed(typed)),
                 activation_source_filter: None,
+                concession: crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
             } => assert!(
                 typed.type_filters.contains(&TypeFilter::Creature),
                 "spell filter must scope to creature spells; got {typed:?}"

@@ -10039,8 +10039,8 @@ fn render_ability_descriptions(def: &mut AbilityDefinition, card_name: &str) {
 /// not about `description`.)
 ///
 /// WILDCARD-FREE on purpose, for the same reason
-/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has nine
-/// variants, so the non-descending arm costs seven leaf names — not the ~206
+/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has ten
+/// variants, so the non-descending arm costs eight leaf names — not the ~206
 /// that justify the wildcard in [`render_effect_descriptions`]. A new variant
 /// carrying a `TriggerDefinition` must be a COMPILE ERROR here, not a silent
 /// pass-through.
@@ -10061,10 +10061,11 @@ fn render_delayed_condition_descriptions(
                 render_trigger_descriptions(other, card_name);
             }
         }
-        // The remaining seven conditions are phase gates or object/filter
+        // The remaining eight conditions are phase gates or object/filter
         // matchers with no nested `TriggerDefinition`, hence no description.
         D::AtNextPhase { .. }
         | D::AtNextPhaseForPlayer { .. }
+        | D::AtBeginningOfAddedPhase { .. }
         | D::WhenLeavesPlay { .. }
         | D::WhenDies { .. }
         | D::WhenLeavesPlayFiltered { .. }
@@ -11449,8 +11450,13 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
         // timing parser used by the "Any player may activate ... but only"
         // composition path. The condition-only form stays on its specialized
         // branch below so the once-per-turn rider is stripped before condition
-        // parsing.
-        if let Some((before, restriction)) = tp.rsplit_around("activate only ") {
+        // parsing. Here and below, the unmodernized "Activate this ability
+        // only …" wording (M'Odo, the Gnarled Oracle; Piercing Rays; Riku and
+        // Riku) is the same restriction as "Activate only …".
+        if let Some((before, restriction)) = tp
+            .rsplit_around("activate this ability only ")
+            .or_else(|| tp.rsplit_around("activate only "))
+        {
             if tag::<_, _, OracleError<'_>>("if ")
                 .parse(restriction.lower.trim_start())
                 .is_err()
@@ -11469,15 +11475,32 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
-        if let Some(prefix) = lower.strip_suffix("activate only during combat") {
-            let end = remaining.len() - "activate only during combat".len();
+        let strip_activated_constraint_suffix =
+            |text: &str, suffixes: &[&str]| -> Option<(usize, usize)> {
+                for &sfx in suffixes {
+                    // allow-noncombinator: structural suffix match on activated ability constraints
+                    if let Some(p) = text.strip_suffix(sfx) {
+                        return Some((p.len(), sfx.len()));
+                    }
+                }
+                None
+            };
+
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &[
+                "activate this ability only during combat",
+                "activate only during combat",
+            ],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::DuringCombat);
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
@@ -11492,29 +11515,38 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
         // BeforeCombatDamage]` via the during-role + before-window sub-combinators).
         // Pinned by Test 10c and the combat-damage building-block tests.
 
-        if let Some(prefix) = lower.strip_suffix("activate only once each turn") {
-            let end = remaining.len() - "activate only once each turn".len();
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &[
+                "activate this ability only once each turn",
+                "activate only once each turn",
+            ],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::OnlyOnceEachTurn);
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
         }
 
-        if let Some(prefix) = lower.strip_suffix("activate only once") {
-            let end = remaining.len() - "activate only once".len();
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &["activate this ability only once", "activate only once"],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::OnlyOnce);
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
@@ -11539,37 +11571,52 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue 'parse_constraints;
         }
 
-        if let Some(prefix) = lower.strip_suffix("activate no more than twice each turn") {
-            let end = remaining.len() - "activate no more than twice each turn".len();
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &[
+                "activate this ability no more than twice each turn",
+                "activate no more than twice each turn",
+            ],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::MaxTimesEachTurn { count: 2 });
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
         }
 
-        if let Some(prefix) = lower.strip_suffix("activate no more than three times each turn") {
-            let end = remaining.len() - "activate no more than three times each turn".len();
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &[
+                "activate this ability no more than three times each turn",
+                "activate no more than three times each turn",
+            ],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::MaxTimesEachTurn { count: 3 });
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
         }
 
-        if let Some(idx) = tp.rfind("activate only if ") {
+        if let Some((idx, trigger_len)) = ["activate this ability only if ", "activate only if "]
+            .into_iter()
+            .find_map(|pfx| tp.rfind(pfx).map(|idx| (idx, pfx.len())))
+        {
             if idx == 0 {
-                let condition_text = remaining["activate only if ".len()..].to_string();
+                let condition_text = remaining[trigger_len..].to_string();
                 if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
                     break;
                 }
@@ -11577,7 +11624,7 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
                 break;
             }
             if lower[..idx].ends_with(". ") {
-                let condition_text = remaining[idx + "activate only if ".len()..].to_string();
+                let condition_text = remaining[idx + trigger_len..].to_string();
                 if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
                     break;
                 }
@@ -11588,9 +11635,13 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
-        if let Some(idx) = tp.rfind("activate only from ") {
+        if let Some((idx, trigger_len)) =
+            ["activate this ability only from ", "activate only from "]
+                .into_iter()
+                .find_map(|pfx| tp.rfind(pfx).map(|idx| (idx, pfx.len())))
+        {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only from ".len()..].trim();
+                let restriction_text = remaining[idx + trigger_len..].trim();
                 let full_text = format!("from {restriction_text}");
                 if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
                     break;
@@ -11602,9 +11653,12 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
-        if let Some(idx) = tp.rfind("activate only ") {
+        if let Some((idx, trigger_len)) = ["activate this ability only ", "activate only "]
+            .into_iter()
+            .find_map(|pfx| tp.rfind(pfx).map(|idx| (idx, pfx.len())))
+        {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only ".len()..].to_string();
+                let restriction_text = remaining[idx + trigger_len..].to_string();
                 if !commit_requires_condition(&restriction_text, &mut constraints.restrictions) {
                     break;
                 }
@@ -11615,9 +11669,15 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
-        if let Some(idx) = tp.rfind("activate no more than ") {
+        if let Some((idx, trigger_len)) = [
+            "activate this ability no more than ",
+            "activate no more than ",
+        ]
+        .into_iter()
+        .find_map(|pfx| tp.rfind(pfx).map(|idx| (idx, pfx.len())))
+        {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate no more than ".len()..].trim();
+                let restriction_text = remaining[idx + trigger_len..].trim();
                 let full_text = format!("no more than {restriction_text}");
                 if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
                     break;

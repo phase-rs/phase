@@ -612,10 +612,11 @@ pub(super) fn resolve_life_loss_target(
 
     // Non-context-ref filters (e.g., explicit Player target on "target opponent
     // loses 2 life"): the chosen player is in `ability.targets`.
-    if let Some(player) = ability.targets.iter().find_map(|target| match target {
-        TargetRef::Player(player) => Some(*player),
-        _ => None,
-    }) {
+    // CR 601.2c: the read skips a separately announced quantity slot, so the
+    // primary target keeps its distinct slot identity.
+    if let Some(player) =
+        crate::game::ability_utils::primary_announced_player(&ability.targets, ability)
+    {
         return player;
     }
 

@@ -7,6 +7,14 @@ import type {
   ViewerInteraction,
 } from "./generated/interaction";
 
+export type {
+  InteractionActionId,
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+  ViewerInteraction,
+};
+
 // ── Identifiers ──────────────────────────────────────────────────────────
 
 export type ObjectId = number;
@@ -468,7 +476,7 @@ export interface DraftLobbyMetadata {
   setCode: string;
   /**
    * Draft kind, as the serialized name of a `DraftKind`. Deliberately not
-   * enumerated here: `DRAFT_KINDS` in `adapter/draft-adapter.ts` is the single
+   * enumerated here: `DRAFT_KINDS` in `adapter/draftKinds.ts` is the single
    * authority, and a second enumeration in a doc comment goes stale silently
    * (this one already had, naming three of the then-five kinds).
    */
@@ -2084,6 +2092,10 @@ export interface ActivationCostSnapshot {
   base_cost: SerializedAbilityCost;
   raise_total?: number;
   reductions?: CostReductionEntry[];
+  // Which pending field holds the unpaid mana while the lock waits for targets.
+  mana_carrier?: "Whole" | "Split";
+  // Set only while a target-settlement election prompt is outstanding.
+  settlement_tail?: "SurfaceThenBoundary" | "Boundary";
   lock:
     | { type: "Open"; data: { point?: ActivationCostLockPoint } }
     | {
@@ -2092,7 +2104,7 @@ export interface ActivationCostSnapshot {
       };
 }
 
-export type ActivationCostLockPoint = "Announcement" | "XAnnounced";
+export type ActivationCostLockPoint = "Announcement" | "XAnnounced" | "TargetSettlement";
 
 /// CR 601.2b + CR 601.2f: the caster's announced nonhybrid equivalents and the
 /// order their reductions are applied in, as one recorded election.
@@ -2404,6 +2416,7 @@ export type WaitingFor =
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RippleRevealChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "RippleBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; final_cast?: ObjectId | null } }
+  | { type: "RevealUntilBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; clear_markers?: ObjectId[]; emit_reveal_until_resolved?: ObjectId | null; reveal_until_hit_snapshot?: unknown } }
   | { type: "ArrangePlanarDeckTopChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_on_top: number } }
   | { type: "RedistributeLifeTotals"; data: { player: PlayerId; options: { assignment: [PlayerId, number][] }[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
@@ -2454,7 +2467,7 @@ export type WaitingFor =
   // `keyword.type` mirrors engine `AlternativeCastKeyword` (game_state.rs) 1:1.
   // Keep this union exhaustive with the engine enum so the modal's keyword
   // switch is type-checked against every variant the engine can emit.
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" } | { type: "FaceDown" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null; alternative_additional_cost_description: AlternativeAdditionalCostDescription | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" } | { type: "FaceDown" } | { type: "Surge" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null; alternative_additional_cost_description: AlternativeAdditionalCostDescription | null } }
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
@@ -3756,6 +3769,8 @@ export interface DerivedViews {
    * matters on the battlefield. Keyed by ObjectId-as-string.
    */
   battlefield_keyword_badges?: Record<string, Keyword[]>;
+  /** CR 400.7 + CR 607.2a: cards currently exiled with each battlefield permanent, keyed by ObjectId-as-string. */
+  linked_exile_ids?: Record<string, ObjectId[]>;
   /**
    * CR 509.1b: live, until-end-of-turn `CantBeBlocked` grants keyed by
    * recipient ObjectId-as-string. A null value means the grant remains live
@@ -3997,21 +4012,22 @@ export type DayNight = "Day" | "Night";
 
 /**
  * Mirrors engine `ExileLinkKind` (`crates/engine/src/types/game_state.rs`).
- * Unit variants serialize as bare strings; the two struct variants serialize
- * as a single-key object under serde's default external tagging. Only
- * `HideawayLookable` is currently read on the client (the exile-visibility
- * gate in `viewmodel/gameStateView.ts`) — the rest are kept so `exile_links`
- * round-trips the full wire shape rather than widening it to `unknown`.
+ * Unit variants serialize as bare strings; the struct variants serialize as a
+ * single-key object under serde's default external tagging. The client reads
+ * no kind; the union mirrors the wire so `exile_links` round-trips.
  */
 export type ExileLinkKind =
   | "TrackedBySource"
   | "Cipher"
   | "Haunt"
-  | "HideawayLookable"
+  | { HideawayLookable: { grant: LookGrant; lookers: PlayerId[]; source_incarnation: number } }
   | "CraftMaterial"
   | { UntilSourceLeaves: { return_zone: Zone } }
   | { UntilOpponentBecomesMonarch: { return_zone: Zone; controller: PlayerId } }
   | { ParadigmSource: { player: PlayerId } };
+
+/** Mirrors engine `LookGrant`: whom a face-down exile look link's live rule admits. */
+export type LookGrant = "SourceController" | { Player: { player: PlayerId } };
 
 export interface GameState {
   turn_number: number;

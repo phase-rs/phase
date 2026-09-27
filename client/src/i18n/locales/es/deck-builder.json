@@ -66,6 +66,13 @@
     "discard": "Descartar",
     "saveAndContinue": "Guardar y continuar"
   },
+  "saveConflict": {
+    "title": "El mazo cambió en otro lugar",
+    "bodyChanged": "\"{{name}}\" cambió en otro lugar desde que este editor lo abrió o lo guardó por última vez, así que no se guardó nada. Carga la versión guardada para verla (se descartarán tus cambios sin guardar) o guarda tu versión de todos modos.",
+    "bodyDeleted": "\"{{name}}\" se eliminó en otro lugar desde que este editor lo abrió o lo guardó por última vez, así que no se guardó nada. Guarda tu versión de todos modos.",
+    "loadSaved": "Cargar versión guardada",
+    "saveMine": "Guardar mi versión"
+  },
   "card": {
     "moveToSideboard": "Mover un/a {{name}} al banquillo",
     "moveToMain": "Mover un/a {{name}} al mazo principal",

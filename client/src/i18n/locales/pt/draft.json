@@ -486,6 +486,10 @@
     "upNext": "A seguir — Partida {{number}}",
     "nextMatch": "Próxima Partida",
     "endRun": "Encerrar Run",
+    "retryEndRun": "Tentar encerrar Run novamente",
+    "retryResume": "Tentar retomar novamente",
+    "startUnavailable": "Não foi possível iniciar esta partida de Draft.",
+    "resumeUnavailable": "Esta Run de Draft não está disponível. Encerre-a para começar de novo.",
     "done": "Concluído",
     "perfectRun": "Run Perfeita",
     "runComplete": "Run Concluída",
@@ -721,5 +725,15 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Salvamento automático] {{format}}",
+    "slotQuick": "Quick Draft",
+    "slotSealed": "Selado",
+    "slotCube": "Cube Draft",
+    "slotPremier": "Draft Premier",
+    "slotTraditional": "Draft Tradicional",
+    "slotCommanderDraft": "Draft Commander",
+    "slotWinston": "Draft Winston"
   }
 }

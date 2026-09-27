@@ -218,6 +218,25 @@ describe("EngineWorkerClient viewer transition projection", () => {
   });
 });
 
+describe("EngineWorkerClient canonical card names", () => {
+  it("posts the name list to the canonical-name endpoint", async () => {
+    const client = new EngineWorkerClient();
+    const pending = client.canonicalCardNames(["Revival/Revenge"]);
+    const worker = currentWorker();
+    const posted = worker.posted[0];
+
+    expect(posted).toMatchObject({
+      type: "canonicalCardNames",
+      names: ["Revival/Revenge"],
+    });
+
+    worker.replyResult(posted.id as number, ["Revival // Revenge"]);
+
+    await expect(pending).resolves.toEqual(["Revival // Revenge"]);
+    client.dispose();
+  });
+});
+
 describe("EngineWorkerClient structured action rejections", () => {
   it("preserves engine rejection metadata and stale disposition", async () => {
     const client = new EngineWorkerClient();

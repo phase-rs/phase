@@ -12888,6 +12888,8 @@ fn a_reversed_activation_discards_its_lifecycle_frame() {
                 dynamic_count: None,
                 exemption: ActivationExemption::None,
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
