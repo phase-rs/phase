@@ -7,9 +7,10 @@ use engine::ai_support::legal_actions_full;
 use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
-    ManaProduction, ModalChoice, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    SacrificeCost, TargetFilter, TargetRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect,
+    ManaContribution, ManaProduction, ModalChoice, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementMode, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, TapCreaturesRequirement, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
@@ -39,6 +40,13 @@ fn count_creatures(count: u32) -> AbilityCost {
     ))
 }
 
+fn count_lands(count: u32) -> AbilityCost {
+    AbilityCost::Sacrifice(SacrificeCost::count(
+        TypedFilter::land().controller(ControllerRef::You).into(),
+        count,
+    ))
+}
+
 fn draw_x(cost: AbilityCost) -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Activated,
@@ -50,6 +58,45 @@ fn draw_x(cost: AbilityCost) -> AbilityDefinition {
         },
     )
     .cost(cost)
+}
+
+fn damage_x(cost: AbilityCost) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::DealDamage {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+    )
+    .cost(cost)
+}
+
+fn optional_graveyard_exile_redirect() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
+        .mode(ReplacementMode::Optional { decline: None })
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                enters_modified_if: None,
+                face_down_profile: None,
+            },
+        ))
 }
 
 fn choose_x_and_finish_mana(runner: &mut GameRunner, x: u32) {
@@ -65,6 +112,32 @@ fn choose_x_and_finish_mana(runner: &mut GameRunner, x: u32) {
     runner.act(GameAction::ChooseX { value: x }).unwrap();
     if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
         runner.act(GameAction::PassPriority).unwrap();
+    }
+}
+
+fn assert_x_guard_refuses(runner: &mut GameRunner, label: &str) {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        runner.act(GameAction::ChooseX { value: 1 })
+    }));
+    match result {
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied());
+            assert_eq!(
+                message,
+                Some("non-self sacrifice/exile cost unhandled"),
+                "{label}"
+            );
+        }
+        Ok(Err(EngineError::ActionNotAllowed(message))) => {
+            assert_eq!(
+                message, "non-self sacrifice/exile cost unhandled",
+                "{label}"
+            );
+        }
+        Ok(other) => panic!("{label} unexpectedly proceeded: {other:?}"),
     }
 }
 
@@ -318,22 +391,9 @@ fn x_mana_targeted_count_keeps_target_and_records_crime_once() {
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
         .add_enchantment_from_oracle(P0, "Targeted X source", "")
-        .with_ability_definition(
-            AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::DealDamage {
-                    amount: QuantityExpr::Ref {
-                        qty: QuantityRef::Variable { name: "X".into() },
-                    },
-                    target: TargetFilter::Any,
-                    damage_source: None,
-                    excess: None,
-                },
-            )
-            .cost(AbilityCost::Composite {
-                costs: vec![x_mana(), count_creatures(1)],
-            }),
-        )
+        .with_ability_definition(damage_x(AbilityCost::Composite {
+            costs: vec![x_mana(), count_creatures(1)],
+        }))
         .id();
     let fodder = scenario.add_creature(P0, "Cost fodder", 1, 1).id();
     let first = scenario.add_creature(P1, "Untargeted", 5, 5).id();
@@ -497,29 +557,7 @@ fn x_mana_replacement_pause_restores_payer_and_announced_x() {
         let other = scenario.add_enchantment_from_oracle(P0, "Other", "").id();
         scenario
             .add_creature(P1, "Optional graveyard redirect", 1, 1)
-            .with_replacement_definition(
-                ReplacementDefinition::new(ReplacementEvent::Moved)
-                    .destination_zone(Zone::Graveyard)
-                    .mode(ReplacementMode::Optional { decline: None })
-                    .execute(AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::ChangeZone {
-                            origin: None,
-                            destination: Zone::Exile,
-                            target: TargetFilter::SelfRef,
-                            owner_library: false,
-                            enter_transformed: false,
-                            enters_under: None,
-                            enter_tapped: EtbTapState::Unspecified,
-                            enters_attacking: false,
-                            up_to: false,
-                            enter_with_counters: vec![],
-                            conditional_enter_with_counters: vec![],
-                            enters_modified_if: None,
-                            face_down_profile: None,
-                        },
-                    )),
-            );
+            .with_replacement_definition(optional_graveyard_exile_redirect());
         scenario.with_library_top(P0, &["A", "B", "C", "D", "E"]);
         scenario.with_mana_pool(
             P0,
@@ -679,29 +717,7 @@ fn x_mana_unsupported_siblings_refuse_before_count_payment() {
                 .activation_residual,
             ActivationResidual::XMana
         ));
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            runner.act(GameAction::ChooseX { value: 1 })
-        }));
-        match result {
-            Err(payload) => {
-                let message = payload
-                    .downcast_ref::<String>()
-                    .map(String::as_str)
-                    .or_else(|| payload.downcast_ref::<&str>().copied());
-                assert_eq!(
-                    message,
-                    Some("non-self sacrifice/exile cost unhandled"),
-                    "{label}"
-                );
-            }
-            Ok(Err(EngineError::ActionNotAllowed(message))) => {
-                assert_eq!(
-                    message, "non-self sacrifice/exile cost unhandled",
-                    "{label}"
-                );
-            }
-            Ok(other) => panic!("{label} unexpectedly proceeded: {other:?}"),
-        }
+        assert_x_guard_refuses(&mut runner, label);
         assert!(runner.state().stack.is_empty(), "{label}");
         assert_eq!(
             runner.state().objects[&source].zone,
@@ -1123,4 +1139,575 @@ fn x_mana_pure_unresolved_one_of_keeps_its_existing_choice() {
     ));
     assert_eq!(runner.state().objects[&fodder].zone, Zone::Battlefield);
     assert!(runner.state().stack.is_empty());
+    let hand_before = runner.state().players[0].hand.len();
+    runner
+        .act(GameAction::ChooseActivationCostBranch { index: 0 })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        min_count,
+        count,
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "selected OneOf Count payment: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+    assert_eq!(choices, &vec![fodder]);
+    assert_eq!(spell.ability.chosen_x, Some(4));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .unwrap();
+    let ability = runner.state().stack.back().unwrap().ability().unwrap();
+    assert_eq!(ability.chosen_x, Some(4));
+    assert_eq!(
+        ability.cost_paid_objects[0].snapshot().unwrap().object_id,
+        fodder
+    );
+    runner.resolve_top();
+    assert_eq!(runner.state().players[0].hand.len(), hand_before + 4);
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+}
+
+#[test]
+fn x_mana_count_two_at_zero_still_pays_two_and_ignores_cast_x() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Count2 zero X source", "")
+        .with_ability_definition(draw_x(AbilityCost::Composite {
+            costs: vec![x_mana(), count_creatures(2)],
+        }))
+        .id();
+    let first = scenario.add_creature(P0, "First zero X fodder", 1, 1).id();
+    let second = scenario.add_creature(P0, "Second zero X fodder", 1, 1).id();
+    scenario.with_library_top(P0, &["A", "B"]);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .cost_x_paid = Some(9);
+    let hand_before = runner.state().players[0].hand.len();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .unwrap();
+    choose_x_and_finish_mana(&mut runner, 0);
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        min_count,
+        count,
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("Count2 at X0: {:?}", runner.state().waiting_for);
+    };
+    assert_eq!((*player, *min_count, *count), (P0, 2, 2));
+    assert_eq!(choices, &vec![first, second]);
+    assert_eq!(spell.ability.chosen_x, Some(0));
+    assert_eq!(runner.state().objects[&source].cost_x_paid, Some(9));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first, second],
+        })
+        .unwrap();
+    let ability = runner.state().stack.back().unwrap().ability().unwrap();
+    assert_eq!(ability.chosen_x, Some(0));
+    assert_eq!(
+        ability
+            .cost_paid_objects
+            .iter()
+            .map(|record| record.snapshot().unwrap().object_id)
+            .collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    runner.resolve_top();
+    assert_eq!(runner.state().players[0].hand.len(), hand_before);
+    assert_eq!(runner.state().objects[&source].cost_x_paid, Some(9));
+}
+
+#[test]
+fn x_mana_two_activations_on_one_source_keep_independent_announcements() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Repeated zero Count source", "")
+        .with_ability_definition(draw_x(AbilityCost::Composite {
+            costs: vec![x_mana(), count_creatures(0)],
+        }))
+        .id();
+    scenario.with_library_top(P0, &["A", "B", "C", "D", "E"]);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
+    );
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .cost_x_paid = Some(9);
+    let hand_before = runner.state().players[0].hand.len();
+    for (x, expected_hand) in [(4, hand_before + 4), (0, hand_before + 4)] {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .unwrap();
+        choose_x_and_finish_mana(&mut runner, x);
+        let WaitingFor::PayCost {
+            player,
+            min_count,
+            count,
+            resume: CostResume::Spell { spell },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "successive Count0 payment: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!((*player, *min_count, *count), (P0, 0, 0));
+        assert_eq!((spell.object_id, spell.ability.chosen_x), (source, Some(x)));
+        assert_eq!(runner.state().objects[&source].cost_x_paid, Some(9));
+        runner
+            .act(GameAction::SelectCards { cards: vec![] })
+            .unwrap();
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .back()
+                .unwrap()
+                .ability()
+                .unwrap()
+                .chosen_x,
+            Some(x)
+        );
+        runner.resolve_top();
+        assert_eq!(runner.state().players[0].hand.len(), expected_hand);
+        assert!(runner.state().stack.is_empty());
+    }
+}
+
+#[test]
+fn x_mana_distinct_creature_and_land_counts_resume_in_both_orders() {
+    for reverse in [false, true] {
+        for nested in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let mut suffix = vec![count_creatures(1), count_lands(1)];
+            if reverse {
+                suffix.reverse();
+            }
+            let cost = if nested {
+                AbilityCost::Composite {
+                    costs: vec![x_mana(), AbilityCost::Composite { costs: suffix }],
+                }
+            } else {
+                let mut costs = vec![x_mana()];
+                costs.extend(suffix);
+                AbilityCost::Composite { costs }
+            };
+            let source = scenario
+                .add_enchantment_from_oracle(P0, "Distinct Count X source", "")
+                .with_ability_definition(draw_x(cost))
+                .id();
+            let creature = scenario.add_creature(P0, "Only creature", 1, 1).id();
+            let land = scenario.add_basic_land(P0, ManaColor::Green);
+            scenario.with_library_top(P0, &["A", "B", "C", "D", "E"]);
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
+            );
+            let mut runner = scenario.build();
+            let hand_before = runner.state().players[0].hand.len();
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                })
+                .unwrap();
+            choose_x_and_finish_mana(&mut runner, 4);
+            let expected = if reverse {
+                [land, creature]
+            } else {
+                [creature, land]
+            };
+            for id in expected {
+                let WaitingFor::PayCost {
+                    player,
+                    choices,
+                    min_count,
+                    count,
+                    resume: CostResume::Spell { spell },
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("distinct Count payment: {:?}", runner.state().waiting_for);
+                };
+                assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+                assert_eq!(choices, &vec![id]);
+                assert_eq!(
+                    (spell.object_id, spell.activation_ability_index),
+                    (source, Some(0))
+                );
+                assert_eq!(spell.ability.chosen_x, Some(4));
+                assert!(matches!(
+                    spell.activation_residual,
+                    ActivationResidual::XMana
+                ));
+                runner
+                    .act(GameAction::SelectCards { cards: vec![id] })
+                    .unwrap();
+                assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+            }
+            let ability = runner.state().stack.back().unwrap().ability().unwrap();
+            assert_eq!(ability.chosen_x, Some(4));
+            assert_eq!(
+                ability
+                    .cost_paid_objects
+                    .iter()
+                    .map(|record| record.snapshot().unwrap().object_id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            runner.resolve_top();
+            assert_eq!(runner.state().players[0].hand.len(), hand_before + 4);
+            assert!(runner.state().stack.is_empty());
+        }
+    }
+}
+
+#[test]
+fn x_mana_target_and_crime_survive_optional_replacement_restore() {
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_enchantment_from_oracle(P0, "Replaced targeted X source", "")
+            .with_ability_definition(damage_x(AbilityCost::Composite {
+                costs: vec![x_mana(), count_creatures(1)],
+            }))
+            .id();
+        let fodder = scenario
+            .add_creature(P0, "Replaced payment fodder", 1, 1)
+            .id();
+        let first = scenario
+            .add_creature(P1, "Untargeted replacement control", 5, 5)
+            .id();
+        let second = scenario
+            .add_creature(P1, "Targeted replacement control", 5, 5)
+            .id();
+        scenario
+            .add_creature(P1, "Optional graveyard redirect", 1, 1)
+            .with_replacement_definition(optional_graveyard_exile_redirect());
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
+        );
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseXValue { .. }
+        ));
+        runner.act(GameAction::ChooseX { value: 4 }).unwrap();
+        let WaitingFor::TargetSelection { pending_cast, .. } = &runner.state().waiting_for else {
+            panic!(
+                "targeted replacement declaration: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(pending_cast.ability.chosen_x, Some(4));
+        assert!(matches!(
+            pending_cast.activation_residual,
+            ActivationResidual::XMana
+        ));
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(second)],
+            })
+            .unwrap();
+        if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        let WaitingFor::PayCost {
+            player,
+            choices,
+            min_count,
+            count,
+            resume: CostResume::Spell { spell },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "targeted replacement cost: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+        assert_eq!(choices, &vec![fodder]);
+        assert_eq!(spell.ability.chosen_x, Some(4));
+        assert_eq!(spell.ability.targets, vec![TargetRef::Object(second)]);
+        assert!(spell.crime_candidate);
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![fodder],
+            })
+            .unwrap();
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!("optional replacement must pause the targeted payment");
+        };
+        let choice = candidates
+            .iter()
+            .position(|candidate| {
+                candidate.description == if accept { "Accept" } else { "Decline" }
+            })
+            .unwrap();
+        let encoded =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        let restored = serde_json::from_value::<PersistedGameState>(encoded)
+            .unwrap()
+            .into_game_state()
+            .unwrap();
+        runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::ChooseReplacement { index: choice })
+            .unwrap();
+        assert_eq!(
+            runner.state().objects[&fodder].zone,
+            if accept { Zone::Exile } else { Zone::Graveyard }
+        );
+        let entry = runner.state().stack.back().unwrap();
+        assert_eq!((entry.source_id, entry.controller), (source, P0));
+        let ability = entry.ability().unwrap();
+        assert_eq!(ability.chosen_x, Some(4));
+        assert_eq!(ability.targets, vec![TargetRef::Object(second)]);
+        assert_eq!(
+            ability.cost_paid_objects[0].snapshot().unwrap().object_id,
+            fodder
+        );
+        assert_eq!(runner.state().players[0].crimes_committed_this_turn, 1);
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&first].damage_marked, 0);
+        assert_eq!(runner.state().objects[&second].damage_marked, 4);
+        assert_eq!(runner.state().players[0].crimes_committed_this_turn, 1);
+    }
+}
+
+#[test]
+fn x_mana_mixed_requirement_life_tap_and_exile_shapes_refuse_atomically() {
+    let creature: TargetFilter = TypedFilter::creature()
+        .controller(ControllerRef::You)
+        .into();
+    let cases = vec![
+        (
+            "fixed life zero",
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+            },
+            1,
+        ),
+        (
+            "fixed life one",
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            1,
+        ),
+        ("unbounded sacrifice", count_creatures(u32::MAX), 1),
+        (
+            "aggregate sacrifice",
+            AbilityCost::Sacrifice(SacrificeCost::new(
+                creature.clone(),
+                SacrificeRequirement::Aggregate {
+                    stat: SacrificeAggregateStat::TotalPower,
+                    comparator: Comparator::GE,
+                    value: 1,
+                },
+            )),
+            1,
+        ),
+        ("tap after Count0", AbilityCost::Tap, 0),
+        ("tap after Count1", AbilityCost::Tap, 1),
+        (
+            "hand exile",
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Hand),
+                filter: None,
+            },
+            1,
+        ),
+        (
+            "graveyard exile",
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            },
+            1,
+        ),
+        (
+            "battlefield exile",
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Battlefield),
+                filter: Some(creature.clone()),
+            },
+            1,
+        ),
+    ];
+    for (label, unsupported, count) in cases {
+        for reversed in [false, true] {
+            for nested in [false, true] {
+                let mut suffix = vec![count_creatures(count), unsupported.clone()];
+                if reversed {
+                    suffix.reverse();
+                }
+                let cost = if nested {
+                    AbilityCost::Composite {
+                        costs: vec![x_mana(), AbilityCost::Composite { costs: suffix }],
+                    }
+                } else {
+                    let mut costs = vec![x_mana()];
+                    costs.extend(suffix);
+                    AbilityCost::Composite { costs }
+                };
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let source = scenario
+                    .add_enchantment_from_oracle(P0, label, "")
+                    .with_ability_definition(draw_x(cost))
+                    .id();
+                let fodder = scenario.add_creature(P0, "Count fodder", 1, 1).id();
+                let second = scenario.add_creature(P0, "Second fodder", 1, 1).id();
+                let hand = scenario.add_card_to_hand(P0, "Hand exile candidate");
+                let graveyard = scenario
+                    .add_land_to_graveyard(P0, "Graveyard exile candidate")
+                    .id();
+                scenario.with_mana_pool(
+                    P0,
+                    vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
+                );
+                let mut runner = scenario.build();
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: source,
+                        ability_index: 0,
+                    })
+                    .unwrap();
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }),
+                    "{label}/{reversed}/{nested}"
+                );
+                assert!(matches!(
+                    runner
+                        .state()
+                        .pending_cast
+                        .as_ref()
+                        .unwrap()
+                        .activation_residual,
+                    ActivationResidual::XMana
+                ));
+                assert_x_guard_refuses(&mut runner, &format!("{label}/{reversed}/{nested}"));
+                assert!(
+                    runner.state().stack.is_empty(),
+                    "{label}/{reversed}/{nested}"
+                );
+                assert_eq!(runner.state().players[0].life, 20);
+                assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+                assert!(!runner.state().objects[&source].tapped);
+                for id in [fodder, second] {
+                    assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+                    assert!(!runner.state().objects[&id].tapped);
+                }
+                assert_eq!(runner.state().objects[&hand].zone, Zone::Hand);
+                assert_eq!(runner.state().objects[&graveyard].zone, Zone::Graveyard);
+            }
+        }
+    }
+}
+
+#[test]
+fn x_mana_targeted_tap_creatures_sibling_refuses_before_payment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_enchantment_from_oracle(P0, "Targeted mixed TapCreatures", "")
+        .with_ability_definition(damage_x(AbilityCost::Composite {
+            costs: vec![
+                x_mana(),
+                count_creatures(1),
+                AbilityCost::TapCreatures {
+                    requirement: TapCreaturesRequirement::Count { count: 1 },
+                    filter: TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .into(),
+                },
+            ],
+        }))
+        .id();
+    let fodder = scenario.add_creature(P0, "Untapped fodder", 1, 1).id();
+    let target = scenario.add_creature(P1, "Opponent target", 5, 5).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
+    );
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .unwrap();
+    runner.act(GameAction::ChooseX { value: 1 }).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        runner.act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+    }));
+    match result {
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied());
+            assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"));
+        }
+        Ok(Err(EngineError::ActionNotAllowed(message))) => {
+            assert_eq!(message, "non-self sacrifice/exile cost unhandled");
+        }
+        Ok(other) => panic!("targeted TapCreatures unexpectedly proceeded: {other:?}"),
+    }
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Battlefield);
+    assert!(!runner.state().objects[&fodder].tapped);
+    assert_eq!(runner.state().objects[&target].damage_marked, 0);
 }

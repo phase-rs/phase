@@ -823,8 +823,32 @@ fn x_mana_activation_pays_both_selected_sacrifices() {
         ActivationResidual::XMana
     ));
     runner.act(GameAction::ChooseX { value: 1 }).unwrap();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
     assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
     let first_choices = prompt(&runner, (1, 1));
+    let WaitingFor::PayCost {
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        unreachable!("prompt verified the Spell cost root")
+    };
+    assert_eq!(
+        (spell.object_id, spell.activation_ability_index),
+        (source, Some(0))
+    );
+    assert_eq!(
+        (
+            spell.ability.source_id,
+            spell.ability.controller,
+            spell.ability.chosen_x
+        ),
+        (source, P0, Some(1))
+    );
+    assert!(matches!(
+        spell.activation_residual,
+        ActivationResidual::XMana
+    ));
     assert!(first_choices.contains(&source) && first_choices.contains(&other));
     runner
         .act(GameAction::SelectCards {
@@ -832,6 +856,31 @@ fn x_mana_activation_pays_both_selected_sacrifices() {
         })
         .unwrap();
     assert_eq!(prompt(&runner, (1, 1)), vec![other]);
+    assert!(runner.state().players[1].graveyard.contains(&source));
+    assert_eq!(runner.state().objects[&source].owner, P1);
+    let WaitingFor::PayCost {
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        unreachable!("prompt verified the Spell cost root")
+    };
+    assert_eq!(
+        (spell.object_id, spell.activation_ability_index),
+        (source, Some(0))
+    );
+    assert_eq!(
+        (
+            spell.ability.source_id,
+            spell.ability.controller,
+            spell.ability.chosen_x
+        ),
+        (source, P0, Some(1))
+    );
+    assert!(matches!(
+        spell.activation_residual,
+        ActivationResidual::XMana
+    ));
     runner
         .act(GameAction::SelectCards { cards: vec![other] })
         .unwrap();
@@ -843,6 +892,8 @@ fn x_mana_activation_pays_both_selected_sacrifices() {
         .map(|record| record.snapshot().unwrap().object_id)
         .collect();
     assert_eq!(paid, vec![source, other]);
+    assert!(runner.state().players[0].graveyard.contains(&other));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
     finish_payoff(&mut runner, source, &[source, other]);
 }
 #[test]

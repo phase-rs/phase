@@ -15611,7 +15611,7 @@ mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::engine_resolution_choices::handle_resolution_choice;
-    use crate::game::scenario::GameScenario;
+    use crate::game::scenario::{GameRunner, GameScenario};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CardSelectionMode,
@@ -26316,6 +26316,14 @@ its replicate cost was paid.)\nDraw a card.";
             ActivationResidual::XMana
         ));
         assert_eq!(spell.ability.chosen_x, Some(4));
+        assert_eq!(
+            (spell.object_id, spell.activation_ability_index),
+            (source, Some(0))
+        );
+        assert_eq!(
+            (spell.ability.source_id, spell.ability.controller),
+            (source, PlayerId(0))
+        );
         state.waiting_for = waiting;
         apply_as_current(
             &mut state,
@@ -26333,6 +26341,14 @@ its replicate cost was paid.)\nDraw a card.";
             ability.cost_paid_objects[0].snapshot().unwrap().object_id,
             victim
         );
+        let mut runner = GameRunner::from_state(state);
+        runner.resolve_top();
+        assert_eq!(runner.state().players[0].life, 21);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 
     /// CR 118.3 + CR 701.21a: A fixed Count2 requires two controlled
@@ -26697,6 +26713,238 @@ its replicate cost was paid.)\nDraw a card.";
             }
             assert!(state.stack.is_empty(), "{label}");
             assert_eq!(state.objects[&victim].zone, Zone::Battlefield, "{label}");
+        }
+    }
+
+    /// CR 601.2h + CR 602.2b: Exile residuals remain outside the supported
+    /// X-mana Count-sacrifice continuation, before any card changes zones.
+    #[test]
+    fn x_residual_exile_forms_keep_the_original_guard() {
+        let battlefield_filter = TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .into();
+        for (label, cost) in [
+            (
+                "hand",
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Hand),
+                    filter: None,
+                },
+            ),
+            (
+                "graveyard",
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+            ),
+            (
+                "battlefield",
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Battlefield),
+                    filter: Some(battlefield_filter.clone()),
+                },
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(7_706),
+                PlayerId(0),
+                "Exile X Source".into(),
+                Zone::Battlefield,
+            );
+            let hand = create_object(
+                &mut state,
+                CardId(7_707),
+                PlayerId(0),
+                "Hand candidate".into(),
+                Zone::Hand,
+            );
+            let graveyard = create_object(
+                &mut state,
+                CardId(7_708),
+                PlayerId(0),
+                "Graveyard candidate".into(),
+                Zone::Graveyard,
+            );
+            let battlefield = create_object(
+                &mut state,
+                CardId(7_709),
+                PlayerId(0),
+                "Battlefield candidate".into(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&battlefield)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            let mut resolved = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            );
+            resolved.set_chosen_x_recursive(4);
+            let mut events = Vec::new();
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                push_activated_ability_to_stack(
+                    &mut state,
+                    PlayerId(0),
+                    source,
+                    0,
+                    resolved,
+                    Some(&cost),
+                    ActivationResidual::XMana,
+                    ActivationTargetSelection::Settled,
+                    None,
+                    None,
+                    false,
+                    None,
+                    &mut events,
+                )
+            }));
+            match result {
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied());
+                    assert_eq!(
+                        message,
+                        Some("non-self sacrifice/exile cost unhandled"),
+                        "{label}"
+                    );
+                }
+                Ok(Err(EngineError::ActionNotAllowed(message))) => {
+                    assert_eq!(
+                        message, "non-self sacrifice/exile cost unhandled",
+                        "{label}"
+                    );
+                }
+                Ok(other) => panic!("{label} exile unexpectedly proceeded: {other:?}"),
+            }
+            assert!(state.stack.is_empty(), "{label}");
+            for (id, zone) in [
+                (source, Zone::Battlefield),
+                (hand, Zone::Hand),
+                (graveyard, Zone::Graveyard),
+                (battlefield, Zone::Battlefield),
+            ] {
+                assert_eq!(state.objects[&id].zone, zone, "{label}");
+            }
+        }
+    }
+
+    /// CR 107.3a + CR 118.3 + CR 701.21a: Unchanged None and ManaLeg
+    /// continuations keep fixed, zero, and sentinel sacrifice bounds.
+    #[test]
+    fn non_x_residual_sacrifice_bounds_and_derived_x_remain_unchanged() {
+        for residual in [ActivationResidual::None, ActivationResidual::ManaLeg] {
+            for (count, expected_bounds, selected, expected_x) in [
+                (0, (0, 0), false, Some(0)),
+                (1, (1, 1), true, None),
+                (u32::MAX, (0, 1), true, Some(1)),
+            ] {
+                let mut state = GameState::new_two_player(42);
+                let source = create_object(
+                    &mut state,
+                    CardId(7_711),
+                    PlayerId(0),
+                    "Non-X Source".into(),
+                    Zone::Battlefield,
+                );
+                let victim = create_object(
+                    &mut state,
+                    CardId(7_712),
+                    PlayerId(0),
+                    "Non-X Victim".into(),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&victim)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                let resolved = ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                );
+                let cost = AbilityCost::Sacrifice(SacrificeCost::count(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .into(),
+                    count,
+                ));
+                let waiting = push_activated_ability_to_stack(
+                    &mut state,
+                    PlayerId(0),
+                    source,
+                    0,
+                    resolved,
+                    Some(&cost),
+                    residual,
+                    ActivationTargetSelection::Settled,
+                    None,
+                    None,
+                    false,
+                    None,
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                let WaitingFor::PayCost {
+                    player,
+                    choices,
+                    min_count,
+                    count,
+                    resume: CostResume::Spell { spell },
+                    ..
+                } = &waiting
+                else {
+                    panic!("non-X Count prompt: {waiting:?}");
+                };
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!((*min_count, *count), expected_bounds);
+                assert_eq!(choices, &vec![victim]);
+                assert!(matches!(
+                    spell.activation_residual,
+                    ActivationResidual::None
+                ));
+                state.waiting_for = waiting;
+                apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards {
+                        cards: if selected { vec![victim] } else { vec![] },
+                    },
+                )
+                .unwrap();
+                let ability = state.stack.back().unwrap().ability().unwrap();
+                assert_eq!(ability.chosen_x, expected_x);
+                assert_eq!(
+                    state.objects[&victim].zone,
+                    if selected {
+                        Zone::Graveyard
+                    } else {
+                        Zone::Battlefield
+                    }
+                );
+            }
         }
     }
 

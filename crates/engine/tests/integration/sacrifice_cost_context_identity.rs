@@ -640,6 +640,7 @@ fn x_mana_sacrifice_keeps_payer_after_source_exits() {
     assert!(root.activation_cost.is_some());
     assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
     runner.act(GameAction::ChooseX { value: 1 }).unwrap();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
     let WaitingFor::PayCost {
         player,
         choices,
@@ -658,6 +659,14 @@ fn x_mana_sacrifice_keeps_payer_after_source_exits() {
         ActivationResidual::XMana
     ));
     assert_eq!(spell.ability.chosen_x, Some(1));
+    assert_eq!(
+        (spell.object_id, spell.activation_ability_index),
+        (source, Some(0))
+    );
+    assert_eq!(
+        (spell.ability.source_id, spell.ability.controller),
+        (source, P0)
+    );
     runner
         .act(GameAction::SelectCards {
             cards: vec![source],
@@ -684,7 +693,17 @@ fn x_mana_sacrifice_keeps_payer_after_source_exits() {
         ActivationResidual::XMana
     ));
     assert_eq!(spell.ability.chosen_x, Some(1));
+    assert_eq!(
+        (spell.object_id, spell.activation_ability_index),
+        (source, Some(0))
+    );
+    assert_eq!(
+        (spell.ability.source_id, spell.ability.controller),
+        (source, P0)
+    );
     assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&source].owner, P1);
+    assert!(runner.state().players[1].graveyard.contains(&source));
     runner
         .act(GameAction::SelectCards { cards: vec![other] })
         .unwrap();
@@ -702,8 +721,15 @@ fn x_mana_sacrifice_keeps_payer_after_source_exits() {
         .map(|record| record.snapshot().unwrap().object_id)
         .collect();
     assert_eq!(paid, vec![source, other]);
+    assert!(runner.state().players[0].graveyard.contains(&other));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
     runner.resolve_top();
     assert_eq!(runner.state().players[0].life, 21);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 #[test]
 fn distinct_sources_and_ability_indices_keep_separate_selected_payments() {
