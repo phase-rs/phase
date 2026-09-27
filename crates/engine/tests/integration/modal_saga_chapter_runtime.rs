@@ -402,3 +402,179 @@ fn an_end_of_turn_chapter_grant_to_creatures_ends_at_cleanup() {
         "the stated duration ends at cleanup"
     );
 }
+
+const TOKEN_FLIGHT_SAGA: &str = "(As this Saga enters and after your draw step, add a lore counter.)\nI \u{2014} Create a 1/1 white Soldier creature token, then it gains flying.\nII \u{2014} You gain 1 life.";
+
+/// CR 611.2a: a grant continuing a token creation ("?, then it gains flying.")
+/// states no duration, and nothing it continues does, so the token keeps
+/// flying past cleanup.
+#[test]
+fn a_continuation_grant_to_a_created_token_outlives_the_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let saga = scenario
+        .add_creature(P0, "Token Flight Saga", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(TOKEN_FLIGHT_SAGA)
+        .id();
+    scenario.with_library_top(P0, &["Plains"; 10]);
+    scenario.with_library_top(P1, &["Plains"; 10]);
+    let mut runner = scenario.build();
+    let execute = runner.state().objects[&saga]
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .find_map(|trigger| {
+            (trigger.definition.saga_chapter == Some(1)).then(|| trigger.definition.execute.clone())
+        })
+        .flatten()
+        .expect("chapter I");
+    let grant = execute
+        .sub_ability
+        .as_deref()
+        .expect("reach: the grant clause");
+    assert_eq!(
+        grant.sub_link,
+        engine::types::ability::SubAbilityLink::ContinuationStep,
+        "reach: the grant continues the token creation"
+    );
+    assert!(
+        format!("{:?}", grant.effect).contains("LastCreated"),
+        "reach: the grant affects the created token, got {:?}",
+        grant.effect
+    );
+    let before: Vec<ObjectId> = runner.state().battlefield.iter().copied().collect();
+    fire_chapter_one(&mut runner, saga, None);
+    let token = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| !before.contains(id))
+        .expect("the token was created");
+    assert!(has_flying(&runner, token), "reach: the token gained flying");
+    pass_cleanup(&mut runner);
+    assert!(has_flying(&runner, token), "the grant survives cleanup");
+}
+
+const BEARS_OF_LITTJARA: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI \u{2014} Create a 2/2 blue Shapeshifter creature token with changeling.\nII \u{2014} Any number of target Shapeshifter creatures you control have base power and toughness 4/4.\nIII \u{2014} Choose up to one target creature or planeswalker. Each creature with power 4 or greater you control deals damage equal to its power to that permanent.";
+
+fn base_pt(runner: &GameRunner, id: ObjectId) -> (Option<i32>, Option<i32>) {
+    let obj = &runner.state().objects[&id];
+    (obj.power, obj.toughness)
+}
+
+/// The Bears of Littjara at one lore counter beside two 2/2 Shapeshifters;
+/// chapter II fires and resolves targeting only the first.
+fn bears_chapter_two() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let saga = scenario
+        .add_creature(P0, "The Bears of Littjara", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(BEARS_OF_LITTJARA)
+        .id();
+    let chosen = scenario
+        .add_creature(P0, "Chosen Shifter", 2, 2)
+        .with_subtypes(vec!["Shapeshifter"])
+        .id();
+    let other = scenario
+        .add_creature(P0, "Other Shifter", 2, 2)
+        .with_subtypes(vec!["Shapeshifter"])
+        .id();
+    scenario.with_library_top(P0, &["Plains"; 10]);
+    scenario.with_library_top(P1, &["Plains"; 10]);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&saga)
+        .unwrap()
+        .counters
+        .insert(CounterType::Lore, 1);
+    {
+        let state = runner.state_mut();
+        state.turn_number = 2;
+        state.active_player = P0;
+        state.phase = Phase::Upkeep;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(lore_count(&runner, saga), 2, "reach: chapter II fires");
+    let mut targeted = false;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                let target =
+                    (!targeted).then_some(engine::types::ability::TargetRef::Object(chosen));
+                targeted = true;
+                runner
+                    .act(GameAction::ChooseTarget { target })
+                    .expect("choose one Shapeshifter, then finish");
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt while resolving chapter II: {other:?}"),
+        }
+    }
+    assert!(targeted, "reach: chapter II asked for its targets");
+    assert!(runner.state().stack.is_empty(), "chapter II resolved");
+    (runner, saga, chosen, other)
+}
+
+/// CR 611.2a: The Bears of Littjara II states no duration, so the chosen
+/// Shapeshifter is base 4/4 until the end of the game: through cleanup and
+/// after the Saga leaves. The unchosen one is unaffected. The effect ends with
+/// its object: the chosen Shapeshifter leaving the battlefield comes back a new
+/// object (CR 400.7) with its printed 2/2.
+#[test]
+fn the_bears_of_littjara_chapter_two_lasts_until_the_end_of_the_game() {
+    let (mut runner, saga, chosen, other) = bears_chapter_two();
+    assert_eq!(
+        base_pt(&runner, chosen),
+        (Some(4), Some(4)),
+        "reach: chapter II applied"
+    );
+    assert_eq!(
+        base_pt(&runner, other),
+        (Some(2), Some(2)),
+        "the unchosen one is unaffected"
+    );
+
+    pass_cleanup(&mut runner);
+    assert_eq!(
+        base_pt(&runner, chosen),
+        (Some(4), Some(4)),
+        "survives cleanup"
+    );
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), saga, Zone::Graveyard, &mut events);
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&saga].zone, Zone::Graveyard);
+    assert_eq!(
+        base_pt(&runner, chosen),
+        (Some(4), Some(4)),
+        "survives the Saga leaving the battlefield"
+    );
+
+    engine::game::zones::move_to_zone(runner.state_mut(), chosen, Zone::Hand, &mut events);
+    engine::game::zones::move_to_zone(runner.state_mut(), chosen, Zone::Battlefield, &mut events);
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&chosen].zone, Zone::Battlefield);
+    assert_eq!(
+        base_pt(&runner, chosen),
+        (Some(2), Some(2)),
+        "the effect ended when its object left the battlefield"
+    );
+}

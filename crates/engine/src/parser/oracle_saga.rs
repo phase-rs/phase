@@ -331,23 +331,40 @@ fn promote_grant_duration_for_chapter(execute: &mut AbilityDefinition) {
 /// separate sentence the parser relinked because it depends on the earlier one.
 /// For a grant to the Saga the two readings differ (end of turn, or while the
 /// Saga remains), and the chain doesn't say which, so that grant is an explicit
-/// gap rather than a guess; no printed Saga has it. A continuation grant to
-/// other objects is left exactly as parsed: its end-of-turn fallback is the
-/// engine-wide reading of a duration-less conjunct (effects/effect.rs), which
-/// World War Hulk III's end-of-turn conjunct relies on.
+/// gap rather than a guess; no printed Saga has it.
+///
+/// A continuation grant to other objects is decided by its governing clause:
+/// the clauses of the instruction it continues, back to the root or the last
+/// `SequentialSibling`. If one of them states a duration (Hulk III's leading
+/// "Until end of turn"), the grant is left as parsed and expires with it
+/// through the GenericEffect resolver's end-of-turn fallback
+/// (effects/effect.rs). If none does, nothing states a duration for the grant,
+/// so it lasts until the end of the game (CR 611.2a), as a grant to other
+/// objects does anywhere else in the chain.
 fn promote_duration_free_grants(ability: &mut AbilityDefinition) {
     if ability.duration.is_none() {
         apply_duration_free_lifetime(&mut ability.effect);
     }
+    let mut instruction_states_duration = ability.duration.is_some();
     let mut node = ability.sub_ability.as_deref_mut();
     while let Some(sub) = node {
+        instruction_states_duration = match sub.sub_link {
+            SubAbilityLink::SequentialSibling => sub.duration.is_some(),
+            SubAbilityLink::ContinuationStep => {
+                instruction_states_duration || sub.duration.is_some()
+            }
+        };
         if sub.duration.is_none() {
             match (sub.sub_link, duration_free_grant_recipients(&sub.effect)) {
                 (_, None) => {}
                 (SubAbilityLink::SequentialSibling, Some(_)) => {
                     apply_duration_free_lifetime(&mut sub.effect);
                 }
-                (SubAbilityLink::ContinuationStep, Some(GrantRecipients::Others)) => {}
+                (SubAbilityLink::ContinuationStep, Some(GrantRecipients::Others)) => {
+                    if !instruction_states_duration {
+                        apply_duration_free_lifetime(&mut sub.effect);
+                    }
+                }
                 (
                     SubAbilityLink::ContinuationStep,
                     Some(GrantRecipients::Saga | GrantRecipients::Undetermined),
@@ -1503,6 +1520,75 @@ mod tests {
             chain.effect.unimplemented_description().is_some(),
             "a mixed grant is an explicit gap, got {:?}",
             chain.effect
+        );
+    }
+
+    /// CR 611.2a: a continuation grant to other objects follows its governing
+    /// clause. World War Hulk III's "… and it gains trample" continues a clause
+    /// stating "Until end of turn" and is left as parsed (the end-of-turn
+    /// fallback expires it); with no stated duration in the instruction it
+    /// continues, the same grant lasts until the end of the game. The parser
+    /// gives no such continuation a governing-duration-free shape today (a
+    /// dependent token grant carries `Permanent` from the effect-chain parser),
+    /// so the second case is built from Hulk's own chain with the leading
+    /// duration removed.
+    #[test]
+    fn a_continuation_grant_to_other_objects_follows_its_governing_duration() {
+        let lines = vec![
+            "(As this Saga enters and after your draw step, add a lore counter.)",
+            "III \u{2014} Choose target creature you control. Until end of turn, double its power and toughness and it gains trample.",
+        ];
+        let (triggers, _, _) = saga_test_chapters(&lines, "Duration Saga");
+        let parsed = triggers[0]
+            .execute
+            .as_deref()
+            .expect("chapter has an ability")
+            .clone();
+        let governing = parsed.sub_ability.as_deref().expect("the doubling clause");
+        assert_eq!(
+            governing.duration,
+            Some(Duration::UntilEndOfTurn),
+            "reach: stated"
+        );
+        let grant = governing
+            .sub_ability
+            .as_deref()
+            .expect("the trample conjunct");
+        assert_eq!(
+            grant.sub_link,
+            SubAbilityLink::ContinuationStep,
+            "reach: a continuation"
+        );
+        assert!(
+            matches!(&*grant.effect, Effect::GenericEffect { duration: None, static_abilities, .. }
+                if static_abilities.iter().all(|def| def.affected.is_some()
+                    && !matches!(def.affected, Some(TargetFilter::SelfRef)))),
+            "reach: a duration-free grant to another object, got {:?}",
+            grant.effect
+        );
+
+        let mut ungoverned = parsed.clone();
+        ungoverned
+            .sub_ability
+            .as_deref_mut()
+            .expect("the doubling clause")
+            .duration = None;
+        promote_grant_duration_for_chapter(&mut ungoverned);
+        let grant = ungoverned
+            .sub_ability
+            .as_deref()
+            .and_then(|def| def.sub_ability.as_deref())
+            .expect("the trample conjunct");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GenericEffect {
+                    duration: Some(Duration::Permanent),
+                    ..
+                }
+            ),
+            "with no governing duration the grant lasts until the end of the game, got {:?}",
+            grant.effect
         );
     }
 
