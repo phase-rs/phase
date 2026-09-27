@@ -9545,6 +9545,83 @@ mod tests {
         );
     }
 
+    /// CR 611.3a + CR 732.2a: a DORMANT first-activation modifier (Professor
+    /// Hojo in hand) reads the whole turn's journal the moment it takes effect,
+    /// so the journal is cost-relevant before it does. A (no earlier qualifying
+    /// activation) and B (one) must compare UNEQUAL: once Hojo is cast, the
+    /// same activation costs {0} in A and {2} in B. The pair is measured through
+    /// the production pipeline as the reach guard.
+    #[test]
+    fn a_dormant_first_activation_modifier_keeps_the_journal_in_the_loop_key() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::mana::{ManaColor, ManaCost, ManaUnit};
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let build = || {
+            let mut s = GameScenario::new_n_player(2, 7);
+            s.at_phase(Phase::PreCombatMain);
+            let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+            let src = s
+                .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+                .id();
+            let hojo = s
+                .add_creature_to_hand_from_oracle(PlayerId(0), "Professor Hojo", 2, 2, HOJO)
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            s.with_mana_pool(
+                PlayerId(0),
+                (0..10)
+                    .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                    .collect(),
+            );
+            (s.build(), own, src, hojo)
+        };
+        let (a_runner, own, src, hojo) = build();
+        let a = a_runner.state().clone();
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "a dormant Hojo makes the earlier qualifying activation cost-relevant (UNEQUAL)"
+        );
+
+        // Reach guard: after Hojo enters, the same activation is priced apart.
+        let paid_after_hojo = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            r.cast(hojo).resolve();
+            let before = r.state().players[0].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            })
+            .expect("target");
+            while matches!(
+                r.state().waiting_for,
+                crate::types::game_state::WaitingFor::ManaPayment { .. }
+            ) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[0].mana_pool.total()
+        };
+        assert_eq!((paid_after_hojo(a), paid_after_hojo(b)), (0, 2));
+    }
+
     /// CR 602.5b: per-GAME ("Activate only once") gate preserved; sibling
     /// unrestricted ability projected out.
     #[test]

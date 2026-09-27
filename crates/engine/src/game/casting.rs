@@ -28325,6 +28325,13 @@ fn transient_reduce_ability_cost_present(state: &GameState) -> bool {
 /// no cost reads, is dropped. Two positions on either side of the discount being
 /// spent then differ (so no certificate can repeat a one-time discount), while
 /// two positions after it keep the same row and still compare equal.
+///
+/// That narrowing is sound only for the modifiers in effect NOW. A dormant one
+/// (a Hojo in hand, on the stack, in a graveyard, on a back face, or on a
+/// permanent whose abilities don't currently function) reads the whole turn the
+/// moment it takes effect (CR 611.3a), so while any exists, every row is kept:
+/// two positions that differ only in earlier activations would otherwise
+/// compare equal and yet price the same later activation differently.
 pub(crate) fn cost_observable_activation_journal(
     state: &GameState,
 ) -> HashMap<PlayerId, im::Vector<AbilityActivationRecord>> {
@@ -28332,6 +28339,7 @@ pub(crate) fn cost_observable_activation_journal(
         return HashMap::new();
     }
     let mut kept: Vec<&AbilityActivationRecord> = Vec::new();
+    let mut in_effect: HashSet<ObjectId> = HashSet::new();
     let mut keep_first = |reduce_mode: &StaticMode,
                           affected: Option<&TargetFilter>,
                           static_source_id: ObjectId,
@@ -28348,6 +28356,7 @@ pub(crate) fn cost_observable_activation_journal(
         else {
             return;
         };
+        in_effect.insert(static_source_id);
         if let Some(row) = first_qualifying_activation_this_turn(
             state,
             keyword,
@@ -28394,6 +28403,26 @@ pub(crate) fn cost_observable_activation_journal(
             }
         }
     }
+    // CR 611.3a: a dormant first-activation modifier will read every row.
+    let dormant = state.objects.iter().any(|(id, obj)| {
+        !in_effect.contains(id)
+            && obj
+                .static_definitions
+                .iter_all()
+                .chain(obj.base_static_definitions.iter())
+                .chain(
+                    obj.back_face
+                        .iter()
+                        .flat_map(|face| face.static_definitions.iter_all()),
+                )
+                .any(|def| is_first_activation_modifier(&def.mode))
+    });
+    if dormant {
+        return state
+            .abilities_activated_this_turn_by_player
+            .as_ref()
+            .clone();
+    }
     let mut journal: HashMap<PlayerId, im::Vector<AbilityActivationRecord>> = HashMap::new();
     for (player, rows) in state.abilities_activated_this_turn_by_player.iter() {
         let observable: im::Vector<_> = rows
@@ -28406,6 +28435,18 @@ pub(crate) fn cost_observable_activation_journal(
         }
     }
     journal
+}
+
+/// CR 611.3a: a "first activated ability ? each turn" cost modifier, the one
+/// kind of modifier that reads the turn's activation journal.
+fn is_first_activation_modifier(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::ReduceAbilityCost {
+            frequency: Some(CastFrequency::OncePerTurn),
+            ..
+        }
+    )
 }
 
 /// CR 601.2f + CR 118.7 + CR 605.1a + CR 606.1: Resolve ONE `ReduceAbilityCost`
