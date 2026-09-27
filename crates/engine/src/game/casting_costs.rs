@@ -6354,6 +6354,7 @@ pub(super) fn push_activated_ability_to_stack(
                     ability_index,
                     carrier(),
                 );
+                pending.activation_residual = activation_residual;
                 pending.activation_cost = remaining_cost.cloned();
                 pending.pending_loyalty_activation_player = pending_loyalty_activation_player;
                 pending.activation_trigger_collection = activation_trigger_collection.clone();
@@ -26963,6 +26964,418 @@ its replicate cost was paid.)\nDraw a card.";
                     }
                 );
             }
+        }
+    }
+
+    fn defensive_x_target_fixture(
+        target_count: usize,
+        mixed: bool,
+    ) -> (
+        GameState,
+        ObjectId,
+        Vec<ObjectId>,
+        ObjectId,
+        ObjectId,
+        AbilityCost,
+        ResolvedAbility,
+    ) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(7_711),
+            PlayerId(0),
+            "Defensive X Source".to_string(),
+            Zone::Battlefield,
+        );
+        let fodder = create_object(
+            &mut state,
+            CardId(7_712),
+            PlayerId(0),
+            "Sacrifice Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        let tapper = create_object(
+            &mut state,
+            CardId(7_713),
+            PlayerId(0),
+            "Tap Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [fodder, tapper] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            state.objects.get_mut(&id).unwrap().base_power = Some(2);
+            state.objects.get_mut(&id).unwrap().base_toughness = Some(2);
+        }
+        let targets: Vec<_> = (0..target_count)
+            .map(|index| {
+                let id = create_object(
+                    &mut state,
+                    CardId(7_714 + index as u64),
+                    PlayerId(1),
+                    "Opposing Creature".to_string(),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                state.objects.get_mut(&id).unwrap().base_power = Some(2);
+                state.objects.get_mut(&id).unwrap().base_toughness = Some(1);
+                id
+            })
+            .collect();
+        let creature: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .into();
+        let count = AbilityCost::Sacrifice(SacrificeCost::count(creature.clone(), 1));
+        let cost = if mixed {
+            AbilityCost::Composite {
+                costs: vec![
+                    count,
+                    AbilityCost::TapCreatures {
+                        requirement: TapCreaturesRequirement::Count { count: 1 },
+                        filter: creature,
+                    },
+                ],
+            }
+        } else {
+            count
+        };
+        let mut resolved = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .into(),
+                damage_source: None,
+                excess: None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        resolved.set_chosen_x_recursive(1);
+        (state, source, targets, fodder, tapper, cost, resolved)
+    }
+
+    /// CR 107.3a + CR 601.2c + CR 601.2h + CR 602.2b: The announced X and
+    /// target declaration survive a defensive activation root before any cost.
+    #[test]
+    fn defensive_x_target_root_refuses_mixed_suffix_before_bulk_or_slot_payment() {
+        let mut failures = Vec::new();
+        for bulk in [true, false] {
+            let (mut state, source, targets, fodder, tapper, cost, resolved) =
+                defensive_x_target_fixture(2, true);
+            let waiting = push_activated_ability_to_stack(
+                &mut state,
+                PlayerId(0),
+                source,
+                0,
+                resolved,
+                Some(&cost),
+                ActivationResidual::XMana,
+                ActivationTargetSelection::Pending,
+                None,
+                None,
+                false,
+                None,
+                &mut Vec::new(),
+            )
+            .expect("unsettled defensive root must request targets");
+            let WaitingFor::TargetSelection {
+                pending_cast,
+                target_slots,
+                ..
+            } = &waiting
+            else {
+                panic!("expected defensive target root, got {waiting:?}");
+            };
+            assert!(target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(targets[0])));
+            assert_eq!(pending_cast.activation_cost, Some(cost.clone()));
+            assert_eq!(pending_cast.ability.chosen_x, Some(1));
+            assert_eq!(pending_cast.object_id, source);
+            assert_eq!(pending_cast.activation_ability_index, Some(0));
+            let residual_at_target = pending_cast.activation_residual;
+            assert!(state.stack.is_empty());
+            assert_eq!(state.objects[&fodder].zone, Zone::Battlefield);
+            assert!(!state.objects[&tapper].tapped);
+
+            state.waiting_for = waiting;
+            let action = if bulk {
+                GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(targets[0])],
+                }
+            } else {
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(targets[0])),
+                }
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| apply_as_current(&mut state, action)));
+            match result {
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied());
+                    assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"));
+                }
+                Ok(Err(EngineError::ActionNotAllowed(message))) => {
+                    assert_eq!(message, "non-self sacrifice/exile cost unhandled");
+                }
+                Ok(other) => failures.push(format!(
+                    "{} target handoff with marker {residual_at_target:?} reached {}: {other:?}",
+                    if bulk { "bulk" } else { "slot" },
+                    if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
+                        "premature PayCost"
+                    } else {
+                        "another outcome"
+                    }
+                )),
+            }
+            if !matches!(residual_at_target, ActivationResidual::XMana) {
+                failures.push(format!(
+                    "{} target root lost XMana: {residual_at_target:?}",
+                    if bulk { "bulk" } else { "slot" }
+                ));
+            }
+            assert!(state.stack.is_empty());
+            assert_eq!(state.objects[&fodder].zone, Zone::Battlefield);
+            assert!(!state.objects[&tapper].tapped);
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// CR 601.2c + CR 601.2h + CR 602.2b: Assigned, random, and uniquely
+    /// automatic targets also complete before an unpaid X-mana suffix.
+    #[test]
+    fn defensive_x_target_routes_refuse_mixed_suffix_and_pay_count_only() {
+        #[derive(Clone, Copy, Debug)]
+        enum Route {
+            Bulk,
+            Slot,
+            Assigned,
+            Random,
+            Automatic,
+        }
+
+        for route in [
+            Route::Bulk,
+            Route::Slot,
+            Route::Assigned,
+            Route::Random,
+            Route::Automatic,
+        ] {
+            for mixed in [true, false] {
+                let target_count = if matches!(route, Route::Automatic) {
+                    1
+                } else {
+                    2
+                };
+                let (mut state, source, targets, fodder, tapper, cost, mut resolved) =
+                    defensive_x_target_fixture(target_count, mixed);
+                match route {
+                    Route::Assigned => resolved.targets.push(TargetRef::Object(targets[0])),
+                    Route::Random => {
+                        resolved.target_selection_mode =
+                            crate::types::ability::TargetSelectionMode::Random;
+                    }
+                    Route::Bulk | Route::Slot | Route::Automatic => {}
+                }
+                let mut events = Vec::new();
+                let push = || {
+                    push_activated_ability_to_stack(
+                        &mut state,
+                        PlayerId(0),
+                        source,
+                        0,
+                        resolved,
+                        Some(&cost),
+                        ActivationResidual::XMana,
+                        ActivationTargetSelection::Pending,
+                        None,
+                        None,
+                        false,
+                        None,
+                        &mut events,
+                    )
+                };
+                if mixed && matches!(route, Route::Assigned | Route::Random | Route::Automatic) {
+                    let result = catch_unwind(AssertUnwindSafe(push));
+                    match result {
+                        Err(payload) => {
+                            let message = payload
+                                .downcast_ref::<String>()
+                                .map(String::as_str)
+                                .or_else(|| payload.downcast_ref::<&str>().copied());
+                            assert_eq!(
+                                message,
+                                Some("non-self sacrifice/exile cost unhandled"),
+                                "{route:?}"
+                            );
+                        }
+                        Ok(Err(EngineError::ActionNotAllowed(message))) => {
+                            assert_eq!(message, "non-self sacrifice/exile cost unhandled");
+                        }
+                        Ok(other) => panic!("{route:?} mixed suffix reached {other:?}"),
+                    }
+                    assert!(
+                        events.iter().any(|event| matches!(
+                            event,
+                            GameEvent::BecomesTarget {
+                                target: TargetRef::Object(id),
+                                ..
+                            } if targets.contains(id)
+                        )),
+                        "{route:?} must declare a legal target before refusal"
+                    );
+                    assert!(state.stack.is_empty(), "{route:?}");
+                    assert_eq!(state.objects[&fodder].zone, Zone::Battlefield);
+                    assert!(!state.objects[&tapper].tapped);
+                    continue;
+                }
+                if mixed {
+                    // The bulk and slot mixed refusal is covered by the separate
+                    // source-matched red/green regression above.
+                    continue;
+                }
+
+                let waiting = push().expect("Count-only defensive X route must continue");
+                state.waiting_for = waiting;
+                if matches!(route, Route::Bulk | Route::Slot) {
+                    let WaitingFor::TargetSelection {
+                        pending_cast,
+                        target_slots,
+                        ..
+                    } = &state.waiting_for
+                    else {
+                        panic!("{route:?} must request target declaration");
+                    };
+                    assert!(matches!(
+                        pending_cast.activation_residual,
+                        ActivationResidual::XMana
+                    ));
+                    assert_eq!(pending_cast.ability.chosen_x, Some(1));
+                    assert!(target_slots[0]
+                        .legal_targets
+                        .contains(&TargetRef::Object(targets[0])));
+                    let action = match route {
+                        Route::Bulk => GameAction::SelectTargets {
+                            targets: vec![TargetRef::Object(targets[0])],
+                        },
+                        Route::Slot => GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(targets[0])),
+                        },
+                        Route::Assigned | Route::Random | Route::Automatic => unreachable!(),
+                    };
+                    apply_as_current(&mut state, action)
+                        .expect("Count-only target declaration must reach payment");
+                }
+                let WaitingFor::PayCost {
+                    choices,
+                    min_count,
+                    count,
+                    resume: CostResume::Spell { spell },
+                    ..
+                } = &state.waiting_for
+                else {
+                    panic!("{route:?} Count-only suffix did not reach PayCost");
+                };
+                assert_eq!((*min_count, *count), (1, 1), "{route:?}");
+                assert!(choices.contains(&fodder), "{route:?}");
+                assert_eq!(spell.object_id, source, "{route:?}");
+                assert_eq!(spell.activation_ability_index, Some(0), "{route:?}");
+                assert_eq!(spell.ability.chosen_x, Some(1), "{route:?}");
+                assert!(matches!(
+                    spell.activation_residual,
+                    ActivationResidual::XMana
+                ));
+                assert!(spell.crime_candidate, "{route:?}");
+                let [TargetRef::Object(selected_target)] = spell.ability.targets.as_slice() else {
+                    panic!("{route:?} lost selected target");
+                };
+                assert!(targets.contains(selected_target), "{route:?}");
+                let selected_target = *selected_target;
+                assert_eq!(state.objects[&fodder].zone, Zone::Battlefield);
+                assert!(!state.objects[&tapper].tapped);
+                assert!(state.stack.is_empty());
+
+                apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards {
+                        cards: vec![fodder],
+                    },
+                )
+                .expect("Count-only X sacrifice must complete");
+                assert_eq!(state.objects[&fodder].zone, Zone::Graveyard);
+                assert!(!state.objects[&tapper].tapped);
+                assert_eq!(state.stack.len(), 1, "{route:?}");
+                let ability = state.stack.back().unwrap().ability().unwrap();
+                assert_eq!(ability.chosen_x, Some(1));
+                assert_eq!(ability.targets, vec![TargetRef::Object(selected_target)]);
+                if matches!(route, Route::Bulk | Route::Automatic) {
+                    let mut runner = GameRunner::from_state(state);
+                    runner.resolve_top();
+                    assert!(runner.state().stack.is_empty(), "{route:?}");
+                    assert_eq!(
+                        runner.state().objects[&selected_target].zone,
+                        Zone::Graveyard,
+                        "{route:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// CR 601.2c + CR 602.2b: Copy the typed residual on defensive target
+    /// roots without changing preexisting None and ManaLeg target routing.
+    #[test]
+    fn defensive_target_root_preserves_non_x_residual_controls() {
+        for residual in [ActivationResidual::None, ActivationResidual::ManaLeg] {
+            let (mut state, source, targets, fodder, tapper, cost, resolved) =
+                defensive_x_target_fixture(2, false);
+            let waiting = push_activated_ability_to_stack(
+                &mut state,
+                PlayerId(0),
+                source,
+                0,
+                resolved,
+                Some(&cost),
+                residual,
+                ActivationTargetSelection::Pending,
+                None,
+                None,
+                false,
+                None,
+                &mut Vec::new(),
+            )
+            .expect("non-X defensive target root");
+            let WaitingFor::TargetSelection { pending_cast, .. } = &waiting else {
+                panic!("non-X residual must still request targets");
+            };
+            assert_eq!(pending_cast.activation_residual, residual);
+            state.waiting_for = waiting;
+            apply_as_current(
+                &mut state,
+                GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(targets[0])],
+                },
+            )
+            .expect("non-X target declaration must reach Count payment");
+            assert!(matches!(state.waiting_for, WaitingFor::PayCost { .. }));
+            assert_eq!(state.objects[&fodder].zone, Zone::Battlefield);
+            assert!(!state.objects[&tapper].tapped);
+            assert!(state.stack.is_empty());
         }
     }
 
