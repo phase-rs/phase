@@ -329,3 +329,76 @@ fn accepting_an_optional_modal_chapter_asks_for_a_mode() {
     assert_eq!(bears, (Some(4), Some(4)), "the chosen +2/+2 applies");
     assert_eq!(life_change, 0);
 }
+
+const FLIGHT_SAGA: &str = "(As this Saga enters and after your draw step, add a lore counter.)\nI \u{2014} Choose one \u{2014}\n\u{2022} Draw a card. Creatures you control gain flying.\n\u{2022} Draw a card. Creatures you control gain flying until end of turn.\nII \u{2014} You gain 1 life.";
+
+/// A Saga whose modal chapter I grants P0's creatures flying, either with no
+/// stated duration (`mode` 0) or until end of turn (`mode` 1), fired and
+/// resolved. Returns the Saga and P0's creature.
+fn fire_flight_saga(mode: usize) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let saga = scenario
+        .add_creature(P0, "Flight Saga", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(FLIGHT_SAGA)
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    scenario.with_library_top(P0, &["Plains"; 10]);
+    scenario.with_library_top(P1, &["Plains"; 10]);
+    let mut runner = scenario.build();
+    fire_chapter_one(&mut runner, saga, Some(mode));
+    assert!(
+        has_flying(&runner, bears),
+        "reach: the chosen mode granted flying"
+    );
+    (runner, saga, bears)
+}
+
+fn has_flying(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id]
+        .keywords
+        .iter()
+        .any(|keyword| matches!(keyword, engine::types::keywords::Keyword::Flying))
+}
+
+/// Run P0's cleanup step (CR 514), where "until end of turn" effects end
+/// (CR 514.2).
+fn pass_cleanup(runner: &mut GameRunner) {
+    let mut events = Vec::new();
+    runner.state_mut().phase = Phase::Cleanup;
+    let _ = engine::game::turns::execute_cleanup(runner.state_mut(), &mut events);
+    engine::game::layers::flush_layers(runner.state_mut());
+}
+
+/// CR 611.2a: "If no duration is stated, it lasts until the end of the game."
+/// A modal chapter's independent grant to other objects ("Creatures you control
+/// gain flying.") survives cleanup and survives the Saga leaving the
+/// battlefield: it isn't the Saga's grant, so its lifetime isn't the Saga's.
+#[test]
+fn a_duration_free_chapter_grant_to_creatures_outlives_the_turn_and_the_saga() {
+    let (mut runner, saga, bears) = fire_flight_saga(0);
+    pass_cleanup(&mut runner);
+    assert!(has_flying(&runner, bears), "the grant survives cleanup");
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), saga, Zone::Graveyard, &mut events);
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&saga].zone, Zone::Graveyard);
+    assert!(
+        has_flying(&runner, bears),
+        "the grant survives the Saga leaving the battlefield"
+    );
+}
+
+/// Control: the same grant stated "until end of turn" ends at cleanup.
+#[test]
+fn an_end_of_turn_chapter_grant_to_creatures_ends_at_cleanup() {
+    let (mut runner, _saga, bears) = fire_flight_saga(1);
+    pass_cleanup(&mut runner);
+    assert!(
+        !has_flying(&runner, bears),
+        "the stated duration ends at cleanup"
+    );
+}

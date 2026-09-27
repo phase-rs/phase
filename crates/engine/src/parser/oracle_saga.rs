@@ -210,17 +210,15 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
                     )
                     .unwrap_or_else(|| parse_effect_chain(effect_text, AbilityKind::Spell)),
                 };
-            // CR 611.2b + CR 714.2b: A chapter ability that grants an ability with no
+            // CR 611.2a + CR 714.2b: A chapter ability that grants an ability with no
             // explicit duration in its Oracle text creates a continuous effect that
-            // persists indefinitely. The general-purpose `try_parse_gain_quoted_ability`
+            // lasts until the end of the game. The general-purpose `try_parse_gain_quoted_ability`
             // path defaults to `UntilEndOfTurn` (correct for pump-spell sub-effects like
-            // "target creature gains flying"), but for a Saga chapter that grants the
-            // Saga itself an activated ability (e.g. Urza's Saga: "I — This Saga gains
-            // '{T}: Add {C}.'", Roar of the Fifth People: "II — This Saga gains
-            // 'Creatures you control have ...'"), the granted ability must persist
-            // while the Saga is on the battlefield. Override the default end-of-turn
-            // duration to `UntilHostLeavesPlay` for each grant whose own clause
-            // states no duration.
+            // "target creature gains flying"), but a chapter grant that states no
+            // duration gets its CR 611.2a lifetime instead: while the Saga is on the
+            // battlefield for a grant to the Saga itself (Urza's Saga: "I — This Saga
+            // gains '{T}: Add {C}.'"), and until the end of the game for a grant to
+            // other objects. See `apply_duration_free_lifetime`.
             promote_grant_duration_for_chapter(&mut execute);
             // CR 603.3c + CR 700.2b: a "you may choose one —" chapter lets the
             // controller choose no mode. The resolving execute ability already
@@ -286,10 +284,12 @@ pub(crate) fn is_saga_chapter(lower: &str) -> bool {
     parse_chapter_line(lower).is_some()
 }
 
-/// CR 611.2a + CR 611.2b + CR 714.2b: When a Saga chapter grants an ability
-/// with no stated duration ("This Saga gains 'X.'"), the grant lasts while the
-/// Saga is on the battlefield, so its duration becomes `UntilHostLeavesPlay`
-/// (cleaned up at zone exit by `prune_host_left_effects`).
+/// CR 611.2a + CR 714.2b: When a Saga chapter grants an ability with no
+/// stated duration, the grant gets its CR 611.2a lifetime: while the Saga is on
+/// the battlefield for a grant to the Saga itself ("This Saga gains 'X.'",
+/// `UntilHostLeavesPlay`, cleaned up at zone exit by `prune_host_left_effects`),
+/// until the end of the game for a grant to other objects (see
+/// `apply_duration_free_lifetime`).
 ///
 /// A continuous effect "lasts as long as stated by the spell or ability
 /// creating it", so each grant is judged by the duration ITS OWN clause states,
@@ -314,38 +314,44 @@ fn promote_grant_duration_for_chapter(execute: &mut AbilityDefinition) {
     promote_duration_free_grants(execute);
 }
 
-/// Promote the `GenericEffect` grants in `ability`'s chain whose own clause
-/// states no duration (see `promote_grant_duration_for_chapter`).
+/// Give the `GenericEffect` grants in `ability`'s chain whose own clause
+/// states no duration their CR 611.2a lifetime (see
+/// `promote_grant_duration_for_chapter` and `apply_duration_free_lifetime`).
 ///
-/// The chain's root keeps the chapter promotion as it was, now judged on the
-/// root clause's recorded duration. A LATER clause that isn't a duration-free
-/// grant to the Saga itself is left exactly as the effect-chain parser produced
-/// it: a grant to anything else, or one carrying a duration on its effect ("…
-/// can't be blocked this turn"), states its own lifetime.
+/// The chain's root is judged on the root clause's recorded duration. A LATER
+/// clause is judged the same way when it is its own instruction, which the
+/// parser links as a `SequentialSibling` (Victory of the Pyrohammer I's
+/// "Victory of the Pyrohammer gains …"). A clause carrying a duration on its
+/// effect ("… can't be blocked this turn") states its own lifetime and is left
+/// as parsed.
 ///
-/// A later duration-free grant to the Saga lasts as long as the Saga does when
-/// it is its own instruction (CR 400.7: the Saga that leaves is a new object;
-/// CR 611.2a: no stated duration), as Victory of the Pyrohammer I's "Victory of
-/// the Pyrohammer gains …" is, and the parser links such a clause as a
-/// `SequentialSibling`. A `ContinuationStep` is ambiguous here: it is either a
-/// conjunct of an earlier clause, whose leading "Until end of turn, … and …"
-/// the parser does not distribute onto it (World War Hulk III's shape), or a
-/// separate sentence the parser relinked because it depends on the earlier
-/// one. The first expires with the turn and the second lasts while the Saga
-/// does, and the chain doesn't say which, so that grant is an explicit gap
-/// (CR 611.2a) rather than a guess either way. No printed Saga has it.
+/// A `ContinuationStep` is ambiguous here: it is either a conjunct of an
+/// earlier clause, whose leading "Until end of turn, … and …" the parser does
+/// not distribute onto it (World War Hulk III's "… and it gains trample"), or a
+/// separate sentence the parser relinked because it depends on the earlier one.
+/// For a grant to the Saga the two readings differ (end of turn, or while the
+/// Saga remains), and the chain doesn't say which, so that grant is an explicit
+/// gap rather than a guess; no printed Saga has it. A continuation grant to
+/// other objects is left exactly as parsed: its end-of-turn fallback is the
+/// engine-wide reading of a duration-less conjunct (effects/effect.rs), which
+/// World War Hulk III's end-of-turn conjunct relies on.
 fn promote_duration_free_grants(ability: &mut AbilityDefinition) {
     if ability.duration.is_none() {
-        promote_generic_effect_duration(&mut ability.effect);
+        apply_duration_free_lifetime(&mut ability.effect);
     }
     let mut node = ability.sub_ability.as_deref_mut();
     while let Some(sub) = node {
-        if sub.duration.is_none() && is_duration_free_grant_to_the_saga(&sub.effect) {
-            match sub.sub_link {
-                SubAbilityLink::SequentialSibling => {
-                    promote_generic_effect_duration(&mut sub.effect);
+        if sub.duration.is_none() {
+            match (sub.sub_link, duration_free_grant_recipients(&sub.effect)) {
+                (_, None) => {}
+                (SubAbilityLink::SequentialSibling, Some(_)) => {
+                    apply_duration_free_lifetime(&mut sub.effect);
                 }
-                SubAbilityLink::ContinuationStep => {
+                (SubAbilityLink::ContinuationStep, Some(GrantRecipients::Others)) => {}
+                (
+                    SubAbilityLink::ContinuationStep,
+                    Some(GrantRecipients::Saga | GrantRecipients::Undetermined),
+                ) => {
                     *sub.effect = Effect::unimplemented(
                         "saga_continuation_self_grant_duration",
                         "a duration-free grant to this Saga continuing an earlier clause",
@@ -357,32 +363,82 @@ fn promote_duration_free_grants(ability: &mut AbilityDefinition) {
     }
 }
 
-/// A `GenericEffect` whose every static affects the Saga itself (`SelfRef`) and
-/// whose effect carries no duration.
-fn is_duration_free_grant_to_the_saga(effect: &Effect) -> bool {
-    matches!(
-        effect,
+/// Who a chapter's `GenericEffect` grant affects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrantRecipients {
+    /// Every static affects the Saga itself (`SelfRef`).
+    Saga,
+    /// Every static affects some other object or set named by its filter.
+    Others,
+    /// A mix of the two, or a static with no `affected` filter.
+    Undetermined,
+}
+
+fn grant_recipients(
+    static_abilities: &[crate::types::ability::StaticDefinition],
+) -> GrantRecipients {
+    let is_saga = |def: &crate::types::ability::StaticDefinition| {
+        matches!(def.affected, Some(TargetFilter::SelfRef))
+    };
+    if static_abilities.iter().all(is_saga) {
+        GrantRecipients::Saga
+    } else if static_abilities
+        .iter()
+        .all(|def| def.affected.is_some() && !is_saga(def))
+    {
+        GrantRecipients::Others
+    } else {
+        GrantRecipients::Undetermined
+    }
+}
+
+/// The recipients of a `GenericEffect` grant whose effect carries no duration,
+/// or `None` for any other effect.
+fn duration_free_grant_recipients(effect: &Effect) -> Option<GrantRecipients> {
+    match effect {
         Effect::GenericEffect {
             duration: None,
             static_abilities,
             ..
-        } if !static_abilities.is_empty()
-            && static_abilities
-                .iter()
-                .all(|def| matches!(def.affected, Some(TargetFilter::SelfRef)))
-    )
+        } if !static_abilities.is_empty() => Some(grant_recipients(static_abilities)),
+        _ => None,
+    }
 }
 
-/// Promote a `GenericEffect` whose duration is the parser default
-/// (`UntilEndOfTurn` or `None`) to `UntilHostLeavesPlay`. Called only for a
-/// clause that states no duration of its own.
-fn promote_generic_effect_duration(effect: &mut Effect) {
-    if let Effect::GenericEffect { duration, .. } = effect {
-        match duration {
-            None | Some(Duration::UntilEndOfTurn) => {
-                *duration = Some(Duration::UntilHostLeavesPlay);
-            }
-            _ => {}
+/// CR 611.2a: "If no duration is stated, it lasts until the end of the game."
+/// Called only for a clause that states no duration of its own, on a
+/// `GenericEffect` whose duration is the parser default (`UntilEndOfTurn` or
+/// `None`).
+///
+/// - A grant to the Saga itself lasts while the Saga is on the battlefield:
+///   the Saga that leaves is a new object (CR 400.7), so `UntilHostLeavesPlay`
+///   is exactly its lifetime.
+/// - A grant to other objects (The Bears of Littjara II's "Any number of target
+///   Shapeshifter creatures you control have base power and toughness 4/4")
+///   lasts until the end of the game, `Duration::Permanent`, and outlives the
+///   Saga.
+/// - A grant mixing the two, or one with no `affected` filter, has no single
+///   lifetime here and is an explicit gap. No printed Saga has it.
+fn apply_duration_free_lifetime(effect: &mut Effect) {
+    let Effect::GenericEffect {
+        duration,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        return;
+    };
+    if !matches!(duration, None | Some(Duration::UntilEndOfTurn)) || static_abilities.is_empty() {
+        return;
+    }
+    match grant_recipients(static_abilities) {
+        GrantRecipients::Saga => *duration = Some(Duration::UntilHostLeavesPlay),
+        GrantRecipients::Others => *duration = Some(Duration::Permanent),
+        GrantRecipients::Undetermined => {
+            *effect = Effect::unimplemented(
+                "saga_grant_duration_recipients",
+                "a duration-free chapter grant whose recipients have no single lifetime",
+            );
         }
     }
 }
@@ -996,7 +1052,7 @@ mod tests {
         assert!(!is_saga_chapter("Draw a card."));
     }
 
-    /// CR 611.2b + CR 714.2b: Urza's Saga chapter I grants the Saga an activated
+    /// CR 611.2a + CR 714.2b: Urza's Saga chapter I grants the Saga an activated
     /// mana ability with no Oracle-text duration. The chapter trigger's
     /// `GenericEffect` must carry `Duration::UntilHostLeavesPlay`, NOT the
     /// default `UntilEndOfTurn` — otherwise the granted `{T}: Add {C}` ability
@@ -1025,7 +1081,7 @@ mod tests {
         }
     }
 
-    /// CR 611.2b + CR 714.2b: Urza's Saga chapter II grants `{2}, {T}: Create
+    /// CR 611.2a + CR 714.2b: Urza's Saga chapter II grants `{2}, {T}: Create
     /// a 0/0 colorless Construct...`. Same persistence requirement as chapter I.
     #[test]
     fn urzas_saga_chapter_two_grants_persist_until_host_leaves_play() {
@@ -1079,7 +1135,7 @@ mod tests {
         );
     }
 
-    /// CR 611.2b + CR 714.2b + CR 602.5: Roar of the Fifth People chapter II
+    /// CR 611.2a + CR 714.2b + CR 602.5: Roar of the Fifth People chapter II
     /// grants the Saga a static ability whose text is "Creatures you control have
     /// '{T}: Add {R}, {G}, or {W}.'". The nested single-quoted tap ability must
     /// parse as a `GrantStaticAbility` on creatures you control — NOT a broken
@@ -1245,8 +1301,9 @@ mod tests {
 
     /// CR 611.2a: a grant keeps the duration its own clause states, whether the
     /// clause states it leading ("Until end of turn, …", Firja's Retribution II's
-    /// shape) or trailing, and a grant that states none lasts while the Saga is on
-    /// the battlefield.
+    /// shape) or trailing. A grant that states none lasts while the Saga is on
+    /// the battlefield when it grants to the Saga (CR 400.7), and until the end
+    /// of the game when it grants to other objects.
     #[test]
     fn chapter_grant_keeps_a_duration_stated_in_either_position() {
         for (body, expected) in [
@@ -1264,7 +1321,12 @@ mod tests {
             ),
             (
                 "Creatures you control gain flying.",
-                Duration::UntilHostLeavesPlay,
+                Duration::Permanent,
+            ),
+            // The Bears of Littjara II's shape.
+            (
+                "Any number of target Shapeshifter creatures you control have base power and toughness 4/4.",
+                Duration::Permanent,
             ),
         ] {
             assert_eq!(one_chapter_grant_duration(body), Some(expected), "{body}");
@@ -1407,12 +1469,61 @@ mod tests {
         }
     }
 
+    /// A duration-free grant to both the Saga and other objects has no single
+    /// CR 611.2a lifetime here (the Saga's part ends with the Saga, the rest
+    /// doesn't), so it is an explicit gap. No printed Saga has it; the shape is
+    /// built from a parsed grant with a static to the Saga added.
+    #[test]
+    fn a_duration_free_grant_to_the_saga_and_other_objects_is_a_gap() {
+        let lines = vec![
+            "(As this Saga enters and after your draw step, add a lore counter.)",
+            "I \u{2014} Creatures you control gain flying.",
+        ];
+        let (triggers, _, _) = saga_test_chapters(&lines, "Duration Saga");
+        let mut chain = triggers[0]
+            .execute
+            .as_deref()
+            .expect("chapter has an ability")
+            .clone();
+        let Effect::GenericEffect {
+            duration,
+            static_abilities,
+            ..
+        } = &mut *chain.effect
+        else {
+            panic!("reach: the chapter is a grant, got {:?}", chain.effect);
+        };
+        assert_eq!(*duration, Some(Duration::Permanent), "reach: promoted");
+        *duration = None;
+        let mut to_the_saga = static_abilities[0].clone();
+        to_the_saga.affected = Some(TargetFilter::SelfRef);
+        static_abilities.push(to_the_saga);
+        promote_grant_duration_for_chapter(&mut chain);
+        assert!(
+            chain.effect.unimplemented_description().is_some(),
+            "a mixed grant is an explicit gap, got {:?}",
+            chain.effect
+        );
+    }
+
     /// The same, inside a modal chapter's mode chain.
     #[test]
     fn modal_mode_promotes_a_later_duration_free_grant() {
-        for bullet in [
-            "\u{2022} Target creature gets +1/+1 until end of turn. This Saga gains \"{T}: Add {C}.\"",
-            "\u{2022} Draw a card. This Saga gains \"{T}: Add {C}.\"",
+        for (bullet, expected) in [
+            (
+                "\u{2022} Target creature gets +1/+1 until end of turn. This Saga gains \"{T}: Add {C}.\"",
+                Duration::UntilHostLeavesPlay,
+            ),
+            (
+                "\u{2022} Draw a card. This Saga gains \"{T}: Add {C}.\"",
+                Duration::UntilHostLeavesPlay,
+            ),
+            // CR 611.2a: an independent later grant to other objects lasts until
+            // the end of the game.
+            (
+                "\u{2022} Draw a card. Creatures you control gain flying.",
+                Duration::Permanent,
+            ),
         ] {
             let lines = vec![
                 "(As this Saga enters and after your draw step, add a lore counter.)",
@@ -1428,7 +1539,7 @@ mod tests {
             assert!(execute.modal.is_some(), "chapter must be modal");
             assert_eq!(
                 chain_grant_duration(&execute.mode_abilities[0]),
-                Some(Duration::UntilHostLeavesPlay),
+                Some(expected),
                 "{bullet}"
             );
         }
