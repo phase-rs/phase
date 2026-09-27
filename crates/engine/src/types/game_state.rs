@@ -13110,6 +13110,16 @@ pub enum WaitingFor {
             deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
         )]
         blocker_constraints: HashMap<ObjectId, crate::game::combat::CombatRequirement>,
+        /// CR 509.1c: per blocker, the attackers whose must-be-blocked
+        /// requirement that blocker's block would obey. Display-only —
+        /// computed by `combat::must_be_blocked_targets_for_player`.
+        #[serde(
+            default,
+            skip_serializing_if = "HashMap::is_empty",
+            serialize_with = "crate::types::deterministic_serde::hash_map",
+            deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
+        )]
+        must_be_blocked_targets: HashMap<ObjectId, Vec<ObjectId>>,
     },
     /// CR 502.3: During the untap step, the active player may choose not to
     /// untap permanents with "You may choose not to untap..." static abilities.
@@ -28990,6 +29000,7 @@ mod forced_cascade_window_tests {
                     valid_block_targets: Default::default(),
                     block_requirements: Default::default(),
                     blocker_constraints: Default::default(),
+                    must_be_blocked_targets: Default::default(),
                 },
             ),
             (
@@ -37601,6 +37612,7 @@ mod tests {
             valid_block_targets: HashMap::new(),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::GameOver {
             winner: Some(PlayerId(0)),

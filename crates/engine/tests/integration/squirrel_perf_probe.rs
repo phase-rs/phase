@@ -229,6 +229,7 @@ fn probe_declare_blockers() {
         valid_block_targets: vbt,
         block_requirements: std::collections::HashMap::new(),
         blocker_constraints: Default::default(),
+        must_be_blocked_targets: Default::default(),
     };
 
     perf_counters::reset();

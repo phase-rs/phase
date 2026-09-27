@@ -15941,6 +15941,7 @@ mod tests {
                         .collect(),
                     block_requirements: Default::default(),
                     blocker_constraints: Default::default(),
+                    must_be_blocked_targets: Default::default(),
                 },
                 true,
             ),
