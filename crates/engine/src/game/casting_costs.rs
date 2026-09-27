@@ -26517,6 +26517,7 @@ its replicate cost was paid.)\nDraw a card.";
                     .into(),
                 2,
             ));
+            let resolved = announced_ability(&state, source, resolved);
             let mut events = Vec::new();
             let outcome = push_activated_ability_to_stack(
                 &mut state,
@@ -26793,6 +26794,7 @@ its replicate cost was paid.)\nDraw a card.";
                 PlayerId(0),
             );
             resolved.set_chosen_x_recursive(4);
+            let resolved = announced_ability(&state, source, resolved);
             let mut events = Vec::new();
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 push_activated_ability_to_stack(
@@ -26915,6 +26917,7 @@ its replicate cost was paid.)\nDraw a card.";
                 PlayerId(0),
             );
             resolved.set_chosen_x_recursive(4);
+            let resolved = announced_ability(&state, source, resolved);
             let mut events = Vec::new();
             let result = catch_unwind(AssertUnwindSafe(|| {
                 push_activated_ability_to_stack(
@@ -27012,6 +27015,7 @@ its replicate cost was paid.)\nDraw a card.";
                         .into(),
                     count,
                 ));
+                let resolved = announced_ability(&state, source, resolved);
                 let waiting = push_activated_ability_to_stack(
                     &mut state,
                     PlayerId(0),
@@ -27176,6 +27180,7 @@ its replicate cost was paid.)\nDraw a card.";
         for bulk in [true, false] {
             let (mut state, source, targets, fodder, tapper, cost, resolved) =
                 defensive_x_target_fixture(2, true);
+            let resolved = announced_ability(&state, source, resolved);
             let waiting = push_activated_ability_to_stack(
                 &mut state,
                 PlayerId(0),
@@ -27293,6 +27298,7 @@ its replicate cost was paid.)\nDraw a card.";
                     }
                     Route::Bulk | Route::Slot | Route::Automatic => {}
                 }
+                let resolved = announced_ability(&state, source, resolved);
                 let mut events = Vec::new();
                 let push = || {
                     push_activated_ability_to_stack(
@@ -27445,6 +27451,7 @@ its replicate cost was paid.)\nDraw a card.";
         for residual in [ActivationResidual::None, ActivationResidual::ManaLeg] {
             let (mut state, source, targets, fodder, tapper, cost, resolved) =
                 defensive_x_target_fixture(2, false);
+            let resolved = announced_ability(&state, source, resolved);
             let waiting = push_activated_ability_to_stack(
                 &mut state,
                 PlayerId(0),
