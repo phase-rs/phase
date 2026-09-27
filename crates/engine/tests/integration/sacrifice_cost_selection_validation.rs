@@ -1,8 +1,6 @@
 //! Initial acceptance of ordinary selected sacrifice costs.
 //! Payment abilities are synthetic typed fixtures; Control Magic uses its pinned Oracle text.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
-
 use engine::ai_support::legal_actions_full;
 use engine::game::casting::find_eligible_sacrifice_targets;
 use engine::game::effects::attach::attach_to;
@@ -774,7 +772,7 @@ fn fixed_mana_source_loss_identity_positive_controls() {
 }
 
 #[test]
-fn original_x_mana_activation_guard_remains_refused() {
+fn x_mana_activation_pays_both_selected_sacrifices() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let component = sacrifice(
@@ -799,7 +797,7 @@ fn original_x_mana_activation_guard_remains_refused() {
             ],
         }))
         .id();
-    scenario.add_enchantment_from_oracle(P0, "Other", "");
+    let other = scenario.add_enchantment_from_oracle(P0, "Other", "").id();
     scenario.with_mana_pool(
         P0,
         vec![ManaUnit::new(ManaType::Green, ObjectId(9999), false, vec![]); 4],
@@ -824,24 +822,80 @@ fn original_x_mana_activation_guard_remains_refused() {
             .activation_residual,
         ActivationResidual::XMana
     ));
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        runner.act(GameAction::ChooseX { value: 1 })
-    }));
-    match outcome {
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| payload.downcast_ref::<&str>().copied());
-            assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"));
-        }
-        Ok(Err(EngineError::ActionNotAllowed(message))) => {
-            assert_eq!(message, "non-self sacrifice/exile cost unhandled");
-        }
-        Ok(other) => panic!("unsupported X sacrifice suffix unexpectedly proceeded: {other:?}"),
-    }
+    runner.act(GameAction::ChooseX { value: 1 }).unwrap();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    let first_choices = prompt(&runner, (1, 1));
+    let WaitingFor::PayCost {
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        unreachable!("prompt verified the Spell cost root")
+    };
+    assert_eq!(
+        (spell.object_id, spell.activation_ability_index),
+        (source, Some(0))
+    );
+    assert_eq!(
+        (
+            spell.ability.source_id,
+            spell.ability.controller,
+            spell.ability.chosen_x
+        ),
+        (source, P0, Some(1))
+    );
+    assert!(matches!(
+        spell.activation_residual,
+        ActivationResidual::XMana
+    ));
+    assert!(first_choices.contains(&source) && first_choices.contains(&other));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![source],
+        })
+        .unwrap();
+    assert_eq!(prompt(&runner, (1, 1)), vec![other]);
+    assert!(runner.state().players[1].graveyard.contains(&source));
+    assert_eq!(runner.state().objects[&source].owner, P1);
+    let WaitingFor::PayCost {
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        unreachable!("prompt verified the Spell cost root")
+    };
+    assert_eq!(
+        (spell.object_id, spell.activation_ability_index),
+        (source, Some(0))
+    );
+    assert_eq!(
+        (
+            spell.ability.source_id,
+            spell.ability.controller,
+            spell.ability.chosen_x
+        ),
+        (source, P0, Some(1))
+    );
+    assert!(matches!(
+        spell.activation_residual,
+        ActivationResidual::XMana
+    ));
+    runner
+        .act(GameAction::SelectCards { cards: vec![other] })
+        .unwrap();
+    let ability = runner.state().stack.back().unwrap().ability().unwrap();
+    assert_eq!(ability.chosen_x, Some(1));
+    let paid: Vec<_> = ability
+        .cost_paid_objects
+        .iter()
+        .map(|record| record.snapshot().unwrap().object_id)
+        .collect();
+    assert_eq!(paid, vec![source, other]);
+    assert!(runner.state().players[0].graveyard.contains(&other));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+    finish_payoff(&mut runner, source, &[source, other]);
 }
-
 #[test]
 fn selected_keyword_sacrifice_revalidates_its_current_quality() {
     for kind in ["other", "offering", "emerge", "emerge_artifact"] {

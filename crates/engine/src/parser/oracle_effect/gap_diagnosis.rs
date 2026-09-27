@@ -815,14 +815,13 @@ fn bound_operand<'a>(operand: &'a str, bounds: &[&str]) -> &'a str {
 // C) Pre-dispatch verbs from parse_effect_clause and lower_imperative_clause
 //
 // (B) and (C) are CLAUSE_HEAD_VERBS below. This is the ONE definition in the workspace:
-// it lives beside the dispatcher it mirrors, and `game::gap_analysis` imports
-// `is_clause_head_verb` from here rather than keeping a second copy.
+// it lives beside the dispatcher it mirrors.
 //
 // NOTE: when adding verbs to parse_imperative_family_ast, also add them here.
 
 /// Additional verbs from `parse_imperative_family_ast` and the pre-dispatch arms, not in
 /// `PREDICATE_VERBS`.
-pub(crate) const CLAUSE_HEAD_VERBS: &[&str] = &[
+const CLAUSE_HEAD_VERBS: &[&str] = &[
     "spend",
     "double",
     "triple",
@@ -872,7 +871,7 @@ pub(crate) const CLAUSE_HEAD_VERBS: &[&str] = &[
 
 /// True when `verb` (conjugated or not) is a clause head the imperative dispatcher
 /// recognises.
-pub(crate) fn is_clause_head_verb(verb: &str) -> bool {
+fn is_clause_head_verb(verb: &str) -> bool {
     let normalized = normalize_verb_token(verb);
     let n = normalized.as_str();
     PREDICATE_VERBS.contains(&n) || CLAUSE_HEAD_VERBS.contains(&n)
