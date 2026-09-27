@@ -24,6 +24,7 @@ pub(crate) mod manland;
 pub mod plan;
 pub mod planner;
 pub mod pod;
+pub mod pod_selection;
 pub mod policies;
 pub mod projection;
 pub mod saved_state;

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use engine::game::bracket_estimate::CommanderBracketTier;
+
 use crate::deck_profile::ArchetypeMultipliers;
 use crate::eval::{EvalWeightSet, KeywordBonuses};
 use crate::strategy_profile::StrategyProfile;
@@ -51,6 +53,28 @@ pub enum AiDifficulty {
 }
 
 impl AiDifficulty {
+    /// Default brain rung for a table at `tier`. A default the per-seat choice
+    /// beats under advisory enforcement, never a cap and never a multiplier:
+    /// shipped presets keep `determinization_samples == 0` because product's
+    /// 2026-07-18 monotonicity decision forbids multiplying another strength
+    /// factor into the same scoring path.
+    ///
+    /// This match is exhaustive so a new Commander bracket cannot silently
+    /// inherit a difficulty. Exhibition maps to `Easy`, not `VeryEasy`, because
+    /// the latter's intentionally poor choices read as bugs; it remains an
+    /// explicit per-seat option.
+    ///
+    /// Bracket policy is not part of the Comprehensive Rules.
+    pub fn for_bracket(tier: CommanderBracketTier) -> Self {
+        match tier {
+            CommanderBracketTier::Exhibition => AiDifficulty::Easy,
+            CommanderBracketTier::Core => AiDifficulty::Medium,
+            CommanderBracketTier::Upgraded => AiDifficulty::Hard,
+            CommanderBracketTier::Optimized => AiDifficulty::VeryHard,
+            CommanderBracketTier::Cedh => AiDifficulty::CEDH,
+        }
+    }
+
     /// Parse a difficulty label supplied by a transport boundary (WASM bridge,
     /// Tauri IPC, CLI). Case-insensitive; unknown labels fall back to `Medium`.
     ///
@@ -1561,6 +1585,38 @@ pub fn create_config_for_players(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn for_bracket_is_total_and_exact() {
+        assert_eq!(
+            AiDifficulty::for_bracket(CommanderBracketTier::Exhibition),
+            AiDifficulty::Easy
+        );
+        assert_eq!(
+            AiDifficulty::for_bracket(CommanderBracketTier::Core),
+            AiDifficulty::Medium
+        );
+        assert_eq!(
+            AiDifficulty::for_bracket(CommanderBracketTier::Upgraded),
+            AiDifficulty::Hard
+        );
+        assert_eq!(
+            AiDifficulty::for_bracket(CommanderBracketTier::Optimized),
+            AiDifficulty::VeryHard
+        );
+        assert_eq!(
+            AiDifficulty::for_bracket(CommanderBracketTier::Cedh),
+            AiDifficulty::CEDH
+        );
+    }
+
+    #[test]
+    fn cedh_mode_still_yields_cedh_difficulty() {
+        assert_eq!(
+            AiDifficulty::for_bracket(CommanderBracketTier::Cedh),
+            AiDifficulty::CEDH
+        );
+    }
 
     #[test]
     fn very_easy_has_high_temperature() {

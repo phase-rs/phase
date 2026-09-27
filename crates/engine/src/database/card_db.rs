@@ -555,6 +555,11 @@ impl CardDatabase {
         self.signals_for_single_face(name)
     }
 
+    /// The data version `estimate_bracket` stamps onto `BracketEstimate::data_version`, which `pod_selection` compares declared labels against.
+    pub fn bracket_lists_version(&self) -> &str {
+        &self.bracket_lists.version
+    }
+
     fn signals_for_single_face(&self, name: &str) -> BracketSignals {
         let key = self.lookup_key(name);
         let mut axes: BTreeSet<BracketAxis> = self.bracket_lists.signals_for(name).axes();
