@@ -19,6 +19,7 @@ import { DeckBuilderToolbar } from "./DeckBuilderToolbar";
 import { DeckBuilderTabBar } from "./DeckBuilderTabBar";
 import { panelId, tabId } from "./deckBuilderTabs";
 import { useDeckBuilder } from "./useDeckBuilder";
+import type { SaveConflictResolution } from "./useDeckBuilder";
 import type { CardHoverInfo } from "../card/CardPreview";
 
 interface DeckBuilderProps {
@@ -94,6 +95,8 @@ export function DeckBuilder({
     handleSave,
     handleClone,
     handleLoad,
+    saveConflict,
+    resolveSaveConflict,
     handleSetCommander,
     isCommanderEligible,
     handleRemoveCommander,
@@ -198,9 +201,8 @@ export function DeckBuilder({
   // Unsaved-changes guard. beforeunload covers tab close / refresh / browser
   // back; an in-app confirm covers the back button and loading another deck.
   const navigate = useNavigate();
-  const [pendingAction, setPendingAction] = useState<
-    { type: "back" } | { type: "load"; name: string } | null
-  >(null);
+  type PendingAction = { type: "back" } | { type: "load"; name: string };
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
 
   useEffect(() => {
     if (!dirty) return;
@@ -213,7 +215,7 @@ export function DeckBuilder({
   }, [dirty]);
 
   const performAction = useCallback(
-    (action: { type: "back" } | { type: "load"; name: string }) => {
+    (action: PendingAction) => {
       if (action.type === "back") navigate(backPath);
       else handleLoad(action.name);
     },
@@ -243,21 +245,53 @@ export function DeckBuilder({
     };
   }, []);
 
+  // Shared by Save & continue's own button, by a same-name conflict's "Save my version", and by
+  // "Load saved version": only a positive outcome ("saved", or "loaded" once the conflict's load
+  // actually replaced the editor) for the SAME pending request may still perform it — either can
+  // change while the async work awaited.
+  const continuePendingAfterSave = useCallback(
+    (outcome: SaveConflictResolution | undefined, action: PendingAction) => {
+      if ((outcome !== "saved" && outcome !== "loaded") || pendingActionRef.current !== action) return;
+      setPendingAction(null);
+      performAction(action);
+    },
+    [performAction],
+  );
+
   const confirmSaveThen = useCallback(async () => {
     const action = pendingAction;
     if (!action) return;
     const outcome = await handleSave();
-    // Continue only if this is still the pending request and the editor still holds what was saved: either can change while the save waits.
-    if (outcome !== "saved" || pendingActionRef.current !== action) return;
-    setPendingAction(null);
-    performAction(action);
-  }, [pendingAction, handleSave, performAction]);
+    continuePendingAfterSave(outcome, action);
+  }, [pendingAction, handleSave, continuePendingAfterSave]);
 
   const confirmDiscardThen = useCallback(() => {
     const action = pendingAction;
     setPendingAction(null);
     if (action) performAction(action);
   }, [pendingAction, performAction]);
+
+  // "Save my version" resolving a conflict raised mid-Save-&-continue must still perform the
+  // pending request on success — otherwise the save lands but the unsaved-changes dialog comes
+  // back over it, asking to save changes that are already saved.
+  const confirmSaveConflictKeepMine = useCallback(() => {
+    const action = pendingAction;
+    void resolveSaveConflict("keepMine").then((outcome) => {
+      if (action) continuePendingAfterSave(outcome, action);
+    });
+  }, [pendingAction, resolveSaveConflict, continuePendingAfterSave]);
+
+  // "Load saved version" resolving a conflict raised mid-Save-&-continue is the user explicitly
+  // discarding their edits (the unsaved dialog's own Discard choice), so it must still perform
+  // the pending request once the load actually replaces the editor. Gated on resolveSaveConflict
+  // returning "loaded" rather than firing unconditionally: a newer Load/edit racing the load
+  // makes it bail.
+  const confirmSaveConflictLoad = useCallback(() => {
+    const action = pendingAction;
+    void resolveSaveConflict("load").then((outcome) => {
+      if (action) continuePendingAfterSave(outcome, action);
+    });
+  }, [pendingAction, resolveSaveConflict, continuePendingAfterSave]);
 
   // Phone: tab bar picks one surface. md+: both columns show.
   const mainVisible = activeSurface === "deck" ? "flex" : "hidden md:flex";
@@ -565,53 +599,102 @@ export function DeckBuilder({
         />
       )}
 
-      {pendingAction && (
+      {saveConflict ? (
         <div
           className="fixed inset-0 z-[120] flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
-          aria-label={t("unsaved.title")}
+          aria-label={t("saveConflict.title")}
         >
           <button
             type="button"
             aria-label={t("unsaved.dismiss")}
             className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
-            onClick={() => setPendingAction(null)}
+            onClick={() => void resolveSaveConflict("dismiss")}
           />
           <div className="relative z-10 w-full max-w-sm rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
-            <h2 className="text-base font-semibold text-white">{t("unsaved.title")}</h2>
+            <h2 className="text-base font-semibold text-white">{t("saveConflict.title")}</h2>
             <p className="mt-1.5 text-sm text-slate-400">
-              {pendingAction.type === "back"
-                ? t("unsaved.bodyLeaving")
-                : t("unsaved.bodyLoading")}
+              {saveConflict.snapshot.raw === null
+                ? t("saveConflict.bodyDeleted", { name: saveConflict.snapshot.name })
+                : t("saveConflict.bodyChanged", { name: saveConflict.snapshot.name })}
             </p>
             <div className="mt-4 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setPendingAction(null)}
+                onClick={() => void resolveSaveConflict("dismiss")}
                 className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
               >
                 {t("common:actions.cancel")}
               </button>
+              {saveConflict.snapshot.raw !== null && (
+                <button
+                  type="button"
+                  onClick={confirmSaveConflictLoad}
+                  className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
+                >
+                  {t("saveConflict.loadSaved")}
+                </button>
+              )}
               <button
                 type="button"
-                onClick={confirmDiscardThen}
+                onClick={confirmSaveConflictKeepMine}
                 className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-sm text-red-200 hover:bg-red-500/20"
               >
-                {t("unsaved.discard")}
-              </button>
-              <button
-                type="button"
-                onClick={confirmSaveThen}
-                disabled={!deckName.trim()}
-                title={deckName.trim() ? undefined : t("toolbar.nameToSave")}
-                className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-sm text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
-              >
-                {t("unsaved.saveAndContinue")}
+                {t("saveConflict.saveMine")}
               </button>
             </div>
           </div>
         </div>
+      ) : (
+        pendingAction && (
+          <div
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("unsaved.title")}
+          >
+            <button
+              type="button"
+              aria-label={t("unsaved.dismiss")}
+              className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
+              onClick={() => setPendingAction(null)}
+            />
+            <div className="relative z-10 w-full max-w-sm rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
+              <h2 className="text-base font-semibold text-white">{t("unsaved.title")}</h2>
+              <p className="mt-1.5 text-sm text-slate-400">
+                {pendingAction.type === "back"
+                  ? t("unsaved.bodyLeaving")
+                  : t("unsaved.bodyLoading")}
+              </p>
+              <div className="mt-4 flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPendingAction(null)}
+                  className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
+                >
+                  {t("common:actions.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDiscardThen}
+                  className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-sm text-red-200 hover:bg-red-500/20"
+                >
+                  {t("unsaved.discard")}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmSaveThen}
+                  disabled={!deckName.trim()}
+                  title={deckName.trim() ? undefined : t("toolbar.nameToSave")}
+                  className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-sm text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
+                >
+                  {t("unsaved.saveAndContinue")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )
       )}
     </div>
   );

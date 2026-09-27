@@ -60,6 +60,16 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
+///      Kopala): `StaticMode::ReduceAbilityCost` gains `targets` and
+///      `frequency`, `GameState` gains the per-turn activation journal
+///      `abilities_activated_this_turn_by_player`, `ResolvedAbility` gains its
+///      pre-payment `activation_record`, the `AbilityActivated` ledger edit
+///      gains its record, and the `ActivationCostSnapshot` carrier gains
+///      `mana_carrier`, `settlement_tail` and the `TargetSettlement` lock point.
+///      A v82 peer would drop the new fields silently, which in P2P prices
+///      one activation differently on host and guest.
+///
 /// 82 — Added phases and steps anchored, identified and counted per
 ///      CR 500.8–500.10. Every change rides full-game state; lobby messages
 ///      are unchanged, and P2P moves in lockstep (wire 64).
@@ -681,7 +691,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 82;
+pub const PROTOCOL_VERSION: u32 = 83;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1897,12 +1907,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 82);
+        assert_eq!(PROTOCOL_VERSION, 83);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 81);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 82);
     }
 
     #[test]

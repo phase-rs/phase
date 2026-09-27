@@ -326,18 +326,42 @@ Deck
     expect(result.commander).toEqual(['Dark Leo & Shredder']);
   });
 
-  it('normalizes split-card names during import', () => {
+  it('leaves a single-slash split-card name as typed', () => {
     const result = parseMtgaDeck('1 Revival/Revenge');
     expect(result.main).toEqual([
-      { count: 1, name: 'Revival // Revenge' },
+      { count: 1, name: 'Revival/Revenge' },
     ]);
   });
 
-  it('normalizes multi-part single-slash split names to canonical " // "', () => {
+  it('leaves a multi-part single-slash name as typed', () => {
     const result = parseMtgaDeck('1 Who / What / When / Where / Why');
     expect(result.main).toEqual([
-      { count: 1, name: 'Who // What // When // Where // Why' },
+      { count: 1, name: 'Who / What / When / Where / Why' },
     ]);
+  });
+
+  it('preserves a printed name that contains a bare "/"', () => {
+    // "Summon: Choco/Mog" is a single-faced card whose real name contains a
+    // bare "/". The engine resolves single-slash split-card names to their
+    // front face itself (card_db.rs::split_composite_name), so the client no
+    // longer rewrites either shape.
+    expect(parseMtgaDeck('1 Summon: Choco/Mog').main).toEqual([
+      { count: 1, name: 'Summon: Choco/Mog' },
+    ]);
+    expect(parseDeckFile('1 Summon: Choco/Mog').main).toEqual([
+      { count: 1, name: 'Summon: Choco/Mog' },
+    ]);
+    const repaired = repairParsedDeck({
+      main: [{ count: 1, name: 'Summon: Choco/Mog' }],
+      sideboard: [],
+    });
+    expect(repaired.main).toEqual([{ count: 1, name: 'Summon: Choco/Mog' }]);
+    const repairedCommander = repairParsedDeck({
+      main: [],
+      sideboard: [],
+      commander: ['Summon: Choco/Mog'],
+    });
+    expect(repairedCommander.commander).toEqual(['Summon: Choco/Mog']);
   });
 
   it('preserves a printed name that literally contains "//" (issue #4790)', () => {

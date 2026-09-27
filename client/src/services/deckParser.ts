@@ -238,15 +238,10 @@ function normalizeCardName(name: string): string {
       : trimmed;
   }
 
-  // Single-slash exporter forms upgrade to canonical. Split on each "/" so both
-  // two-part ("Revival/Revenge") and multi-part
-  // ("Who / What / When / Where / Why") split cards collapse to " // " joins.
-  if (!trimmed.includes("/")) return trimmed;
-  return trimmed
-    .split("/")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join(" // ");
+  // A bare "/" is left verbatim: it can be part of a printed name
+  // ("Summon: Choco/Mog"), and the engine resolves a single-slash split-card
+  // name ("Revival/Revenge") to its front face itself.
+  return trimmed;
 }
 
 function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {

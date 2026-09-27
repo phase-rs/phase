@@ -55,6 +55,7 @@ import init, {
   get_card_face_data,
   get_card_parse_details,
   get_card_rulings,
+  canonicalCardNames,
 } from "@wasm/engine";
 
 import {
@@ -146,6 +147,7 @@ type EngineRequest =
   | { type: "getCardFaceData"; id: number; cardName: string }
   | { type: "getCardParseDetails"; id: number; cardName: string }
   | { type: "getCardRulings"; id: number; cardName: string }
+  | { type: "canonicalCardNames"; id: number; names: string[] }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
@@ -319,6 +321,11 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "getCardRulings": {
         result(msg.id, get_card_rulings(msg.cardName));
+        break;
+      }
+
+      case "canonicalCardNames": {
+        result(msg.id, canonicalCardNames(msg.names));
         break;
       }
 

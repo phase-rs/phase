@@ -4359,6 +4359,8 @@ fn instruction_outlives_declined_gate(
         chosen_players: _,
         replacement_applied: _,
         parent_target_missing_reason: _,
+        activation_cost_reduction: _,
+        activation_record: _,
     } = node;
     let unbound = condition.is_none()
         && else_ability.is_none()

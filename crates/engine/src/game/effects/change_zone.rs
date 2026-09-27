@@ -2206,8 +2206,8 @@ pub fn resolve_all(
             .map(|(owner, cards)| snapshot_mass_library_order_batch(state, owner, cards))
             .collect();
         if !remaining_batches.is_empty() {
-            state.pending_mass_library_order_choice =
-                Some(crate::types::game_state::PendingMassLibraryOrderChoice {
+            state.pending_mass_library_order_choice = Some(Box::new(
+                crate::types::game_state::PendingMassLibraryOrderChoice {
                     source_id: ability.source_id,
                     library_position: effect_library_position
                         .clone()
@@ -2218,7 +2218,8 @@ pub fn resolve_all(
                         crate::types::game_state::PendingMassLibraryOrderBatches::Typed(
                             remaining_batches,
                         ),
-                });
+                },
+            ));
         }
         state.waiting_for = mass_library_order_effect_zone_choice(
             snapshot_mass_library_order_batch(state, first_owner, first_cards),

@@ -41,10 +41,15 @@ export class SavedDeckLibraryBusyError extends Error {
 /** A user-initiated write was refused because the deck it targeted changed before it ran. */
 export class SavedDeckChangedError extends Error {
   readonly deckName: string;
-  constructor(deckName: string) {
+  /** The bytes `deckName` held at the moment this was thrown (`null` meaning none), when the
+   *  thrower captured them under its own lock — a caller that wants to act on exactly what the
+   *  refusal saw reads this instead of re-reading storage itself, which could race a later write. */
+  readonly stored?: string | null;
+  constructor(deckName: string, stored?: string | null) {
     super(`Saved deck changed before the write ran: ${deckName}`);
     this.name = "SavedDeckChangedError";
     this.deckName = deckName;
+    this.stored = stored;
   }
 }
 
