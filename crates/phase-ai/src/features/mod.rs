@@ -60,7 +60,7 @@ pub use tokens_wide::TokensWideFeature;
 pub use tribal::TribalFeature;
 pub use vehicles::VehiclesFeature;
 
-use engine::game::bracket_estimate::CommanderBracketTier;
+use engine::game::bracket_estimate::EffectiveBracketTier;
 
 use crate::deck_profile::DeckArchetype;
 use crate::strategy_profile::StrategyProfile;
@@ -108,24 +108,21 @@ pub struct DeckFeatures {
     /// CR 702.122: crewed-Vehicle density paired with the creature bench needed
     /// to tap for it. Gives `CrewTimingPolicy` the deck signal it lacked.
     pub vehicles: VehiclesFeature,
-    /// Declaration-derived: the deck's declared bracket tier. Unlike the
-    /// other fields here, this is not structurally detected from card text —
-    /// it is a per-deck declaration set at deck-analysis time from deck
-    /// metadata. Stored as the full `CommanderBracketTier` (not a `bool`) so
-    /// the design space stays open: `ComboLinePolicy::activation()` and
-    /// `CedhKeepablesMulligan` gate on `== Cedh` today, but bracket-aware
-    /// behavior for other tiers can read the same field without a new flag.
-    pub bracket_tier: CommanderBracketTier,
+    /// The reconciled `max(declared, estimated)` bracket tier. Unlike the other
+    /// fields, this is deck metadata rather than a card-text feature. It can be
+    /// built only through `effective_tier` or `Default`, preventing a raw
+    /// declaration from bypassing estimator reconciliation.
+    pub effective_bracket_tier: EffectiveBracketTier,
 }
 
 impl DeckFeatures {
     /// Construct `DeckFeatures` from a deck. Walks each per-class detector
-    /// (`landfall::detect`, `mana_ramp::detect`, ...) and records the declared
-    /// `bracket_tier`.
+    /// (`landfall::detect`, `mana_ramp::detect`, ...) and records the reconciled
+    /// effective bracket tier.
     ///
     /// Per-class detectors are pure functions over `&[DeckEntry]`. The tier
     /// argument flows in from deck metadata at the AI-setup boundary.
-    pub fn analyze(deck: &[engine::game::DeckEntry], tier: CommanderBracketTier) -> Self {
+    pub fn analyze(deck: &[engine::game::DeckEntry], tier: EffectiveBracketTier) -> Self {
         let profile = crate::deck_profile::DeckProfile::analyze(deck);
         let archetype = match &profile.classification {
             crate::deck_profile::ArchetypeClassification::Pure(arch) => *arch,
@@ -159,7 +156,7 @@ impl DeckFeatures {
             draw_matters: draw_matters::detect(deck),
             discard_matters: discard_matters::detect(deck),
             vehicles: vehicles::detect(deck),
-            bracket_tier: tier,
+            effective_bracket_tier: tier,
         }
     }
 }
@@ -167,19 +164,20 @@ impl DeckFeatures {
 #[cfg(test)]
 mod cedh_field_tests {
     use super::*;
+    use engine::game::bracket_estimate::{effective_tier, CommanderBracketTier};
 
     #[test]
     fn default_features_tier_is_not_cedh() {
         let f = DeckFeatures::default();
-        assert_ne!(f.bracket_tier, CommanderBracketTier::Cedh);
+        assert_ne!(f.effective_bracket_tier.tier(), CommanderBracketTier::Cedh);
     }
 
     #[test]
     fn analyze_records_cedh_tier() {
-        // Use an empty deck — structural features default to zero; bracket_tier
+        // Use an empty deck — structural features default to zero; the tier
         // should follow only the tier argument.
-        let f = DeckFeatures::analyze(&[], CommanderBracketTier::Cedh);
-        assert_eq!(f.bracket_tier, CommanderBracketTier::Cedh);
+        let f = DeckFeatures::analyze(&[], effective_tier(CommanderBracketTier::Cedh, None));
+        assert_eq!(f.effective_bracket_tier.tier(), CommanderBracketTier::Cedh);
     }
 
     #[test]
@@ -190,9 +188,9 @@ mod cedh_field_tests {
             CommanderBracketTier::Upgraded,
             CommanderBracketTier::Optimized,
         ] {
-            let f = DeckFeatures::analyze(&[], tier);
-            assert_eq!(f.bracket_tier, tier);
-            assert_ne!(f.bracket_tier, CommanderBracketTier::Cedh);
+            let f = DeckFeatures::analyze(&[], effective_tier(tier, None));
+            assert_eq!(f.effective_bracket_tier.tier(), tier);
+            assert_ne!(f.effective_bracket_tier.tier(), CommanderBracketTier::Cedh);
         }
     }
 }

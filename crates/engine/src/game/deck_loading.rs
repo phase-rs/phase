@@ -4,7 +4,7 @@ use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
-use crate::game::bracket_estimate::{ComboDeclaration, CommanderBracketTier};
+use crate::game::bracket_estimate::{estimate_bracket, ComboDeclaration, CommanderBracketTier};
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
@@ -98,6 +98,12 @@ pub struct PlayerDeckPayload {
     /// field continue to deserialize correctly.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// The estimator's bracket floor. `None` means no estimate was taken, such as
+    /// for a deck without a commander, a pre-phase payload, or a test fixture.
+    /// AI code must never read `bracket_tier` directly; it reads the reconciled
+    /// effective tier from the resulting [`crate::types::game_state::PlayerDeckPool`].
+    #[serde(default)]
+    pub estimated_bracket_tier: Option<CommanderBracketTier>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -257,11 +263,11 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
 /// using a `CardDatabase` for lookup. Unresolvable names are silently skipped.
 ///
-/// The `bracket_tier` is taken from `list.bracket_tier` — `PlayerDeckList`
-/// already carries the declared tier, so there is no separate parameter to
-/// keep in sync. Callers that need a specific tier set it on the
-/// `PlayerDeckList` before calling.
+/// The `bracket_tier` is taken from `list.bracket_tier`, while the estimator's
+/// floor is computed from the complete `PlayerDeckList`. Callers that need a
+/// specific declared tier set it on the list before calling.
 pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
+    let estimated_bracket_tier = estimate_tier_for_seat(db, list, "player");
     PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
@@ -274,17 +280,34 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
+        estimated_bracket_tier,
     }
+}
+
+fn estimate_tier_for_seat(
+    db: &CardDatabase,
+    list: &PlayerDeckList,
+    seat: &str,
+) -> Option<CommanderBracketTier> {
+    let estimated = estimate_bracket(list, db).map(|estimate| estimate.tier);
+    tracing::debug!(
+        seat,
+        declared_tier = %list.bracket_tier,
+        estimated_tier = ?estimated,
+        "resolved Commander bracket estimate"
+    );
+    estimated
 }
 
 /// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
 ///
-/// Each `PlayerDeckList`'s `bracket_tier` field is forwarded directly to the
-/// corresponding `PlayerDeckPayload`, so callers that populate the tier before
-/// calling this function receive correctly-tiered payloads. Old payloads that
-/// omit the field deserialize with `CommanderBracketTier::Core` (the `default`).
+/// Each declaration is forwarded and each estimator floor is computed from the
+/// corresponding complete `PlayerDeckList`. Old payloads that omit either field
+/// deserialize with `CommanderBracketTier::Core` and `None`, respectively.
 pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
+    let player_estimate = estimate_tier_for_seat(db, &list.player, "player");
+    let opponent_estimate = estimate_tier_for_seat(db, &list.opponent, "opponent");
     DeckPayload {
         player: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
@@ -298,6 +321,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sticker_sheets: list.player.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.player.signature_spell),
             bracket_tier: list.player.bracket_tier,
+            estimated_bracket_tier: player_estimate,
         },
         opponent: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.opponent.main_deck),
@@ -311,11 +335,13 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sticker_sheets: list.opponent.sticker_sheets.clone(),
             signature_spell: resolve_names(db, &list.opponent.signature_spell),
             bracket_tier: list.opponent.bracket_tier,
+            estimated_bracket_tier: opponent_estimate,
         },
         ai_decks: list
             .ai_decks
             .iter()
-            .map(|deck| PlayerDeckPayload {
+            .enumerate()
+            .map(|(index, deck)| PlayerDeckPayload {
                 main_deck: resolve_names(db, &deck.main_deck),
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
@@ -327,6 +353,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 sticker_sheets: deck.sticker_sheets.clone(),
                 signature_spell: resolve_names(db, &deck.signature_spell),
                 bracket_tier: deck.bracket_tier,
+                estimated_bracket_tier: estimate_tier_for_seat(db, deck, &format!("ai_{index}")),
             })
             .collect(),
         // ai_difficulties is carried through from the DeckList so the caller's
@@ -490,6 +517,7 @@ fn momir_fixed_deck_payload(db: &CardDatabase, submitted: &DeckPayload) -> DeckP
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
+        estimated_bracket_tier: None,
     };
     DeckPayload {
         player: fixed_seat(),
@@ -908,6 +936,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_scheme_deck: std::sync::Arc::clone(&p0_scheme),
             current_scheme_deck: p0_scheme,
             bracket_tier: payload.player.bracket_tier,
+            estimated_bracket_tier: payload.player.estimated_bracket_tier,
         });
     let p1_main = std::sync::Arc::new(main_deck_for(&payload.opponent));
     let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
@@ -933,6 +962,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_scheme_deck: std::sync::Arc::clone(&p1_scheme),
             current_scheme_deck: p1_scheme,
             bracket_tier: payload.opponent.bracket_tier,
+            estimated_bracket_tier: payload.opponent.estimated_bracket_tier,
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
@@ -960,6 +990,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 registered_scheme_deck: std::sync::Arc::clone(&scheme),
                 current_scheme_deck: scheme,
                 bracket_tier: ai_deck.bracket_tier,
+                estimated_bracket_tier: ai_deck.estimated_bracket_tier,
             });
     }
 
@@ -1312,6 +1343,17 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
     use super::super::printed_cards::derive_colors_from_mana_cost;
+
+    #[test]
+    fn player_deck_payload_without_estimated_bracket_tier_defaults_to_none() {
+        let mut json = serde_json::to_value(PlayerDeckPayload::default()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("estimated_bracket_tier");
+
+        let payload: PlayerDeckPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.estimated_bracket_tier, None);
+    }
 
     fn make_creature_face() -> CardFace {
         CardFace {

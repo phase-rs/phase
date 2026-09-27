@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::game::bracket_estimate::{ComboDeclaration, CommanderBracketTier};
+use crate::game::deck_loading::PlayerDeckList;
 
 /// A deck specified as card name strings — the wire format used by clients
 /// and the starter deck module. Distinct from `PlayerDeckPayload` which
@@ -42,6 +43,25 @@ pub struct DeckData {
     /// which is deliberately NOT the same as a declared absence.
     #[serde(default)]
     pub combo_declaration: ComboDeclaration,
+}
+
+impl From<&DeckData> for PlayerDeckList {
+    fn from(deck: &DeckData) -> Self {
+        Self {
+            main_deck: deck.main_deck.clone(),
+            sideboard: deck.sideboard.clone(),
+            commander: deck.commander.clone(),
+            companion: deck.companion.clone(),
+            attraction_deck: deck.attraction_deck.clone(),
+            planar_deck: deck.planar_deck.clone(),
+            scheme_deck: deck.scheme_deck.clone(),
+            contraption_deck: deck.contraption_deck.clone(),
+            sticker_sheets: deck.sticker_sheets.clone(),
+            signature_spell: deck.signature_spell.clone(),
+            bracket_tier: deck.bracket_tier,
+            combo_declaration: deck.combo_declaration,
+        }
+    }
 }
 
 /// A named starter deck with its card list.
@@ -165,6 +185,41 @@ fn starter_to_deck_data(deck: &StarterDeck) -> DeckData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_deck_list_from_deck_data_round_trips_every_field() {
+        let source = DeckData {
+            main_deck: vec!["Main".to_string()],
+            sideboard: vec!["Side".to_string()],
+            commander: vec!["Commander".to_string()],
+            companion: vec!["Companion".to_string()],
+            attraction_deck: vec!["Attraction".to_string()],
+            planar_deck: vec!["Plane".to_string()],
+            scheme_deck: vec!["Scheme".to_string()],
+            contraption_deck: vec!["Contraption".to_string()],
+            sticker_sheets: vec!["Stickers".to_string()],
+            signature_spell: vec!["Signature".to_string()],
+            bracket_tier: CommanderBracketTier::Optimized,
+            combo_declaration: ComboDeclaration::Intended {
+                window: Some(crate::game::bracket_estimate::ComboWindow::EarlyGame),
+            },
+        };
+
+        let converted = PlayerDeckList::from(&source);
+
+        assert_eq!(converted.main_deck, source.main_deck);
+        assert_eq!(converted.sideboard, source.sideboard);
+        assert_eq!(converted.commander, source.commander);
+        assert_eq!(converted.companion, source.companion);
+        assert_eq!(converted.attraction_deck, source.attraction_deck);
+        assert_eq!(converted.planar_deck, source.planar_deck);
+        assert_eq!(converted.scheme_deck, source.scheme_deck);
+        assert_eq!(converted.contraption_deck, source.contraption_deck);
+        assert_eq!(converted.sticker_sheets, source.sticker_sheets);
+        assert_eq!(converted.signature_spell, source.signature_spell);
+        assert_eq!(converted.bracket_tier, source.bracket_tier);
+        assert_eq!(converted.combo_declaration, source.combo_declaration);
+    }
 
     #[test]
     fn all_starter_decks_have_60_cards() {

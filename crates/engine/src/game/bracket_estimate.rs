@@ -19,7 +19,7 @@ use crate::types::ability::Comparator;
 
 /// Commander bracket tier. The estimator never returns `Cedh` — that is a
 /// meta self-declaration kept on the frontend's existing manual picker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumIter)]
 #[serde(rename_all = "snake_case")]
 pub enum CommanderBracketTier {
     Exhibition, // B1
@@ -78,6 +78,51 @@ impl CommanderBracketTier {
             Self::Optimized => 4,
             Self::Cedh => 5,
         }
+    }
+}
+
+/// The tier the AI is allowed to act on.
+///
+/// Bracket policy is WotC Commander Format Panel guidance, **not** the Comprehensive
+/// Rules — no `// CR` annotation applies (see the module header).
+///
+/// A declaration may raise this value and can never lower it below what the estimator
+/// can prove from the deck's own contents. `Cedh` is declaration-only in both
+/// directions: [`estimate_bracket`] never returns it, so a `Cedh` declaration always
+/// survives and no estimate can manufacture one.
+///
+/// [`CommanderBracketTier::as_u8`] is the ordering authority. The enum deliberately
+/// derives no `Ord`: the order is stated once rather than inherited from declaration
+/// order.
+pub fn effective_tier(
+    declared: CommanderBracketTier,
+    estimated: Option<CommanderBracketTier>,
+) -> EffectiveBracketTier {
+    let tier = match estimated {
+        Some(floor) if floor.as_u8() > declared.as_u8() => floor,
+        Some(_) | None => declared,
+    };
+    EffectiveBracketTier(tier)
+}
+
+/// A tier that has been through [`effective_tier`]. The inner field is private to this
+/// module, so the only ways to obtain one are [`effective_tier`] and [`Default`] — a raw
+/// declaration cannot reach AI deck features through the wrong parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectiveBracketTier(CommanderBracketTier);
+
+impl EffectiveBracketTier {
+    pub fn tier(self) -> CommanderBracketTier {
+        self.0
+    }
+}
+
+/// `Core`, matching [`CommanderBracketTier::default`] — the "no deck analysed" value
+/// AI deck-feature defaults need. This is the one construction path that does not
+/// reconcile, and it carries no deck to reconcile against.
+impl Default for EffectiveBracketTier {
+    fn default() -> Self {
+        Self(CommanderBracketTier::default())
     }
 }
 
@@ -679,6 +724,28 @@ mod tests {
     use crate::database::bracket_lists::{BracketCardClass, BracketLists};
     use crate::database::{BracketSignals, CardDatabase};
     use crate::game::deck_loading::PlayerDeckList;
+    use strum::IntoEnumIterator;
+
+    #[test]
+    fn effective_tier_truth_table() {
+        let estimated = std::iter::once(None)
+            .chain(CommanderBracketTier::iter().map(Some))
+            .collect::<Vec<_>>();
+
+        let mut rows = 0;
+        for declared in CommanderBracketTier::iter() {
+            for estimate in &estimated {
+                let expected = match estimate {
+                    Some(floor) if floor.as_u8() > declared.as_u8() => *floor,
+                    Some(_) | None => declared,
+                };
+                assert_eq!(effective_tier(declared, *estimate).tier(), expected);
+                rows += 1;
+            }
+        }
+
+        assert_eq!(rows, 30);
+    }
 
     fn db_with_signals(entries: &[(&str, BracketSignals)]) -> CardDatabase {
         let mass_land_denial: Vec<&str> = entries

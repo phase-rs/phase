@@ -1,6 +1,6 @@
 //! ComboLinePolicy — boosts priors on candidate actions that progress a
 //! reachable combo line. Gating: `activation()` returns `None` unless the
-//! deck's `bracket_tier` is `Cedh`, so non-cEDH decks pay zero cost (the
+//! deck's reconciled effective bracket tier is `Cedh`, so non-cEDH decks pay zero cost (the
 //! per-DecisionKind index in PolicyRegistry still includes us, but activation
 //! skips us).
 
@@ -56,7 +56,7 @@ impl TacticalPolicy for ComboLinePolicy {
         _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        if features.bracket_tier == CommanderBracketTier::Cedh {
+        if features.effective_bracket_tier.tier() == CommanderBracketTier::Cedh {
             // activation-constant: combo-line guidance is only active for cEDH decks.
             Some(1.0)
         } else {
@@ -167,6 +167,7 @@ mod tests {
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::context::AiContext;
     use crate::features::DeckFeatures;
+    use engine::game::bracket_estimate::effective_tier;
 
     fn make_state() -> GameState {
         GameState::new_two_player(0)
@@ -174,7 +175,7 @@ mod tests {
 
     fn make_features(tier: CommanderBracketTier) -> DeckFeatures {
         DeckFeatures {
-            bracket_tier: tier,
+            effective_bracket_tier: effective_tier(tier, None),
             ..DeckFeatures::default()
         }
     }

@@ -1,5 +1,5 @@
 //! `CedhKeepablesMulligan` — stub aggressive mulligan policy for cEDH decks.
-//! Gated internally on `features.bracket_tier == Cedh` (`MulliganPolicy` has no
+//! Gated internally on `features.effective_bracket_tier.tier() == Cedh` (`MulliganPolicy` has no
 //! `activation()` method; every registered policy is consulted on every hand).
 //!
 //! CR 103.5: deciding to keep after the mulligan process.
@@ -49,7 +49,7 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         _mulligans_taken: u8, // input-unused: depth is bounded by `card_floor::MulliganCardFloor`; this policy judges composition only
     ) -> MulliganScore {
         // Internal gate: non-cEDH decks see a zero-delta Score (cheap no-op).
-        if features.bracket_tier != CommanderBracketTier::Cedh {
+        if features.effective_bracket_tier.tier() != CommanderBracketTier::Cedh {
             return MulliganScore::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("cedh_keepables_na"),
@@ -195,6 +195,7 @@ mod tests {
 
     use super::*;
     use crate::plan::PlanSnapshot;
+    use engine::game::bracket_estimate::effective_tier;
 
     fn make_state() -> GameState {
         GameState::new_two_player(0)
@@ -202,11 +203,14 @@ mod tests {
 
     fn features_cedh(is_cedh: bool) -> DeckFeatures {
         DeckFeatures {
-            bracket_tier: if is_cedh {
-                CommanderBracketTier::Cedh
-            } else {
-                CommanderBracketTier::Core
-            },
+            effective_bracket_tier: effective_tier(
+                if is_cedh {
+                    CommanderBracketTier::Cedh
+                } else {
+                    CommanderBracketTier::Core
+                },
+                None,
+            ),
             ..DeckFeatures::default()
         }
     }

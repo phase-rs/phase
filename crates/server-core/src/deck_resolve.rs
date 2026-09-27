@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use engine::database::CardDatabase;
+use engine::game::bracket_estimate::estimate_bracket;
 use engine::game::deck_loading::{DeckEntry, PlayerDeckPayload};
 use engine::game::ComboDeclaration;
 use engine::types::card::CardFace;
@@ -55,6 +56,8 @@ fn resolve_entries(
 /// Groups duplicate names into a single DeckEntry with aggregated count.
 /// Returns Err listing unresolvable card names if any lookup fails.
 pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayload, String> {
+    let list = engine::game::deck_loading::PlayerDeckList::from(deck);
+    let estimated_bracket_tier = estimate_bracket(&list, db).map(|estimate| estimate.tier);
     let (main_deck, mut missing) = resolve_entries(db, &deck.main_deck, "main");
     let (sideboard, mut sideboard_missing) = resolve_entries(db, &deck.sideboard, "sideboard");
     missing.append(&mut sideboard_missing);
@@ -97,6 +100,7 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
         signature_spell,
         sticker_sheets: deck.sticker_sheets.clone(),
         bracket_tier: deck.bracket_tier,
+        estimated_bracket_tier,
     })
 }
 
@@ -155,6 +159,8 @@ pub fn deck_data_from_payload(db: &CardDatabase, payload: &PlayerDeckPayload) ->
         // Decides `validate_cedh_bracket`, which `start_game` runs whenever an
         // AI seat is at cEDH difficulty.
         bracket_tier: payload.bracket_tier,
+        // `DeckData` is the submitted declaration wire type, not an estimator-result
+        // carrier. A subsequent resolve recomputes the floor from the complete list.
         // `PlayerDeckPayload` deliberately does not carry this deck-building answer.
         combo_declaration: ComboDeclaration::Undeclared,
     }

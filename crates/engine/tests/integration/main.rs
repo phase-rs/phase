@@ -91,6 +91,7 @@ mod bracket_combo_declaration;
 mod bracket_corpus;
 mod bracket_fixture_signals;
 mod bracket_lists_data;
+mod bracket_tier_reconciliation;
 mod braids_arisen_nightmare_decline;
 mod brainspoil;
 mod breeches_blastmaker_coin_flip_copy;
