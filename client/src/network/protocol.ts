@@ -106,6 +106,14 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  64 — game_setup and state_update carry GameState, whose additional-phase
+ *       abilities now hold an ExtraPhaseAnchor, whose delayed triggers can hold
+ *       AtBeginningOfAddedPhase, whose scheduled extra phases and resume
+ *       records carry a TurnSegment and a minted id, and whose per-turn step
+ *       counters are one steps_started_this_turn tally. Both peers are
+ *       browsers and neither validates the shape, so a v63 peer would take the
+ *       new shapes with no decode error; first contact rejects the skew
+ *       instead. Bumped in lockstep with full-game protocol 82.
  *  63 — game_setup and state_update carry GameState, whose
  *       AlternativeCastChoice prompt can now carry keyword { type: "Surge" }.
  *       Bumped in lockstep with full-game protocol 81.
@@ -423,7 +431,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 63 as const;
+export const WIRE_PROTOCOL_VERSION = 64 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

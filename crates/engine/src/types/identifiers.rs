@@ -41,6 +41,17 @@ pub struct LogicalZoneChangeGroupId(pub u64);
 #[serde(transparent)]
 pub struct DiscardFrameId(pub u64);
 
+/// CR 500.8 + CR 500.9 + CR 500.10: monotonic identity of one scheduled extra
+/// phase or step, minted when an effect schedules it. Two scheduled units can
+/// share an anchor and a phase; this is what tells them apart. `0` is never
+/// minted: an entry written without an id (seeded, or saved before ids
+/// existed) reads the default and names no minted unit.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct ExtraPhaseId(pub u64);
+
 /// Unique identifier for a set of objects tracked across delayed trigger boundaries.
 /// CR 603.7: Delayed triggers reference the specific objects from the originating effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

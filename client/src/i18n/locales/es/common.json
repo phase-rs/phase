@@ -423,5 +423,25 @@
       "no-turn": "No se proporcionó un relay TURN",
       "aborted": "Solicitud cancelada"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Otra pestaña de Phase está ocupada. Cierra las demás pestañas de Phase e inténtalo de nuevo.",
+    "title": {
+      "save": "No se pudo guardar el mazo",
+      "clone": "No se pudo clonar el mazo",
+      "import": "No se pudo importar el mazo",
+      "delete": "No se pudo eliminar el mazo",
+      "organize": "No se pudo actualizar la organización del mazo",
+      "updateFeeds": "No se pudieron actualizar los feeds de mazos",
+      "restore": "No se pudo restaurar la copia de seguridad",
+      "applyCloud": "No se pudieron aplicar los mazos de la nube",
+      "autosaveDraft": "No se pudo autoguardar el mazo del draft"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase no pudo acceder al almacenamiento del navegador. Inténtalo de nuevo en un momento."
+  },
+  "savedDeckChanged": {
+    "description": "Este mazo cambió antes de que se ejecutara tu acción, así que no se cambió nada. Revisa el mazo e inténtalo de nuevo."
   }
 }
