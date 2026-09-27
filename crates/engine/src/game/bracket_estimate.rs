@@ -1,6 +1,7 @@
-//! Commander bracket estimator. Profiles a Commander deck along four axes
-//! (Game Changers, Mass Land Denial, Extra Turns, Efficient Tutors) and
-//! returns a `BracketEstimate` placing the deck in bracket B2–B4.
+//! Commander bracket estimator. Profiles a Commander deck along four
+//! card-derived axes (Game Changers, Mass Land Denial, Extra Turns, Efficient
+//! Tutors), folds in the deck owner's two-card-combo declaration, and returns a
+//! `BracketEstimate` placing the deck in bracket B2–B4.
 //!
 //! Pure: no game state, no I/O, no randomness. Same `(deck, db)` →
 //! identical `BracketEstimate`.
@@ -78,6 +79,129 @@ impl CommanderBracketTier {
             Self::Cedh => 5,
         }
     }
+}
+
+/// The deck owner's answer to the two-card-infinite-combo barometer.
+///
+/// Brackets are a self-declaration system and this barometer is a statement about
+/// deck-building INTENT ("no *intentional* two-card infinite combos" — Introducing
+/// Commander Brackets Beta, Bracket 1 and Bracket 2 Deck Building; archived copy read
+/// 2026-09-12), so no card list can answer it and only the deck's owner can.
+///
+/// Three states, not two: an UNANSWERED barometer is not a declared absence, and
+/// collapsing them would let a deck nobody asked about read as a clean one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComboDeclaration {
+    /// Nobody has answered. The estimate must say so rather than assume "none".
+    Undeclared,
+    /// The owner states the deck contains no intentional two-card infinite combo.
+    NoneIntended,
+    /// The owner states it does. `window` is the follow-up question — the published
+    /// lines treat an early line differently from a late one — and stays `None` when
+    /// the owner declared the combo but not when it assembles.
+    Intended {
+        #[serde(default)]
+        window: Option<ComboWindow>,
+    },
+}
+
+impl Default for ComboDeclaration {
+    /// `Undeclared` — every payload that predates this field, and every deck nobody
+    /// has been asked about, is unanswered, never "clean".
+    fn default() -> Self {
+        Self::Undeclared
+    }
+}
+
+/// When a declared intentional two-card infinite combo can assemble.
+///
+/// The boundary is the published one and is deliberately NOT a turn number in the type:
+/// Bracket 3's Experience paragraph words it as combos "that can happen cheaply and in
+/// about the first six or so turns of the game" (Introducing Commander Brackets Beta),
+/// and the 2025-10-21 update restates it as "you don't expect to win or lose before
+/// turn six". Both are prose about expectation, not a threshold the engine measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComboWindow {
+    EarlyGame,
+    LateGame,
+}
+
+/// The bracket floor a combo declaration forces under the two published lines, or
+/// `None` when nothing is claimed.
+///
+/// Bracket policy is not the Comprehensive Rules (see this module's header), so no
+/// rules annotation applies. Each encoded line names the copy it was read from, which
+/// is the discipline P3's `FloorRule` rows use:
+///
+/// * Brackets 1 and 2 Deck Building — "No intentional two-card infinite combos"
+///   (Introducing Commander Brackets Beta, magic.wizards.com; archived copy read
+///   2026-09-12). A declared intentional combo therefore cannot sit in B1 or B2 →
+///   floor Upgraded.
+/// * Bracket 3 Deck Building — "No intentional early-game two-card infinite combos"
+///   (same source; the window is defined in that bracket's Experience paragraph and
+///   restated in the 2025-10-21 update). An early line therefore cannot sit in B3 →
+///   floor Optimized.
+/// * Bracket 4 Deck Building — "There are no restrictions (other than the banned
+///   list)", so there is no third row and this function never returns Cedh.
+/// * The 2026-02-09 update made no bracket-level change; these lines are current.
+pub fn combo_declaration_floor(declaration: ComboDeclaration) -> Option<CommanderBracketTier> {
+    match declaration {
+        ComboDeclaration::Undeclared | ComboDeclaration::NoneIntended => None,
+        ComboDeclaration::Intended {
+            window: None | Some(ComboWindow::LateGame),
+        } => Some(CommanderBracketTier::Upgraded),
+        ComboDeclaration::Intended {
+            window: Some(ComboWindow::EarlyGame),
+        } => Some(CommanderBracketTier::Optimized),
+    }
+}
+
+/// A checkpoint the published Commander format page names. The live page names three
+/// barometers — "two-card infinite combos, extra turns, mass land denial" — and
+/// separately names the Game Changers list "that the brackets reference"; all four are
+/// carried here because the panel must state the authority behind each of them.
+///
+/// Deliberately NOT the same type as `BracketAxis`, and not a variant added to it. An
+/// axis is a curated-list COUNT the engine derives from the deck's cards; a barometer is
+/// a question the format asks, which may be answered from an axis, from the deck owner,
+/// or not at all. The two sets differ at both ends: `EfficientTutors` is still an axis
+/// (evidence only) but stopped being a barometer when the 2025-10-21 update removed the
+/// tutor restrictions, and `TwoCardCombos` is a barometer with no axis behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Barometer {
+    GameChangers,
+    ExtraTurns,
+    MassLandDenial,
+    TwoCardCombos,
+}
+
+/// Whose word a barometer's reading rests on. Brackets are a self-declaration system,
+/// so "the deck's owner said so" is a first-class answer — and "nobody said" is a third
+/// state that must never be rendered as a declared absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BarometerAuthority {
+    /// Read from the deck's cards against a dated, curated list.
+    Engine,
+    /// Stated by the deck's owner. The engine cannot verify it.
+    DeckOwner,
+    /// Nobody answered it.
+    Unanswered,
+}
+
+/// The two-card-infinite-combo barometer's reading.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComboBarometer {
+    pub declaration: ComboDeclaration,
+    /// The floor `declaration` forces under the published lines, if any. The engine
+    /// computes it (the frontend is a display layer and must not re-derive it) and
+    /// `estimate_bracket` has ALREADY folded it into `BracketEstimate::tier`; it is
+    /// carried separately so the panel can attribute that part of the tier to the deck
+    /// owner rather than to the cards.
+    pub floor: Option<CommanderBracketTier>,
 }
 
 /// One observable Commander Brackets policy axis.
@@ -280,6 +404,15 @@ pub struct BracketEstimate {
     /// layers in enum design").
     #[serde(default)]
     pub declaration: Option<DeclarationVerdict>,
+    #[serde(default)]
+    pub combo_barometer: ComboBarometer,
+    /// What this estimate could answer, and on whose authority, for every checkpoint the
+    /// published format page names. Rendered verbatim by the panel so a barometer nobody
+    /// answered can never read as a clean one. A `BTreeMap` for the same reason
+    /// `violations` is one: ordered, keyed, and the invariant "at most one entry per
+    /// barometer" is expressed in the type.
+    #[serde(default)]
+    pub barometers: BTreeMap<Barometer, BarometerAuthority>,
 }
 
 /// How a player's declared bracket relates to the floor the deck's contents
@@ -311,7 +444,10 @@ pub enum DeclarationVerdict {
     /// establish. `raised_by` names the axes that established that floor, in
     /// `BracketAxis` declaration order; the caller reads their card evidence
     /// out of the estimate's own per-axis reading rather than duplicating it
-    /// here, so there is exactly one name alphabet on the wire.
+    /// here, so there is exactly one name alphabet on the wire. `raised_by`
+    /// names card-derived axes only and is empty when the floor rests on the
+    /// owner's own combo declaration (the panel reads `combo_barometer.floor`
+    /// for that case).
     BelowFloor {
         floor: CommanderBracketTier,
         raised_by: Vec<BracketAxis>,
@@ -363,6 +499,7 @@ fn floor_raising_axes(estimate: &BracketEstimate) -> Vec<BracketAxis> {
         .collect()
 }
 
+/// Profiles the deck's cards and folds in the owner's combo declaration.
 /// Returns `None` when the deck has no commander.
 pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<BracketEstimate> {
     use strum::IntoEnumIterator;
@@ -384,12 +521,13 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
         signature_spell, // counted — Oathbreaker RC second command-zone card
         sideboard,       // NOT counted — Commander has no sideboard; the deck
         //   builder parses one, and the request still carries it
-        attraction_deck,  // NOT counted — Unfinity variant, outside the 100
-        planar_deck,      // NOT counted — Planechase variant deck
-        scheme_deck,      // NOT counted — Archenemy variant deck
-        contraption_deck, // NOT counted — Unstable variant deck
-        sticker_sheets,   // NOT counted — Unfinity stickers, not cards in the deck
-        bracket_tier: _,  // the player's declaration, not a card list
+        attraction_deck,   // NOT counted — Unfinity variant, outside the 100
+        planar_deck,       // NOT counted — Planechase variant deck
+        scheme_deck,       // NOT counted — Archenemy variant deck
+        contraption_deck,  // NOT counted — Unstable variant deck
+        sticker_sheets,    // NOT counted — Unfinity stickers, not cards in the deck
+        bracket_tier: _,   // the player's declaration, not a card list
+        combo_declaration, // the owner's barometer answer, not a card list
     } = deck;
     let _ = (
         sideboard,
@@ -433,6 +571,28 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
         EstimateConfidence::Partial
     };
     let (tier, checks) = decide_tier(&axes);
+    let combo_floor = combo_declaration_floor(*combo_declaration);
+    // The published combo lines are floors like any other; the resolved tier is the
+    // highest floor across every checkpoint. Ordering goes through `as_u8()` —
+    // `CommanderBracketTier` derives no `Ord` and this unit does not add one.
+    let tier = match combo_floor {
+        Some(floor) if floor.as_u8() > tier.as_u8() => floor,
+        _ => tier,
+    };
+    let barometers = BTreeMap::from([
+        (Barometer::GameChangers, BarometerAuthority::Engine),
+        (Barometer::ExtraTurns, BarometerAuthority::Engine),
+        (Barometer::MassLandDenial, BarometerAuthority::Engine),
+        (
+            Barometer::TwoCardCombos,
+            match combo_declaration {
+                ComboDeclaration::Undeclared => BarometerAuthority::Unanswered,
+                ComboDeclaration::NoneIntended | ComboDeclaration::Intended { .. } => {
+                    BarometerAuthority::DeckOwner
+                }
+            },
+        ),
+    ]);
 
     Some(BracketEstimate {
         tier,
@@ -446,6 +606,11 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
         },
         data_version: db.bracket_lists.version.clone(),
         declaration: None,
+        combo_barometer: ComboBarometer {
+            declaration: *combo_declaration,
+            floor: combo_floor,
+        },
+        barometers,
     })
 }
 
@@ -590,6 +755,169 @@ mod tests {
         CardDatabase::from_json_str(CARD_DATA_WITH_KNOWN_FACES)
             .unwrap()
             .with_bracket_lists(BracketLists::from_pairs("faces-1", &[]))
+    }
+
+    #[test]
+    fn combo_floor_is_none_when_unanswered_or_declared_absent() {
+        assert_eq!(combo_declaration_floor(ComboDeclaration::Undeclared), None);
+        assert_eq!(
+            combo_declaration_floor(ComboDeclaration::NoneIntended),
+            None
+        );
+    }
+
+    #[test]
+    fn combo_floor_is_b3_for_a_declared_combo_without_an_early_window() {
+        assert_eq!(
+            combo_declaration_floor(ComboDeclaration::Intended { window: None }),
+            Some(CommanderBracketTier::Upgraded)
+        );
+        assert_eq!(
+            combo_declaration_floor(ComboDeclaration::Intended {
+                window: Some(ComboWindow::LateGame),
+            }),
+            Some(CommanderBracketTier::Upgraded)
+        );
+    }
+
+    #[test]
+    fn combo_floor_is_b4_for_a_declared_early_combo() {
+        assert_eq!(
+            combo_declaration_floor(ComboDeclaration::Intended {
+                window: Some(ComboWindow::EarlyGame),
+            }),
+            Some(CommanderBracketTier::Optimized)
+        );
+    }
+
+    #[test]
+    fn declared_early_combo_raises_tier_above_the_card_derived_floor() {
+        let d = PlayerDeckList {
+            combo_declaration: ComboDeclaration::Intended {
+                window: Some(ComboWindow::EarlyGame),
+            },
+            ..deck(vec!["Cmdr"], vec!["Forest"])
+        };
+        let estimate = estimate_bracket(&d, &db_with_signals(&[])).unwrap();
+
+        assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
+        assert_eq!(
+            estimate.combo_barometer.floor,
+            Some(CommanderBracketTier::Optimized)
+        );
+    }
+
+    #[test]
+    fn declared_combo_never_lowers_a_higher_card_derived_floor() {
+        let db = db_with_signals(&[(
+            "Armageddon",
+            BracketSignals {
+                mass_land_denial: true,
+                ..Default::default()
+            },
+        )]);
+        let d = PlayerDeckList {
+            combo_declaration: ComboDeclaration::Intended { window: None },
+            ..deck(vec!["Cmdr"], vec!["Armageddon"])
+        };
+        let estimate = estimate_bracket(&d, &db).unwrap();
+
+        assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
+        assert_eq!(
+            estimate.combo_barometer.floor,
+            Some(CommanderBracketTier::Upgraded)
+        );
+    }
+
+    #[test]
+    fn barometer_authority_distinguishes_unanswered_from_declared_absence() {
+        let cases = [
+            (ComboDeclaration::Undeclared, BarometerAuthority::Unanswered),
+            (
+                ComboDeclaration::NoneIntended,
+                BarometerAuthority::DeckOwner,
+            ),
+            (
+                ComboDeclaration::Intended { window: None },
+                BarometerAuthority::DeckOwner,
+            ),
+        ];
+
+        for (declaration, expected_combo_authority) in cases {
+            let d = PlayerDeckList {
+                combo_declaration: declaration,
+                ..deck(vec!["Cmdr"], vec!["Forest"])
+            };
+            let estimate = estimate_bracket(&d, &db_with_signals(&[])).unwrap();
+
+            assert_eq!(estimate.barometers.len(), 4);
+            assert_eq!(
+                estimate.barometers[&Barometer::TwoCardCombos],
+                expected_combo_authority
+            );
+            for barometer in [
+                Barometer::GameChangers,
+                Barometer::ExtraTurns,
+                Barometer::MassLandDenial,
+            ] {
+                assert_eq!(estimate.barometers[&barometer], BarometerAuthority::Engine);
+            }
+
+            if declaration == ComboDeclaration::Undeclared {
+                let value = serde_json::to_value(&estimate).unwrap();
+                assert_eq!(
+                    value["combo_barometer"],
+                    serde_json::json!({
+                        "declaration": { "kind": "undeclared" },
+                        "floor": null,
+                    })
+                );
+                assert_eq!(
+                    value["barometers"],
+                    serde_json::json!({
+                        "extra_turns": "engine",
+                        "game_changers": "engine",
+                        "mass_land_denial": "engine",
+                        "two_card_combos": "unanswered",
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn combo_declaration_round_trips_through_json() {
+        let declarations = [
+            ComboDeclaration::Undeclared,
+            ComboDeclaration::NoneIntended,
+            ComboDeclaration::Intended { window: None },
+            ComboDeclaration::Intended {
+                window: Some(ComboWindow::EarlyGame),
+            },
+        ];
+
+        for declaration in declarations {
+            let json = serde_json::to_string(&declaration).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ComboDeclaration>(&json).unwrap(),
+                declaration
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<ComboDeclaration>(r#"{"kind":"intended"}"#).unwrap(),
+            ComboDeclaration::Intended { window: None }
+        );
+        assert_eq!(
+            serde_json::to_string(&ComboDeclaration::Undeclared).unwrap(),
+            r#"{"kind":"undeclared"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ComboDeclaration::Intended {
+                window: Some(ComboWindow::EarlyGame),
+            })
+            .unwrap(),
+            r#"{"kind":"intended","window":"early_game"}"#
+        );
     }
 
     #[test]

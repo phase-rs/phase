@@ -1047,6 +1047,7 @@ impl GameSession {
                 sticker_sheets: deck.sticker_sheets.clone(),
                 signature_spell: deck.signature_spell.clone(),
                 bracket_tier: deck.bracket_tier,
+                combo_declaration: deck.combo_declaration,
             };
             // The resolver (`ServerDeckResolver::resolve` in phase-server)
             // has already validated these names against the same `db`, so

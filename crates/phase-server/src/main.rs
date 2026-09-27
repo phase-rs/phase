@@ -5806,6 +5806,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
             sticker_sheets: deck.sticker_sheets,
             signature_spell: deck.signature_spell,
             bracket_tier: deck.bracket_tier,
+            combo_declaration: deck.combo_declaration,
         })
     }
 }

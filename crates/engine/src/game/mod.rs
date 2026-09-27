@@ -213,8 +213,9 @@ pub use bracket_corpus::{
     HELD_OUT_RESIDUE, HELD_OUT_RULE_SENTENCE, MIN_AXIS_POPULATION_N, MIN_BAND_POPULATION_N,
 };
 pub use bracket_estimate::{
-    estimate_bracket, estimate_bracket_for_request, AxisReading, BracketAxis, BracketCheck,
-    BracketCheckOutcome, BracketCoverage, BracketEstimate, BracketEstimateRequest,
+    combo_declaration_floor, estimate_bracket, estimate_bracket_for_request, AxisReading,
+    Barometer, BarometerAuthority, BracketAxis, BracketCheck, BracketCheckOutcome, BracketCoverage,
+    BracketEstimate, BracketEstimateRequest, ComboBarometer, ComboDeclaration, ComboWindow,
     CommanderBracketTier, DeclarationVerdict, EstimateConfidence, FloorRule, FloorRuleSource,
 };
 // Plumbing: read-only re-export of the X-affordability authority

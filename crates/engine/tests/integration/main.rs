@@ -86,6 +86,7 @@ mod borg_queen_assimilate;
 mod bounce_destination_redirect;
 mod bound_by_moonsilver_sacrifice_source_relative_6017;
 mod bracket_axis_readings;
+mod bracket_combo_declaration;
 mod bracket_corpus;
 mod bracket_fixture_signals;
 mod bracket_lists_data;

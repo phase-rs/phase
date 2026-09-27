@@ -4,7 +4,7 @@ use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
-use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::game::bracket_estimate::{ComboDeclaration, CommanderBracketTier};
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
@@ -144,6 +144,11 @@ pub struct PlayerDeckList {
     /// omit it, which `#[serde(default)]` handles transparently).
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// The deck owner's answer to the two-card-infinite-combo barometer. Defaults to
+    /// `Undeclared` when omitted — every payload that predates this field is unanswered,
+    /// which is deliberately NOT the same as a declared absence.
+    #[serde(default)]
+    pub combo_declaration: ComboDeclaration,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

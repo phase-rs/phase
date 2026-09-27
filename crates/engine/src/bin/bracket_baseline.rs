@@ -482,6 +482,8 @@ mod tests {
                     },
                     data_version: "test".to_string(),
                     declaration: None,
+                    combo_barometer: Default::default(),
+                    barometers: Default::default(),
                 },
             },
         }

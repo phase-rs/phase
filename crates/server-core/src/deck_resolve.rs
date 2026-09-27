@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckEntry, PlayerDeckPayload};
+use engine::game::ComboDeclaration;
 use engine::types::card::CardFace;
 use tracing::warn;
 
@@ -154,6 +155,8 @@ pub fn deck_data_from_payload(db: &CardDatabase, payload: &PlayerDeckPayload) ->
         // Decides `validate_cedh_bracket`, which `start_game` runs whenever an
         // AI seat is at cEDH difficulty.
         bracket_tier: payload.bracket_tier,
+        // `PlayerDeckPayload` deliberately does not carry this deck-building answer.
+        combo_declaration: ComboDeclaration::Undeclared,
     }
 }
 

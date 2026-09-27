@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::game::bracket_estimate::{ComboDeclaration, CommanderBracketTier};
 
 /// A deck specified as card name strings — the wire format used by clients
 /// and the starter deck module. Distinct from `PlayerDeckPayload` which
@@ -37,6 +37,11 @@ pub struct DeckData {
     /// preserving backward compatibility with older wire payloads.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// The deck owner's answer to the two-card-infinite-combo barometer. Defaults to
+    /// `Undeclared` when omitted — every payload that predates this field is unanswered,
+    /// which is deliberately NOT the same as a declared absence.
+    #[serde(default)]
+    pub combo_declaration: ComboDeclaration,
 }
 
 /// A named starter deck with its card list.
