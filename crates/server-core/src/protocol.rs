@@ -3319,7 +3319,8 @@ mod tests {
     }
 
     /// `WaitingFor::DeclareBlockers` gains `must_be_blocked_targets`
-    /// (CR 509.1c) — a capability bump like 60, not a parse bump.
+    /// (CR 509.1c) and `block_capacities` (CR 509.1a + CR 101.1) — a
+    /// capability bump like 60, not a parse bump.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so

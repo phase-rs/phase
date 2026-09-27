@@ -8,7 +8,7 @@ import {
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   attackTargetsForAttacker,
-  bandMateIdsByAttacker,
+  blockersByAttacker,
   blockTargetSelection,
   type BlockTargetStack,
   buildAttacks,
@@ -243,6 +243,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(2);
@@ -261,6 +262,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(2);
@@ -275,6 +277,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: { 12: { count: 2 } },
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(2);
@@ -290,6 +293,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(2);
@@ -305,6 +309,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(1);
@@ -319,6 +324,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets,
+      blockCapacities: undefined,
     });
     expect(forPending).toHaveLength(2);
     expect(forPending.find((s) => s.ids.includes(11))).toMatchObject({ mustBeBlocked: false });
@@ -330,6 +336,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets,
+      blockCapacities: undefined,
     });
     expect(forOtherBlocker).toHaveLength(1);
     expect(forOtherBlocker[0]).toMatchObject({ ids: [11, 12], mustBeBlocked: false });
@@ -347,6 +354,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(3);
@@ -363,6 +371,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(1);
@@ -376,6 +385,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(1);
@@ -389,6 +399,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(1);
@@ -403,6 +414,7 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     // Without band propagation this would split into a {14} stack reporting
@@ -419,30 +431,286 @@ describe("partitionBlockTargets", () => {
       blockRequirements: undefined,
       blockerConstraints: undefined,
       mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
     });
 
     expect(stacks).toHaveLength(2);
     expect(stacks.find((s) => s.ids.includes(14))).toMatchObject({ otherBlockerIds: [101] });
     expect(stacks.find((s) => s.ids.includes(15))).toMatchObject({ otherBlockerIds: [] });
   });
+
+  it("holds a candidate through a band-mate the pending blocker already blocks OUTSIDE the candidate list, capped by capacity (implementation-review probe)", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([14])]]);
+    const board = {
+      attackers: [attacker(14, P1, 5), attacker(15, P1, 5), attacker(16, P1, 5)],
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    };
+    const capped = partitionBlockTargets([15, 16], 100, { ...board, blockCapacities: { 100: 1 } });
+    expect(capped).toHaveLength(1);
+    expect(capped[0]).toMatchObject({
+      ids: [15, 16],
+      heldThroughBand: true,
+      assignedIds: [],
+      otherBlockerIds: [],
+      bandId: 5,
+      maxAssignable: 0,
+    });
+
+    const unlimited = partitionBlockTargets([15, 16], 100, { ...board, blockCapacities: { 100: null } });
+    expect(unlimited[0]).toMatchObject({
+      heldThroughBand: true,
+      maxAssignable: 2,
+    });
+  });
+
+  it("holds a candidate through a band-mate the pending blocker directly picked INSIDE the candidate list", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([14])]]);
+    const stacks = partitionBlockTargets([14, 15, 16], 100, {
+      attackers: [attacker(14, P1, 5), attacker(15, P1, 5), attacker(16, P1, 5)],
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+      blockCapacities: { 100: null },
+    });
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks.find((s) => s.ids.includes(14))).toMatchObject({
+      ids: [14],
+      heldThroughBand: false,
+      assignedIds: [14],
+    });
+    expect(stacks.find((s) => s.ids.includes(15))).toMatchObject({
+      ids: [15, 16],
+      heldThroughBand: true,
+      maxAssignable: 2,
+    });
+  });
+
+  it("never marks a directly-assigned member as held, even alongside a held band-mate", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([14, 15])]]);
+    const stacks = partitionBlockTargets([14, 15, 16], 100, {
+      attackers: [attacker(14, P1, 5), attacker(15, P1, 5), attacker(16, P1, 5)],
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
+    });
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks.find((s) => s.ids.includes(14))).toMatchObject({
+      ids: [14, 15],
+      assignedIds: [14, 15],
+      heldThroughBand: false,
+    });
+    expect(stacks.find((s) => s.ids.includes(16))).toMatchObject({ ids: [16], heldThroughBand: true });
+  });
+
+  it("does not hold a candidate for a band-mate block assigned to a DIFFERENT blocker", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[101, new Set([14])]]);
+    const stacks = partitionBlockTargets([14, 15, 16], 100, {
+      attackers: [attacker(14, P1, 5), attacker(15, P1, 5), attacker(16, P1, 5)],
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
+    });
+
+    expect(stacks.every((s) => s.heldThroughBand === false)).toBe(true);
+    expect(stacks.find((s) => s.ids.includes(14))?.otherBlockerIds).toEqual([101]);
+  });
+
+  it("keeps a required band member steppable up to capacity instead of zeroing a held member (CR 509.1c)", () => {
+    const board = {
+      attackers: [attacker(14, P1, 5), attacker(15, P1, 5), attacker(16, P1, 5)],
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: { 100: [14, 15, 16] },
+      blockCapacities: { 100: 2 },
+    };
+
+    const none = partitionBlockTargets([14, 15, 16], 100, {
+      ...board,
+      blockerAssignments: new Map<ObjectId, Set<ObjectId>>(),
+    });
+    expect(none).toHaveLength(1);
+    expect(none[0]).toMatchObject({
+      ids: [14, 15, 16],
+      mustBeBlocked: true,
+      heldThroughBand: false,
+      maxAssignable: 2,
+    });
+
+    const withOnePick = partitionBlockTargets([14, 15, 16], 100, {
+      ...board,
+      blockerAssignments: new Map<ObjectId, Set<ObjectId>>([[100, new Set([14])]]),
+    });
+    expect(withOnePick).toHaveLength(2);
+    expect(withOnePick.find((s) => s.ids.includes(14))).toMatchObject({
+      ids: [14],
+      assignedIds: [14],
+      maxAssignable: 1,
+    });
+    expect(withOnePick.find((s) => s.ids.includes(15))).toMatchObject({
+      ids: [15, 16],
+      heldThroughBand: true,
+      mustBeBlocked: true,
+      assignedIds: [],
+      maxAssignable: 1,
+    });
+  });
+
+  it("keeps band ids and object ids in separate key spaces when they overlap numerically", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([
+      [100, new Set([5])],
+      [101, new Set([14])],
+    ]);
+    const attackers = [attacker(5, P1, null), attacker(14, P1, 5), attacker(15, P1, 5)];
+
+    expect(blockersByAttacker(attackers, blockerAssignments)).toEqual(
+      new Map([
+        [5, [100]],
+        [14, [101]],
+        [15, [101]],
+      ]),
+    );
+
+    const stacks = partitionBlockTargets([14, 15], 100, {
+      attackers,
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+      blockCapacities: undefined,
+    });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]).toMatchObject({ heldThroughBand: false, otherBlockerIds: [101] });
+  });
+
+  describe("maxAssignable ceiling", () => {
+    it("caps a bandless stack at the pending blocker's remaining capacity", () => {
+      const [stack] = partitionBlockTargets([11, 12, 13, 14], 100, {
+        attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1), attacker(14, P1)],
+        blockerAssignments: noAssignments,
+        blockRequirements: undefined,
+        blockerConstraints: undefined,
+        mustBeBlockedTargets: undefined,
+        blockCapacities: { 100: 1 },
+      });
+      expect(stack).toMatchObject({ maxAssignable: 1 });
+    });
+
+    it("subtracts the pending blocker's assignment OUTSIDE the stack, even to a non-candidate id", () => {
+      const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([99])]]);
+      const [stack] = partitionBlockTargets([11, 12, 13], 100, {
+        attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1)],
+        blockerAssignments,
+        blockRequirements: undefined,
+        blockerConstraints: undefined,
+        mustBeBlockedTargets: undefined,
+        blockCapacities: { 100: 2 },
+      });
+      expect(stack).toMatchObject({ maxAssignable: 1 });
+    });
+
+    it("does not double-count the stack's own assignments as outside", () => {
+      const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([11])]]);
+      const [stack] = partitionBlockTargets([11, 12, 13], 100, {
+        attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1)],
+        blockerAssignments,
+        blockRequirements: undefined,
+        blockerConstraints: undefined,
+        mustBeBlockedTargets: undefined,
+        blockCapacities: { 100: 2 },
+      });
+      expect(stack).toMatchObject({ maxAssignable: 2 });
+    });
+
+    it("imposes no ceiling for a null capacity or an absent capacities map", () => {
+      const forNull = partitionBlockTargets([11, 12, 13, 14], 100, {
+        attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1), attacker(14, P1)],
+        blockerAssignments: noAssignments,
+        blockRequirements: undefined,
+        blockerConstraints: undefined,
+        mustBeBlockedTargets: undefined,
+        blockCapacities: { 100: null },
+      });
+      expect(forNull[0]).toMatchObject({ maxAssignable: 4 });
+
+      const forUndefined = partitionBlockTargets([11, 12, 13, 14], 100, {
+        attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1), attacker(14, P1)],
+        blockerAssignments: noAssignments,
+        blockRequirements: undefined,
+        blockerConstraints: undefined,
+        mustBeBlockedTargets: undefined,
+        blockCapacities: undefined,
+      });
+      expect(forUndefined[0]).toMatchObject({ maxAssignable: 4 });
+    });
+
+    it("sizes a banded stack's ceiling by stack size alone under an unlimited capacity — no band-specific cap", () => {
+      const [stack] = partitionBlockTargets([14, 15, 16], 100, {
+        attackers: [attacker(14, P1, 5), attacker(15, P1, 5), attacker(16, P1, 5)],
+        blockerAssignments: noAssignments,
+        blockRequirements: undefined,
+        blockerConstraints: undefined,
+        mustBeBlockedTargets: undefined,
+        blockCapacities: { 100: null },
+      });
+      expect(stack).toMatchObject({ maxAssignable: 3 });
+    });
+
+    it("clamps to the capacity even when it is below the stack's already-assigned count", () => {
+      const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([11, 12])]]);
+      const [stack] = partitionBlockTargets([11, 12, 13], 100, {
+        attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1)],
+        blockerAssignments,
+        blockRequirements: undefined,
+        blockerConstraints: undefined,
+        mustBeBlockedTargets: undefined,
+        blockCapacities: { 100: 1 },
+      });
+      expect(stack).toMatchObject({ maxAssignable: 1, assignedIds: [11, 12] });
+    });
+  });
 });
 
-describe("bandMateIdsByAttacker", () => {
-  it("maps each banded attacker to every attacker sharing its band, including itself (CR 702.22c)", () => {
-    const map = bandMateIdsByAttacker([attacker(11, P1, 1), attacker(12, P1, 1), attacker(13, P1, 2)]);
-    expect(map.get(11)).toEqual(new Set([11, 12]));
-    expect(map.get(12)).toEqual(new Set([11, 12]));
-    expect(map.get(13)).toEqual(new Set([13]));
+describe("blockersByAttacker", () => {
+  it("maps a banded attacker to every blocker assigned to any band-mate, ascending (CR 702.22h)", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([
+      [102, new Set([11])],
+      [101, new Set([12])],
+    ]);
+    const map = blockersByAttacker(
+      [attacker(11, P1, 1), attacker(12, P1, 1), attacker(13, P1, 2)],
+      blockerAssignments,
+    );
+    expect(map.get(11)).toEqual([101, 102]);
+    expect(map.get(12)).toEqual([101, 102]);
+    expect(map.has(13)).toBe(false);
   });
 
-  it("maps a bandless attacker to only itself", () => {
-    const map = bandMateIdsByAttacker([attacker(11, P1, null), attacker(12, P1)]);
-    expect(map.get(11)).toEqual(new Set([11]));
-    expect(map.get(12)).toEqual(new Set([12]));
+  it("maps a bandless attacker to only its own direct blockers", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([11])]]);
+    const map = blockersByAttacker([attacker(11, P1, null), attacker(12, P1)], blockerAssignments);
+    expect(map.get(11)).toEqual([100]);
+    expect(map.has(12)).toBe(false);
   });
 
-  it("returns an empty map for undefined attackers", () => {
-    expect(bandMateIdsByAttacker(undefined).size).toBe(0);
+  it("omits an attacker no blocker reaches", () => {
+    const map = blockersByAttacker([attacker(11, P1)], new Map());
+    expect(map.has(11)).toBe(false);
+  });
+
+  it("with attackers undefined, a direct assignment still maps (record-less id)", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([11])]]);
+    const map = blockersByAttacker(undefined, blockerAssignments);
+    expect(map.get(11)).toEqual([100]);
   });
 });
 
@@ -459,6 +727,8 @@ describe("blockTargetSelection", () => {
       mustBeBlocked: false,
       bandId: null,
       assignedIds: [11, 12],
+      heldThroughBand: false,
+      maxAssignable: 4,
       ...overrides,
     };
   }
@@ -473,12 +743,24 @@ describe("blockTargetSelection", () => {
     expect(blockTargetSelection(makeStack(), 0)).toEqual([]);
   });
 
-  it("clamps below 0 and above the stack size", () => {
+  it("clamps below 0 and above maxAssignable", () => {
     expect(blockTargetSelection(makeStack(), -5)).toEqual([]);
     expect(blockTargetSelection(makeStack(), 99)).toEqual([11, 12, 13, 14]);
   });
 
   it("is the identity at the current assigned count", () => {
     expect(blockTargetSelection(makeStack(), 2)).toEqual([11, 12]);
+  });
+
+  it("grows no further than maxAssignable when it is below the stack size", () => {
+    expect(
+      blockTargetSelection(makeStack({ assignedIds: [11], maxAssignable: 2 }), 4),
+    ).toEqual([11, 12]);
+  });
+
+  it("still shrinks correctly when already-assigned exceeds maxAssignable (over capacity)", () => {
+    expect(
+      blockTargetSelection(makeStack({ assignedIds: [11, 12, 13], maxAssignable: 1 }), 2),
+    ).toEqual([11, 12]);
   });
 });

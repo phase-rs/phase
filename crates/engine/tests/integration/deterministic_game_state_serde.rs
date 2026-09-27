@@ -144,6 +144,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::block_requirements", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::blocker_constraints", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::must_be_blocked_targets", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::block_capacities", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
 ];
 
 fn owner_id(file: &str, owner: &str, variant: Option<&str>, field: &str) -> String {
@@ -490,6 +491,13 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "WaitingFor",
             Some("DeclareBlockers"),
             "must_be_blocked_targets",
+            "HashMap",
+            HASH_MAP,
+        ),
+        (
+            "WaitingFor",
+            Some("DeclareBlockers"),
+            "block_capacities",
             "HashMap",
             HASH_MAP,
         ),
@@ -1178,7 +1186,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        53,
+        54,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -2075,6 +2083,7 @@ fn declare_blockers_numeric_maps_round_trip_through_value_bare_raw_and_trusted()
             (ObjectId(3), vec![ObjectId(1)]),
             (ObjectId(4), vec![ObjectId(1)]),
         ]),
+        block_capacities: HashMap::from([(ObjectId(3), Some(1)), (ObjectId(4), None)]),
     };
     let value = waiting_value(&waiting);
     for field in [
@@ -2082,6 +2091,7 @@ fn declare_blockers_numeric_maps_round_trip_through_value_bare_raw_and_trusted()
         "block_requirements",
         "blocker_constraints",
         "must_be_blocked_targets",
+        "block_capacities",
     ] {
         assert_eq!(
             value["data"][field].as_object().map(serde_json::Map::len),
@@ -2103,6 +2113,7 @@ fn declare_blockers_numeric_maps_round_trip_through_value_bare_raw_and_trusted()
         block_requirements: HashMap::new(),
         blocker_constraints: HashMap::new(),
         must_be_blocked_targets: HashMap::new(),
+        block_capacities: HashMap::new(),
     };
     let empty_value = waiting_value(&empty);
     assert_eq!(

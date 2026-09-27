@@ -314,6 +314,7 @@
     "blockedCount": "blq {{count}}",
     "blockingWith": "Bloque avec {{name}}",
     "blockedBy": "Bloqué par {{names}}",
+    "blockedThroughBand": "Bloqué par {{name}} via sa bande",
     "unblocked": "Non bloqué",
     "pickAll": "Tous",
     "pickNone": "Aucun",

@@ -27,7 +27,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { type BlockerAssignments, useUiStore } from "../../stores/uiStore.ts";
-import { bandMateIdsByAttacker, blockTargetSelection, partitionBlockTargets } from "../../utils/combat.ts";
+import { blockersByAttacker, blockTargetSelection, partitionBlockTargets } from "../../utils/combat.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { PermanentCard } from "./PermanentCard.tsx";
 import { type GroupRenderMode, groupStaggerPx, type BattlefieldRowType } from "./groupRenderMode.ts";
@@ -209,18 +209,16 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const selectedTapCount = group.ids.filter((id) => selectedCardIds.includes(id)).length;
   const assignedBlockerCount = group.ids.filter((id) => blockerAssignments.has(id)).length;
   const committedAttackerCount = group.ids.filter((id) => committedAttackerIds.has(id)).length;
-  const bandMates = useMemo(() => bandMateIdsByAttacker(combatAttackers), [combatAttackers]);
+  const reachingBlockers = useMemo(
+    () => blockersByAttacker(combatAttackers, blockerAssignments),
+    [combatAttackers, blockerAssignments],
+  );
   // Members already assigned at least one blocker, so a defender can see block
   // progress on a collapsed attacking pile without expanding it. CR 702.22h: a
   // block assigned only to a band-mate counts too, since the whole band
   // becomes blocked with it.
   const blockedAttackerCount = combatMode === "blockers"
-    ? group.ids.filter((id) => {
-        const mates = bandMates.get(id) ?? new Set([id]);
-        return Array.from(blockerAssignments.values()).some((attackerIds) =>
-          Array.from(mates).some((mateId) => attackerIds.has(mateId)),
-        );
-      }).length
+    ? group.ids.filter((id) => reachingBlockers.has(id)).length
     : 0;
   const canOpenPicker = pickerContext != null;
 
@@ -787,6 +785,7 @@ function BlockTargetGroupControls({
         blockRequirements: waitingFor.data.block_requirements,
         blockerConstraints: waitingFor.data.blocker_constraints,
         mustBeBlockedTargets: waitingFor.data.must_be_blocked_targets,
+        blockCapacities: waitingFor.data.block_capacities,
       }),
     [eligibleIds, blockerId, combatAttackers, blockerAssignments, waitingFor],
   );
@@ -838,15 +837,25 @@ function BlockTargetGroupControls({
         if (stack.minBlockers > 0) {
           labelParts.push(t("combat.blockNeedsBadge", { required: stack.minBlockers }));
         }
-        labelParts.push(
-          stack.otherBlockerIds.length > 0
-            ? t("permanent.blockedBy", {
-                names: stack.otherBlockerIds
-                  .map((id) => objects?.[id]?.name ?? t("attackTargetPicker.objectFallback", { id }))
-                  .join(", "),
-              })
-            : t("permanent.unblocked"),
-        );
+        // CR 702.22h: a held stack is already blocked by the pending blocker
+        // through a band-mate, so it reads its own label instead of
+        // "Unblocked" — but it can ALSO carry a DIFFERENT blocker's own
+        // assignment (otherBlockerIds), so both may appear together.
+        if (stack.heldThroughBand) {
+          labelParts.push(t("permanent.blockedThroughBand", { name: blockerName }));
+        }
+        if (stack.otherBlockerIds.length > 0) {
+          labelParts.push(
+            t("permanent.blockedBy", {
+              names: stack.otherBlockerIds
+                .map((id) => objects?.[id]?.name ?? t("attackTargetPicker.objectFallback", { id }))
+                .join(", "),
+            }),
+          );
+        }
+        if (!stack.heldThroughBand && stack.otherBlockerIds.length === 0) {
+          labelParts.push(t("permanent.unblocked"));
+        }
         const label = labelParts.join(" · ");
 
         return (
@@ -854,7 +863,7 @@ function BlockTargetGroupControls({
             <div className="truncate text-[10px] text-slate-300">{label}</div>
             <CountPickerControls
               count={stack.assignedIds.length}
-              max={stack.ids.length}
+              max={stack.maxAssignable}
               onChange={(n) =>
                 setGroupBlockerAssignments(blockerId, stack.ids, blockTargetSelection(stack, n))
               }

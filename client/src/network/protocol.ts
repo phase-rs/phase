@@ -107,10 +107,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *
  * Bumps to date:
  *  65 — game_setup and state_update carry GameState, whose DeclareBlockers
- *       prompt can now carry must_be_blocked_targets (CR 509.1c). Both peers
- *       are browsers and neither validates the shape, so a v64 peer would
- *       take the new field with no decode error; first contact rejects the
- *       skew instead. Bumped in lockstep with full-game protocol 83.
+ *       prompt can now carry must_be_blocked_targets (CR 509.1c) and
+ *       block_capacities (CR 509.1a + CR 101.1). Both peers are browsers and
+ *       neither validates the shape, so a v64 peer would take the new fields
+ *       with no decode error; first contact rejects the skew instead. Bumped
+ *       in lockstep with full-game protocol 83.
  *  64 — game_setup and state_update carry GameState, whose additional-phase
  *       abilities now hold an ExtraPhaseAnchor, whose delayed triggers can hold
  *       AtBeginningOfAddedPhase, whose scheduled extra phases and resume

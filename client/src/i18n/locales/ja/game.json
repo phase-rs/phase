@@ -319,6 +319,7 @@
     "blockedCount": "ブロック済 {{count}}",
     "blockingWith": "{{name}}でブロック中",
     "blockedBy": "{{names}}にブロックされている",
+    "blockedThroughBand": "{{name}}にバンドを通じてブロックされている",
     "unblocked": "ブロックされていない",
     "pickAll": "すべて",
     "pickNone": "なし",
