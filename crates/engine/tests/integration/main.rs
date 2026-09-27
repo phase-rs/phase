@@ -418,6 +418,7 @@ mod grimdancer_two_counter_entry_choice;
 mod grubs_command_tracked_set_filter;
 mod guard_ownership;
 mod guardian_project_same_name_intervening_if;
+mod gut_true_soul_zealot_sacrifice_type_union;
 mod gwaihir_cda_off_zone_sibling_static;
 mod gwaihir_vigilance_zone_gate;
 mod hag_noxious_nightmares_menace_grant;

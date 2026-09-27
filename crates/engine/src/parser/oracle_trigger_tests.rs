@@ -70,6 +70,99 @@ fn trigger_chain_effects(trigger: &TriggerDefinition) -> Vec<&Effect> {
         .collect()
 }
 
+const GUT_TRUE_SOUL_ZEALOT_ORACLE: &str = "Whenever you attack, you may sacrifice another creature or an artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking. (It can't be blocked except by two or more creatures.)\nChoose a Background (You can have a Background as a second commander.)";
+
+#[test]
+fn gut_attack_trigger_sacrifice_is_a_scoped_type_union() {
+    // CR 508.3d + CR 118.12: the optional sacrifice occurs on resolution of
+    // this "you attack" trigger, before its "If you do" token instruction.
+    let parsed = parse_oracle_text(
+        GUT_TRUE_SOUL_ZEALOT_ORACLE,
+        "Gut, True Soul Zealot",
+        &["Choose a background".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Goblin".to_string(), "Shaman".to_string()],
+    );
+    let trigger = parsed.triggers.first().expect("Gut's attack trigger");
+    assert_eq!(trigger.mode, TriggerMode::YouAttack);
+    let execute = trigger.execute.as_deref().expect("optional sacrifice");
+    assert!(execute.optional);
+    assert_no_unimplemented(execute);
+    let Effect::Sacrifice {
+        target: TargetFilter::Or { filters },
+        count: QuantityExpr::Fixed { value: 1 },
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected one sacrifice from type union: {execute:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for (leg, ty, another) in [
+        (&filters[0], TypeFilter::Creature, true),
+        (&filters[1], TypeFilter::Artifact, false),
+    ] {
+        let TargetFilter::Typed(typed) = leg else {
+            panic!("expected typed leg: {leg:?}");
+        };
+        assert!(typed.type_filters.contains(&ty), "{leg:?}");
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert_eq!(typed.properties.contains(&FilterProp::Another), another);
+    }
+    let followup = execute
+        .sub_ability
+        .as_deref()
+        .expect("If you do instruction");
+    assert_eq!(
+        followup.condition,
+        Some(AbilityCondition::effect_performed())
+    );
+    assert!(matches!(followup.effect.as_ref(), Effect::Token { .. }));
+    assert!(
+        !parsed.parse_warnings.iter().any(|warning| matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause { description, .. }
+                if description.contains("sacrifice another creature or an artifact")
+        )),
+        "the supported sacrifice instruction must not be swallowed: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+#[test]
+fn attack_trigger_refuses_truncated_third_sacrifice_type() {
+    // Synthetic full Oracle line: the production entry must report the
+    // unsupported third leg rather than claiming a supported two-leg filter.
+    let parsed = parse_oracle_text(
+        "Whenever you attack, you may sacrifice another creature or an artifact or an enchantment. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking.",
+        "Synthetic Attack Sacrifice",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("attack trigger reached production parser");
+    assert_eq!(trigger.mode, TriggerMode::YouAttack);
+    let effects = trigger_chain_effects(trigger);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Unimplemented {
+                description: Some(description),
+                ..
+            } if description.contains("another creature or an artifact or an enchantment")
+        )),
+        "the unsupported clause must remain visible in coverage: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Sacrifice { .. })),
+        "truncated sacrifice must not be marked supported: {effects:?}"
+    );
+}
+
 /// CR 608.2c: the scoped phase player stated once governs a same-sentence
 /// conjugated "and" continuation — Seizan, Perverter of Truth's upkeep player
 /// draws the two cards, not the ability's controller.

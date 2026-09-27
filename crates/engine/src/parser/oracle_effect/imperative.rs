@@ -63,11 +63,12 @@ use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    match_mass_union_separator, parse_anaphoric_target_ref, parse_definite_parent_reference,
-    parse_event_context_ref, parse_fight_target, parse_mass_type_union, parse_target,
-    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, parse_word_bounded, resolve_pronoun_target,
-    resolve_singular_exiled_card_target, starts_with_type_word, TargetSyntax,
+    fold_article_led_type_union, match_mass_union_separator, parse_anaphoric_target_ref,
+    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
+    parse_mass_type_union, parse_target, parse_target_with_ctx, parse_target_with_syntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, parse_word_bounded,
+    resolve_pronoun_target, resolve_singular_exiled_card_target, starts_with_type_word,
+    TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
@@ -1854,16 +1855,33 @@ pub(super) fn parse_targeted_action_ast(
         // Herald / Balduvian Horde / Phlage class. See the
         // `self_etb_sacrifice_it_anaphor_binds_to_self_ref` regression test
         // in `oracle_trigger.rs` for the lock-in.
-        let target = if target_text.trim().is_empty() {
-            TargetFilter::Any
+        let (mut target, rem) = if target_text.trim().is_empty() {
+            (TargetFilter::Any, "")
         } else if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
-            resolve_it_pronoun(ctx)
+            (resolve_it_pronoun(ctx), "")
         } else {
-            let (target, _rem) = parse_target_with_ctx(&target_text, ctx);
+            let (target, rem) = parse_target_with_ctx(&target_text, ctx);
             #[cfg(debug_assertions)]
-            assert_no_compound_remainder(_rem, text);
-            target
+            assert_no_compound_remainder(rem, text);
+            (target, rem)
         };
+        // The count grammar consumes "another", so scope its exclusion to the
+        // left leg before an independently determined, article-led right leg
+        // is folded. Article-less unions are already built by parse_target and
+        // share the exclusion across both legs.
+        if matches!(count_word, CountWord::SourceExclusion) {
+            add_another_to_filter_recursive(&mut target);
+        }
+        let base_was_typed = matches!(target, TargetFilter::Typed(_));
+        let (target, folded_rest) = fold_article_led_type_union(target, rem);
+        if base_was_typed
+            && matches!(target, TargetFilter::Or { .. })
+            && all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+                .parse(folded_rest.trim())
+                .is_err()
+        {
+            return None;
+        }
         // CR 701.21a: When the count expression already carries a typed filter
         // ("half the permanents they control" → ObjectCount{Typed[Permanent,
         // controller:You]}) and the target text didn't yield a filter, lift the
@@ -1880,25 +1898,6 @@ pub(super) fn parse_targeted_action_ast(
         // sacrifice a non-Demon creature" must restrict the prompt to the
         // actor's permanents — sacrificing requires controlling the permanent.
         apply_actor_default(&mut target, ctx);
-        // Re-apply the source exclusion the count word stripped. The count
-        // grammar consumes "another " as a bare count of 1, discarding the
-        // exclusion, so the filter built from the remainder ("creature or land")
-        // carries no `FilterProp::Another` and would let the source sacrifice
-        // itself (Morkrut Necropod, #4513).
-        //
-        // Apply the exclusion to every typed leg. "Another" means "not this
-        // source permanent"; it is required on any leg the source's type could
-        // match and is harmless (vacuous) on legs it cannot.
-        //
-        // No CR annotation here: this is parser-grammar scoping of the word
-        // "another"; the exclusion itself is CR-annotated at the filter layer
-        // (`game/filter.rs` `FilterProp::Another`).
-        if matches!(
-            count_word,
-            super::super::oracle_util::CountWord::SourceExclusion
-        ) {
-            add_another_to_filter_recursive(&mut target);
-        }
         return Some(TargetedImperativeAst::Sacrifice {
             target,
             count,
@@ -18208,6 +18207,83 @@ mod tests {
             },
             other => panic!("expected Effect::Sacrifice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_sacrifice_article_led_union_scopes_each_determiner() {
+        for (text, first, second, first_another, second_another) in [
+            (
+                "sacrifice another creature or an artifact",
+                TypeFilter::Creature,
+                TypeFilter::Artifact,
+                true,
+                false,
+            ),
+            (
+                "sacrifice another creature or an enchantment",
+                TypeFilter::Creature,
+                TypeFilter::Enchantment,
+                true,
+                false,
+            ),
+            (
+                "sacrifice an artifact or another creature",
+                TypeFilter::Artifact,
+                TypeFilter::Creature,
+                false,
+                true,
+            ),
+            (
+                "sacrifice another creature or artifact",
+                TypeFilter::Creature,
+                TypeFilter::Artifact,
+                true,
+                true,
+            ),
+        ] {
+            let mut ctx = ParseContext {
+                actor: Some(ControllerRef::You),
+                ..Default::default()
+            };
+            let ast = parse_targeted_action_ast(text, &text.to_lowercase(), &mut ctx)
+                .expect("sacrifice filter union");
+            let Effect::Sacrifice {
+                target: TargetFilter::Or { filters },
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } = lower_targeted_action_ast(ast)
+            else {
+                panic!("expected single sacrifice from type union: {text}");
+            };
+            assert_eq!(filters.len(), 2, "{text}");
+            for (leg, expected_type, another) in [
+                (&filters[0], first, first_another),
+                (&filters[1], second, second_another),
+            ] {
+                let TargetFilter::Typed(typed) = leg else {
+                    panic!("expected typed union leg: {leg:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&expected_type),
+                    "{text}: {leg:?}"
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You), "{text}");
+                assert_eq!(
+                    typed.properties.contains(&FilterProp::Another),
+                    another,
+                    "{text}: {leg:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_refuses_incomplete_article_led_union() {
+        let text = "sacrifice another creature or an artifact or an enchantment";
+        assert!(
+            parse_targeted_action_ast(text, text, &mut ParseContext::default()).is_none(),
+            "incomplete third leg must not be emitted as a supported two-leg sacrifice"
+        );
     }
 
     #[test]
