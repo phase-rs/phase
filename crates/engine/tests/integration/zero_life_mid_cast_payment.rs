@@ -475,8 +475,9 @@ fn replacement_choice_after_a_mana_ability_paid_the_last_life_stays_open() {
         .expect("activate Mana Confluence");
     // CR 605.3b + CR 616.1: the replacement's choice is part of paying the mana
     // ability's cost, so no one has priority yet. Answering it isn't driven
-    // here: a separate, pre-existing defect re-charges the life after the
-    // rider resolves on this path, at any life total.
+    // here: on this path a separate, pre-existing defect (logged on its own)
+    // re-charges the life after the rider resolves and asks again, looping at
+    // any life total.
     assert_rider_open_at_zero_life(&runner);
 }
 

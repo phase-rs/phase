@@ -22787,27 +22787,31 @@ fn annotate_paused_exile_event(
 }
 
 impl GameState {
-    /// CR 601.2 + CR 602.2b + CR 605.3b: Whether a spell is being cast or an
-    /// ability — a mana ability included — is being activated. No player
-    /// receives priority until that process finishes (CR 601.2i), so the
-    /// CR 704.3 state-based action check waits for it.
+    /// CR 704.3: Whether the game is inside a process that no player receives
+    /// priority during, so the state-based action check must wait until it
+    /// completes. There are four owners:
+    /// - **a cast or activation** (CR 601.2 + CR 602.2b; priority returns only
+    ///   at CR 601.2i): an inline cast carrier (`has_pending_cast`), or one
+    ///   parked in the external `pending_cast` carrier behind a prompt that
+    ///   doesn't carry it (Assist);
+    /// - **a cast or activation cost paused on a replacement** (CR 616.1): a
+    ///   cost move awaiting its replacement, a life payment whose replacement
+    ///   is still running its interactive effect, or a cost discard. Those
+    ///   prompts (`ReplacementChoice`, `ChooseOneOfBranch`, ...) are shared
+    ///   with resolutions, so the owner is read from the typed resume instead;
+    /// - **a mana ability's activation** (CR 605.3b), with priority or while
+    ///   paying a cost;
+    /// - **a triggered mana ability** (CR 605.4a), which "resolves immediately
+    ///   after the mana ability that triggered it, without waiting for
+    ///   priority".
     ///
-    /// Wider than [`WaitingFor::has_pending_cast`], the display and
-    /// `CancelCast` predicate. It also counts:
-    /// - a cast parked in the external `pending_cast` carrier behind a prompt
-    ///   that doesn't carry it (Assist);
-    /// - the continuations of a mana ability's activation;
-    /// - a cast or activation cost paused on a replacement (CR 616.1): a cost
-    ///   move awaiting its replacement, a life payment whose replacement is
-    ///   still running its interactive effect, or a cost discard.
-    ///
-    /// Those replacement prompts (`ReplacementChoice`, `ChooseOneOfBranch`,
-    /// ...) are shared with resolutions, so their owner is read from the typed
-    /// resume rather than from the prompt.
-    pub fn is_casting_or_activating(&self) -> bool {
+    /// Prompts owned by a resolution are deliberately not counted, so the
+    /// #962 safety net still ends a game stuck waiting on a player who has
+    /// already lost. Wider than [`WaitingFor::has_pending_cast`], the display
+    /// and `CancelCast` predicate.
+    pub fn withholds_priority(&self) -> bool {
         self.pending_cast.is_some()
             || self.waiting_for.has_pending_cast()
-            || self.waiting_for.is_mana_ability_continuation()
             || self
                 .pending_cost_move_resume
                 .as_ref()
@@ -22818,6 +22822,8 @@ impl GameState {
                 .is_some_and(DeferredLifeCostResume::is_casting_or_activation_cost)
             // Both variants carry the cast being paid for.
             || self.pending_discard_for_cost.is_some()
+            || self.waiting_for.is_mana_ability_continuation()
+            || self.pending_triggered_mana_resume.is_some()
     }
 
     /// Returns the active continuation only when its typed frame is the stack
@@ -38129,7 +38135,7 @@ mod tests {
         // PendingCast. A mana ability activated inside a spell cast still routes
         // the cast through the outer ManaPayment state, so excluding this
         // variant here does not lose mid-cast tracking. (The CR 704.3 gate reads
-        // `GameState::is_casting_or_activating`, which does count it.)
+        // `GameState::withholds_priority`, which does count it.)
         let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
             kind: PayCostKind::TapCreatures {
@@ -38194,7 +38200,7 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        assert!(!state.is_casting_or_activating());
+        assert!(!state.withholds_priority());
 
         state.waiting_for = WaitingFor::ChooseManaColor {
             player: PlayerId(0),
@@ -38205,14 +38211,14 @@ mod tests {
         };
         assert!(!state.waiting_for.has_pending_cast());
         assert!(state.waiting_for.is_mana_ability_continuation());
-        assert!(state.is_casting_or_activating());
+        assert!(state.withholds_priority());
 
         state.waiting_for = WaitingFor::PayManaAbilityMana {
             player: PlayerId(0),
             options: vec![vec![ManaType::Black]],
             pending_mana_ability: Box::new(pending),
         };
-        assert!(state.is_casting_or_activating());
+        assert!(state.withholds_priority());
 
         // CR 702.132a: Assist parks the cast in the external carrier while the
         // caster picks a helper; the cast is still in progress.
@@ -38223,7 +38229,7 @@ mod tests {
             convoke_mode: None,
         };
         assert!(!state.waiting_for.has_pending_cast());
-        assert!(!state.is_casting_or_activating());
+        assert!(!state.withholds_priority());
         let ability = crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Draw {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -38239,7 +38245,7 @@ mod tests {
             ability,
             ManaCost::zero(),
         )));
-        assert!(state.is_casting_or_activating());
+        assert!(state.withholds_priority());
     }
 
     /// CR 608.2 + CR 616.1: a replacement prompt left over from a resolution's
@@ -38256,7 +38262,7 @@ mod tests {
             total: 3,
             resume_at_resolution_depth: 0,
         });
-        assert!(!state.is_casting_or_activating());
+        assert!(!state.withholds_priority());
 
         state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::Cast {
             player: PlayerId(0),
@@ -38264,12 +38270,12 @@ mod tests {
             remaining_life_payments: Vec::new(),
             resume_at_resolution_depth: 0,
         });
-        assert!(state.is_casting_or_activating());
+        assert!(state.withholds_priority());
 
         // CR 601.2h + CR 616.1: a cost discard paused on a replacement carries
         // its cast inside the resume, not in `pending_cast`.
         state.pending_deferred_life_cost_resume = None;
-        assert!(!state.is_casting_or_activating());
+        assert!(!state.withholds_priority());
         let ability = crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Draw {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
@@ -38285,7 +38291,7 @@ mod tests {
             chosen: vec![ObjectId(3)],
             paused_at_index: 0,
         }));
-        assert!(state.is_casting_or_activating());
+        assert!(state.withholds_priority());
     }
 
     #[test]
