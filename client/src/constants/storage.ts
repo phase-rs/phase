@@ -468,9 +468,10 @@ export function writeDraftAutosaveDeck(
  * (`DeckMeta.autosaveSlot`). Both checks read `savedDeckRef` under the lock, not just `previous`:
  * when an earlier queued save or clone to that same name has already committed by the time this
  * transaction runs, its write is what `previous` should be compared against, not the value
- * captured back at this click. On a same-name refusal, `savedDeckRef` is rebased to what
- * `nextName` holds now (or `null` if it was deleted) when this save still claims the editor, so a
- * retried Save acts on the current state instead of refusing again.
+ * captured back at this click. On a same-name refusal, `savedDeckRef` is cleared to `null` when
+ * this save still claims the editor, so the next Save (whether a retry under the same name or a
+ * rename) captures `previous = null` and writes fresh at its `nextName` instead of moving or
+ * overwriting whatever the refusal left behind at the old name.
  *
  * On success, `savedDeckRef` is updated to this write's snapshot only if `claimsEditor` (checked
  * again after the write) still says so — a Load that switched the editor to a different deck
@@ -489,10 +490,12 @@ export function saveBuilderDeck(
     if (effective && effective.name === nextName) {
       if (getDeckMeta(nextName)?.autosaveSlot === undefined && !savedDeckUnchanged(txn, effective)) {
         if (claimsEditor()) {
-          // Rebase so the retry the "try again" toast asks for is an informed overwrite or
-          // recreation, not another refusal against this same stale snapshot.
-          const raw = localStorage.getItem(STORAGE_KEY_PREFIX + nextName);
-          savedDeckRef.current = raw === null ? null : { name: nextName, raw };
+          // Clear instead of rebasing onto the other writer's bytes: rebasing made a later
+          // rename-Save treat that snapshot as "unchanged" and move + overwrite the other
+          // writer's deck the user never saw. Clearing makes the retry the "try again" toast
+          // asks for a first save (overwrite or recreate) instead, and leaves the rename rule
+          // (compare against `previous`, not `savedDeckRef`) unaffected by this refusal.
+          savedDeckRef.current = null;
         }
         throw new SavedDeckChangedError(nextName);
       }

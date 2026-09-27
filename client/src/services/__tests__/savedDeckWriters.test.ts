@@ -438,9 +438,9 @@ describe("saveBuilderDeck under the deck's own name", () => {
     await expect(call).rejects.toBeInstanceOf(SavedDeckChangedError);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Built")).toBe("REPLACEMENT-DATA");
     expect(getDeckMeta("Built")).toEqual({ addedAt: 2000 });
-    // Rebased to the replacement so a retried save is an informed overwrite, not another refusal
-    // against this same stale snapshot.
-    expect(ref.current).toEqual({ name: "Built", raw: "REPLACEMENT-DATA" });
+    // Cleared, not rebased onto the replacement, so a retried save (same name or a rename)
+    // captures `previous = null` and writes fresh instead of moving or overwriting this deck.
+    expect(ref.current).toBeNull();
   });
 
   it("writes when the deck still holds the snapshot (paired positive)", async () => {

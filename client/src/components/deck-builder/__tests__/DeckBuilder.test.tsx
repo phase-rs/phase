@@ -2176,6 +2176,123 @@ describe("DeckBuilder", () => {
       const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "P") ?? "{}");
       expect(stored.main).toEqual([{ name: "Lightning Bolt", count: 3 }]);
     });
+
+    it("a rename-Save made after a same-name refusal leaves the other writer's deck in place", async () => {
+      const user = userEvent.setup();
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "P",
+        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
+      );
+      render(
+        <DeckBuilder
+          format="Standard"
+          onFormatChange={vi.fn()}
+          initialDeckName="P"
+          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+          onSearchFiltersChange={vi.fn()}
+          onResetSearch={vi.fn()}
+        />,
+      );
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+      const holder = withSavedDeckLibrary(async (txn) => {
+        await held;
+        writeSavedDeckData(txn, "P", otherTab);
+      });
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      await user.click(screen.getByRole("button", { name: "Save" }));
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+      });
+      release();
+      await holder;
+      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+      // Reach guard: the refusal left the other writer's bytes in place before the rename.
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+
+      await user.clear(nameInput);
+      await user.type(nameInput, "Q");
+      await user.click(screen.getByRole("button", { name: "Save" }));
+      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification?.title).toBe("Deck saved"));
+
+      // The rename must not move or overwrite the other writer's deck at the old name.
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+      const atQ = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Q") ?? "{}");
+      expect(atQ.main).toEqual([{ name: "Lightning Bolt", count: 3 }]);
+    });
+
+    it("a same-name refusal on P, after a Load moved the editor to D, does not blunt D's own change detection", async () => {
+      const user = userEvent.setup();
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "P",
+        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
+      );
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "D",
+        JSON.stringify({ main: [{ name: "Counterspell", count: 4 }], sideboard: [], format: "Standard" }),
+      );
+      render(
+        <DeckBuilder
+          format="Standard"
+          onFormatChange={vi.fn()}
+          initialDeckName="P"
+          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+          onSearchFiltersChange={vi.fn()}
+          onResetSearch={vi.fn()}
+        />,
+      );
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+      const holder = withSavedDeckLibrary(async (txn) => {
+        await held;
+        writeSavedDeckData(txn, "P", otherTab);
+      });
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      await user.click(screen.getByRole("button", { name: "Save" }));
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+      });
+
+      await user.click(screen.getByRole("button", { name: "Load deck..." }));
+      await user.click(screen.getByRole("option", { name: "D" }));
+      await user.click(screen.getByRole("button", { name: "Discard" }));
+      await waitFor(() => expect(nameInput).toHaveValue("D"));
+
+      release();
+      await holder;
+      // P's refusal ran after the Load, so it must not touch savedDeckRef — D owns it now.
+      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+
+      const changedElsewhere = JSON.stringify({ main: [{ name: "Island", count: 40 }], sideboard: [] });
+      localStorage.setItem(STORAGE_KEY_PREFIX + "D", changedElsewhere);
+
+      // If P's refusal had cleared savedDeckRef anyway, this Save of D would have no snapshot
+      // to compare against and would silently overwrite the change above instead of refusing.
+      await user.click(await screen.findByRole("button", { name: "remove-Counterspell" }));
+      await user.click(screen.getByRole("button", { name: "Save" }));
+      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "D")).toBe(changedElsewhere);
+    });
   });
 
   it("toggles between Deck and Info surfaces via the tab bar", async () => {
