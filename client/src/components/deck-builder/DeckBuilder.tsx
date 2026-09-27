@@ -74,6 +74,8 @@ export function DeckBuilder({
     deckSizeRule,
     estimate,
     auditEmptyReason,
+    signals,
+    signalsEmptyReason,
     cmcValues,
     colorDistribution,
     cardCounts,
@@ -526,6 +528,8 @@ export function DeckBuilder({
               comboDeclaration={comboDeclaration}
               onComboDeclarationChange={setComboDeclaration}
               auditEmptyReason={auditEmptyReason}
+              signals={signals}
+              signalsEmptyReason={signalsEmptyReason}
               onCardClick={handleScrollToCard}
             />
           </div>

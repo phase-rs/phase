@@ -290,6 +290,26 @@
     "ariaLabel": "Poziom talii",
     "unrated": "Bez oceny"
   },
+  "signals": {
+    "title": "Sygnały talii",
+    "disclaimer": "Statystyki opisowe z przeanalizowanego tekstu kart w talii. Nie są kryteriami poziomu i nigdy nie zmieniają oszacowania.",
+    "avgManaValue": "Średnia wartość many (karty niebędące lądami): {{value}}",
+    "notMeasurable": "niemierzalna",
+    "noCommander": "Dodaj dowódcę, aby zobaczyć sygnały talii.",
+    "unavailable": "Sygnały talii wymagają danych kart, które nie zostały jeszcze wczytane.",
+    "unresolved": "Nie znaleziono {{n}} nazw kart w danych kart.",
+    "kind": {
+      "counterspells": "Kontry",
+      "spot_removal": "Punktowe usuwanie",
+      "sweepers": "Czyszczenie stołu",
+      "card_advantage": "Przewaga kart",
+      "free_interaction": "Darmowa interakcja",
+      "mana_producers": "Źródła many",
+      "land_fetch": "Wyszukiwanie lądów",
+      "rituals": "Rytuały",
+      "extra_land_drops": "Dodatkowe zagrania lądów"
+    }
+  },
   "comboBarometer": {
     "ariaLabel": "Nieskończona kombinacja dwóch kart",
     "question": "Celowa nieskończona kombinacja dwóch kart?",

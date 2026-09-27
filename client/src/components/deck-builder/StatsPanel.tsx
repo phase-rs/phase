@@ -8,9 +8,11 @@ import type {
   ComboDeclaration,
   CommanderBracket,
 } from "../../types/bracket";
+import type { DeckSignals } from "../../types/deckSignals";
 import { ColorDistribution } from "./ColorDistribution";
 import { ManaCurve } from "./ManaCurve";
 import { BracketAuditPanel } from "./BracketAuditPanel";
+import { DeckSignalsPanel } from "./DeckSignalsPanel";
 import { BracketPicker } from "./BracketPicker";
 import { ComboDeclarationPicker } from "./ComboDeclarationPicker";
 
@@ -52,6 +54,8 @@ interface StatsPanelProps {
   comboDeclaration: ComboDeclaration;
   onComboDeclarationChange: (declaration: ComboDeclaration) => void;
   auditEmptyReason?: "not-commander" | "no-commander" | "card-data-unavailable";
+  signals: DeckSignals | null;
+  signalsEmptyReason?: "not-commander" | "no-commander" | "card-data-unavailable";
   onCardClick: (cardName: string) => void;
 }
 
@@ -66,6 +70,8 @@ export function StatsPanel({
   comboDeclaration,
   onComboDeclarationChange,
   auditEmptyReason,
+  signals,
+  signalsEmptyReason,
   onCardClick,
 }: StatsPanelProps) {
   const { t } = useTranslation("deck-builder");
@@ -97,6 +103,7 @@ export function StatsPanel({
             emptyReason={auditEmptyReason}
             onCardClick={onCardClick}
           />
+          <DeckSignalsPanel signals={signals} emptyReason={signalsEmptyReason} />
         </div>
       )}
 

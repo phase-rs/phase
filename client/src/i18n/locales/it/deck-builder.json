@@ -290,6 +290,26 @@
     "ariaLabel": "Bracket del mazzo",
     "unrated": "Senza valutazione"
   },
+  "signals": {
+    "title": "Segnali del mazzo",
+    "disclaimer": "Statistiche descrittive ricavate dal testo analizzato delle carte del mazzo. Non sono criteri di bracket e non modificano mai la stima.",
+    "avgManaValue": "Valore di mana medio (non terra): {{value}}",
+    "notMeasurable": "non misurabile",
+    "noCommander": "Aggiungi un comandante per vedere i segnali del mazzo.",
+    "unavailable": "I segnali del mazzo richiedono dati delle carte, che non sono ancora stati caricati.",
+    "unresolved": "{{n}} nomi di carte non sono stati trovati nei dati delle carte.",
+    "kind": {
+      "counterspells": "Contromagie",
+      "spot_removal": "Rimozioni mirate",
+      "sweepers": "Rimozioni globali",
+      "card_advantage": "Vantaggio carte",
+      "free_interaction": "Interazione gratuita",
+      "mana_producers": "Produttori di mana",
+      "land_fetch": "Ricerca di terre",
+      "rituals": "Rituali",
+      "extra_land_drops": "Terre aggiuntive per turno"
+    }
+  },
   "comboBarometer": {
     "ariaLabel": "Combo infinita di due carte",
     "question": "Combo infinita intenzionale di due carte?",

@@ -31,8 +31,14 @@ import {
   isStateLostMessage,
   nextSnapshotSeq,
 } from "./types";
-import type { BracketEstimate, BracketEstimateRequest } from "../types/bracketEstimate";
+import type {
+  BracketDeckRequest,
+  BracketEstimate,
+  BracketEstimateRequest,
+} from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
+import type { DeckSignals } from "../types/deckSignals";
+import { isDeckSignals } from "../types/deckSignals";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { classifyInitFailure } from "./init-envelope";
 import { AiWorkerPool } from "./ai-worker-pool";
@@ -953,6 +959,15 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     return this.fallback!.estimateBracketForDeck(request);
   }
 
+  async deckSignals(deck: BracketDeckRequest): Promise<DeckSignals | null> {
+    await this.initialize();
+    await this.requireCardDb();
+    if (this.engine) {
+      return this.engine.deckSignalsForDeck(deck);
+    }
+    return this.fallback!.deckSignalsForDeck(deck);
+  }
+
   /**
    * Eagerly load the card database into the shared worker so later compat
    * checks and game init are instant. Public entry point for the menu/page
@@ -1261,6 +1276,7 @@ interface MainThreadFallback {
     firstPlayer?: number,
   ): Promise<SubmitResult>;
   estimateBracketForDeck(request: BracketEstimateRequest): Promise<BracketEstimate | null>;
+  deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
   evaluateDeckFormatGate(request: unknown): Promise<unknown>;
   customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown>;
@@ -1502,6 +1518,14 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         if (r === null || r === undefined) return null;
         if (isBracketEstimate(r)) return r;
         throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
+      }),
+
+    deckSignalsForDeck: (deck: BracketDeckRequest) =>
+      enqueue(() => {
+        const r = wasm.deck_signals_for_deck(deck);
+        if (r === null || r === undefined) return null;
+        if (isDeckSignals(r)) return r;
+        throw new Error("deck_signals_for_deck returned invalid deck signals");
       }),
 
     // Card DB is loaded into this same `@wasm/engine` module singleton by

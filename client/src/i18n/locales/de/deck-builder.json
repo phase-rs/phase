@@ -290,6 +290,26 @@
     "ariaLabel": "Deck-Bracket",
     "unrated": "Unbewertet"
   },
+  "signals": {
+    "title": "Deck-Signale",
+    "disclaimer": "Beschreibende Statistiken aus dem analysierten Kartentext des Decks. Sie sind keine Bracket-Kriterien und ändern die Schätzung nie.",
+    "avgManaValue": "Durchschnittlicher Manawert (Nichtländer): {{value}}",
+    "notMeasurable": "nicht messbar",
+    "noCommander": "Füge einen Commander hinzu, um Deck-Signale zu sehen.",
+    "unavailable": "Deck-Signale benötigen Kartendaten, die noch nicht geladen wurden.",
+    "unresolved": "{{n}} Kartennamen wurden in den Kartendaten nicht gefunden.",
+    "kind": {
+      "counterspells": "Gegenzauber",
+      "spot_removal": "Gezielte Entfernung",
+      "sweepers": "Massenentfernung",
+      "card_advantage": "Kartenvorteil",
+      "free_interaction": "Kostenlose Interaktion",
+      "mana_producers": "Manaproduzenten",
+      "land_fetch": "Landsuche",
+      "rituals": "Rituale",
+      "extra_land_drops": "Zusätzliche Länder pro Zug"
+    }
+  },
   "comboBarometer": {
     "ariaLabel": "Unendliche Zwei-Karten-Kombo",
     "question": "Beabsichtigte unendliche Zwei-Karten-Kombo?",

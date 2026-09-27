@@ -290,6 +290,26 @@
     "ariaLabel": "Nivel del mazo",
     "unrated": "Sin clasificar"
   },
+  "signals": {
+    "title": "Señales del mazo",
+    "disclaimer": "Estadísticas descriptivas del texto de carta analizado del mazo. No son criterios de nivel y nunca cambian la estimación.",
+    "avgManaValue": "Valor de maná promedio (no tierras): {{value}}",
+    "notMeasurable": "no medible",
+    "noCommander": "Añade un comandante para ver las señales del mazo.",
+    "unavailable": "Las señales del mazo necesitan datos de cartas, que aún no se han cargado.",
+    "unresolved": "No se encontraron {{n}} nombres de cartas en los datos de cartas.",
+    "kind": {
+      "counterspells": "Contrahechizos",
+      "spot_removal": "Remoción puntual",
+      "sweepers": "Limpiamesas",
+      "card_advantage": "Ventaja de cartas",
+      "free_interaction": "Interacción gratuita",
+      "mana_producers": "Productores de maná",
+      "land_fetch": "Búsqueda de tierras",
+      "rituals": "Rituales",
+      "extra_land_drops": "Tierras adicionales por turno"
+    }
+  },
   "comboBarometer": {
     "ariaLabel": "Combo infinito de dos cartas",
     "question": "¿Combo infinito intencional de dos cartas?",

@@ -290,6 +290,26 @@
     "ariaLabel": "Deck bracket",
     "unrated": "Unrated"
   },
+  "signals": {
+    "title": "Deck signals",
+    "disclaimer": "Descriptive statistics from the deck's parsed card text. These are not bracket criteria and never change the estimate.",
+    "avgManaValue": "Average mana value (nonland): {{value}}",
+    "notMeasurable": "not measurable",
+    "noCommander": "Add a commander to see deck signals.",
+    "unavailable": "Deck signals need card data, which hasn't loaded yet.",
+    "unresolved": "{{n}} card names were not found in the card data.",
+    "kind": {
+      "counterspells": "Counterspells",
+      "spot_removal": "Spot removal",
+      "sweepers": "Sweepers",
+      "card_advantage": "Card advantage",
+      "free_interaction": "Free interaction",
+      "mana_producers": "Mana producers",
+      "land_fetch": "Land fetch",
+      "rituals": "Rituals",
+      "extra_land_drops": "Extra land drops"
+    }
+  },
   "comboBarometer": {
     "ariaLabel": "Two-card infinite combo",
     "question": "Intentional two-card infinite combo?",
