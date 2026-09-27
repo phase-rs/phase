@@ -23320,26 +23320,30 @@ fn blitz_castable_zone(
 /// CR 702.103b + CR 601.2a + CR 110.4: can a graveyard bestow cast commit to a
 /// permission it can actually use (see `elected_graveyard_permission_source`)?
 ///
-/// Judged on the BESTOWED form, because that is the spell as it will be cast:
-/// an Aura enchantment, not a creature. Under Muldrotha a bestowed Boon Satyr
-/// is an enchantment spell with one slot, so bestow is usable, while under
-/// Encroaching Mycosynth it is an artifact and an enchantment spell with two,
-/// which needs a slot prompt this path does not have. The form is applied to a
-/// scratch copy through the same `apply_bestow_aura_form` the bestow handler
-/// uses, so this agrees with the check `prepare_spell_cast` makes after that
-/// handler has applied it for real.
+/// Judged on the BESTOWED form (`bestowed`, see `bestowed_form`), because that
+/// is the spell as it will be cast: an Aura enchantment, not a creature. Under
+/// Muldrotha a bestowed Boon Satyr is an enchantment spell with one slot, so
+/// bestow is usable, while under Encroaching Mycosynth it is an artifact and an
+/// enchantment spell with two, which needs a slot prompt this path does not
+/// have. This agrees with the check `prepare_spell_cast` makes after the bestow
+/// handler has applied the form for real.
 fn graveyard_bestow_authority_usable(
-    state: &GameState,
+    bestowed: &GameState,
     player: PlayerId,
     object_id: ObjectId,
 ) -> bool {
-    let mut bestowed = state.clone();
-    let Some(obj) = bestowed.objects.get_mut(&object_id) else {
-        return false;
-    };
-    apply_bestow_aura_form(obj);
-    elected_graveyard_permission_source(&bestowed, player, object_id, CastingVariant::Bestow)
+    elected_graveyard_permission_source(bestowed, player, object_id, CastingVariant::Bestow)
         .is_some()
+}
+
+/// CR 702.103b: a scratch copy of `state` with `object_id` in its bestowed
+/// form, through the same `apply_bestow_aura_form` the bestow handler applies
+/// before preparing the cast. The bestow offer reads targets, cost modifiers and
+/// permissions from it, so it judges the spell that will actually be cast.
+fn bestowed_form(state: &GameState, object_id: ObjectId) -> Option<GameState> {
+    let mut bestowed = state.clone();
+    apply_bestow_aura_form(bestowed.objects.get_mut(&object_id)?);
+    Some(bestowed)
 }
 
 /// A Blitz cast on offer for this object: its effective mana sub-cost, its
@@ -23433,40 +23437,54 @@ fn bestow_offer(
             crate::types::keywords::Keyword::Bestow(cost) => Some(cost.clone()),
             _ => None,
         })?;
-    // CR 702.103a + CR 303.4a: bestow turns the spell into an Aura requiring a
-    // legal target. If no creature is legally enchantable, bestow can't be
+    // CR 702.103b: the offer judges the spell as it will be cast, the bestowed
+    // Aura, not the creature card: an Aura isn't a creature, so protection from
+    // creatures doesn't stop it from targeting (CR 702.16b), and a "creature
+    // spells" cost modifier doesn't apply to it.
+    let bestowed = bestowed_form(state, object_id)?;
+    // CR 702.103a + CR 303.4a: the bestowed Aura requires a legal target for
+    // its enchant ability, enumerated as the cast enumerates it (the Aura
+    // branch of `continue_with_prepared`). If none exists, bestow can't be
     // chosen.
-    let creature_filter = TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
-    let legal_creature_targets =
-        targeting::find_legal_targets(state, &creature_filter, player, object_id);
+    let legal_aura_targets = bestowed
+        .objects
+        .get(&object_id)?
+        .keywords
+        .iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Enchant(filter) => Some(filter.clone()),
+            _ => None,
+        })
+        .map(|filter| targeting::find_legal_targets(&bestowed, &filter, player, object_id))
+        .unwrap_or_default();
     // CR 601.2f-h + CR 118.9d: split the (possibly compound) bestow cost into its
     // mana sub-cost and Collect-evidence residual, then apply active cost
     // modifiers to the mana sub-cost.
     let (mana_part, residual) = split_bestow_cost_components(&bestow_cost);
     let mana = mana_part.as_ref().map(|m| {
-        apply_cost_modifiers_to_base(state, player, object_id, m.clone())
+        apply_cost_modifiers_to_base(&bestowed, player, object_id, m.clone())
             .unwrap_or_else(|| m.clone())
     });
     // CR 601.2c + CR 601.2f-h: bestow is on offer when its total is payable for
     // at least one legal Aura target: a tax that depends on the target (Terror
     // of the Peaks) is priced against each candidate. The committed target is
     // priced again by payment once it is chosen.
-    let target_assignments: Vec<Vec<TargetRef>> = legal_creature_targets
+    let target_assignments: Vec<Vec<TargetRef>> = legal_aura_targets
         .into_iter()
         .map(|target| vec![target])
         .collect();
     // CR 601.2a + CR 110.4: from the graveyard, bestow needs a permission it can
-    // commit to, judged on the bestowed form (see
-    // `graveyard_bestow_authority_usable`).
+    // commit to (see `graveyard_bestow_authority_usable`).
     let offerable = alternative_cost_offer_payable(
-        state,
+        &bestowed,
         player,
         object_id,
         CastingVariant::Bestow,
         &mana,
         &residual,
         &target_assignments,
-    ) && (from_hand || graveyard_bestow_authority_usable(state, player, object_id));
+    ) && (from_hand
+        || graveyard_bestow_authority_usable(&bestowed, player, object_id));
     Some(BestowOffer {
         mana,
         residual,
@@ -23534,6 +23552,12 @@ fn alternative_cost_offer_payable(
             imposed.as_ref(),
         );
         super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
+            // CR 601.2h: each required cost's own resource (a sacrifice, a
+            // discard) must be available too, by the check payment's
+            // required-cost flow applies; the combined life is priced above.
+            && imposed
+                .as_ref()
+                .is_none_or(|cost| cost.is_payable(state, player, object_id))
             // CR 118.3: a zero mana cost is always payable.
             && mana.as_ref().is_none_or(|m| {
                 can_pay_cost_after_auto_tap(state, player, object_id, m)

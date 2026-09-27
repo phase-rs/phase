@@ -2848,8 +2848,8 @@ fn bestow_onto_terror_with_a_defiler_is_offered_when_its_total_life_is_payable()
 /// CR 601.2c + CR 601.2f-h: the offered cast completes at the price the offer
 /// read. Terror is the only creature to enchant, the Defiler's {R} reduction is
 /// taken for 2 life, Terror's tax charges 3 more, and Collect evidence is still
-/// paid. Run at 6 life so the payment leaves P0 alive; the 5-life case above is
-/// the offer's boundary.
+/// paid. Run at 6 life so the payment leaves P0 alive; the 5-life case above
+/// is the offer's boundary.
 #[test]
 fn bestow_onto_terror_with_a_defiler_completes_through_the_offered_cast() {
     let (mut runner, phoenix, terror, _, evidence) = phoenix_enchanting_near_terror(6, false);
@@ -3287,4 +3287,196 @@ fn menu_keeps_an_unresolved_life_amount_as_an_expression() {
     };
     let (runner, dog) = underdog_under_breach_paying(x.clone());
     assert_eq!(blitz_option_life(&runner, dog), x);
+}
+
+/// Everflame Eidolon in P0's hand with three red mana, and `guardian` (P0's
+/// only other creature) carrying `protection` parsed from its reminder-free
+/// keyword line.
+fn eidolon_beside_a_protected_creature(protection: &str) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let guardian = scenario
+        .add_creature(P0, "Commander Eesha", 2, 4)
+        .from_oracle_text_with_keywords(
+            &["Flying", protection],
+            &format!("Flying, {}", protection.to_lowercase()),
+        )
+        .id();
+    let mut builder = scenario.add_creature_to_hand(P0, "Everflame Eidolon", 1, 1);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 1,
+    });
+    builder.with_subtypes(vec!["Spirit"]);
+    builder.with_color(vec![ManaColor::Red]);
+    builder.from_oracle_text_with_keywords(&["Bestow"], EVERFLAME_EIDOLON);
+    let eidolon = builder.id();
+    let mut runner = scenario.build();
+    {
+        let obj = runner.state_mut().objects.get_mut(&eidolon).unwrap();
+        for types in [
+            &mut obj.card_types.core_types,
+            &mut obj.base_card_types.core_types,
+        ] {
+            if !types.contains(&CoreType::Enchantment) {
+                types.push(CoreType::Enchantment);
+            }
+        }
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert!(
+        runner.state().objects[&guardian]
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Protection(_))),
+        "reach: {protection} parses as protection"
+    );
+    add_mana(&mut runner, ManaType::Red, 3);
+    (runner, eidolon, guardian)
+}
+
+/// Whether casting `id` offers its bestow alternative.
+fn bestow_is_offered(runner: &mut GameRunner, id: ObjectId) -> bool {
+    let card_id = runner.state().objects[&id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the printed cast is castable either way");
+    matches!(
+        runner.state().waiting_for,
+        WaitingFor::AlternativeCastChoice {
+            keyword: engine::types::game_state::AlternativeCastKeyword::Bestow,
+            ..
+        }
+    )
+}
+
+/// CR 702.103b + CR 702.16b: the bestowed spell is an Aura enchantment, not a
+/// creature, so protection from creatures (Commander Eesha) doesn't stop it
+/// from targeting. With Eesha as the only creature to enchant, bestow is
+/// offered, and the bestowed cast enchants her.
+#[test]
+fn bestow_onto_a_creature_with_protection_from_creatures_is_offered() {
+    let (mut runner, eidolon, eesha) =
+        eidolon_beside_a_protected_creature("Protection from creatures");
+    assert!(bestow_is_offered(&mut runner, eidolon));
+    runner
+        .act(GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Alternative,
+        })
+        .expect("choosing bestow is legal");
+    if let WaitingFor::TargetSelection { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(eesha)),
+            })
+            .expect("Eesha is a legal creature to enchant");
+    }
+    assert_eq!(runner.state().objects[&eidolon].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "{{2}}{{R}} paid"
+    );
+}
+
+/// Control: protection from enchantments does stop the bestowed Aura, so with
+/// that creature as the only one to enchant, bestow is not offered.
+#[test]
+fn bestow_onto_a_creature_with_protection_from_enchantments_is_not_offered() {
+    let (mut runner, eidolon, _) =
+        eidolon_beside_a_protected_creature("Protection from enchantments");
+    assert!(!bestow_is_offered(&mut runner, eidolon));
+}
+
+/// Phoenix beside Terror (the only creature to enchant), with red mana, P0 at
+/// 20, and Terror's tax changed to "discard a card". No printed imposer charges
+/// a non-life cost, so Terror's own target-gated static carries the new cost.
+/// With `card_in_hand`, P0 holds one card to discard.
+fn phoenix_near_a_discard_tax(
+    card_in_hand: bool,
+) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
+    let (mut runner, phoenix, terror, _, evidence) = phoenix_enchanting_near_terror(20, false);
+    let retax = |defs: &[engine::types::ability::StaticDefinition]| {
+        let mut retaxed = 0;
+        let defs: Vec<_> = defs
+            .iter()
+            .cloned()
+            .map(|mut def| {
+                if let engine::types::statics::StaticMode::ImposeAdditionalCost { cost, .. } =
+                    &mut def.mode
+                {
+                    *cost = engine::parser::oracle_cost::parse_single_cost("Discard a card");
+                    retaxed += 1;
+                }
+                def
+            })
+            .collect();
+        (defs, retaxed)
+    };
+    let obj = runner.state_mut().objects.get_mut(&terror).unwrap();
+    let (current, retaxed) = retax(obj.static_definitions.as_slice());
+    let (base, _) = retax(obj.base_static_definitions.as_slice());
+    obj.static_definitions.clear();
+    for def in current {
+        obj.static_definitions.push(def);
+    }
+    obj.base_static_definitions = base.into();
+    assert_eq!(retaxed, 1, "reach: Terror's tax static is retaxed");
+    if card_in_hand {
+        let card_id = engine::types::identifiers::CardId(runner.state().next_object_id);
+        engine::game::zones::create_object(
+            runner.state_mut(),
+            card_id,
+            P0,
+            "Filler Card".to_string(),
+            Zone::Hand,
+        );
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    add_mana(&mut runner, ManaType::Red, 1);
+    (runner, phoenix, terror, evidence)
+}
+
+/// CR 601.2c + CR 601.2h: a target's non-life tax needs its resource. With no
+/// card in hand, Terror's "discard a card" tax can't be paid, so bestow (whose
+/// only target is Terror) is not offered.
+#[test]
+fn bestow_onto_terror_is_not_offered_when_its_discard_tax_has_no_card() {
+    let (runner, phoenix, _, _) = phoenix_near_a_discard_tax(false);
+    assert!(offered_cast(&runner, phoenix).is_none());
+}
+
+/// Control: with a card in hand the tax is payable, so bestow is offered and
+/// completes, discarding the card.
+#[test]
+fn bestow_onto_terror_with_a_card_for_its_discard_tax_completes() {
+    let (mut runner, phoenix, terror, evidence) = phoenix_near_a_discard_tax(true);
+    let action = offered_cast(&runner, phoenix).expect("the card in hand pays the tax");
+    runner.act(action).expect("the offered cast is accepted");
+    for _ in 0..6 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(terror)),
+            },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: false },
+            WaitingFor::CollectEvidenceChoice { .. } => GameAction::SelectCards {
+                cards: evidence.clone(),
+            },
+            WaitingFor::PayCost { choices, .. } => GameAction::SelectCards {
+                cards: choices.first().copied().into_iter().collect(),
+            },
+            _ => break,
+        };
+        runner.act(action).expect("each step of the cast is legal");
+    }
+    assert_eq!(runner.state().objects[&phoenix].zone, Zone::Stack);
+    assert!(
+        runner.state().players[0].hand.is_empty(),
+        "the tax's card is discarded"
+    );
 }
