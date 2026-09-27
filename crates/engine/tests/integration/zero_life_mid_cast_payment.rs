@@ -5,6 +5,8 @@
 //! priority", and CR 704.3 checks state-based actions only then. No player
 //! receives priority while a spell is being cast (CR 601.2h) or an ability
 //! activated (CR 602.2b), so the caster finishes the cast and only then loses.
+//! The same holds while a mana ability is being activated (CR 605.3b), with
+//! priority or mid-cast: its color choice stays open at 0 life.
 //!
 //! The Platinum Angel and Yawgmoth tests are controls: the "can't lose"
 //! exception was already honoured, and an activation's life cost is paid as
@@ -15,7 +17,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityCost, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ManaChoice, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -210,6 +212,101 @@ fn mana_ability_paying_the_last_life_mid_cast_does_not_end_the_game_yet() {
         spell_cast(&events, deluge),
         "Toxic Deluge must become cast: {events:?}"
     );
+    assert!(eliminated(&runner));
+    assert!(p1_won(&runner), "got {:?}", runner.state().waiting_for);
+}
+
+/// CR 605.3b: Mana Confluence activated as an ability (not a pre-selected tap)
+/// pays its life before asking which color to add. That color choice is part
+/// of activating the mana ability, so no one has priority yet.
+fn activate_confluence_paying_last_life(runner: &mut GameRunner, confluence: ObjectId) {
+    assert_eq!(runner.life(P0), 1);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: confluence,
+            ability_index: 0,
+        })
+        .expect("activate Mana Confluence");
+    assert_eq!(runner.life(P0), 0);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { player, .. } if player == P0
+        ),
+        "the color choice must still be open to P0, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+fn choose_black(runner: &mut GameRunner) -> Vec<GameEvent> {
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Black),
+            count: 1,
+        })
+        .expect("choose black")
+        .events
+}
+
+fn black_mana_added(events: &[GameEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::ManaAdded {
+                mana_type: ManaType::Black,
+                ..
+            }
+        )
+    })
+}
+
+#[test]
+fn mana_ability_color_choice_after_the_last_life_mid_cast_stays_open() {
+    let DelugeBoard {
+        mut runner,
+        deluge,
+        confluence,
+        ..
+    } = cast_toxic_deluge(4, 3, &[ManaType::Colorless, ManaType::Colorless], false);
+    assert!(is_mana_payment(&runner));
+
+    // CR 117.1d: activated while paying Toxic Deluge's {2}{B}.
+    activate_confluence_paying_last_life(&mut runner, confluence);
+    let mut events = choose_black(&mut runner);
+    assert!(black_mana_added(&events), "{events:?}");
+    if is_mana_payment(&runner) {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("finish paying {2}{B}")
+                .events,
+        );
+    }
+
+    // CR 601.2i, then CR 104.3b + CR 704.5a.
+    assert!(
+        spell_cast(&events, deluge),
+        "Toxic Deluge must become cast: {events:?}"
+    );
+    assert!(eliminated(&runner));
+    assert!(p1_won(&runner), "got {:?}", runner.state().waiting_for);
+}
+
+#[test]
+fn mana_ability_color_choice_after_the_last_life_at_priority_stays_open() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 1);
+    let confluence = scenario
+        .add_land_from_oracle(P0, "Mana Confluence", MANA_CONFLUENCE)
+        .id();
+    let mut runner = scenario.build();
+
+    activate_confluence_paying_last_life(&mut runner, confluence);
+    let events = choose_black(&mut runner);
+
+    // CR 605.3b: the mana ability finishes and adds its mana; then
+    // CR 104.3b + CR 704.5a end the game as P0 would receive priority.
+    assert!(black_mana_added(&events), "{events:?}");
     assert!(eliminated(&runner));
     assert!(p1_won(&runner), "got {:?}", runner.state().waiting_for);
 }
