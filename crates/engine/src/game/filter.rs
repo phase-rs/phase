@@ -2993,6 +2993,26 @@ pub fn last_revealed_library_ids_matching(
         .collect()
 }
 
+/// Cards from `last_revealed_ids` matching a filter, without restricting to a specific zone.
+pub fn last_revealed_ids_matching(
+    state: &GameState,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> Vec<ObjectId> {
+    let looked_filter = remap_exiled_by_source_for_looked_cards(filter);
+    state
+        .last_revealed_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|_obj| matches_target_filter(state, *id, &looked_filter, ctx))
+        })
+        .collect()
+}
+
 /// CR 405.1 + CR 115.9b: Match filters against a spell or ability on the
 /// stack, including nested "targets ..." predicates on that stack entry.
 pub(crate) fn matches_stack_target_filter(

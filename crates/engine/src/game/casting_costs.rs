@@ -3744,6 +3744,26 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // CR 701.21a + CR 118.3 + CR 601.2h + CR 602.2b: Each selected
+    // permanent must still satisfy this cost and be controlled by its payer
+    // before any payment is recorded; unpayable costs cannot be paid.
+    let selected_cost = match paid_cost {
+        Some(payment) => Some(payment.cost),
+        None => pending.activation_cost.as_ref(),
+    };
+    let (_, filter) = selected_cost
+        .and_then(super::casting::find_non_self_sacrifice_cost)
+        .ok_or_else(|| {
+            EngineError::InvalidAction("sacrifice payment has no selected non-self cost".into())
+        })?;
+    let live =
+        super::casting::find_eligible_sacrifice_targets(state, player, pending.object_id, filter);
+    if chosen.iter().any(|id| !live.contains(id)) {
+        return Err(EngineError::ActionNotAllowed(
+            "Selected permanent no longer eligible for sacrifice".into(),
+        ));
+    }
+
     // CR 702.48b-c / CR 702.119a-c: If this sacrifice is paying an Offering or
     // Emerge additional cost, use the chosen permanent's ObjectId BEFORE it
     // leaves the battlefield so the mana-value reduction can read its mana cost.
@@ -5374,9 +5394,16 @@ pub(crate) fn handle_exile_materials_for_cost(
 pub(crate) fn finish_activated_ability_at_payment_boundary(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2f + CR 601.2g + CR 602.2b: Targets are announced; keep the
+    // fixed total cost on this pending root before any mana-ability detour.
+    if let Some(locked) = pending.activation_cost.as_ref().and_then(|cost| {
+        super::costs::lock_half_life_activation_cost(state, player, pending.object_id, cost)
+    }) {
+        pending.activation_cost = Some(locked);
+    }
     let ability_index = pending.activation_ability_index.ok_or_else(|| {
         EngineError::InvalidAction(
             "activation payment boundary missing an ability index".to_string(),
@@ -16710,8 +16737,13 @@ mod tests {
             count: 2,
             // Fixed (non-variable) sacrifice cost of exactly 2 — min == count.
             min_count: 2,
-            resume: CostResume::Spell {
+            resume: CostResume::SpellCost {
                 spell: Box::new(pending),
+                cost: Box::new(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TypedFilter::creature().into(),
+                    2,
+                ))),
+                source: SpellCostSource::Other,
             },
         };
 
@@ -16893,8 +16925,13 @@ mod tests {
             count: 2,
             // Fixed (non-variable) sacrifice cost of exactly 2 — min == count.
             min_count: 2,
-            resume: CostResume::Spell {
+            resume: CostResume::SpellCost {
                 spell: Box::new(pending),
+                cost: Box::new(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TypedFilter::creature().into(),
+                    2,
+                ))),
+                source: SpellCostSource::Other,
             },
         };
 
@@ -19058,6 +19095,420 @@ mod tests {
         );
     }
 
+    // Synthetic hostile selections pass the old bounds, uniqueness, and
+    // advertisement checks before exercising the owning handler.
+    #[test]
+    fn selected_sacrifice_revalidates_live_filter_and_prohibition() {
+        for case in ["type", "subtype", "another", "owner", "nonland", "creature"] {
+            for eligible in [false, true] {
+                let mut scenario = GameScenario::new();
+                let source = scenario
+                    .add_creature(PlayerId(0), "Source", 2, 2)
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .id();
+                let candidate = if case == "another" && !eligible {
+                    source
+                } else {
+                    scenario.add_creature(PlayerId(0), "Candidate", 2, 2).id()
+                };
+                let filter: TargetFilter = match case {
+                    "type" => TypedFilter::new(TypeFilter::Artifact).into(),
+                    "subtype" => TypedFilter::creature().subtype("Squirrel".into()).into(),
+                    "another" => TypedFilter::creature()
+                        .properties(vec![FilterProp::Another])
+                        .into(),
+                    "owner" => TypedFilter::creature()
+                        .properties(vec![FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        }])
+                        .into(),
+                    "nonland" | "creature" => TypedFilter::permanent().into(),
+                    _ => unreachable!(),
+                };
+                if matches!(case, "nonland" | "creature") {
+                    scenario
+                        .add_enchantment_from_oracle(PlayerId(1), "Cost prohibition", "")
+                        .with_static(StaticMode::CantPayCost {
+                            who: crate::types::statics::ProhibitionScope::AllPlayers,
+                            cost: crate::types::statics::CostPaymentProhibition::Sacrifice {
+                                filter: if case == "nonland" {
+                                    TargetFilter::Not {
+                                        filter: Box::new(TypedFilter::land().into()),
+                                    }
+                                } else {
+                                    TypedFilter::creature().into()
+                                },
+                            },
+                        });
+                }
+                let mut runner = scenario.build();
+                let obj = runner.state_mut().objects.get_mut(&candidate).unwrap();
+                match case {
+                    "type" if eligible => obj.card_types.core_types.push(CoreType::Artifact),
+                    "subtype" if eligible => obj.card_types.subtypes.push("Squirrel".into()),
+                    "owner" if !eligible => obj.owner = PlayerId(1),
+                    "nonland" if eligible => obj.card_types.core_types.push(CoreType::Land),
+                    "creature" if eligible => {
+                        obj.card_types.core_types = vec![CoreType::Artifact];
+                        obj.base_power = None;
+                        obj.base_toughness = None;
+                    }
+                    _ => {}
+                }
+                obj.base_card_types = obj.card_types.clone();
+                let mut pending = make_pending(source);
+                pending.ability.effect = Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                };
+                pending.activation_cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+                    filter.clone(),
+                    1,
+                )));
+                let live = super::super::casting::find_eligible_sacrifice_targets(
+                    runner.state(),
+                    PlayerId(0),
+                    source,
+                    &filter,
+                );
+                assert_eq!(live.contains(&candidate), eligible, "live reach: {case}");
+                let before = serde_json::to_value(runner.state()).unwrap();
+                let mut events = Vec::new();
+                let result = handle_sacrifice_for_cost(
+                    runner.state_mut(),
+                    PlayerId(0),
+                    pending,
+                    None,
+                    CostSelection {
+                        min_count: 1,
+                        count: 1,
+                        legal_permanents: &[candidate],
+                        chosen: &[candidate],
+                    },
+                    &mut events,
+                );
+                // CR 118.3 + CR 701.21a: Ineligible resources cannot pay a sacrifice cost.
+                if eligible {
+                    runner.state_mut().waiting_for = result.unwrap();
+                    assert_eq!(runner.state().objects[&candidate].zone, Zone::Graveyard);
+                    assert!(events.iter().any(|event| matches!(event, GameEvent::PermanentSacrificed { object_id, player_id }
+                        if *object_id == candidate && *player_id == PlayerId(0))));
+                    assert_eq!(runner.state().stack.len(), 1);
+                    runner.resolve_top();
+                    assert_eq!(runner.state().players[0].life, 21);
+                    assert!(runner.state().stack.is_empty());
+                } else {
+                    assert!(
+                        matches!(result, Err(EngineError::ActionNotAllowed(ref text))
+                        if text == "Selected permanent no longer eligible for sacrifice"),
+                        "{case}: {result:?}"
+                    );
+                    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+                    assert!(events.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_sacrifice_current_leaf() {
+        assert_selected_sacrifice_authority(false);
+    }
+
+    #[test]
+    fn selected_sacrifice_spell_authority() {
+        assert_selected_sacrifice_authority(true);
+    }
+
+    fn assert_selected_sacrifice_authority(selected_spell: bool) {
+        for nested in [false, true] {
+            for current_type in [TypeFilter::Creature, TypeFilter::Artifact] {
+                for eligible in [false, true] {
+                    let mut scenario = GameScenario::new();
+                    let source = scenario
+                        .add_enchantment_from_oracle(PlayerId(0), "Source", "")
+                        .with_ability_definition(AbilityDefinition::new(
+                            AbilityKind::Activated,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                player: TargetFilter::Controller,
+                            },
+                        ))
+                        .id();
+                    let creature = scenario.add_creature(PlayerId(0), "Creature", 2, 2).id();
+                    let artifact = scenario
+                        .add_artifact_from_oracle(PlayerId(0), "Artifact", "")
+                        .id();
+                    let creature_first = current_type == TypeFilter::Creature;
+                    let (current, later) = if creature_first {
+                        (creature, artifact)
+                    } else {
+                        (artifact, creature)
+                    };
+                    let selected = AbilityCost::Sacrifice(SacrificeCost::count(
+                        TypedFilter::new(current_type.clone()).into(),
+                        1,
+                    ));
+                    let later_cost = AbilityCost::Sacrifice(SacrificeCost::count(
+                        TypedFilter::new(if creature_first {
+                            TypeFilter::Artifact
+                        } else {
+                            TypeFilter::Creature
+                        })
+                        .into(),
+                        1,
+                    ));
+                    let mut pending = make_pending(source);
+                    pending.ability.effect = Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    };
+                    pending.activation_cost = Some(if selected_spell {
+                        later_cost.clone()
+                    } else if nested {
+                        AbilityCost::Composite {
+                            costs: vec![
+                                AbilityCost::Composite {
+                                    costs: vec![selected.clone()],
+                                },
+                                later_cost.clone(),
+                            ],
+                        }
+                    } else {
+                        AbilityCost::Composite {
+                            costs: vec![selected.clone(), later_cost.clone()],
+                        }
+                    });
+                    pending
+                        .additional_cost_queue
+                        .push(AdditionalCostInstance::new(
+                            AdditionalCostOrigin::Other,
+                            AdditionalCost::Required(later_cost),
+                        ));
+                    let payment = selected_spell.then_some(SpellCostPayment {
+                        cost: &selected,
+                        source: SpellCostSource::Other,
+                    });
+                    let chosen = if eligible { current } else { later };
+                    let mut runner = scenario.build();
+                    let (_, filter) =
+                        super::super::casting::find_non_self_sacrifice_cost(&selected).unwrap();
+                    assert_eq!(
+                        super::super::casting::find_eligible_sacrifice_targets(
+                            runner.state(),
+                            PlayerId(0),
+                            source,
+                            filter
+                        )
+                        .contains(&chosen),
+                        eligible
+                    );
+                    let before = serde_json::to_value(runner.state()).unwrap();
+                    let mut events = Vec::new();
+                    let result = handle_sacrifice_for_cost(
+                        runner.state_mut(),
+                        PlayerId(0),
+                        pending,
+                        payment,
+                        CostSelection {
+                            min_count: 1,
+                            count: 1,
+                            legal_permanents: &[creature, artifact],
+                            chosen: &[chosen],
+                        },
+                        &mut events,
+                    );
+                    if eligible {
+                        let waiting = result.unwrap();
+                        assert_eq!(runner.state().objects[&current].zone, Zone::Graveyard);
+                        assert_eq!(runner.state().objects[&later].zone, Zone::Battlefield);
+                        assert!(!events.is_empty());
+                        if !selected_spell {
+                            assert!(matches!(waiting, WaitingFor::PayCost { .. }));
+                        }
+                    } else {
+                        assert!(
+                            matches!(result, Err(EngineError::ActionNotAllowed(ref text)) if text == "Selected permanent no longer eligible for sacrifice")
+                        );
+                        assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+                        assert!(events.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    // Synthetic direct state: the represented selection survives advertisement
+    // while its permanent has left the battlefield. Public control-loss coverage
+    // separately drives ActivateAbility/CastSpell through SelectCards.
+    #[test]
+    fn ordinary_selected_sacrifice_error_contract() {
+        for selected_spell in [false, true] {
+            for eligible in [false, true] {
+                let mut scenario = GameScenario::new();
+                let source = scenario
+                    .add_enchantment_from_oracle(PlayerId(0), "Source", "")
+                    .with_ability_definition(AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .id();
+                let candidate = scenario.add_creature(PlayerId(0), "Candidate", 2, 2).id();
+                let filter: TargetFilter = TypedFilter::creature().into();
+                let selected = AbilityCost::Sacrifice(SacrificeCost::count(filter.clone(), 1));
+                let mut pending = make_pending(source);
+                pending.ability.effect = Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                };
+                if !selected_spell {
+                    pending.activation_cost = Some(selected.clone());
+                }
+                let payment = selected_spell.then_some(SpellCostPayment {
+                    cost: &selected,
+                    source: SpellCostSource::Other,
+                });
+                let mut runner = scenario.build();
+                if !eligible {
+                    runner.state_mut().battlefield.retain(|id| *id != candidate);
+                    runner.state_mut().objects.get_mut(&candidate).unwrap().zone = Zone::Graveyard;
+                    runner.state_mut().players[0].graveyard.push_back(candidate);
+                }
+                assert_eq!(
+                    super::super::casting::find_eligible_sacrifice_targets(
+                        runner.state(),
+                        PlayerId(0),
+                        source,
+                        &filter
+                    )
+                    .contains(&candidate),
+                    eligible
+                );
+                let before = serde_json::to_value(runner.state()).unwrap();
+                let mut events = Vec::new();
+                // A never-advertised response remains malformed even with
+                // represented cost authority and an ineligible live permanent.
+                let malformed = handle_sacrifice_for_cost(
+                    runner.state_mut(),
+                    PlayerId(0),
+                    pending.clone(),
+                    payment,
+                    CostSelection {
+                        min_count: 1,
+                        count: 1,
+                        legal_permanents: &[],
+                        chosen: &[candidate],
+                    },
+                    &mut events,
+                );
+                assert!(
+                    matches!(malformed, Err(EngineError::InvalidAction(ref text))
+                    if text == "Selected permanent not eligible for sacrifice")
+                );
+                assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+                assert!(events.is_empty());
+                let result = handle_sacrifice_for_cost(
+                    runner.state_mut(),
+                    PlayerId(0),
+                    pending,
+                    payment,
+                    CostSelection {
+                        min_count: 1,
+                        count: 1,
+                        legal_permanents: &[candidate],
+                        chosen: &[candidate],
+                    },
+                    &mut events,
+                );
+                // CR 701.21a + CR 118.3: A departed permanent cannot pay the cost.
+                if eligible {
+                    runner.state_mut().waiting_for = result.unwrap();
+                    assert_eq!(runner.state().objects[&candidate].zone, Zone::Graveyard);
+                    assert!(events.iter().any(|event| matches!(event,
+                        GameEvent::PermanentSacrificed { object_id, player_id }
+                        if *object_id == candidate && *player_id == PlayerId(0))));
+                    assert_eq!(runner.state().stack.len(), 1);
+                    runner.resolve_top();
+                    assert_eq!(runner.state().players[0].life, 21);
+                    assert!(runner.state().stack.is_empty());
+                } else {
+                    assert!(
+                        matches!(result, Err(EngineError::ActionNotAllowed(ref text))
+                        if text == "Selected permanent no longer eligible for sacrifice")
+                    );
+                    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+                    assert!(events.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_sacrifice_missing_metadata_and_old_check_order() {
+        let mut state = GameState::new_two_player(42);
+        let pending = make_pending(ObjectId(999));
+        for (min_count, count, legal, chosen, expected) in [
+            (
+                0,
+                0,
+                vec![],
+                vec![],
+                "sacrifice payment has no selected non-self cost",
+            ),
+            (
+                1,
+                1,
+                vec![],
+                vec![],
+                "Must sacrifice exactly 1 permanent(s), got 0",
+            ),
+            (
+                2,
+                2,
+                vec![],
+                vec![ObjectId(1), ObjectId(1)],
+                "Cannot sacrifice the same permanent more than once for a cost",
+            ),
+            (
+                1,
+                1,
+                vec![],
+                vec![ObjectId(1)],
+                "Selected permanent not eligible for sacrifice",
+            ),
+        ] {
+            let before = serde_json::to_value(&state).unwrap();
+            let mut events = Vec::new();
+            let result = handle_sacrifice_for_cost(
+                &mut state,
+                PlayerId(0),
+                pending.clone(),
+                None,
+                CostSelection {
+                    min_count,
+                    count,
+                    legal_permanents: &legal,
+                    chosen: &chosen,
+                },
+                &mut events,
+            );
+            assert!(
+                matches!(result, Err(EngineError::InvalidAction(ref text)) if text == expected)
+            );
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            assert!(events.is_empty());
+        }
+    }
+
     #[test]
     fn sacrifice_for_cost_valid_selection() {
         let mut state = GameState::new_two_player(42);
@@ -19107,7 +19558,12 @@ mod tests {
                 },
             )]);
 
-        let pending = announced(&state, make_pending(source));
+        let mut pending = make_pending(source);
+        pending.activation_cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TypedFilter::creature().into(),
+            1,
+        )));
+        let pending = announced(&state, pending);
         let legal = vec![creature_a, creature_b];
         let chosen = vec![creature_a];
         let mut events = Vec::new();
@@ -19262,6 +19718,12 @@ mod tests {
             )]);
 
         let mut pending = make_pending(source);
+        pending.activation_cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TypedFilter::creature()
+                .with_type(TypeFilter::Subtype("Squirrel".into()))
+                .into(),
+            u32::MAX,
+        )));
         pending.ability = Box::new(ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
@@ -19855,7 +20317,12 @@ mod tests {
         // Pay the cost via the cost-payment helper directly — same path
         // taken when an activated ability's sacrifice subcost resumes after
         // `WaitingFor::SacrificeForCost`.
-        let pending = announced(&state, make_pending(source));
+        let mut pending = make_pending(source);
+        pending.activation_cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TypedFilter::new(TypeFilter::Artifact).into(),
+            1,
+        )));
+        let pending = announced(&state, pending);
         let mut events = Vec::new();
         handle_sacrifice_for_cost(
             &mut state,
@@ -20177,7 +20644,12 @@ mod tests {
             obj.trigger_definitions.push(trig);
         }
 
-        let pending = announced(&state, make_pending(source));
+        let mut pending = make_pending(source);
+        pending.activation_cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TypedFilter::new(TypeFilter::Artifact).into(),
+            1,
+        )));
+        let pending = announced(&state, pending);
         let mut events = Vec::new();
         handle_sacrifice_for_cost(
             &mut state,

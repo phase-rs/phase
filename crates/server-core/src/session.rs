@@ -341,6 +341,8 @@ pub struct RestoredStackAutomationResume {
 
 pub const PUBLIC_SEAT_RESERVATION_MS: u64 = 120_000;
 
+pub const HOST_AWAY_REFUSAL: &str = "The host is away; try again when they return";
+
 #[derive(Debug, Clone)]
 pub struct SeatReservation {
     pub token: String,
@@ -596,6 +598,15 @@ pub struct GameSession {
 impl GameSession {
     pub fn ai_driver_fault(&self) -> Option<&AiDriverFault> {
         self.ai_driver_fault.as_ref()
+    }
+
+    /// A pregame room issues no seat while seat 0 is away.
+    fn reject_if_host_away(&self) -> Result<(), String> {
+        if self.is_pregame() && !self.connected[0] {
+            Err(HOST_AWAY_REFUSAL.to_string())
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn reject_if_ai_driver_faulted(&self) -> Result<(), String> {
@@ -2224,6 +2235,7 @@ impl GameSession {
 
     pub fn reserve_seat(&mut self, display_name: String) -> Result<SeatReservation, String> {
         self.reject_if_ai_driver_faulted()?;
+        self.reject_if_host_away()?;
         self.cleanup_expired_reservations();
         if self.game_started {
             return Err("Game has already started".to_string());
@@ -2267,6 +2279,7 @@ impl GameSession {
         display_name: String,
         reservation_token: Option<String>,
     ) -> Result<(String, GameState), String> {
+        self.reject_if_host_away()?;
         self.cleanup_expired_reservations();
         let reservation = match reservation_token.as_deref() {
             Some(token) => Some(
@@ -3119,6 +3132,53 @@ mod tests {
         assert_eq!(restored.key, snapshot.key);
         assert_eq!(restored.mutation_revision, 11);
         assert_eq!(restored.activation_epoch, Some(3));
+    }
+
+    #[test]
+    fn a_pregame_room_issues_no_seat_while_its_host_is_away() {
+        let mut mgr = SessionManager::new();
+        let (code, _host) = mgr.create_game(make_deck(), None);
+        let held = mgr
+            .try_session(&code)
+            .unwrap()
+            .reserve_seat("G".to_string())
+            .expect("reserve while the host is present");
+        let mut session = mgr.try_session(&code).unwrap();
+        session.mark_disconnected(PlayerId(0));
+        let tokens_before = session.player_tokens.clone();
+
+        assert_eq!(
+            session.reserve_seat("H".to_string()).err().as_deref(),
+            Some(HOST_AWAY_REFUSAL)
+        );
+        assert_eq!(
+            session
+                .join_with_reservation(make_deck(), None, String::new(), Some(held.token.clone()))
+                .err()
+                .as_deref(),
+            Some(HOST_AWAY_REFUSAL)
+        );
+        assert_eq!(session.reservations.len(), 1);
+        assert!(session.reservations.contains_key(&held.token));
+        assert_eq!(session.player_tokens, tokens_before);
+
+        session.mark_connected(PlayerId(0));
+        session
+            .join_with_reservation(make_deck(), None, String::new(), Some(held.token))
+            .expect("the held reservation is honoured once the host returns");
+    }
+
+    #[test]
+    fn a_started_game_is_not_refused_as_host_away() {
+        let mut mgr = SessionManager::new();
+        let (code, _host) = mgr.create_game(make_deck(), None);
+        let mut session = mgr.try_session(&code).unwrap();
+        session.mark_disconnected(PlayerId(0));
+        session.game_started = true;
+        assert_eq!(
+            session.reserve_seat("G".to_string()).err().as_deref(),
+            Some("Game has already started")
+        );
     }
 
     #[test]

@@ -1461,6 +1461,31 @@ describe("DraftPodGuestAdapter", () => {
     });
   });
 
+  it("forwards a recovered deck-submission acceptance without installing its view", async () => {
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];
+
+    const priorView = mockView("Deckbuilding");
+    guestEventHandler({ type: "viewUpdated", view: priorView });
+    expect(adapter.currentView).toBe(priorView);
+
+    const recoveredView = mockView("Pairing");
+    guestEventHandler({
+      type: "recoveredDeckSubmissionAccepted",
+      mainDeck: ["Island"],
+      commanders: [],
+      view: recoveredView,
+    });
+
+    expect(events).toContainEqual({
+      type: "recoveredDeckSubmissionAccepted",
+      mainDeck: ["Island"],
+      commanders: [],
+      view: recoveredView,
+    });
+    expect(adapter.currentView).toBe(priorView);
+  });
+
   it("updates status based on DraftPlayerView status", async () => {
     await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
     const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];

@@ -2,16 +2,20 @@ import { useCallback, useEffect, useState } from "react";
 
 import {
   DECKS_CHANGED_EVENT,
+  captureSavedDeck,
   createFolder as createFolderStore,
   deleteFolder as deleteFolderStore,
   getDeckMeta,
   listFolders,
   renameFolder as renameFolderStore,
+  requireSavedDeckUnchanged,
   setDeckFolder,
   toggleDeckStar,
   type DeckFolder,
   type DeckMeta,
 } from "../constants/storage";
+import { attemptSavedDeckWrite } from "../services/savedDeckWriteFailure";
+import { withSavedDeckLibrary } from "../services/savedDeckTransaction";
 import { PROFILE_REPLACED_EVENT } from "../stores/cloudSyncStore";
 
 export interface FolderGroup {
@@ -73,15 +77,61 @@ export function groupSavedDecks(
   };
 }
 
+/** Module-level so the hook returns the same identity on every render (it closes over nothing). */
+function createFolder(name: string, deckName?: string): Promise<DeckFolder | null> {
+  const deck = deckName === undefined ? null : captureSavedDeck(deckName);
+  return attemptSavedDeckWrite("organize", () =>
+    withSavedDeckLibrary((txn) => {
+      if (deck) requireSavedDeckUnchanged(txn, deck);
+      const folder = createFolderStore(txn, name);
+      // One transaction, so a move of this deck queued while it waits runs after it instead of being overwritten.
+      if (folder && deck) setDeckFolder(txn, deck.name, folder.id);
+      return folder;
+    }),
+  ).then((r) => (r.ok ? r.value : null));
+}
+/** Module-level so the hook returns the same identity on every render (it closes over nothing). */
+function renameFolder(id: string, name: string): Promise<boolean> {
+  return attemptSavedDeckWrite("organize", () => withSavedDeckLibrary((txn) => renameFolderStore(txn, id, name))).then(
+    (r) => r.ok,
+  );
+}
+/** Module-level so the hook returns the same identity on every render (it closes over nothing). */
+function deleteFolder(id: string): Promise<boolean> {
+  return attemptSavedDeckWrite("organize", () => withSavedDeckLibrary((txn) => deleteFolderStore(txn, id))).then(
+    (r) => r.ok,
+  );
+}
+/** Module-level so the hook returns the same identity on every render (it closes over nothing). */
+function assignDeck(deckName: string, folderId: string | null): Promise<boolean> {
+  const deck = captureSavedDeck(deckName);
+  return attemptSavedDeckWrite("organize", () =>
+    withSavedDeckLibrary((txn) => {
+      requireSavedDeckUnchanged(txn, deck);
+      setDeckFolder(txn, deck.name, folderId);
+    }),
+  ).then((r) => r.ok);
+}
+/** Module-level so the hook returns the same identity on every render (it closes over nothing). */
+function toggleStar(deckName: string): Promise<boolean> {
+  const deck = captureSavedDeck(deckName);
+  return attemptSavedDeckWrite("organize", () =>
+    withSavedDeckLibrary((txn) => {
+      requireSavedDeckUnchanged(txn, deck);
+      return toggleDeckStar(txn, deck.name);
+    }),
+  ).then((r) => r.ok);
+}
+
 export interface UseDeckFoldersResult {
   folders: DeckFolder[];
   /** Group a (pre-sorted) list of saved deck names into Starred/folders/Unfiled. */
   group: (deckNames: string[]) => GroupedDecks;
-  createFolder: (name: string) => DeckFolder | null;
-  renameFolder: (id: string, name: string) => void;
-  deleteFolder: (id: string) => void;
-  assignDeck: (deckName: string, folderId: string | null) => void;
-  toggleStar: (deckName: string) => boolean;
+  createFolder: (name: string, deckName?: string) => Promise<DeckFolder | null>;
+  renameFolder: (id: string, name: string) => Promise<boolean>;
+  deleteFolder: (id: string) => Promise<boolean>;
+  assignDeck: (deckName: string, folderId: string | null) => Promise<boolean>;
+  toggleStar: (deckName: string) => Promise<boolean>;
 }
 
 /**
@@ -115,10 +165,10 @@ export function useDeckFolders(): UseDeckFoldersResult {
   return {
     folders,
     group,
-    createFolder: createFolderStore,
-    renameFolder: renameFolderStore,
-    deleteFolder: deleteFolderStore,
-    assignDeck: setDeckFolder,
-    toggleStar: toggleDeckStar,
+    createFolder,
+    renameFolder,
+    deleteFolder,
+    assignDeck,
+    toggleStar,
   };
 }

@@ -16,18 +16,26 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // cost-reduction election (`ReductionProvenance::{AbilityCostRider,
 // TransientEffect}` and the `activation_cost_snapshot` carrier); v80 reshapes
 // the face-down exile look link (`ExileLinkKind::HideawayLookable { grant,
-// lookers, source_incarnation }`); v81 adds
+// lookers, source_incarnation }`); v81 adds the CR 702.117a Surge cast
+// election tag (`AlternativeCastKeyword::Surge`); v82 retypes
+// `AdditionalPhase.after` to `ExtraPhaseAnchor`, adds
+// `DelayedTriggerCondition::AtBeginningOfAddedPhase`, replaces
+// `ExtraPhase.phase` and the `extra_phase_resume` element with
+// `TurnSegment`-carrying records and minted ids, and replaces the two
+// per-turn step counters with the `steps_started_this_turn` tally; v83 adds
 // target-gated activation costs (`ReduceAbilityCost { targets, frequency }`,
-// the once-per-turn ledger and the target-settlement carrier fields).
+// the per-turn activation journal and the target-settlement carrier fields).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +10: upstream's v76 CR 601.2f caster-elected cost-reduction ordering, the
 // v77 pre-emptive bump ahead of new format names, the v78 CR 611.2a
 // event-deadline duration parse bump, the v79 activated-ability
-// cost-reduction election, the v80 exile look-link reshape, and
-// the v81 target-gated activation costs.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 10;
+// cost-reduction election, the v80 exile look-link reshape, and the v81 Surge
+// cast election tag.
+// +11: the v82 CR 500.8–500.10 added-phase anchoring parse bump.
+// +12: the v83 target-gated activation costs.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 12;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -58,8 +66,10 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +6: wire 60 moves with full-game v78 for the event-deadline duration.
 // +7: wire 61 moves with full-game v79 for the activated-ability cost election.
 // +8: wire 62 moves with full-game v80 for the exile look-link reshape.
-// +9: wire 63 moves with full-game v81 for target-gated activation costs.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 9;
+// +9: wire 63 moves with full-game v81 for the Surge cast election tag.
+// +10: wire 64 moves with full-game v82 for added-phase anchoring.
+// +11: wire 65 moves with full-game v83 for target-gated activation costs.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 11;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
