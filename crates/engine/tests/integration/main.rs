@@ -1723,6 +1723,7 @@ mod will_cycle_duration_seam_b1;
 mod windfall_greatest_discard_aggregate;
 mod winding_way_reveal_partition_2931;
 mod witchs_oven_food_tokens;
+mod x_mana_sacrifice_residual;
 mod xantid_swarm_defending_player_cant_cast;
 mod you_have_been_caught_stealing_any_damage;
 mod yurlok_of_scorch_thrash;
