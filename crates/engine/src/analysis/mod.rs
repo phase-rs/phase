@@ -34,6 +34,7 @@
 
 pub mod ability_graph;
 pub mod decision_template;
+pub mod deck_signals;
 pub mod loop_check;
 pub mod resource;
 #[cfg(any(test, feature = "test-support"))]

@@ -1264,6 +1264,12 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
 /// [`collect_effects_in_effect`] — the nested-effect payloads that the display
 /// walkers (`build_ability_item`) do *not* descend. Borrows the faces, so the
 /// returned references live as long as the input.
+///
+/// This is deliberately distinct from
+/// [`crate::analysis::deck_signals::ability_chain::collect_scoped_effects`]:
+/// that walker can exclude `else_ability` and `mode_abilities` and never
+/// descends nested effect payloads, while this walker always descends all
+/// three.
 pub(crate) fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
     collect_effects_in_effect(&def.effect, out);
     if let Some(sub) = &def.sub_ability {
