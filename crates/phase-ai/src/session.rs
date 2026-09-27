@@ -21,6 +21,7 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::util::Deadline;
 
+use crate::combo::{ComboLineId, ComboReachability};
 use crate::deck_profile::DeckProfile;
 use crate::features::DeckFeatures;
 use crate::plan::{derive_snapshot, PlanSnapshot};
@@ -36,6 +37,23 @@ use crate::synergy::SynergyGraph;
 /// detection should treat each commander face as more informative than a
 /// singleton main-deck card.
 const COMMANDER_ANALYSIS_WEIGHT: u32 = 4;
+
+/// One key is taken per distinct search node, so this deterministic bound prevents
+/// the memo from growing for an entire game.
+pub const REACHABLE_LINES_CACHE_MAX: usize = 512;
+
+/// `ProjectionKey` minus the projection-specific axes. The turn/active-player
+/// fields are both a cheap collision guard on the 64-bit `quick_state_hash`
+/// digest and what makes staleness unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReachableLinesKey {
+    pub state_hash: u64,
+    pub turn_number: u32,
+    pub active_player: PlayerId,
+    pub ai_player: PlayerId,
+}
+
+pub type ReachableLines = Arc<Vec<(ComboLineId, ComboReachability)>>;
 
 type ProspectiveFetchProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedFetchPrompt)>>;
 pub(crate) type PactRouteStore = HashMap<PlayerId, CertifiedPactPlan>;
@@ -54,6 +72,13 @@ pub struct AiSession {
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
     pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
+    /// Memo for `ComboRegistry::reachable_lines`, which `ComboLinePolicy::verdict` calls once
+    /// per CANDIDATE while every candidate at a node shares one `state` (the policy registry
+    /// builds one `PolicyContext` per candidate from one batch environment). The cache lives
+    /// here and not on the policy because `TacticalPolicy` is `Send + Sync` with
+    /// `fn verdict(&self, ..)` behind a `OnceLock`: a `RefCell` field will not compile and a
+    /// `Mutex` field would be a process-global lock in the per-candidate inner loop.
+    pub reachable_lines_cache: Arc<RwLock<HashMap<ReachableLinesKey, ReachableLines>>>,
     /// Reducer-certified fetch selection armed only after this session chose
     /// its corresponding root activation. The engine token contains no clone
     /// or hidden terminal state and rejects any stale prompt.
@@ -87,6 +112,7 @@ impl std::fmt::Debug for AiSession {
             .field("synergy", &self.synergy)
             .field("memory", &self.memory)
             .field("projection_cache", &self.projection_cache)
+            .field("reachable_lines_cache", &self.reachable_lines_cache)
             .field("prospective_fetch_prompt", &self.prospective_fetch_prompt)
             .field(
                 "prospective_fetch_follow_up",
@@ -140,6 +166,7 @@ impl AiSession {
             synergy,
             memory: Arc::default(),
             projection_cache: Arc::default(),
+            reachable_lines_cache: Arc::default(),
             prospective_fetch_prompt: Arc::default(),
             prospective_fetch_follow_up: Arc::default(),
             prospective_fetch_proposals: Arc::default(),
@@ -272,6 +299,45 @@ impl AiSession {
         }
 
         Ok(projection)
+    }
+
+    /// Read-through memo; poisoned locks degrade to recomputation. On overflow it drops
+    /// earlier turns first, then clears if the current turn still fills the bound.
+    pub fn get_or_reachable_lines(
+        &self,
+        state: &GameState,
+        ai_player: PlayerId,
+        compute: impl FnOnce() -> Vec<(ComboLineId, ComboReachability)>,
+    ) -> ReachableLines {
+        let key = ReachableLinesKey {
+            state_hash: quick_state_hash(state),
+            turn_number: state.turn_number,
+            active_player: state.active_player,
+            ai_player,
+        };
+
+        if let Ok(cache) = self.reachable_lines_cache.read() {
+            if let Some(hit) = cache.get(&key) {
+                return Arc::clone(hit);
+            }
+        }
+
+        let reachable: ReachableLines = Arc::new(compute());
+
+        if let Ok(mut cache) = self.reachable_lines_cache.write() {
+            if cache.len() >= REACHABLE_LINES_CACHE_MAX {
+                cache.retain(|existing, _| existing.turn_number == state.turn_number);
+                if cache.len() >= REACHABLE_LINES_CACHE_MAX {
+                    cache.clear();
+                }
+            }
+            // Both eviction branches are deterministic functions of deterministic
+            // insertion order. An LRU buys no correctness; a dropped entry costs
+            // at most one recompute.
+            cache.insert(key, Arc::clone(&reachable));
+        }
+
+        reachable
     }
 
     /// Cache-only projection lookup — returns `None` on miss without doing
@@ -408,7 +474,7 @@ mod tests {
 
     use crate::projection::ProjectionHorizon;
 
-    use super::{deck_pools_fingerprint, AiSession, SessionCache};
+    use super::{deck_pools_fingerprint, AiSession, SessionCache, REACHABLE_LINES_CACHE_MAX};
 
     fn make_pool_with_tier(
         player: PlayerId,
@@ -617,6 +683,38 @@ mod tests {
             2,
             "a distinct key must add a second cache entry"
         );
+    }
+
+    #[test]
+    fn reachable_lines_cache_is_bounded() {
+        use std::cell::Cell;
+
+        let session = AiSession::empty();
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 1;
+        let compute_count = Cell::new(0usize);
+
+        for index in 0..REACHABLE_LINES_CACHE_MAX {
+            state.next_object_id = index as u64 + 1;
+            session.get_or_reachable_lines(&state, PlayerId(0), || {
+                compute_count.set(compute_count.get() + 1);
+                Vec::new()
+            });
+        }
+
+        state.turn_number = 2;
+        state.next_object_id = REACHABLE_LINES_CACHE_MAX as u64 + 1;
+        session.get_or_reachable_lines(&state, PlayerId(0), || {
+            compute_count.set(compute_count.get() + 1);
+            Vec::new()
+        });
+
+        assert_eq!(
+            session.reachable_lines_cache.read().unwrap().len(),
+            1,
+            "cross-turn overflow must evict every earlier-turn entry"
+        );
+        assert_eq!(compute_count.get(), REACHABLE_LINES_CACHE_MAX + 1);
     }
 
     /// T3 — the deadline reaches `project_to` THROUGH the cache wrapper, and a

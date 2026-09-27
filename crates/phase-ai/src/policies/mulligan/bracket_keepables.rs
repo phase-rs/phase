@@ -1,6 +1,6 @@
-//! `CedhKeepablesMulligan` — stub aggressive mulligan policy for cEDH decks.
-//! Gated internally on `features.effective_bracket_tier.tier() == Cedh` (`MulliganPolicy` has no
-//! `activation()` method; every registered policy is consulted on every hand).
+//! `BracketKeepablesMulligan` — bracket-gated aggressive mulligan policy.
+//! The reconciled effective tier resolves through one exhaustive bounds table
+//! (`MulliganPolicy` has no `activation()` method).
 //!
 //! CR 103.5: deciding to keep after the mulligan process.
 //!
@@ -23,20 +23,42 @@ use crate::policies::registry::{PolicyId, PolicyReason};
 
 use super::{is_land_only_source, is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
+/// Land-count bounds this policy enforces at a given bracket tier. `None` = the policy
+/// does not apply at this tier — the early return the trait shape forces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeepableLandBounds {
+    min_lands: u32,
+    max_land_only: u32,
+}
+
+fn land_bounds_for(tier: CommanderBracketTier) -> Option<KeepableLandBounds> {
+    use CommanderBracketTier::{Cedh, Core, Exhibition, Optimized, Upgraded};
+
+    match tier {
+        Exhibition | Core | Upgraded => None,
+        Optimized => None, // U6 owns this row.
+        // Today's literals, moved not changed.
+        Cedh => Some(KeepableLandBounds {
+            min_lands: 2,
+            max_land_only: 4,
+        }),
+    }
+}
+
 #[derive(Default)]
-pub struct CedhKeepablesMulligan {
+pub struct BracketKeepablesMulligan {
     combo_registry: ComboRegistry,
 }
 
-impl CedhKeepablesMulligan {
+impl BracketKeepablesMulligan {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl MulliganPolicy for CedhKeepablesMulligan {
+impl MulliganPolicy for BracketKeepablesMulligan {
     fn id(&self) -> PolicyId {
-        PolicyId::CedhKeepablesMulligan
+        PolicyId::BracketKeepablesMulligan
     }
 
     fn evaluate(
@@ -48,31 +70,31 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         _turn_order: TurnOrder, // input-unused: cEDH structure checks do not use play/draw
         _mulligans_taken: u8, // input-unused: depth is bounded by `card_floor::MulliganCardFloor`; this policy judges composition only
     ) -> MulliganScore {
-        // Internal gate: non-cEDH decks see a zero-delta Score (cheap no-op).
-        if features.effective_bracket_tier.tier() != CommanderBracketTier::Cedh {
+        // Internal gate: tiers without bounds see a zero-delta Score (cheap no-op).
+        let Some(bounds) = land_bounds_for(features.effective_bracket_tier.tier()) else {
             return MulliganScore::Score {
                 delta: 0.0,
-                reason: PolicyReason::new("cedh_keepables_na"),
+                reason: PolicyReason::new("bracket_keepables_na"),
             };
-        }
+        };
 
         let land_count = count_lands_in_hand(hand, state);
         let land_only_count = count_land_only_cards_in_hand(hand, state);
 
-        // < 2 lands: can't cast spells or accelerate. CR 103.5 — even cEDH
-        // hands must be able to develop a mana base.
-        if land_count < 2 {
+        // Below `bounds.min_lands`: can't cast spells or accelerate. CR 103.5 — even
+        // cEDH hands must develop a mana base; the Cedh row is calibrated to 37 lands.
+        if land_count < bounds.min_lands {
             return MulliganScore::ForceMulligan {
-                reason: PolicyReason::new("cedh_keepables_too_few_lands")
+                reason: PolicyReason::new("bracket_keepables_too_few_lands")
                     .with_fact("lands", land_count as i64),
             };
         }
 
-        // > 4 lands: too land-heavy for a 37-land cEDH list; threat/combo
-        // density too diluted to win at a speed-focused table.
-        if land_only_count > 4 {
+        // Above `bounds.max_land_only`: threat/combo density is too diluted for a
+        // speed-focused table; the Cedh row is calibrated to a 37-land cEDH list.
+        if land_only_count > bounds.max_land_only {
             return MulliganScore::ForceMulligan {
-                reason: PolicyReason::new("cedh_keepables_too_many_lands")
+                reason: PolicyReason::new("bracket_keepables_too_many_lands")
                     .with_fact("lands", land_only_count as i64),
             };
         }
@@ -87,7 +109,7 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         if !combo_lines.is_empty() {
             return MulliganScore::Score {
                 delta: 5.0,
-                reason: PolicyReason::new("cedh_keepables_combo_in_hand")
+                reason: PolicyReason::new("bracket_keepables_combo_in_hand")
                     .with_fact("combo_lines", combo_lines.len() as i64),
             };
         }
@@ -100,7 +122,7 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         // fast-mana clock nor a disruption piece — untenable at a cEDH table.
         if !has_fast_mana && !has_tutor && !has_interaction {
             return MulliganScore::ForceMulligan {
-                reason: PolicyReason::new("cedh_keepables_no_acceleration_tutor_or_interaction"),
+                reason: PolicyReason::new("bracket_keepables_no_acceleration_tutor_or_interaction"),
             };
         }
 
@@ -108,7 +130,7 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         // mulligans from this policy or other registered policies.
         MulliganScore::Score {
             delta: 1.0,
-            reason: PolicyReason::new("cedh_keepables_baseline_keep"),
+            reason: PolicyReason::new("bracket_keepables_baseline_keep"),
         }
     }
 }
@@ -192,6 +214,7 @@ mod tests {
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
+    use strum::IntoEnumIterator;
 
     use super::*;
     use crate::plan::PlanSnapshot;
@@ -213,6 +236,24 @@ mod tests {
             ),
             ..DeckFeatures::default()
         }
+    }
+
+    #[test]
+    fn land_bounds_table_is_exhaustive_and_only_cedh_is_on() {
+        let actual: Vec<_> = CommanderBracketTier::iter().map(land_bounds_for).collect();
+        assert_eq!(
+            actual,
+            vec![
+                None,
+                None,
+                None,
+                None,
+                Some(KeepableLandBounds {
+                    min_lands: 2,
+                    max_land_only: 4,
+                }),
+            ]
+        );
     }
 
     /// Add a card to the given state in `Zone::Hand` for player 0.
@@ -303,7 +344,7 @@ mod tests {
 
     #[test]
     fn not_applicable_when_not_cedh() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let score = policy.evaluate(
             &[],
             &make_state(),
@@ -320,7 +361,7 @@ mod tests {
 
     #[test]
     fn empty_hand_is_cedh_force_mulligan_too_few_lands() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let score = policy.evaluate(
             &[],
             &make_state(),
@@ -340,7 +381,7 @@ mod tests {
     /// at a cEDH table without any clock or disruption piece.
     #[test]
     fn cedh_hand_with_no_acceleration_tutor_or_interaction_force_mulligans() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -375,13 +416,13 @@ mod tests {
             MulliganScore::ForceMulligan { reason } => {
                 assert_eq!(
                     reason.kind,
-                    "cedh_keepables_no_acceleration_tutor_or_interaction",
+                    "bracket_keepables_no_acceleration_tutor_or_interaction",
                     "unexpected reason kind: {}",
                     reason.kind
                 );
             }
             _ => panic!(
-                "expected ForceMulligan(cedh_keepables_no_acceleration_tutor_or_interaction), got {score:?}"
+                "expected ForceMulligan(bracket_keepables_no_acceleration_tutor_or_interaction), got {score:?}"
             ),
         }
     }
@@ -390,7 +431,7 @@ mod tests {
     /// the structural gate and yields a positive Score.
     #[test]
     fn cedh_hand_with_fast_mana_baseline_keeps() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -433,7 +474,7 @@ mod tests {
                     "expected delta 1.0, got {delta}"
                 );
                 assert_eq!(
-                    reason.kind, "cedh_keepables_baseline_keep",
+                    reason.kind, "bracket_keepables_baseline_keep",
                     "unexpected reason kind: {}",
                     reason.kind
                 );
@@ -444,7 +485,7 @@ mod tests {
 
     #[test]
     fn cedh_hand_with_tutor_baseline_keeps() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -478,7 +519,7 @@ mod tests {
 
     #[test]
     fn cedh_hand_with_interaction_baseline_keeps() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -514,7 +555,7 @@ mod tests {
     /// threat/combo density is diluted.
     #[test]
     fn cedh_hand_too_many_lands_force_mulligans() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -550,18 +591,18 @@ mod tests {
         match score {
             MulliganScore::ForceMulligan { reason } => {
                 assert_eq!(
-                    reason.kind, "cedh_keepables_too_many_lands",
+                    reason.kind, "bracket_keepables_too_many_lands",
                     "unexpected reason kind: {}",
                     reason.kind
                 );
             }
-            _ => panic!("expected ForceMulligan(cedh_keepables_too_many_lands), got {score:?}"),
+            _ => panic!("expected ForceMulligan(bracket_keepables_too_many_lands), got {score:?}"),
         }
     }
 
     #[test]
     fn flexible_modal_lands_do_not_trigger_cedh_too_many_lands_mulligan() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -590,7 +631,7 @@ mod tests {
         );
         assert!(matches!(
             score,
-            MulliganScore::Score { reason, .. } if reason.kind == "cedh_keepables_baseline_keep"
+            MulliganScore::Score { reason, .. } if reason.kind == "bracket_keepables_baseline_keep"
         ));
     }
 
@@ -600,7 +641,7 @@ mod tests {
     /// staple.
     #[test]
     fn cedh_hand_with_complete_combo_returns_strong_keep() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
 
@@ -641,7 +682,7 @@ mod tests {
                     (delta - 5.0).abs() < f64::EPSILON,
                     "expected delta 5.0 for combo-in-hand, got {delta}"
                 );
-                assert_eq!(reason.kind, "cedh_keepables_combo_in_hand");
+                assert_eq!(reason.kind, "bracket_keepables_combo_in_hand");
             }
             _ => panic!("expected strong-keep Score, got {score:?}"),
         }
@@ -666,13 +707,13 @@ mod tests {
         hand
     }
 
-    /// `CedhKeepablesMulligan` stays archetype-scoped: non-cEDH decks get a
+    /// `BracketKeepablesMulligan` stays bracket-scoped: non-cEDH decks get a
     /// zero-delta Score at any `mulligans_taken`. The universal card-count floor
     /// lives in `policies::mulligan::card_floor::MulliganCardFloor`, not here —
     /// this policy must never grow a process-level responsibility again.
     #[test]
     fn non_cedh_unaffected_at_high_mulligan_count() {
-        let policy = CedhKeepablesMulligan::new();
+        let policy = BracketKeepablesMulligan::new();
         let mut state = GameState::new_two_player(42);
         let hand = make_bad_cedh_hand(&mut state);
 
