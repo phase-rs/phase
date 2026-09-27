@@ -28465,11 +28465,13 @@ fn transient_reduce_ability_cost_present(state: &GameState) -> bool {
 /// the stack, in a library or graveyard, on a back face, as a base static, or
 /// on a permanent whose abilities don't currently function), because a
 /// dormant one reads the whole turn the moment it takes effect (CR 611.3a).
-/// Each definition is judged on its own gates, so two definitions on one
-/// object never mask each other. Two positions on either side of a qualifying
-/// activation then differ, while rows no definition could read (an untap
-/// ability that targets nothing, with only Hojo around) are projected out and
-/// ordinary activation loops still compare equal.
+/// Each definition is judged on its own gates, and once per living player as
+/// its hypothetical controller (CR 109.5: control can later pass to anyone), so
+/// two definitions on one object never mask each other. Two positions on
+/// either side of a qualifying activation then differ, while rows no
+/// definition could read (an untap ability that targets nothing, with only
+/// Hojo around) are projected out and ordinary activation loops still compare
+/// equal.
 ///
 /// Every gate is evaluable on a recorded row (the source and each target are
 /// snapshots, which `reduce_ability_cost_non_target_gates_admit` and
@@ -28529,14 +28531,13 @@ pub(crate) fn cost_observable_activation_journal(
             )
             .filter(|def| is_first_activation_modifier(&def.mode));
         for def in definitions {
-            // CR 109.5: "you" is the static's controller. A dormant object's
-            // future controller isn't known: it is its current controller or,
-            // once it changes zones, usually its owner. Both are judged, and
-            // either one's first qualifying row is kept (over-keeping can only
-            // make positions compare unequal, never equal).
-            keep_first(&def.mode, def.affected.as_ref(), *id, obj.controller);
-            if obj.owner != obj.controller {
-                keep_first(&def.mode, def.affected.as_ref(), *id, obj.owner);
+            // CR 109.5: "you" is the static's CURRENT controller, and control
+            // can later pass to any player (Control Magic), so each definition
+            // is judged once per living player as its hypothetical controller.
+            // At most players × definitions rows are kept, and over-keeping can
+            // only make positions compare unequal, never equal.
+            for player in state.players.iter().filter(|p| !p.is_eliminated) {
+                keep_first(&def.mode, def.affected.as_ref(), *id, player.id);
             }
         }
     }

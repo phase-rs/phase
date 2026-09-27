@@ -1253,24 +1253,16 @@ fn scheduled_drive_still_renders_the_already_spendable_mana_badge() {
     );
 }
 
-/// CR 611.3a + CR 732.2a: a Professor Hojo sitting in the library doesn't block
-/// an ordinary activation loop. The loop key keeps only the journal rows a
-/// first-activation modifier could read; Basalt's untap targets nothing, so no
-/// row qualifies for Hojo and none is kept. Reach guards: Hojo (its Oracle
-/// text) is in the library carrying its once-per-turn modifier, and the
+/// CR 611.3a + CR 732.2a: Basalt Monolith + Power Artifact beside a Professor
+/// Hojo that isn't on the battlefield, in `zone`. Drives one period and
+/// returns whether the mana-engine shortcut was offered. Reach guards: Hojo
+/// (its Oracle text) carries its once-per-turn modifier in that zone, and the
 /// period's untap really was journaled.
-///
-/// MEASURED: a regression guard only, not a revert-to-red pin. This offer is
-/// also made on 45fdbed7d, which kept every row while a dormant Hojo existed,
-/// and under a mutation that keeps every row: the mana-engine offer here does
-/// not gate on journal equality. It pins that a library Hojo never becomes a
-/// reason to withhold this shortcut.
-#[test]
-fn a_hojo_in_the_library_does_not_block_the_mana_engine_shortcut() {
+fn mana_engine_offered_beside_hojo_in(zone: Zone) -> bool {
+    use engine::types::statics::{CastFrequency, StaticMode};
     // Scryfall Oracle text; the shared test database has no Hojo.
     const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.\nWhenever one or more creatures you control become the target of an activated ability, draw a card. This ability triggers only once each turn.";
-    use engine::types::statics::{CastFrequency, StaticMode};
-    let Some(db) = shared_card_db() else { return };
+    let db = shared_card_db().expect("the shared card database");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let basalt = scenario.add_real_card(P0, BASALT, Zone::Battlefield, db);
@@ -1278,13 +1270,15 @@ fn a_hojo_in_the_library_does_not_block_the_mana_engine_shortcut() {
         .add_creature_to_hand_from_oracle(P0, "Professor Hojo", 2, 2, HOJO)
         .id();
     let mut runner = scenario.build();
-    remove_from_zone(runner.state_mut(), hojo, Zone::Hand, P0);
-    add_to_zone(runner.state_mut(), hojo, Zone::Library, P0);
-    runner.state_mut().objects.get_mut(&hojo).unwrap().zone = Zone::Library;
+    if zone != Zone::Hand {
+        remove_from_zone(runner.state_mut(), hojo, Zone::Hand, P0);
+        add_to_zone(runner.state_mut(), hojo, zone, P0);
+        runner.state_mut().objects.get_mut(&hojo).unwrap().zone = zone;
+    }
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     let power = place_on_battlefield(runner.state_mut(), P0, POWER, db);
     attach_to(runner.state_mut(), power, basalt);
-    assert_eq!(runner.state().objects[&hojo].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&hojo].zone, zone);
     assert!(
         runner.state().objects[&hojo]
             .static_definitions
@@ -1296,7 +1290,7 @@ fn a_hojo_in_the_library_does_not_block_the_mana_engine_shortcut() {
                     ..
                 }
             )),
-        "reach guard: the library Hojo carries its first-activation modifier"
+        "reach guard: Hojo carries its first-activation modifier in {zone:?}"
     );
     let mut rig = Rig { runner, basalt };
     let mana_idx = mana_ability_index(rig.runner.state(), rig.basalt).expect("mana ability");
@@ -1312,12 +1306,35 @@ fn a_hojo_in_the_library_does_not_block_the_mana_engine_shortcut() {
             .is_some_and(|rows| rows.iter().any(|row| row.source == basalt)),
         "reach guard: the untap was journaled"
     );
-    assert!(
-        matches!(
-            rig.runner.state().waiting_for,
-            WaitingFor::LoopShortcut { .. }
-        ),
-        "a library Hojo must not suppress the shortcut, got {:?}",
-        rig.runner.state().waiting_for
-    );
+    matches!(
+        rig.runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    )
+}
+
+/// End-to-end guard for a HIDDEN library Hojo. The P7 cover compares frames
+/// built from `proposer_hidden_view`, which blanks the library card's statics,
+/// so its comparator never sees this Hojo (probed: the reader is live on the
+/// board and absent from every compared frame). This does not show the path
+/// ignores the journal; it pins that a hidden Hojo never withholds the offer.
+#[test]
+fn a_hidden_library_hojo_does_not_block_the_mana_engine_shortcut() {
+    if shared_card_db().is_none() {
+        return;
+    }
+    assert!(mana_engine_offered_beside_hojo_in(Zone::Library));
+}
+
+/// CR 611.3a + CR 732.2a: a REVEALED Hojo (in the graveyard, which the cover's
+/// frames keep) is seen by the comparator, which does gate on the journal.
+/// Basalt's untap targets no creature, so no row qualifies for Hojo, the
+/// per-definition projection keeps none, and the shortcut is still offered.
+/// Keeping every row while any dormant reader exists (45fdbed7d's rule)
+/// withholds it.
+#[test]
+fn a_revealed_hojo_does_not_block_the_mana_engine_shortcut() {
+    if shared_card_db().is_none() {
+        return;
+    }
+    assert!(mana_engine_offered_beside_hojo_in(Zone::Graveyard));
 }

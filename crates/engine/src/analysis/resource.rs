@@ -9809,6 +9809,113 @@ mod tests {
         assert_eq!((paid_after_transform(a), paid_after_transform(b)), (0, 2));
     }
 
+    /// CR 109.5 + CR 611.3a: "you" is the modifier's CURRENT controller, and
+    /// control can later pass to any player, not just its owner. It's P2's
+    /// turn in a three-player game; P0 owns and controls Hojo; P2 has a creature
+    /// and a tapper. State B has an earlier P2 activation targeting P2's own
+    /// creature, A doesn't. They must compare UNEQUAL: once P2 gains control of
+    /// Hojo (Control Magic), the same P2 activation costs {0} in A and {2} in B
+    /// (the production reach guard).
+    #[test]
+    fn a_first_activation_row_is_kept_for_every_possible_controller() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaColor, ManaUnit};
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+        let (p0, p2) = (PlayerId(0), PlayerId(2));
+
+        let mut s = GameScenario::new_n_player(3, 7);
+        s.at_phase(Phase::PreCombatMain);
+        let hojo = s
+            .add_creature_from_oracle(p0, "Professor Hojo", 2, 2, HOJO)
+            .id();
+        let theirs = s.add_creature(p2, "P2 Creature", 1, 1).id();
+        let src = s
+            .add_artifact_from_oracle(p2, "P2 Tapper", "{2}: Tap target creature.")
+            .id();
+        let magic = s
+            .add_enchantment_from_oracle(
+                p2,
+                "Control Magic",
+                "Enchant creature\nYou control enchanted creature.",
+            )
+            .with_subtypes(vec!["Aura"])
+            .id();
+        s.with_mana_pool(
+            p2,
+            (0..10)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut runner = s.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = p2;
+            state.priority_player = p2;
+            state.waiting_for = WaitingFor::Priority { player: p2 };
+        }
+        let a = runner.state().clone();
+        assert_eq!(
+            a.objects[&hojo].controller, p0,
+            "reach guard: P0 controls Hojo"
+        );
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            p2,
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                p2,
+                src,
+                None,
+                &[TargetRef::Object(theirs)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "P2's qualifying row is cost-relevant should P2 gain Hojo (UNEQUAL)"
+        );
+
+        // Reach guard: P2 gains control of Hojo, then activates.
+        let paid_after_transfer = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            {
+                let state = r.state_mut();
+                state.objects.get_mut(&magic).unwrap().attached_to = Some(hojo.into());
+                state
+                    .objects
+                    .get_mut(&hojo)
+                    .unwrap()
+                    .attachments
+                    .push(magic);
+                state.layers_dirty.mark_full();
+            }
+            crate::game::layers::flush_layers(r.state_mut());
+            assert_eq!(
+                r.state().objects[&hojo].controller,
+                p2,
+                "reach guard: P2 has Hojo"
+            );
+            let before = r.state().players[2].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(theirs)],
+            })
+            .expect("target");
+            while matches!(r.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[2].mana_pool.total()
+        };
+        assert_eq!((paid_after_transfer(a), paid_after_transfer(b)), (0, 2));
+    }
+
     /// CR 602.5b: per-GAME ("Activate only once") gate preserved; sibling
     /// unrestricted ability projected out.
     #[test]
