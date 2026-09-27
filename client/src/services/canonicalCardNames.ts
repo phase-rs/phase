@@ -14,13 +14,9 @@ function isOptionalStringArray(v: unknown): boolean {
 }
 
 /**
- * True when `value` has every field `deckCardNames` and `applyCanonicalNames`
- * read: `main`/`sideboard` as arrays of entries with a string `name`, the
- * other name-list fields as arrays of strings when present, and `companion`
- * as a string when present. Guards untrusted stored JSON before it reaches
- * those two functions, which otherwise throw or corrupt data on a malformed
- * shape (e.g. `deck.main.flatMap` on a non-array, or spreading a non-array
- * `commander` into characters).
+ * True when `value` has `main`/`sideboard` as arrays of entries with a string
+ * `name`, the other name-list fields as arrays of strings when present, and
+ * `companion` as a string when present.
  */
 export function isCanonicalizableDeck(value: unknown): value is ParsedDeck & Record<string, unknown> {
   if (!isObject(value)) return false;
@@ -94,7 +90,7 @@ export function applyCanonicalNames(
 }
 
 /**
- * Deck-import step: `deck` with the engine's canonical names, or `deck`
+ * `deck` with the engine's canonical names, or `deck`
  * unchanged when the engine cannot answer (its names still resolve as typed,
  * per `deck_validation.rs::slash_spellings_are_known_and_share_one_copy_count`
  * / `deck_loading.rs::resolve_names_groups_slash_spellings_of_one_card`).

@@ -80,8 +80,8 @@ export function migrateSavedDecks(): void {
  * A deck is written only if it still holds what was read before the engine
  * call, under the saved-deck library lock and, like `migrateSavedDecks`,
  * with the storage watcher suppressed. Each deck written is announced with
- * `SAVED_DECK_REWRITTEN_EVENT` in the same transaction, so an open deck
- * builder keeps it as its Save baseline.
+ * `SAVED_DECK_REWRITTEN_EVENT` in the same transaction, so a deck builder open in this window
+ * keeps it as its Save baseline.
  */
 export async function canonicalizeSavedDeckNames(): Promise<void> {
   const feedOwned = new Set(Object.keys(loadDeckOrigins()));

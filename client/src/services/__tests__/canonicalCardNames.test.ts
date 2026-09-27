@@ -189,6 +189,7 @@ describe("isCanonicalizableDeck", () => {
     ["null", null],
     ["a string", "not-a-deck"],
     ["missing main", { sideboard: [] }],
+    ["missing sideboard", { main: [] }],
     ["main not an array", { main: "x", sideboard: [] }],
     ["main entry with a non-string name", { main: [{ count: 1, name: 5 }], sideboard: [] }],
     ["commander as a string instead of an array", { main: [], sideboard: [], commander: "X" }],

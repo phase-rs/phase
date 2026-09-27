@@ -12,6 +12,7 @@ import {
   removeDeckMeta,
   saveBuilderDeck,
   stampDeckMeta,
+  writeDraftAutosaveDeck,
   writeSavedDeckData,
   type DeckFolder,
 } from "../../constants/storage";
@@ -403,5 +404,72 @@ describe("queued organization and adopt refuse against a deck that changed while
     await expect(call).rejects.toBeInstanceOf(SavedDeckChangedError);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Adopted Deck")).toBeNull();
     expect(loadDeckOrigins()).toEqual({});
+  });
+});
+
+describe("saveBuilderDeck under the deck's own name", () => {
+  it("refuses, writing nothing, when a write queued ahead of it replaced the deck", async () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Built", JSON.stringify({ main: [], sideboard: [] }));
+    const snapshot = { name: "Built", raw: localStorage.getItem(STORAGE_KEY_PREFIX + "Built") };
+    const ref = { current: snapshot };
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = withSavedDeckLibrary(async (txn) => {
+      await held;
+      removeDeckMeta(txn, "Built");
+      writeSavedDeckData(txn, "Built", "REPLACEMENT-DATA");
+      stampDeckMeta(txn, "Built", 2000);
+    });
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).held).toHaveLength(1);
+    });
+
+    const call = saveBuilderDeck(snapshot, ref, () => true, "Built", "EDITOR-DATA");
+    call.catch(() => {});
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).pending).toHaveLength(1);
+    });
+    release();
+    await holder;
+
+    await expect(call).rejects.toBeInstanceOf(SavedDeckChangedError);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Built")).toBe("REPLACEMENT-DATA");
+    expect(getDeckMeta("Built")).toEqual({ addedAt: 2000 });
+    // Rebased to the replacement so a retried save is an informed overwrite, not another refusal
+    // against this same stale snapshot.
+    expect(ref.current).toEqual({ name: "Built", raw: "REPLACEMENT-DATA" });
+  });
+
+  it("writes when the deck still holds the snapshot (paired positive)", async () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Built", JSON.stringify({ main: [], sideboard: [] }));
+    const snapshot = { name: "Built", raw: localStorage.getItem(STORAGE_KEY_PREFIX + "Built") };
+    const ref = { current: snapshot };
+
+    const saved = await saveBuilderDeck(snapshot, ref, () => true, "Built", "EDITOR-DATA");
+    expect(saved).toEqual({ name: "Built", raw: "EDITOR-DATA" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Built")).toBe("EDITOR-DATA");
+  });
+
+  it("overwrites a deck the draft autosave still owns, and clears that ownership", async () => {
+    await writeDraftAutosaveDeck("Sealed", "[Autosave] Sealed", "AUTOSAVE-V1");
+    const snapshot = {
+      name: "[Autosave] Sealed",
+      raw: localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed"),
+    };
+    await writeDraftAutosaveDeck("Sealed", "[Autosave] Sealed", "AUTOSAVE-V2");
+
+    const saved = await saveBuilderDeck(
+      snapshot,
+      { current: snapshot },
+      () => true,
+      "[Autosave] Sealed",
+      "EDITOR-DATA",
+    );
+    expect(saved.raw).toBe("EDITOR-DATA");
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed")).toBe("EDITOR-DATA");
+    expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBeUndefined();
   });
 });

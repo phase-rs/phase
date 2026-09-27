@@ -206,6 +206,7 @@ describe("canonicalizeSavedDeckNames", () => {
     const missingMainRaw = JSON.stringify({ sideboard: [] });
     const mainNotArrayRaw = JSON.stringify({ main: "not-an-array", sideboard: [] });
     const nullRaw = JSON.stringify(null);
+    const missingSideboardRaw = JSON.stringify({ main: [] });
     const commanderStringRaw = JSON.stringify({
       main: [{ count: 1, name: "Lightning Bolt" }],
       sideboard: [],
@@ -215,6 +216,7 @@ describe("canonicalizeSavedDeckNames", () => {
     localStorage.setItem(STORAGE_KEY_PREFIX + "MissingMain", missingMainRaw);
     localStorage.setItem(STORAGE_KEY_PREFIX + "MainNotArray", mainNotArrayRaw);
     localStorage.setItem(STORAGE_KEY_PREFIX + "Null", nullRaw);
+    localStorage.setItem(STORAGE_KEY_PREFIX + "MissingSideboard", missingSideboardRaw);
     localStorage.setItem(STORAGE_KEY_PREFIX + "CommanderString", commanderStringRaw);
     mocks.canonicalCardNames.mockImplementation(
       renameTo({ "Summon: Choco // Mog": "Summon: Choco/Mog" }),
@@ -227,6 +229,7 @@ describe("canonicalizeSavedDeckNames", () => {
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "MissingMain")).toBe(missingMainRaw);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "MainNotArray")).toBe(mainNotArrayRaw);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Null")).toBe(nullRaw);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "MissingSideboard")).toBe(missingSideboardRaw);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "CommanderString")).toBe(commanderStringRaw);
   });
 });

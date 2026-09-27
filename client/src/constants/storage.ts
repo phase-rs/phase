@@ -462,10 +462,15 @@ export function writeDraftAutosaveDeck(
 
 /**
  * Save the deck builder's deck as `nextName`. When renamed, move it from `previous.name` only if
- * that name still holds the deck `previous` captured; otherwise leave that name's deck alone. The
- * check reads `savedDeckRef` under the lock, not just `previous`: when an earlier queued save or
- * clone to that same name has already committed by the time this transaction runs, its write is
- * what `previous` should be compared against, not the value captured back at this click.
+ * that name still holds the deck `previous` captured; otherwise leave that name's deck alone.
+ * When `previous.name` is `nextName`, throw `SavedDeckChangedError`, writing nothing, unless that
+ * name still holds the deck `previous` captured or the draft autosave still owns it
+ * (`DeckMeta.autosaveSlot`). Both checks read `savedDeckRef` under the lock, not just `previous`:
+ * when an earlier queued save or clone to that same name has already committed by the time this
+ * transaction runs, its write is what `previous` should be compared against, not the value
+ * captured back at this click. On a same-name refusal, `savedDeckRef` is rebased to what
+ * `nextName` holds now (or `null` if it was deleted) when this save still claims the editor, so a
+ * retried Save acts on the current state instead of refusing again.
  *
  * On success, `savedDeckRef` is updated to this write's snapshot only if `claimsEditor` (checked
  * again after the write) still says so — a Load that switched the editor to a different deck
@@ -481,7 +486,17 @@ export function saveBuilderDeck(
   return withSavedDeckLibrary(async (txn) => {
     const live = savedDeckRef.current;
     const effective = claimsEditor() && previous && live && live.name === previous.name ? live : previous;
-    if (effective && effective.name !== nextName && savedDeckUnchanged(txn, effective)) {
+    if (effective && effective.name === nextName) {
+      if (getDeckMeta(nextName)?.autosaveSlot === undefined && !savedDeckUnchanged(txn, effective)) {
+        if (claimsEditor()) {
+          // Rebase so the retry the "try again" toast asks for is an informed overwrite or
+          // recreation, not another refusal against this same stale snapshot.
+          const raw = localStorage.getItem(STORAGE_KEY_PREFIX + nextName);
+          savedDeckRef.current = raw === null ? null : { name: nextName, raw };
+        }
+        throw new SavedDeckChangedError(nextName);
+      }
+    } else if (effective && savedDeckUnchanged(txn, effective)) {
       // If nextName already names another deck, the writeSavedDeckData below overwrites
       // its data (pre-existing Save behavior) and moveSavedDeck's metadata
       // carry likewise replaces its metadata — both correctly reflect the

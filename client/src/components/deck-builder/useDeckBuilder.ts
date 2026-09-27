@@ -24,6 +24,7 @@ import {
   type SavedDeckSnapshot,
 } from "../../constants/storage";
 import { withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import { attemptSavedDeckWrite } from "../../services/savedDeckWriteFailure";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
@@ -89,7 +90,7 @@ export function useDeckBuilder({
   // a value captured before it (see saveBuilderDeck's doc).
   const savedDeckRef = useRef<SavedDeckSnapshot | null>(null);
   // A SAVED_DECK_REWRITTEN_EVENT that replaced the open deck's stored bytes moves the Save
-  // baseline with it, so a later rename still moves that deck.
+  // baseline with it, so a later same-name Save is not refused and a rename still moves that deck.
   useEffect(
     () =>
       onSavedDeckRewritten((rewrite) => {
@@ -574,7 +575,8 @@ export function useDeckBuilder({
       // matches what we're about to persist.
       applyDeckToEditor(resolved);
     }
-    const data = serializeSavedDeck(resolved, format, bracket);
+    // The editor can still hold spellings the saved-deck name repair already replaced.
+    const data = serializeSavedDeck(await canonicalizeDeckNames(resolved), format, bracket);
     const nextName = deckName.trim();
     const claimsEditor = () => !editorChangedSince(captured).reloaded;
     const saved = await attemptSavedDeckWrite("save", () =>
@@ -614,7 +616,7 @@ export function useDeckBuilder({
     // capture it now, before any await lets a Load or rename-Save race this transaction.
     const folderAtClick = sourceAtClick ? getDeckMeta(sourceAtClick.name)?.folderId ?? null : null;
     const base = deckName.trim() || "Untitled Deck";
-    const data = serializeSavedDeck(currentDeck, format, bracket);
+    const data = serializeSavedDeck(await canonicalizeDeckNames(currentDeck), format, bracket);
     const cloned = await attemptSavedDeckWrite("clone", () =>
       withSavedDeckLibrary((txn) => {
         const name = freeDeckName(txn, `${base} copy`, (i) => `${base} copy ${i}`);
