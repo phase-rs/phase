@@ -47,12 +47,40 @@ pub enum AiDifficulty {
     Medium,
     Hard,
     VeryHard,
-    /// Bracket-5 competitive Commander. Bypasses 4-player paranoid scaling;
-    /// activates combo-recognition policies via `DeckFeatures::is_cedh`.
+    /// Bracket-5 competitive Commander. Bypasses 4-player paranoid scaling via
+    /// [`PodScaling::PodCalibrated`]; combo-recognition policies activate on the
+    /// reconciled tier in `DeckFeatures::effective_bracket_tier`.
     CEDH,
 }
 
+/// How a preset's search budget responds to seat count. Private to this module and
+/// never serialized — `AiConfig` carries `player_count` and the resulting
+/// `SearchConfig`, not this verdict.
+///
+/// This exists so a rung's pod behaviour is STATED per rung. `difficulty !=
+/// AiDifficulty::CEDH` silently enrolled every future rung in seat scaling; a bracket→rung
+/// table (P10) makes that default load-bearing, because the separation a mapping buys at
+/// 1v1 is not the separation it delivers at four seats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PodScaling {
+    /// The preset's budget assumes a 2-player game; cap it as seats grow.
+    ScaleWithSeats,
+    /// The preset is already authored for a 4-player Commander table.
+    PodCalibrated,
+}
+
 impl AiDifficulty {
+    fn pod_scaling(self) -> PodScaling {
+        match self {
+            Self::VeryEasy | Self::Easy | Self::Medium | Self::Hard | Self::VeryHard => {
+                PodScaling::ScaleWithSeats
+            }
+            // The CEDH doc says "Bypasses 4-player paranoid scaling"; the preset's
+            // depth 3 / 96 nodes was authored against a four-seat table.
+            Self::CEDH => PodScaling::PodCalibrated,
+        }
+    }
+
     /// Default brain rung for a table at `tier`. A default the per-seat choice
     /// beats under advisory enforcement, never a cap and never a multiplier:
     /// shipped presets keep `determinization_samples == 0` because product's
@@ -1555,17 +1583,16 @@ pub fn create_config_for_players(
 
     match player_count {
         0..=2 => {} // No scaling needed
-        3..=4 => {
-            // cEDH: no scaling needed — the preset is calibrated for 4-player tables.
-            // All other difficulties get the paranoid cap.
-            if difficulty != AiDifficulty::CEDH {
+        3..=4 => match difficulty.pod_scaling() {
+            PodScaling::PodCalibrated => {}
+            PodScaling::ScaleWithSeats => {
                 // Paranoid search: cap depth at 2, reduce budget
                 config.search.max_depth = config.search.max_depth.min(2);
                 config.search.max_nodes = config.search.max_nodes * 2 / 3;
                 config.search.max_branching = config.search.max_branching.min(4);
                 config.search.rollout_depth = config.search.rollout_depth.min(1);
             }
-        }
+        },
         _ => {
             // 5-6+ players: heuristic-only or minimal search
             if config.difficulty <= AiDifficulty::Medium {
@@ -1977,6 +2004,62 @@ mod tests {
             cfg.search.max_depth, 2,
             "VeryHard should still be capped at 4p"
         );
+    }
+
+    /// Pod separation is NOT the 1v1 separation. At 4 seats VeryEasy and Easy remain
+    /// search-disabled, so their caps are moot; the three search-enabled ScaleWithSeats
+    /// rungs collapse to one depth/branching/rollout-depth shape distinguished only by
+    /// node budget, while PodCalibrated CEDH keeps a full extra ply and 2.3x the nodes.
+    /// A bracket→rung mapping measured 1v1 must be re-measured in a pod (P9's instrument)
+    /// before it is believed.
+    #[test]
+    fn pod_scaling_collapses_every_scaled_rung_to_one_shape() {
+        let expected = [
+            (AiDifficulty::VeryEasy, (0, 0, 4, 0)),
+            (AiDifficulty::Easy, (0, 0, 4, 0)),
+            (AiDifficulty::Medium, (2, 16, 4, 1)),
+            (AiDifficulty::Hard, (2, 32, 4, 1)),
+            (AiDifficulty::VeryHard, (2, 42, 4, 1)),
+            (AiDifficulty::CEDH, (3, 96, 5, 2)),
+        ];
+        let mut disabled_scaled = Vec::new();
+        let mut enabled_scaled_nodes = Vec::new();
+        let mut enabled_scaled_shape = None;
+
+        for (difficulty, expected_budget) in expected {
+            let config = create_config_for_players(difficulty, Platform::Native, 4);
+            let budget = (
+                config.search.max_depth,
+                config.search.max_nodes,
+                config.search.max_branching,
+                config.search.rollout_depth,
+            );
+            assert_eq!(budget, expected_budget, "{difficulty:?}");
+
+            if difficulty.pod_scaling() == PodScaling::ScaleWithSeats {
+                if config.search.enabled {
+                    let shape = (
+                        config.search.max_depth,
+                        config.search.max_branching,
+                        config.search.rollout_depth,
+                    );
+                    assert_eq!(*enabled_scaled_shape.get_or_insert(shape), shape);
+                    enabled_scaled_nodes.push(config.search.max_nodes);
+                } else {
+                    disabled_scaled.push((difficulty, budget));
+                }
+            }
+        }
+
+        assert_eq!(
+            disabled_scaled,
+            [
+                (AiDifficulty::VeryEasy, (0, 0, 4, 0)),
+                (AiDifficulty::Easy, (0, 0, 4, 0)),
+            ]
+        );
+        assert_eq!(enabled_scaled_shape, Some((2, 4, 1)));
+        assert_eq!(enabled_scaled_nodes, [16, 32, 42]);
     }
 
     #[test]
