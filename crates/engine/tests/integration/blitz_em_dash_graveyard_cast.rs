@@ -3563,6 +3563,19 @@ fn omniscience_menu_offers_bestow_onto_a_creature_with_protection_from_creatures
         runner.state().objects[&eidolon].bestow_form.is_some(),
         "cast bestowed"
     );
+    runner.resolve_top();
+    let aura = &runner.state().objects[&eidolon];
+    assert_eq!(aura.zone, Zone::Battlefield, "the bestowed Aura resolves");
+    assert_eq!(
+        aura.attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(eesha)),
+        "it enchants Eesha"
+    );
+    assert!(
+        aura.card_types.subtypes.iter().any(|s| s == "Aura")
+            && !aura.card_types.core_types.contains(&CoreType::Creature),
+        "as an Aura, not a creature"
+    );
 }
 
 /// Control: protection from enchantments does stop the bestowed Aura, so the
