@@ -5732,18 +5732,27 @@ fn graveyard_permission_variant(
 ///   the graveyard is elected here. See "Choosing a permission" below.
 /// - Anything else: the printed-cost election (`printed_graveyard_permission_election`).
 ///
-/// Choosing a permission. CR 601.2a: when several permissions admit the cast,
-/// the player announces which one they are using (Muldrotha, 2020-11-10
-/// ruling). The engine does not model that announcement yet, so it chooses only
-/// where the choice is strictly dominant. An `Unlimited` permission with no
+/// Choosing a permission. CR 601.2a + CR 601.2b: when several permissions admit
+/// the cast, the player announces which one they are using as they begin to
+/// cast the card (Muldrotha, 2020-11-10 ruling: "If multiple effects allow you
+/// to play a card from your graveyard, you must announce which permission
+/// you're using as you begin to play the card."). The engine does not model
+/// that announcement yet, so for the card's own Blitz/Bestow it elects a
+/// permission only where no choice is left to make: exactly one usable
+/// permission, or a strictly dominant one. An `Unlimited` permission with no
 /// rider (`GraveyardPermissionSource::is_strictly_dominant`) spends no slot and
 /// adds nothing, so a bounded slot is not spent when such a permission also
 /// admits the cast (Sabin, Master Monk's own "using its blitz ability" rider
-/// beside Muldrotha or Exploration Broodship). Otherwise it falls back to source
-/// order. That fallback is a policy, not a rules result: between two bounded
-/// permissions (Muldrotha and Lurrus) the player's announcement decides, and an
-/// unlimited permission WITH a rider is a real trade-off (Leonardo's finality
-/// counter against Muldrotha's slot).
+/// beside Muldrotha or Exploration Broodship).
+///
+/// Stated gap: a graveyard Blitz/Bestow cast is unavailable when two or more
+/// eligible permissions differ and neither is strictly dominant (Muldrotha
+/// beside Leonardo, Sewer Samurai: a slot against a finality counter), because
+/// only the player's announcement can choose between them. It fails closed
+/// (`None`) rather than electing by source order; the player's announcement
+/// choice lands in a follow-up. The printed-cost election
+/// (`printed_graveyard_permission_election`) still falls back to source order,
+/// as it did before this rider path existed.
 ///
 /// CR 118.9b: a permission that requires a casting method ("using its blitz
 /// ability") authorizes only that method, so each arm considers only the
@@ -5783,11 +5792,13 @@ fn elected_graveyard_permission_source(
                                 == 1)
                 })
                 .collect();
-            usable
-                .iter()
-                .find(|candidate| candidate.is_strictly_dominant())
-                .or_else(|| usable.first())
-                .copied()
+            match usable.as_slice() {
+                [only] => Some(*only),
+                _ => usable
+                    .iter()
+                    .find(|candidate| candidate.is_strictly_dominant())
+                    .copied(),
+            }
         }
         _ => printed_graveyard_permission_election(candidates),
     }

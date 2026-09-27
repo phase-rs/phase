@@ -756,18 +756,44 @@ fn bestow_from_graveyard_under_muldrotha_spends_its_enchantment_slot() {
     );
 }
 
-/// CR 601.2a: when several permissions admit a graveyard cast, the player
-/// announces which one they use (Muldrotha, 2020-11-10 ruling). The engine
-/// picks only when the choice is strictly dominant, so an unlimited permission
-/// that brings a rider is NOT preferred over a bounded one.
+/// Whether casting `id` from the graveyard offers its `keyword` alternative
+/// cost, judged on a copy of the game so nothing is committed: the cast either
+/// asks the two-way alternative-cost question or lists the method in its
+/// casting menu.
+fn alternative_offered(
+    runner: &GameRunner,
+    id: ObjectId,
+    keyword: engine::types::game_state::AlternativeCastKeyword,
+) -> bool {
+    let variant = match keyword {
+        engine::types::game_state::AlternativeCastKeyword::Blitz => "Blitz",
+        engine::types::game_state::AlternativeCastKeyword::Bestow => "Bestow",
+        other => panic!("not a graveyard rider: {other:?}"),
+    };
+    let mut probe = GameRunner::from_state(runner.state().clone());
+    match cast_from_graveyard(&mut probe, id) {
+        Ok(WaitingFor::AlternativeCastChoice {
+            keyword: offered, ..
+        }) => offered == keyword,
+        Ok(WaitingFor::CastingVariantChoice { options, .. }) => options
+            .iter()
+            .any(|option| format!("{:?}", option.variant) == variant),
+        _ => false,
+    }
+}
+
+/// CR 601.2a + CR 601.2b: when several permissions admit a graveyard cast, the
+/// player announces which one they use (Muldrotha, 2020-11-10 ruling). Until
+/// that announcement is modeled, a Blitz cast between two permissions that
+/// differ, neither strictly dominant, is not offered: the engine won't choose
+/// for the player by source order.
 ///
-/// Leonardo is unlimited but gives the creature a finality counter, so blitz's
-/// end-step sacrifice would exile Riveteers Decoy instead of returning it to the
-/// graveyard. Spending Muldrotha's slot instead is a real alternative, so the
-/// engine keeps the same source-order first match a printed-cost cast gets.
-/// Muldrotha is added first, so that first match is Muldrotha.
+/// Leonardo is unlimited but gives the creature a finality counter; Muldrotha
+/// spends its creature slot. That is a real trade-off, so the blitz is not
+/// offered, while the printed cast still is. Without Leonardo, the same blitz
+/// is offered through Muldrotha alone (the reach control).
 #[test]
-fn blitz_does_not_prefer_an_unlimited_permission_that_brings_a_rider() {
+fn blitz_between_two_non_dominant_permissions_is_not_offered() {
     let decoy_blitz = blitz_keyword(&parse_oracle_text(
         RIVETEERS_DECOY,
         "Riveteers Decoy",
@@ -775,60 +801,255 @@ fn blitz_does_not_prefer_an_unlimited_permission_that_brings_a_rider() {
         &["Creature".into()],
         &["Human".into(), "Warrior".into()],
     ));
+    let board = |with_leonardo: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        add_permission_source(
+            &mut scenario,
+            "Muldrotha, the Gravetide",
+            MULDROTHA,
+            &["Elemental", "Avatar"],
+        );
+        if with_leonardo {
+            add_permission_source(
+                &mut scenario,
+                "Leonardo, Sewer Samurai",
+                LEONARDO,
+                &["Mutant", "Ninja", "Turtle", "Samurai"],
+            );
+        }
+        let decoy = scenario
+            .add_creature_to_graveyard(P0, "Riveteers Decoy", 3, 1)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .with_keyword(decoy_blitz.clone())
+            .id();
+        let mut runner = scenario.build();
+        fill_mana(&mut runner, ManaType::Green);
+        (runner, decoy)
+    };
 
+    let (control, decoy) = board(false);
+    assert!(
+        alternative_offered(
+            &control,
+            decoy,
+            engine::types::game_state::AlternativeCastKeyword::Blitz
+        ),
+        "reach: through Muldrotha alone the blitz is offered"
+    );
+
+    let (mut runner, decoy) = board(true);
+    assert!(
+        !alternative_offered(
+            &runner,
+            decoy,
+            engine::types::game_state::AlternativeCastKeyword::Blitz
+        ),
+        "two non-dominant permissions: the blitz must not be offered"
+    );
+    assert!(
+        offered_cast(&runner, decoy).is_some(),
+        "the printed cast is still offered"
+    );
+    let waiting = cast_from_graveyard(&mut runner, decoy).expect("the printed cast is legal");
+    assert!(
+        !matches!(waiting, WaitingFor::AlternativeCastChoice { .. }),
+        "no blitz choice is asked, got {waiting:?}"
+    );
+    assert_eq!(runner.state().objects[&decoy].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        6,
+        "the printed {{1}}{{G}} is paid, not blitz's {{3}}{{G}}"
+    );
+}
+
+/// The same between two BOUNDED permissions: Muldrotha's creature slot against
+/// Exploration Broodship's once-per-turn slot and land sacrifice. The blitz is
+/// not offered, while each permission alone offers it.
+#[test]
+fn blitz_between_two_bounded_permissions_is_not_offered() {
+    let board = |with_muldrotha: bool, with_broodship: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if with_broodship {
+            add_exploration_broodship(&mut scenario, BROODSHIP_STATIONED);
+        }
+        if with_muldrotha {
+            add_permission_source(
+                &mut scenario,
+                "Muldrotha, the Gravetide",
+                MULDROTHA,
+                &["Elemental", "Avatar"],
+            );
+        }
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let guardian = scenario
+            .add_creature_to_graveyard(P0, "Caldaia Guardian", 4, 3)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Green],
+            })
+            .with_keyword(caldaia_blitz())
+            .id();
+        let mut runner = scenario.build();
+        engine::game::layers::flush_layers(runner.state_mut());
+        fill_mana(&mut runner, ManaType::Green);
+        (runner, guardian)
+    };
+    let blitz = engine::types::game_state::AlternativeCastKeyword::Blitz;
+    for (muldrotha, broodship) in [(true, false), (false, true)] {
+        let (runner, guardian) = board(muldrotha, broodship);
+        assert!(
+            alternative_offered(&runner, guardian, blitz),
+            "reach: one permission alone (muldrotha {muldrotha}, broodship {broodship}) offers the blitz"
+        );
+    }
+    let (runner, guardian) = board(true, true);
+    assert!(
+        !alternative_offered(&runner, guardian, blitz),
+        "two bounded permissions: the blitz must not be offered"
+    );
+    assert!(
+        offered_cast(&runner, guardian).is_some(),
+        "the printed cast is still offered"
+    );
+}
+
+/// Control: a strictly dominant permission is still elected beside two
+/// non-dominant ones. Sabin's own "using its blitz ability" permission is
+/// unlimited with no rider, so blitzing Sabin beside Muldrotha and Exploration
+/// Broodship is offered and spends neither's slot nor Broodship's land.
+#[test]
+fn blitz_with_a_strictly_dominant_permission_is_offered_beside_non_dominant_ones() {
+    let parsed = parse_oracle_text(
+        SABIN,
+        "Sabin, Master Monk",
+        &[],
+        &["Legendary".into(), "Creature".into()],
+        &["Human".into(), "Noble".into(), "Monk".into()],
+    );
+    let own_rider = parsed
+        .statics
+        .first()
+        .expect("graveyard-cast permission static must parse")
+        .clone();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let broodship = add_exploration_broodship(&mut scenario, BROODSHIP_STATIONED);
     let muldrotha = add_permission_source(
         &mut scenario,
         "Muldrotha, the Gravetide",
         MULDROTHA,
         &["Elemental", "Avatar"],
     );
-    add_permission_source(
-        &mut scenario,
-        "Leonardo, Sewer Samurai",
-        LEONARDO,
-        &["Mutant", "Ninja", "Turtle", "Samurai"],
-    );
-    let decoy = scenario
-        .add_creature_to_graveyard(P0, "Riveteers Decoy", 3, 1)
+    let land = scenario.add_basic_land(P0, ManaColor::Red);
+    let sabin = scenario
+        .add_creature_to_graveyard(P0, "Sabin, Master Monk", 4, 3)
+        .with_static_definition(own_rider)
         .with_mana_cost(ManaCost::Cost {
-            generic: 1,
-            shards: vec![ManaCostShard::Green],
+            generic: 4,
+            shards: vec![ManaCostShard::Red],
         })
-        .with_keyword(decoy_blitz)
+        .with_keyword(blitz_keyword(&parsed))
         .id();
+    let filler = scenario.add_card_to_hand(P0, "Filler Card");
     let mut runner = scenario.build();
-    fill_mana(&mut runner, ManaType::Green);
+    engine::game::layers::flush_layers(runner.state_mut());
+    fill_mana(&mut runner, ManaType::Red);
 
-    cast_from_graveyard(&mut runner, decoy).expect("graveyard cast must be legal");
+    assert!(alternative_offered(
+        &runner,
+        sabin,
+        engine::types::game_state::AlternativeCastKeyword::Blitz
+    ));
+    cast_from_graveyard(&mut runner, sabin).expect("graveyard cast must be legal");
     runner
         .act(GameAction::ChooseAlternativeCast {
             choice: AlternativeCastDecision::Alternative,
         })
-        .expect("choosing blitz must complete the cast");
-    // Positive reach guard: blitz's {3}{G} = 4 was charged, not the printed 2.
-    assert_eq!(runner.state().players[0].mana_pool.total(), 4);
-
-    assert!(
-        runner
-            .state()
-            .graveyard_cast_permissions_used_per_type
-            .contains(&(muldrotha, CoreType::Creature)),
-        "with no strictly dominant permission, the source-order first match \
-         (Muldrotha) authorizes the cast and spends its slot, used: {:?}",
-        runner.state().graveyard_cast_permissions_used_per_type
-    );
-
-    runner.resolve_top();
-    let entered = &runner.state().objects[&decoy];
-    assert_eq!(entered.zone, Zone::Battlefield);
+        .expect("choosing blitz must be legal");
+    pay_offered_costs(&mut runner);
+    assert_eq!(runner.state().stack.len(), 1, "Sabin must be on the stack");
     assert_eq!(
-        entered.counters.get(&CounterType::Finality).copied(),
-        None,
-        "Leonardo's permission was not the one used, so its finality rider must \
-         not apply, counters: {:?}",
-        entered.counters
+        runner.state().objects[&filler].zone,
+        Zone::Graveyard,
+        "discard paid"
+    );
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Battlefield,
+        "Broodship's land sacrifice is not charged"
+    );
+    assert!(!runner
+        .state()
+        .graveyard_cast_permissions_used
+        .contains(&broodship));
+    assert!(!runner
+        .state()
+        .graveyard_cast_permissions_used_per_type
+        .contains(&(muldrotha, CoreType::Creature)));
+}
+
+/// The Bestow sibling: a graveyard Boon Satyr between Muldrotha and Exploration
+/// Broodship, both able to authorize the bestowed (enchantment) spell. Bestow
+/// is not offered, while Muldrotha alone offers it.
+#[test]
+fn bestow_between_two_bounded_permissions_is_not_offered() {
+    let board = |with_broodship: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if with_broodship {
+            add_exploration_broodship(&mut scenario, BROODSHIP_STATIONED);
+        }
+        add_permission_source(
+            &mut scenario,
+            "Muldrotha, the Gravetide",
+            MULDROTHA,
+            &["Elemental", "Avatar"],
+        );
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let mut builder = scenario.add_creature_to_graveyard(P0, "Boon Satyr", 4, 2);
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+        });
+        builder.with_subtypes(vec!["Satyr"]);
+        builder.from_oracle_text_with_keywords(&["Flash", "Bestow"], BOON_SATYR);
+        let satyr = builder.id();
+        let mut runner = scenario.build();
+        {
+            let obj = runner.state_mut().objects.get_mut(&satyr).unwrap();
+            for types in [
+                &mut obj.card_types.core_types,
+                &mut obj.base_card_types.core_types,
+            ] {
+                if !types.contains(&CoreType::Enchantment) {
+                    types.push(CoreType::Enchantment);
+                }
+            }
+        }
+        engine::game::layers::flush_layers(runner.state_mut());
+        fill_mana(&mut runner, ManaType::Green);
+        (runner, satyr)
+    };
+    let bestow = engine::types::game_state::AlternativeCastKeyword::Bestow;
+    let (control, satyr) = board(false);
+    assert!(
+        alternative_offered(&control, satyr, bestow),
+        "reach: through Muldrotha alone the bestow is offered"
+    );
+    let (runner, satyr) = board(true);
+    assert!(
+        !alternative_offered(&runner, satyr, bestow),
+        "two bounded permissions: the bestow must not be offered"
+    );
+    assert!(
+        offered_cast(&runner, satyr).is_some(),
+        "the printed cast is still offered"
     );
 }
 
@@ -1329,21 +1550,16 @@ const KRARK_CLAN_IRONWORKS: &str = "Sacrifice an artifact: Add {C}{C}.";
 /// CR 601.2a: a graveyard cast commits to one permission as its costs begin, and
 /// that permission is the one spent, even if its source leaves during payment.
 ///
-/// Exploration Broodship is scanned before Muldrotha, so it is elected and its
-/// land sacrifice is charged. Broodship is then sacrificed to Krark-Clan
-/// Ironworks for mana mid-payment. Re-electing at finalization would find only
-/// Muldrotha and spend Muldrotha's creature slot for a cast Broodship paid for.
+/// Exploration Broodship is the only permission, so it is elected and its land
+/// sacrifice is charged. Broodship is then sacrificed to Krark-Clan Ironworks
+/// for mana mid-payment. Re-electing at finalization would find no permission
+/// at all and refuse the cast (or spend nothing); the recorded authority keeps
+/// the cast Broodship's.
 #[test]
 fn blitz_keeps_its_elected_permission_when_the_source_leaves_mid_payment() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let broodship = add_exploration_broodship(&mut scenario, BROODSHIP_STATIONED);
-    let muldrotha = add_permission_source(
-        &mut scenario,
-        "Muldrotha, the Gravetide",
-        MULDROTHA,
-        &["Elemental", "Avatar"],
-    );
     let ironworks = scenario
         .add_artifact_from_oracle(P0, "Krark-Clan Ironworks", KRARK_CLAN_IRONWORKS)
         .id();
@@ -1423,14 +1639,6 @@ fn blitz_keeps_its_elected_permission_when_the_source_leaves_mid_payment() {
             .graveyard_cast_permissions_used
             .contains(&broodship),
         "Broodship admitted and was charged for this cast, so its slot is the one spent"
-    );
-    assert!(
-        !runner
-            .state()
-            .graveyard_cast_permissions_used_per_type
-            .contains(&(muldrotha, CoreType::Creature)),
-        "Muldrotha did not admit this cast, so its creature slot must stay free, used: {:?}",
-        runner.state().graveyard_cast_permissions_used_per_type
     );
 }
 
