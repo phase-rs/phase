@@ -5487,6 +5487,8 @@ pub(crate) fn target_first_activation_defers_interactive_costs_to_payment_bounda
         // removal after the mana window. Other interactive residuals (such as
         // exile from hand and unattach) retain their dispatcher order.
         && super::casting::find_non_self_battlefield_removal_cost(cost).is_some())
+        || (matches!(pending.activation_residual, ActivationResidual::XMana)
+            && super::casting::find_non_self_sacrifice_cost(cost).is_some())
         || (pending.ability.chosen_x.is_some() && cost_has_targeted_symbolic_counter_removal(cost))
 }
 
@@ -6232,6 +6234,85 @@ fn extract_waterbend_activation_cost(
     ))
 }
 
+/// CR 118.3 + CR 601.2h + CR 602.2b: A recognized non-self Count
+/// sacrifice after X mana can continue only when every unpaid leaf is a
+/// concrete Count sacrifice; other residuals retain their existing routing.
+fn validate_x_mana_sacrifice_residual(
+    cost: &AbilityCost,
+    activation_residual: ActivationResidual,
+) -> Result<bool, EngineError> {
+    let recognized_count = matches!(activation_residual, ActivationResidual::XMana)
+        && super::casting::find_non_self_sacrifice_cost(cost).is_some();
+    let mut unsupported_sacrifice = false;
+    let mut unsupported_sibling = false;
+    if recognized_count {
+        // CR 118.3 + CR 601.2h + CR 602.2b: Only a tree of concrete
+        // non-self Count sacrifices is payable through this continuation.
+        // Inspect every node before the first selection or cost move.
+        cost.for_each_cost_node(&mut |node| match node {
+            AbilityCost::Composite { .. } => {}
+            AbilityCost::Sacrifice(sacrifice)
+                if !matches!(sacrifice.target, TargetFilter::SelfRef) =>
+            {
+                if !matches!(
+                    sacrifice.requirement.fixed_count(),
+                    Some(count) if count != u32::MAX
+                ) {
+                    unsupported_sacrifice = true;
+                }
+            }
+            AbilityCost::Sacrifice(_)
+            | AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::OneOf { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::PerCounter { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Unimplemented { .. } => unsupported_sibling = true,
+        });
+    }
+    let unhandled_x_residual = matches!(activation_residual, ActivationResidual::XMana)
+        && (unsupported_sacrifice
+            || unsupported_sibling
+            || super::casting::find_non_self_exile(cost).is_some()
+            || super::casting::find_battlefield_exile_cost(cost).is_some());
+    if unhandled_x_residual {
+        debug_assert!(
+            !unhandled_x_residual,
+            "non-self sacrifice/exile cost unhandled"
+        );
+        return Err(EngineError::ActionNotAllowed(
+            "non-self sacrifice/exile cost unhandled".to_string(),
+        ));
+    }
+
+    Ok(recognized_count)
+}
+
 /// Push an activated ability to the stack after costs are paid.
 /// Shared by: direct path in `handle_activate_ability`, sacrifice detour, and
 /// waterbend/ManaPayment finalization in the PassPriority handler.
@@ -6354,74 +6435,7 @@ pub(super) fn push_activated_ability_to_stack(
     // handlers remove the leg they paid before this boundary, so a parked mana
     // root never replays an earlier selection.
     if let Some(cost) = remaining_cost {
-        let recognized_count = matches!(activation_residual, ActivationResidual::XMana)
-            && super::casting::find_non_self_sacrifice_cost(cost).is_some();
-        let mut unsupported_sacrifice = false;
-        let mut unsupported_sibling = false;
-        if recognized_count {
-            // CR 118.3 + CR 601.2h + CR 602.2b: Only a tree of concrete
-            // non-self Count sacrifices is payable through this continuation.
-            // Inspect every node before the first selection or cost move.
-            cost.for_each_cost_node(&mut |node| match node {
-                AbilityCost::Composite { .. } => {}
-                AbilityCost::Sacrifice(sacrifice)
-                    if !matches!(sacrifice.target, TargetFilter::SelfRef) =>
-                {
-                    if !matches!(
-                        sacrifice.requirement.fixed_count(),
-                        Some(count) if count != u32::MAX
-                    ) {
-                        unsupported_sacrifice = true;
-                    }
-                }
-                AbilityCost::Sacrifice(_)
-                | AbilityCost::Mana { .. }
-                | AbilityCost::ManaDynamic { .. }
-                | AbilityCost::Tap
-                | AbilityCost::Untap
-                | AbilityCost::Loyalty { .. }
-                | AbilityCost::PayLife { .. }
-                | AbilityCost::Discard { .. }
-                | AbilityCost::Exile { .. }
-                | AbilityCost::ExileMaterials { .. }
-                | AbilityCost::CollectEvidence { .. }
-                | AbilityCost::ExileWithAggregate { .. }
-                | AbilityCost::TapCreatures { .. }
-                | AbilityCost::RemoveCounter { .. }
-                | AbilityCost::PayEnergy { .. }
-                | AbilityCost::PaySpeed { .. }
-                | AbilityCost::ReturnToHand { .. }
-                | AbilityCost::Unattach
-                | AbilityCost::UnattachFrom { .. }
-                | AbilityCost::Mill { .. }
-                | AbilityCost::Exert
-                | AbilityCost::Blight { .. }
-                | AbilityCost::Reveal { .. }
-                | AbilityCost::Behold { .. }
-                | AbilityCost::OneOf { .. }
-                | AbilityCost::Waterbend { .. }
-                | AbilityCost::NinjutsuFamily { .. }
-                | AbilityCost::EffectCost { .. }
-                | AbilityCost::PerCounter { .. }
-                | AbilityCost::KeywordCostOfCastSpell { .. }
-                | AbilityCost::GetPlayerCounters { .. }
-                | AbilityCost::Unimplemented { .. } => unsupported_sibling = true,
-            });
-        }
-        let unhandled_x_residual = matches!(activation_residual, ActivationResidual::XMana)
-            && (unsupported_sacrifice
-                || unsupported_sibling
-                || super::casting::find_non_self_exile(cost).is_some()
-                || super::casting::find_battlefield_exile_cost(cost).is_some());
-        if unhandled_x_residual {
-            debug_assert!(
-                !unhandled_x_residual,
-                "non-self sacrifice/exile cost unhandled"
-            );
-            return Err(EngineError::ActionNotAllowed(
-                "non-self sacrifice/exile cost unhandled".to_string(),
-            ));
-        }
+        let recognized_count = validate_x_mana_sacrifice_residual(cost, activation_residual)?;
 
         let mut pending_interactive = PendingCast::for_activation(
             source_id,
@@ -14060,6 +14074,10 @@ pub fn enter_payment_step(
                 .take()
                 .expect("checked pending cast presence");
             return begin_deferred_target_selection(state, player, pending, events);
+        }
+
+        if let Some(cost) = pending.activation_cost.as_ref() {
+            validate_x_mana_sacrifice_residual(cost, pending.activation_residual)?;
         }
 
         let targeted_counter_resume = pending.ability.chosen_x.and_then(|chosen_x| {
@@ -26720,7 +26738,7 @@ its replicate cost was paid.)\nDraw a card.";
     /// X-mana Count-sacrifice continuation, before any card changes zones.
     #[test]
     fn x_residual_exile_forms_keep_the_original_guard() {
-        let battlefield_filter = TypedFilter::creature()
+        let battlefield_filter: TargetFilter = TypedFilter::creature()
             .controller(ControllerRef::You)
             .into();
         for (label, cost) in [
