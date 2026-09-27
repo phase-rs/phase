@@ -2073,7 +2073,15 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // The predicate lives in `sba` so it shares the same CR 101.2 "can't lose"
     // exception as the real player-loss SBA checks, and stays narrower than the
     // full SBA loop to avoid unrelated mid-resolution SBA prompts.
-    if sba::has_pending_player_loss_sba(state) {
+    //
+    // CR 704.3 + CR 104.3b: not while a spell is being cast or an ability
+    // activated. No player receives priority during casting (CR 601.2h;
+    // CR 602.2b for activations), and paying life down to 0 is a legal payment
+    // (CR 119.4), so the 0-life check waits until the cast is complete or
+    // backed out of and a player would next receive priority. Until then that
+    // player is still in the game, so waiting on their casting choices is not
+    // the #962 softlock.
+    if sba::has_pending_player_loss_sba(state) && !state.waiting_for.has_pending_cast() {
         sba::check_state_based_actions(state, &mut result.events);
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
