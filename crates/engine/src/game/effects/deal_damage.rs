@@ -1163,30 +1163,36 @@ fn stash_remaining_damage_chain(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) {
-    let controller = ability.controller;
-    let mut iter = remaining.into_iter();
-    let Some((first_target, first_amount)) = iter.next() else {
-        // No remaining batch work — still forward the parent's sub_ability so the
-        // downstream chain resumes after the pending replacement choice resolves.
-        if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
-        }
-        return;
-    };
+    if let Some(head) = remaining_damage_head(ability, damage_source_id, remaining) {
+        append_to_pending_continuation(state, Some(Box::new(head)));
+    }
+}
 
-    let mut head =
-        build_remaining_damage_node(damage_source_id, controller, first_target, first_amount);
-    for (target, amount) in iter {
-        let node = build_remaining_damage_node(damage_source_id, controller, target, amount);
-        append_to_sub_chain(&mut head, node);
-    }
-    if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
-    }
-    append_to_pending_continuation(state, Some(Box::new(head)));
+/// CR 120.3 + CR 608.2c: the linked chain a paused damage batch leaves behind —
+/// one node per remaining (target, amount) pair, in order, followed by the
+/// parent's `sub_ability` tail. With no remaining batch work the chain is just
+/// the tail, so the downstream chain still resumes after the pending
+/// replacement choice. `None` when there is neither.
+fn remaining_damage_head(
+    ability: &ResolvedAbility,
+    damage_source_id: ObjectId,
+    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+) -> Option<ResolvedAbility> {
+    let controller = ability.controller;
+    let tail = ability
+        .sub_ability
+        .as_ref()
+        .map(|sub| cast_tail_with_parent_targets(sub, ability));
+    remaining
+        .into_iter()
+        .map(|(target, amount)| {
+            build_remaining_damage_node(damage_source_id, controller, target, amount)
+        })
+        .chain(tail)
+        .reduce(|mut head, node| {
+            append_to_sub_chain(&mut head, node);
+            head
+        })
 }
 
 /// CR 608.2c + CR 616.1e: Clone a damage effect's `sub_ability` tail for a
@@ -1332,11 +1338,156 @@ fn active_excess_recipient(
     }
 }
 
+/// CR 608.2c: where the not-yet-applied portions of a division go when a
+/// replacement choice pauses it. Instructions are followed in the order
+/// written, so a resumed CR 608.2d division runs ahead of the tail its own
+/// pause already parked in the continuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemainingDamageSplice {
+    /// The node still carries its own `sub_ability` tail; remaining portions
+    /// (then the tail) go to the END of the continuation.
+    AfterContinuation,
+    /// A resumed CR 608.2d division whose tail the pause already parked;
+    /// remaining portions go AHEAD of the continuation.
+    BeforeContinuation,
+}
+
 /// CR 120.1: Deal N damage — reduces life for players, marks damage on creatures.
 /// Reads amount from `Effect::DealDamage { amount }`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    resolve_with_splice(
+        state,
+        ability,
+        RemainingDamageSplice::AfterContinuation,
+        events,
+    )
+}
+
+/// CR 608.2d + CR 608.2c: resume a resolution-time division paused by
+/// [`pause_for_resolution_division`]. The chosen portions are stamped into the
+/// stored node's `distribution`; no player receives priority between the choice
+/// and the damage (the division is part of applying the effect).
+pub(crate) fn resume_resolution_division(
+    state: &mut GameState,
+    pending_effect: &ResolvedAbility,
+    distribution: &[(TargetRef, u32)],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut stamped = pending_effect.clone();
+    stamped.distribution = Some(distribution.to_vec());
+    resolve_with_splice(
+        state,
+        &stamped,
+        RemainingDamageSplice::BeforeContinuation,
+        events,
+    )
+}
+
+/// CR 608.2d + CR 115.10a: the objects an untargeted resolution-time division
+/// may be made among — the node's recipient population (a tracked set bound
+/// earlier in this resolution) as it exists on the battlefield now.
+fn resolution_division_candidates(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    let Effect::DealDamage { target, .. } = &ability.effect else {
+        return Vec::new();
+    };
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
+    let ctx = filter::FilterContext::from_ability(ability);
+    state
+        .battlefield_phased_in_ids()
+        .into_iter()
+        .filter(|id| filter::matches_target_filter(state, *id, &effective_filter, &ctx))
+        .collect()
+}
+
+/// CR 608.2d + CR 608.2h + CR 115.10a: an untargeted division is chosen while the
+/// effect is applied. `total` was determined once, before the choice (CR 608.2h).
+/// With nothing to divide or nobody to divide it among, the effect does as much
+/// as possible — nothing (CR 609.3). With exactly one candidate the only legal
+/// division is applied directly. Otherwise the chooser (`target_chooser`, e.g.
+/// the target's controller; default the controller) is asked; the paused node is
+/// stored without its tail, which the chain's auto-stash parks in the
+/// continuation. The damage follows the choice with no priority window.
+fn pause_for_resolution_division(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    unit: crate::types::game_state::DistributionUnit,
+    total: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let candidates = resolution_division_candidates(state, ability);
+    if total == 0 || candidates.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+    if let [only] = candidates.as_slice() {
+        let mut stamped = ability.clone();
+        stamped.distribution = Some(vec![(TargetRef::Object(*only), total)]);
+        return resolve_with_splice(
+            state,
+            &stamped,
+            RemainingDamageSplice::AfterContinuation,
+            events,
+        );
+    }
+    let player = ability
+        .target_chooser
+        .as_ref()
+        .and_then(|chooser| {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, chooser)
+        })
+        .unwrap_or(ability.controller);
+    let mut node = ability.clone();
+    node.sub_ability = None;
+    node.else_ability = None;
+    state.waiting_for = crate::types::game_state::WaitingFor::DistributeAmong {
+        player,
+        total,
+        targets: candidates.into_iter().map(TargetRef::Object).collect(),
+        unit,
+        scope: crate::types::game_state::DistributionScope::ResolutionCandidates {
+            pending_effect: Box::new(node),
+        },
+    };
+    Ok(())
+}
+
+/// CR 120.3 + CR 616.1e + CR 608.2c: park the not-yet-applied portions of a
+/// division while a replacement choice is pending. `AfterContinuation` is the
+/// announced-division behaviour (the tail is still attached to this node, so the
+/// remaining portions and then the tail go to the END of the continuation);
+/// `BeforeContinuation` is a resumed CR 608.2d division, whose tail the pause
+/// already parked — the remaining portions must run AHEAD of it.
+fn stash_remaining_distribution(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    damage_source_id: ObjectId,
+    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+    splice: RemainingDamageSplice,
+) {
+    match splice {
+        RemainingDamageSplice::AfterContinuation => {
+            stash_remaining_damage_chain(state, ability, damage_source_id, remaining);
+        }
+        RemainingDamageSplice::BeforeContinuation => {
+            if let Some(head) = remaining_damage_head(ability, damage_source_id, remaining) {
+                super::prepend_to_pending_continuation(state, head);
+            }
+        }
+    }
+}
+
+fn resolve_with_splice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    splice: RemainingDamageSplice,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let (num_dmg, damage_source, target_filter): (u32, Option<DamageSource>, &TargetFilter) =
@@ -1381,6 +1532,14 @@ pub fn resolve(
         ctx.excess_recipient = active_excess_recipient(state, &ctx, *excess);
     }
 
+    // CR 608.2d + CR 115.10a: an untargeted division is chosen while the effect
+    // is applied — pause (or auto-apply) before any of its damage is dealt.
+    if ability.distribution.is_none() {
+        if let Some(unit) = crate::game::ability_utils::resolution_time_division(ability) {
+            return pause_for_resolution_division(state, ability, unit.clone(), num_dmg, events);
+        }
+    }
+
     // CR 120.1 + CR 608.2c: Resolve effective damage targets.
     //
     // `SelfRef` is the printed-name anaphor (`~`) — always resolves to the
@@ -1405,7 +1564,7 @@ pub fn resolve(
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    stash_remaining_distribution(state, ability, ctx.source_id, remaining, splice);
                     return Ok(());
                 }
             }
@@ -1557,6 +1716,17 @@ pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) ->
         return each_target_damage_split(state, ability, target_filter)
             .map(|(recipient, _)| vec![recipient])
             .unwrap_or_default();
+    }
+    // CR 608.2d: a resolution-time division's recipients are exactly the chosen
+    // portions; before the choice none are known (the node's propagated
+    // `targets` name the parent's target, not a recipient).
+    if crate::game::ability_utils::resolution_time_division(ability).is_some() {
+        return ability
+            .distribution
+            .iter()
+            .flatten()
+            .map(|(target, _)| target.clone())
+            .collect();
     }
     if matches!(target_filter, TargetFilter::EventTarget) {
         // CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style non-target damage
@@ -7768,5 +7938,573 @@ mod tests {
         // Silence the unused CounterType import on builds where the matches! arm
         // already consumed it via the qualified path.
         let _ = CounterType::Plus1Plus1;
+    }
+
+    /// CR 701.26a + CR 608.2c + CR 120.1: SetTapState{Tap, All} publishes only
+    /// the permanents it actually tapped, stamped `Tapped`; an each-source node
+    /// reading that set deals each newly tapped Wolf's OWN power. Board: untapped
+    /// Wolves 1/2/4, pre-tapped Wolf 3, 5/5 target → exactly 7 (not 10 with the
+    /// pre-tapped Wolf, not 3k for any uniform per-source power).
+    #[test]
+    fn each_wolf_tapped_this_way_deals_own_power_only_newly_tapped() {
+        use crate::types::ability::{
+            EachDamageRecipient, EffectScope, TapStateChange, ThisWayCause,
+        };
+        use crate::types::identifiers::TrackedSetId;
+        let mut state = GameState::new_two_player(7);
+        let mk =
+            |state: &mut GameState, id: u64, owner: PlayerId, name: &str, p: i32, wolf: bool| {
+                let o = create_object(
+                    state,
+                    CardId(id),
+                    owner,
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&o).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                if wolf {
+                    obj.card_types.subtypes = vec!["Wolf".to_string()];
+                }
+                obj.base_card_types = obj.card_types.clone();
+                obj.power = Some(p);
+                obj.base_power = Some(p);
+                obj.toughness = Some(p);
+                obj.base_toughness = Some(p);
+                o
+            };
+        let w1 = mk(&mut state, 50, PlayerId(0), "Wolf One", 1, true);
+        let w2 = mk(&mut state, 51, PlayerId(0), "Wolf Two", 2, true);
+        let w4 = mk(&mut state, 52, PlayerId(0), "Wolf Four", 4, true);
+        let w3 = mk(&mut state, 53, PlayerId(0), "Wolf Three", 3, true);
+        state.objects.get_mut(&w3).unwrap().tapped = true;
+        let target = mk(&mut state, 54, PlayerId(1), "Target", 5, false);
+
+        let tap_all = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .subtype("Wolf".to_string())
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Untapped]),
+                ),
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let each_wolf = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().subtype("Wolf".to_string()),
+                    )),
+                    caused_by: Some(ThisWayCause::Tapped),
+                },
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::BatchSource,
+                    },
+                },
+                recipient: EachDamageRecipient::Shared(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ),
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = tap_all.sub_ability(each_wolf);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        for w in [w1, w2, w4] {
+            assert!(state.objects[&w].tapped, "untapped Wolf becomes tapped");
+        }
+        assert_eq!(
+            state.objects[&target].damage_marked, 7,
+            "only the three newly tapped Wolves deal their own power (1+2+4)"
+        );
+        for w in [w1, w2, w3, w4] {
+            assert_eq!(state.objects[&w].damage_marked, 0);
+        }
+    }
+
+    // ---- CR 608.2d resolution-time untargeted division (Master of the Wild Hunt) ----
+
+    /// Battlefield creature fixture: `power`/`toughness`, optionally a Wolf.
+    fn division_creature(
+        state: &mut GameState,
+        card: u64,
+        owner: PlayerId,
+        power: i32,
+        toughness: i32,
+        wolf: bool,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            owner,
+            format!("Creature {card}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        if wolf {
+            obj.card_types.subtypes = vec!["Wolf".to_string()];
+        }
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.base_power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_toughness = Some(toughness);
+        id
+    }
+
+    /// Master of the Wild Hunt clause 3 as lowered: "That creature deals damage
+    /// equal to its power divided as its controller chooses among any number of
+    /// those Wolves" — the declared target is `targets[0]` (propagated from
+    /// clause 2), the recipients are the chain's tracked Wolves.
+    fn wolves_division_node(target: ObjectId, source: ObjectId) -> ResolvedAbility {
+        use crate::types::game_state::DistributionUnit;
+        use crate::types::identifiers::TrackedSetId;
+        let mut node = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().subtype("Wolf".to_string()),
+                    )),
+                    caused_by: None,
+                },
+                damage_source: Some(DamageSource::Target),
+                excess: None,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        node.distribute = Some(DistributionUnit::Damage);
+        node.target_chooser = Some(TargetFilter::ParentTargetController);
+        node
+    }
+
+    fn damage_dealt_count(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
+            .count()
+    }
+
+    fn deal_damage_resolved(events: &[GameEvent]) -> bool {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::DealDamage,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// V5a: CR 608.2d + CR 608.2h — with two candidates the effect pauses before
+    /// any damage: the target's controller divides the target's power among the
+    /// tracked Wolves; the stored node has its tail cleared.
+    #[test]
+    fn resolution_division_pauses_for_the_targets_controller() {
+        use crate::types::game_state::{DistributionScope, DistributionUnit};
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 2, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 2, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+        let mut node = wolves_division_node(giant, master);
+        node.sub_ability = Some(Box::new(make_ability(1, vec![])));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &node, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DistributeAmong {
+                player,
+                total,
+                targets,
+                unit,
+                scope: DistributionScope::ResolutionCandidates { pending_effect },
+            } => {
+                assert_eq!(*player, PlayerId(1), "the target's controller divides");
+                assert_eq!(*total, 5, "the target's power, not a Wolf's");
+                assert_eq!(targets, &vec![TargetRef::Object(w1), TargetRef::Object(w2)]);
+                assert_eq!(unit, &DistributionUnit::Damage);
+                assert!(pending_effect.sub_ability.is_none());
+                assert!(pending_effect.distribution.is_none());
+            }
+            other => panic!("expected a resolution-time DistributeAmong, got {other:?}"),
+        }
+        assert_eq!(
+            damage_dealt_count(&events),
+            0,
+            "no damage before the choice"
+        );
+    }
+
+    /// V5b: one candidate — the only legal division is applied without a prompt.
+    #[test]
+    fn resolution_division_single_candidate_auto_applies() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 8, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1]);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &wolves_division_node(giant, master),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::DistributeAmong { .. }
+        ));
+        assert_eq!(state.objects[&w1].damage_marked, 5);
+        assert_eq!(state.objects[&giant].damage_marked, 0);
+        assert!(deal_damage_resolved(&events));
+    }
+
+    /// V5c: CR 609.3 — a target with power 0 has nothing to divide: no prompt,
+    /// no damage, and the effect still reports resolution.
+    #[test]
+    fn resolution_division_zero_total_resolves_without_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 2, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 2, true);
+        let wall = division_creature(&mut state, 4, PlayerId(1), 0, 4, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &wolves_division_node(wall, master), &mut events).unwrap();
+
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::DistributeAmong { .. }
+        ));
+        assert_eq!(damage_dealt_count(&events), 0);
+        assert!(deal_damage_resolved(&events));
+    }
+
+    /// V5d: CR 609.3 — an empty chain set (no Wolf was tapped this way) leaves
+    /// nobody to divide among: no prompt, no damage, EffectResolved emitted.
+    #[test]
+    fn resolution_division_empty_population_resolves_without_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let untracked = division_creature(&mut state, 2, PlayerId(0), 2, 2, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![]);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &wolves_division_node(giant, master),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::DistributeAmong { .. }
+        ));
+        assert_eq!(state.objects[&untracked].damage_marked, 0);
+        assert_eq!(damage_dealt_count(&events), 0);
+        assert!(deal_damage_resolved(&events));
+    }
+
+    /// V5e + V5r: resuming the paused node with the chosen split deals each
+    /// portion from the target; before the choice the node reports no damage
+    /// recipients (its propagated `targets` name the parent's target, not a
+    /// recipient), after it exactly the chosen ones.
+    #[test]
+    fn resolution_division_resume_applies_chosen_portions() {
+        use crate::types::game_state::DistributionScope;
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 9, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 9, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+        let node = wolves_division_node(giant, master);
+
+        assert!(
+            damage_recipients(&state, &node).is_empty(),
+            "V5r: no recipient is known before the division is chosen"
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &node, &mut events).unwrap();
+        let WaitingFor::DistributeAmong {
+            scope: DistributionScope::ResolutionCandidates { pending_effect },
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!("expected the resolution-time pause");
+        };
+
+        let mut stamped = (*pending_effect).clone();
+        stamped.distribution = Some(vec![(TargetRef::Object(w1), 1)]);
+        assert_eq!(
+            damage_recipients(&state, &stamped),
+            vec![TargetRef::Object(w1)],
+            "V5r: after the choice the recipients are the chosen portions"
+        );
+
+        let mut events = Vec::new();
+        resume_resolution_division(
+            &mut state,
+            &pending_effect,
+            &[(TargetRef::Object(w1), 1), (TargetRef::Object(w2), 4)],
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.objects[&w1].damage_marked, 1);
+        assert_eq!(state.objects[&w2].damage_marked, 4);
+        assert_eq!(state.objects[&giant].damage_marked, 0);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::DamageDealt { source_id, target: TargetRef::Object(t), amount: 4, .. }
+                if *source_id == giant && *t == w2
+        )));
+        assert!(deal_damage_resolved(&events));
+    }
+
+    /// V5r siblings (R2-F1): announced-target divisions keep reporting their
+    /// targets as recipients — including a `ParentTarget` division node with no
+    /// stamped split (the post-"instead"-swap shape).
+    #[test]
+    fn announced_division_recipients_are_its_targets() {
+        use crate::types::game_state::DistributionUnit;
+        let mut state = GameState::new_two_player(42);
+        let t = division_creature(&mut state, 4, PlayerId(1), 0, 20, false);
+        let mut targeted = make_ability(3, vec![TargetRef::Object(t)]);
+        targeted.distribute = Some(DistributionUnit::Damage);
+        assert_eq!(
+            damage_recipients(&state, &targeted),
+            vec![TargetRef::Object(t)]
+        );
+
+        let mut parent_target = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 12 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(t)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        parent_target.distribute = Some(DistributionUnit::Damage);
+        assert_eq!(
+            damage_recipients(&state, &parent_target),
+            vec![TargetRef::Object(t)]
+        );
+    }
+
+    /// V5n-runtime (R2-F1): the post-`apply_instead_swap` Shatterskull Smashing
+    /// X >= 6 node (`ParentTarget` recipient, `distribute: Damage`, no stamped
+    /// split) with TWO announced targets is not re-divided at resolution — both
+    /// targets are dealt damage and no `DistributeAmong` appears.
+    #[test]
+    fn post_instead_swap_parent_target_division_is_not_rechosen() {
+        use crate::game::ability_utils::apply_instead_swap;
+        use crate::types::game_state::DistributionUnit;
+        let mut state = GameState::new_two_player(42);
+        let spell = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let t1 = division_creature(&mut state, 2, PlayerId(1), 0, 20, false);
+        let t2 = division_creature(&mut state, 3, PlayerId(1), 0, 20, false);
+        let targets = vec![TargetRef::Object(t1), TargetRef::Object(t2)];
+
+        let mut parent = make_ability(6, targets.clone());
+        parent.source_id = spell;
+        parent.distribute = Some(DistributionUnit::Damage);
+        parent.distribution = Some(vec![(TargetRef::Object(t1), 3), (TargetRef::Object(t2), 3)]);
+        let mut sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 12 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            spell,
+            PlayerId(0),
+        );
+        sub.distribute = Some(DistributionUnit::Damage);
+        let mut swapped = apply_instead_swap(&parent, &sub);
+        assert!(
+            swapped.distribute.is_some() && swapped.distribution.is_none(),
+            "premise: the swap keeps `distribute` and drops the announced split"
+        );
+        swapped.targets = targets.clone();
+        swapped.target_incarnations = targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(
+                    crate::types::identifiers::ObjectIncarnationRef::from_object(
+                        &state.objects[id],
+                    ),
+                ),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        resolve(&mut state, &swapped, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DistributeAmong { .. }),
+            "an announced division is never re-chosen at resolution"
+        );
+        assert!(state.objects[&t1].damage_marked > 0);
+        assert!(state.objects[&t2].damage_marked > 0);
+        assert!(deal_damage_resolved(&events));
+    }
+
+    fn continuation_marker_tail() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 99 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(777),
+            PlayerId(0),
+        )
+    }
+
+    fn active_chain_summary(state: &GameState) -> Vec<(ObjectId, TargetRef, i32)> {
+        collect_chain_summary(
+            &state
+                .active_ability_continuation()
+                .expect("an active continuation")
+                .chain,
+        )
+    }
+
+    /// V5s (R2-F2): CR 608.2c — a resumed CR 608.2d division's remaining
+    /// portions run AHEAD of the tail its pause already parked
+    /// (`BeforeContinuation`); an announced division's go after it
+    /// (`AfterContinuation`, unchanged).
+    #[test]
+    fn stash_remaining_distribution_orders_by_splice() {
+        let src = ObjectId(500);
+        let r1 = TargetRef::Object(ObjectId(501));
+        let r2 = TargetRef::Object(ObjectId(502));
+        let marker = (ObjectId(777), TargetRef::Player(PlayerId(1)), 99);
+        let node = make_ability(3, vec![]);
+        assert!(node.sub_ability.is_none());
+
+        let seeded = || {
+            let mut state = GameState::new_two_player(42);
+            crate::game::effects::append_to_pending_continuation(
+                &mut state,
+                Some(Box::new(continuation_marker_tail())),
+            );
+            assert_eq!(active_chain_summary(&state), vec![marker.clone()]);
+            state
+        };
+
+        let mut before = seeded();
+        stash_remaining_distribution(
+            &mut before,
+            &node,
+            src,
+            [(r1.clone(), 1), (r2.clone(), 2)],
+            RemainingDamageSplice::BeforeContinuation,
+        );
+        assert_eq!(
+            active_chain_summary(&before),
+            vec![(src, r1.clone(), 1), (src, r2.clone(), 2), marker.clone()]
+        );
+
+        let mut after = seeded();
+        stash_remaining_distribution(
+            &mut after,
+            &node,
+            src,
+            [(r1.clone(), 1), (r2.clone(), 2)],
+            RemainingDamageSplice::AfterContinuation,
+        );
+        assert_eq!(
+            active_chain_summary(&after),
+            vec![marker, (src, r1, 1), (src, r2, 2)]
+        );
+    }
+
+    /// V5s-resume (R2-F2): through `resume_resolution_division` with a real
+    /// replacement pause on the first portion, the remaining portions are parked
+    /// ahead of the already-parked chain tail (CR 608.2c instruction order).
+    #[test]
+    fn resumed_division_replacement_pause_parks_portions_before_tail() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 1, 1, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 1, 1, true);
+        let w3 = division_creature(&mut state, 4, PlayerId(0), 1, 1, true);
+        let giant = division_creature(&mut state, 5, PlayerId(1), 3, 3, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2, w3]);
+        crate::game::effects::append_to_pending_continuation(
+            &mut state,
+            Some(Box::new(continuation_marker_tail())),
+        );
+        install_optional_damage_replacement(&mut state);
+        let pending = wolves_division_node(giant, master);
+
+        let mut events = Vec::new();
+        resume_resolution_division(
+            &mut state,
+            &pending,
+            &[
+                (TargetRef::Object(w1), 1),
+                (TargetRef::Object(w2), 1),
+                (TargetRef::Object(w3), 1),
+            ],
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "reach guard: the first portion paused on the replacement choice"
+        );
+        let summary = active_chain_summary(&state);
+        let position = |entry: &(ObjectId, TargetRef, i32)| {
+            summary
+                .iter()
+                .position(|e| e == entry)
+                .unwrap_or_else(|| panic!("{entry:?} missing from {summary:?}"))
+        };
+        let at_w2 = position(&(giant, TargetRef::Object(w2), 1));
+        let at_w3 = position(&(giant, TargetRef::Object(w3), 1));
+        let at_tail = position(&(ObjectId(777), TargetRef::Player(PlayerId(1)), 99));
+        assert!(
+            at_w2 < at_w3 && at_w3 < at_tail,
+            "remaining portions run before the parked tail: {summary:?}"
+        );
     }
 }

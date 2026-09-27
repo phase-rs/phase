@@ -2120,7 +2120,8 @@
     "unitDamage": "de daño",
     "unitLife": "de vida",
     "title": "Distribuir {{total}} {{unit}}",
-    "subtitle": "Asigna al menos 1 {{unit}} a cada objetivo. Restante: {{remaining}}"
+    "subtitle": "Asigna al menos 1 {{unit}} a cada objetivo. Restante: {{remaining}}",
+    "subtitleAnyNumber": "Asigna al menos 1 {{unit}} a cada uno que elijas, entre cualquier número de ellos. Restante: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Elegir una mazmorra",

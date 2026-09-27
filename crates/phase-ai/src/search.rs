@@ -13887,6 +13887,7 @@ mod tests {
             total: 5,
             targets: targets.clone(),
             unit: DistributionUnit::Damage,
+            scope: engine::types::game_state::DistributionScope::AnnouncedTargets,
         };
 
         let even = GameAction::DistributeAmong {

@@ -2120,7 +2120,8 @@
     "unitDamage": "danno",
     "unitLife": "vita",
     "title": "Distribuisci {{total}} {{unit}}",
-    "subtitle": "Assegna almeno 1 {{unit}} a ogni bersaglio. Rimanente: {{remaining}}"
+    "subtitle": "Assegna almeno 1 {{unit}} a ogni bersaglio. Rimanente: {{remaining}}",
+    "subtitleAnyNumber": "Assegna almeno 1 {{unit}} a ciascuno di quelli che scegli, tra un numero qualsiasi di essi. Rimanente: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Scegli un sotterraneo",

@@ -2120,7 +2120,8 @@
     "unitDamage": "obrażeń",
     "unitLife": "życia",
     "title": "Rozdziel {{total}} {{unit}}",
-    "subtitle": "Przydziel co najmniej 1 {{unit}} każdemu celowi. Pozostało: {{remaining}}"
+    "subtitle": "Przydziel co najmniej 1 {{unit}} każdemu celowi. Pozostało: {{remaining}}",
+    "subtitleAnyNumber": "Przydziel co najmniej 1 {{unit}} każdemu wybranemu, spośród dowolnej ich liczby. Pozostało: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Wybierz loch",

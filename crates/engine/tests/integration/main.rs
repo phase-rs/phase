@@ -1039,6 +1039,7 @@ mod martial_impetus_other_attacker_exclusion_6017;
 mod mass_library_order_restore;
 mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
+mod master_of_the_wild_hunt;
 mod masters_councillors;
 mod mauhur_swarming_of_moria;
 mod max_speed_owner_arm_from_graveyard;

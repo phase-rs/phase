@@ -2439,7 +2439,12 @@ fn amount_assignment_projection(
             require_all: false,
             action: AmountAssignmentAction::BlockerDamage,
         },
-        WaitingFor::DistributeAmong { total, targets, .. } => AmountAssignmentProjection {
+        WaitingFor::DistributeAmong {
+            total,
+            targets,
+            scope,
+            ..
+        } => AmountAssignmentProjection {
             candidates: targets
                 .iter()
                 .cloned()
@@ -2451,7 +2456,12 @@ fn amount_assignment_projection(
             min_total: *total,
             max_total: *total,
             exact_total: Some(*total),
-            require_all: true,
+            // CR 601.2d: every announced target receives at least one; CR 608.2d:
+            // a resolution-time division is among any number of the candidates.
+            require_all: match scope {
+                crate::types::game_state::DistributionScope::AnnouncedTargets => true,
+                crate::types::game_state::DistributionScope::ResolutionCandidates { .. } => false,
+            },
             action: AmountAssignmentAction::DistributeAmong,
         },
         WaitingFor::MoveCountersDistribution {
@@ -11408,6 +11418,72 @@ pub fn submit_interaction_with_rejection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// V5i: CR 608.2d — a resolution-time division is among ANY number of its
+    /// candidates, so a response assigning the whole total to a strict subset
+    /// materializes; CR 601.2d — the announce-time sibling still requires every
+    /// announced target to receive a share.
+    #[test]
+    fn distribute_among_projection_admits_subsets_only_for_resolution_candidates() {
+        use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+        use crate::types::game_state::{DistributionScope, DistributionUnit};
+
+        let targets = vec![
+            TargetRef::Object(ObjectId(31)),
+            TargetRef::Object(ObjectId(32)),
+        ];
+        let wait = |scope: DistributionScope| WaitingFor::DistributeAmong {
+            player: PlayerId(1),
+            total: 3,
+            targets: targets.clone(),
+            unit: DistributionUnit::Damage,
+            scope,
+        };
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(30),
+            PlayerId(0),
+        );
+        let interaction_id = InteractionId("t.0.0".to_string());
+        let subset = InteractionResponse::AssignAmounts {
+            assignments: vec![AmountAssignment {
+                choice_id: interaction_choice_id(&interaction_id, 'a', 0),
+                amount: 3,
+            }],
+        };
+
+        let resolution =
+            amount_assignment_projection(&wait(DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            }))
+            .expect("projection")
+            .expect("DistributeAmong projects amount assignments");
+        let (action, _) =
+            materialize_amount_assignment_response(&interaction_id, &resolution, &subset)
+                .expect("a subset is a legal resolution-time division");
+        assert_eq!(
+            action,
+            GameAction::DistributeAmong {
+                distribution: vec![(targets[0].clone(), 3)],
+            }
+        );
+
+        let announced = amount_assignment_projection(&wait(DistributionScope::AnnouncedTargets))
+            .expect("projection")
+            .expect("DistributeAmong projects amount assignments");
+        assert_eq!(
+            materialize_amount_assignment_response(&interaction_id, &announced, &subset)
+                .map(|(action, _)| action),
+            Err(InteractionReasonCode::ConstraintUnsatisfied),
+            "every announced target must receive a share"
+        );
+    }
 
     #[test]
     fn cannot_cast_from_zone_projection_is_lossless() {

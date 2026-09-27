@@ -2120,7 +2120,8 @@
     "unitDamage": "blessures",
     "unitLife": "points de vie",
     "title": "Répartir {{total}} {{unit}}",
-    "subtitle": "Assignez au moins 1 {{unit}} à chaque cible. Restant : {{remaining}}"
+    "subtitle": "Assignez au moins 1 {{unit}} à chaque cible. Restant : {{remaining}}",
+    "subtitleAnyNumber": "Assignez au moins 1 {{unit}} à chacun de ceux que vous choisissez, parmi un nombre quelconque d'entre eux. Restant : {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Choisir un donjon",

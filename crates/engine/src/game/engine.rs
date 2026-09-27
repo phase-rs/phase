@@ -13,13 +13,13 @@ use crate::types::actions::{
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
-    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError, PriorityPassingMode,
-    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
-    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
-    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-    StackResolutionSession, WaitingFor,
+    CastingVariant, ConvokeMode, CostResume, DistributionScope, DistributionUnit, GameState,
+    LandPlayRecord, LoopDetectionMode, ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind,
+    PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved, PersistedRestoreError,
+    PriorityPassingMode, ResolveAllConsentParticipant, ResolveAllConsentRun,
+    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -35,7 +35,7 @@ use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
-    begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
+    self, begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
     compute_unavailable_modes, has_legal_target_assignment_for_ability, modal_choice_for_player,
 };
 use super::casting;
@@ -15133,8 +15133,17 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )?
         }
-        // CR 601.2d: Distribute among targets (casting-time distribution).
-        (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
+        // CR 601.2d: Distribute among targets (casting-time distribution). A
+        // CR 608.2d resolution-time division belongs to a resolving ability,
+        // which cannot be cancelled — it falls to the catch-all rejection.
+        (
+            WaitingFor::DistributeAmong {
+                player,
+                scope: DistributionScope::AnnouncedTargets,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
@@ -15153,34 +15162,56 @@ fn apply_non_priority_pass_action(
                 player,
                 total,
                 targets,
-                ..
+                unit,
+                scope,
             },
             GameAction::DistributeAmong { distribution },
         ) => {
             let p = *player;
-            let expected_total = *total;
 
-            // Validate: each target gets ≥ 1, and total matches.
-            let actual_total: u32 = distribution.iter().map(|(_, a)| *a).sum();
-            if actual_total != expected_total {
-                return Err(EngineError::InvalidAction(format!(
-                    "Distribution total {} != required {}",
-                    actual_total, expected_total
-                )));
-            }
-            for (t, amount) in &distribution {
-                if *amount == 0 {
-                    return Err(EngineError::InvalidAction(
-                        "Each target must receive at least 1".to_string(),
-                    ));
-                }
-                if !targets.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Distribution target not in legal set".to_string(),
-                    ));
-                }
-            }
+            // CR 601.2d + CR 608.2d: the single division validator (sum, each
+            // entry ≥ 1, legal recipient, no duplicates) for both scopes.
+            ability_utils::validate_distribution(&distribution, *total, targets)
+                .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
 
+            match scope {
+                // CR 608.2d + CR 608.2c: an untargeted division chosen while the
+                // effect is applied. The damage follows the choice at once — no
+                // player receives priority in between (CR 704.3: SBAs are checked
+                // only when a player would receive priority), and afterwards the
+                // active player receives priority (CR 117.3b).
+                DistributionScope::ResolutionCandidates { pending_effect } => {
+                    let pending_effect = pending_effect.clone();
+                    let unit = unit.clone();
+                    // CR 117.3b: the placeholder is seated at the active player, who
+                    // receives priority once the ability finishes resolving — not the
+                    // chooser, who may be any player (the target's controller).
+                    let active = state.active_player;
+                    state.waiting_for = WaitingFor::Priority { player: active };
+                    state.priority_player = active;
+                    match unit {
+                        DistributionUnit::Damage => {
+                            effects::deal_damage::resume_resolution_division(
+                                state,
+                                &pending_effect,
+                                &distribution,
+                                &mut events,
+                            )
+                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+                        }
+                        DistributionUnit::EvenSplitDamage
+                        | DistributionUnit::Counters(_)
+                        | DistributionUnit::Life => {
+                            return Err(EngineError::InvalidAction(
+                                "no resolver pauses for this division unit at resolution"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    resume_pending_continuation_if_priority(state, &mut events)?;
+                    state.waiting_for.clone()
+                }
+                DistributionScope::AnnouncedTargets => {
             // Store on the pending cast's resolved ability if we're mid-casting.
             // The distribution will be read during effect resolution.
             if let Some(pending) = state.pending_cast.as_mut() {
@@ -15295,11 +15326,14 @@ fn apply_non_priority_pass_action(
                 // trigger-owned and are deliberately untouched.
                 triggers::finish_trigger_construction_action(state, &mut events, produced)
             } else {
-                // Resolution-time distribution continuation path.
-                state.waiting_for = WaitingFor::Priority { player: p };
-                state.priority_player = p;
-                resume_pending_continuation_if_priority(state, &mut events)?;
-                state.waiting_for.clone()
+                // CR 601.2d: an announced division is always owned by a pending
+                // cast or a pending trigger; with neither there is nothing to
+                // resume, so the submission is rejected rather than guessed at.
+                return Err(EngineError::InvalidAction(
+                    "an announced division has no pending cast or trigger".to_string(),
+                ));
+            }
+                }
             }
         }
         (

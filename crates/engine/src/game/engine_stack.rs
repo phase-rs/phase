@@ -84,6 +84,7 @@ pub(super) fn finalize_trigger_target_selection(
                         total,
                         targets: dist_targets,
                         unit,
+                        scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
                     };
                 }
             }

@@ -581,7 +581,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
-        distribute: _, // CR 601.2d/603.3d unassigned division is an announce-time choice
+        distribute: _, // CR 601.2d announce-time; CR 608.2d: resolution_time_division
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
         cast_occurrence: _, // finalized-cast provenance, no resolution-time choice
@@ -638,6 +638,10 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     }
     // CR 601.2c + CR 603.3d: a resolution-time target chooser announces targets.
     if target_chooser.is_some() {
+        return true;
+    }
+    // CR 608.2d: an untargeted division is chosen while applying the effect.
+    if crate::game::ability_utils::resolution_time_division(a).is_some() {
         return true;
     }
     // CR 608.2d: resolution-timed target selection is a resolution-time choice
@@ -787,6 +791,67 @@ mod tests {
         let mut divided = base.clone();
         divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
         assert!(!chain_offers_choice(&divided));
+    }
+
+    /// V5p: CR 608.2d — a division among a tracked-set population ("any number of
+    /// those Wolves") is chosen while the effect is applied, so the chain offers a
+    /// resolution choice. Announced-target divisions whose recipient is a context
+    /// ref (`ParentTarget` after an "instead" swap; a Stumpsquall-shaped counters
+    /// division) stay announce-time and choice-free (R2-F1).
+    #[test]
+    fn resolution_time_division_is_a_resolution_choice_only_for_tracked_sets() {
+        use crate::types::game_state::DistributionUnit;
+        let damage = |target: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: fixed(3),
+                    target,
+                    damage_source: None,
+                    excess: None,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let tracked = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature(),
+            )),
+            caused_by: None,
+        };
+        for base in [damage(tracked.clone()), damage(TargetFilter::ParentTarget)] {
+            assert!(
+                !chain_offers_choice(&base),
+                "reach guard: the undivided base must be choice-free"
+            );
+        }
+
+        let mut tracked_division = damage(tracked);
+        tracked_division.distribute = Some(DistributionUnit::Damage);
+        assert!(chain_offers_choice(&tracked_division));
+
+        let mut parent_target_division = damage(TargetFilter::ParentTarget);
+        parent_target_division.distribute = Some(DistributionUnit::Damage);
+        assert!(!chain_offers_choice(&parent_target_division));
+
+        let mut counters = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: fixed(3),
+                target: TargetFilter::ParentTarget,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            !chain_offers_choice(&counters),
+            "reach guard: the undivided counters base must be choice-free"
+        );
+        counters.distribute = Some(DistributionUnit::Counters("P1P1".to_string()));
+        assert!(!chain_offers_choice(&counters));
     }
 
     /// Snapshot every axis the witness reads.

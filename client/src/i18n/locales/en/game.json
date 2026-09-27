@@ -2158,7 +2158,8 @@
     "unitDamage": "damage",
     "unitLife": "life",
     "title": "Distribute {{total}} {{unit}}",
-    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}"
+    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}",
+    "subtitleAnyNumber": "Assign at least 1 {{unit}} to each one you choose, among any number of them. Remaining: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Choose a Dungeon",

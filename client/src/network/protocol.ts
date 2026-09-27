@@ -106,6 +106,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  65 — game_setup and state_update carry GameState, whose DistributeAmong
+ *       prompt can now carry scope { type: "ResolutionCandidates" } (a CR
+ *       608.2d division among any number of candidates) and whose abilities
+ *       can carry ThisWayCause "Tapped". A v64 peer would drop scope and
+ *       require every candidate to receive at least one; first contact
+ *       rejects the skew instead. Bumped in lockstep with full-game
+ *       protocol 83.
  *  64 — game_setup and state_update carry GameState, whose additional-phase
  *       abilities now hold an ExtraPhaseAnchor, whose delayed triggers can hold
  *       AtBeginningOfAddedPhase, whose scheduled extra phases and resume
@@ -431,7 +438,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 64 as const;
+export const WIRE_PROTOCOL_VERSION = 65 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

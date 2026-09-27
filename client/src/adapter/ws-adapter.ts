@@ -210,6 +210,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 83 — Resolution-time division (CR 608.2d): WaitingFor.DistributeAmong
+ *      gains scope { type: "ResolutionCandidates" }, under which the modal
+ *      lets unchosen candidates receive nothing, and serialized abilities can
+ *      carry ThisWayCause "Tapped" — see PROTOCOL_VERSION's own `/// 83` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v82 client would ignore
+ *      scope and demand at least one for every candidate, leaving valid
+ *      subset divisions unconfirmable; the exact-match version check at
+ *      connect refuses the pairing.
  * 82 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
  *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
  *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a
@@ -565,7 +573,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      activation_cost_snapshot fields are additive and skipped when empty, so
  *      every spell frame is byte-identical to v78.
  */
-export const PROTOCOL_VERSION = 82;
+export const PROTOCOL_VERSION = 83;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

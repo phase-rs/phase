@@ -7428,6 +7428,14 @@ pub enum ThisWayCause {
     /// CR 701.9a: the member was discarded this way (cause survives a
     /// replacement that redirects the discard to another zone — CR 614.6).
     Discarded,
+    /// CR 701.26a: the member was tapped this way — only an actual
+    /// untapped→tapped change counts. A permanent that was already tapped, or
+    /// that a "can't become tapped" restriction kept upright, is not tapped by
+    /// the instruction and so never becomes a member of a mass tap's set (it
+    /// emits no `PermanentTapped`, and a mass tap declares no targets to fall
+    /// back to). Master of the Wild Hunt: "Each Wolf tapped this way
+    /// deals damage equal to its power to target creature."
+    Tapped,
     /// CR 608.2c + CR 400.7: the member was returned (put onto the battlefield)
     /// this way by a one-shot put-onto-battlefield instruction.
     Returned,
@@ -7709,6 +7717,9 @@ pub enum TargetFilter {
     /// (`Some(Exiled)`) and "sacrificed this way" (`Some(Sacrificed)`)
     /// references disjointly — and a sacrifice that a replacement redirects to
     /// Exile (CR 614.6) still counts as `Sacrificed` (issue #2932).
+    /// A mass tap stamps its newly tapped members `Tapped` (CR 701.26a), so
+    /// "each Wolf tapped this way" (`Some(Tapped)`) reads exactly the
+    /// permanents the instruction tapped.
     TrackedSetFiltered {
         id: super::identifiers::TrackedSetId,
         filter: Box<TargetFilter>,
@@ -21246,6 +21257,22 @@ impl TargetFilter {
         )
     }
 
+    /// CR 608.2c + CR 115.10a: true when this filter names a population bound
+    /// earlier in the same resolution ("those Wolves" — a `TrackedSet` /
+    /// `TrackedSetFiltered` published by a prior instruction), never announced
+    /// as a target. The single authority shared by the parser (a damage clause
+    /// whose recipient is such a population never takes that population as its
+    /// antecedent) and the engine (a division among such a population is chosen
+    /// while the effect is applied, CR 608.2d, not announced with the targets,
+    /// CR 601.2d). Deliberately narrower than [`Self::is_context_ref`]: a
+    /// `ParentTarget` / `ParentTargetSlot` recipient names ANNOUNCED targets.
+    pub fn is_tracked_set_population(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        )
+    }
+
     /// CR 115.10a + CR 608.2d: True when this filter DESCRIBES a population that
     /// a resolver may enumerate against the live board — the non-targeted
     /// counterpart of a chosen target (CR 115.10a: being affected by a spell or
@@ -25776,11 +25803,13 @@ pub struct AbilityDefinition {
     /// (Mana Clash, Goblin Lyre, Pixie Queen, Vexing Sphinx, Maddening Hex, etc.).
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
     pub target_selection_mode: TargetSelectionMode,
-    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
-    /// this ability's target(s) at stack placement. `None` = controller chooses
-    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
-    /// selected" axis). Unlike `optional_player` and `optional_for`, this is a
-    /// stack-placement target choice, not a resolution-time optional actor.
+    /// CR 601.2c + CR 603.3d + CR 608.2d: the player who makes this ability
+    /// node's object choices — its targets at stack placement, or, for an
+    /// untargeted division announced while the effect is applied
+    /// (`ability_utils::resolution_time_division`), the division. `None` = the
+    /// controller (default). Mirrors `target_selection_mode` (the same "by-whom"
+    /// axis). Unlike `optional_player` and `optional_for`, this is not a
+    /// resolution-time optional actor.
     pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
     /// non-count companion to `repeat_for`. When `Some`, the resolution chain
@@ -32745,11 +32774,12 @@ pub struct ResolvedAbility {
     /// to short-circuit `WaitingFor::TargetSelection` for `Random` abilities.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
-    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
-    /// this ability's target(s) at stack placement. `None` = controller chooses
-    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
-    /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
-    /// sacrifices.
+    /// CR 601.2c + CR 603.3d + CR 608.2d: the player who makes this ability
+    /// node's object choices — its targets at stack placement, or, for an
+    /// untargeted division announced while the effect is applied
+    /// (`ability_utils::resolution_time_division`), the division. `None` = the
+    /// controller (default). Mirrors `target_selection_mode` (the same "by-whom"
+    /// axis). "Of their choice" sacrifices are not this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 109.4: Players chosen by `Effect::Choose { choice_type:
@@ -34604,6 +34634,49 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// CR 608.2c + CR 115.10a: only a tracked-set population (bound earlier in
+    /// the same resolution) is a CR 608.2d untargeted division recipient. The
+    /// wider `is_context_ref` also admits announced-target anaphors
+    /// (`ParentTarget` / `ParentTargetSlot`) and self/none references, which is
+    /// why it was rejected as the shared parser/runtime key.
+    #[test]
+    fn tracked_set_population_is_only_tracked_sets() {
+        let tracked = TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+        let tracked_filtered = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            caused_by: None,
+        };
+        assert!(tracked.is_tracked_set_population());
+        assert!(tracked_filtered.is_tracked_set_population());
+
+        for announced_or_self in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 1 },
+            TargetFilter::SelfRef,
+            TargetFilter::None,
+            TargetFilter::LastCreated,
+            TargetFilter::Typed(TypedFilter::creature()),
+        ] {
+            assert!(
+                !announced_or_self.is_tracked_set_population(),
+                "{announced_or_self:?} is not a tracked-set population"
+            );
+        }
+        for wider in [
+            TargetFilter::ParentTarget,
+            TargetFilter::SelfRef,
+            TargetFilter::None,
+        ] {
+            assert!(
+                wider.is_context_ref(),
+                "{wider:?} IS a context ref — the wider predicate would misclassify it"
+            );
+        }
+    }
 
     /// Issue #8485: `origin` and `source_object` are additive and wire-compatible.
     ///

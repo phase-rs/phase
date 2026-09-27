@@ -3304,6 +3304,23 @@ pub fn candidate_actions_broad_with_probe(
             player,
             total,
             targets,
+            scope: crate::types::game_state::DistributionScope::ResolutionCandidates { .. },
+            ..
+        } => resolution_division_distributions(state, *total, targets)
+            .into_iter()
+            .map(|distribution| {
+                candidate(
+                    GameAction::DistributeAmong { distribution },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::DistributeAmong {
+            player,
+            total,
+            targets,
+            scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
             ..
         } => {
             if targets.is_empty() {
@@ -6312,6 +6329,79 @@ fn lethal_top_up(state: &GameState, target: &TargetRef) -> Option<u32> {
     Some(needed.saturating_sub(1))
 }
 
+/// CR 608.2d + CR 704.5g: legal alternatives for an untargeted resolution-time
+/// division of `total` among ANY number of `candidates` (each chosen one gets at
+/// least one). Unlike the announce-time arm, no candidate is owed a share, so
+/// spreading one point onto every body (the even-split `max(1)` shape) is not
+/// required — and would over-assign when there are more candidates than points.
+///
+/// Emits (a) a lethal-greedy subset: candidates in ascending order of the damage
+/// they still need (CR 704.5g; non-creatures last), each given what it needs
+/// while the budget allows, the leftover added to the last one chosen (or all of
+/// `total` to the first in that order when none fits); and (b) all of `total` on
+/// the first candidate, when it differs from (a). Every vector satisfies
+/// `ability_utils::validate_distribution`. Legal alternatives only; the tactical
+/// layer (phase-ai `most_lethal_distribution`) picks among them.
+fn resolution_division_distributions(
+    state: &GameState,
+    total: u32,
+    candidates: &[TargetRef],
+) -> Vec<Vec<(TargetRef, u32)>> {
+    if candidates.is_empty() || total == 0 {
+        return Vec::new();
+    }
+    let need = |target: &TargetRef| -> Option<u32> {
+        let TargetRef::Object(id) = target else {
+            return None;
+        };
+        let object = state.objects.get(id)?;
+        object
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature)
+            .then(|| crate::game::combat_damage::lethal_damage_needed(state, *id, false))
+    };
+    // `sort_by_key` is stable: equal needs keep `candidates` order, and
+    // non-creatures (`None` → `u32::MAX`) sort last.
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    order.sort_by_key(|&index| need(&candidates[index]).unwrap_or(u32::MAX));
+
+    let mut shares = vec![0u32; candidates.len()];
+    let mut budget = total;
+    let mut last_chosen = None;
+    for &index in &order {
+        let Some(needed) = need(&candidates[index]) else {
+            continue;
+        };
+        let share = needed.max(1);
+        if share > budget {
+            continue;
+        }
+        shares[index] = share;
+        budget -= share;
+        last_chosen = Some(index);
+        if budget == 0 {
+            break;
+        }
+    }
+    match last_chosen {
+        Some(index) => shares[index] += budget,
+        None => shares[order[0]] = total,
+    }
+    let lethal_greedy: Vec<(TargetRef, u32)> = candidates
+        .iter()
+        .cloned()
+        .zip(shares)
+        .filter(|(_, share)| *share > 0)
+        .collect();
+    let all_on_first = vec![(candidates[0].clone(), total)];
+    if all_on_first == lethal_greedy {
+        vec![lethal_greedy]
+    } else {
+        vec![lethal_greedy, all_on_first]
+    }
+}
+
 /// CR 601.2d: a lethal-first division of `total` among `targets`, returned in
 /// `targets` order so it compares directly against the even split.
 ///
@@ -6543,6 +6633,7 @@ mod tests {
             total,
             targets: targets.to_vec(),
             unit: crate::types::game_state::DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
         };
         candidate_actions(state)
             .into_iter()
@@ -6551,6 +6642,76 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// V5-AI: CR 608.2d — every candidate for a resolution-time division is a
+    /// legal division (sum == total, every entry ≥ 1, entries are distinct
+    /// candidates). Hostile row: 2 points over five 1/1 candidates, where the
+    /// announce-time even split would hand every candidate `max(1)` and
+    /// over-assign; each emitted division is a strict subset.
+    #[test]
+    fn resolution_division_candidates_are_all_legal_divisions() {
+        let mut state = GameState::new_two_player(42);
+        let targets: Vec<TargetRef> = (0..5)
+            .map(|index| TargetRef::Object(distribution_creature(&mut state, index, 1, 1)))
+            .collect();
+        let pending = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::DealDamage {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                target: crate::types::ability::TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let prompt = |state: &mut GameState, total: u32, targets: &[TargetRef]| {
+            state.waiting_for = WaitingFor::DistributeAmong {
+                player: PlayerId(1),
+                total,
+                targets: targets.to_vec(),
+                unit: crate::types::game_state::DistributionUnit::Damage,
+                scope: crate::types::game_state::DistributionScope::ResolutionCandidates {
+                    pending_effect: Box::new(pending.clone()),
+                },
+            };
+            candidate_actions(state)
+                .into_iter()
+                .filter_map(|candidate| match candidate.action {
+                    GameAction::DistributeAmong { distribution } => Some(distribution),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let distributions = prompt(&mut state, 2, &targets);
+        assert!(!distributions.is_empty(), "reach guard: candidates exist");
+        for distribution in &distributions {
+            assert!(
+                crate::game::ability_utils::validate_distribution(distribution, 2, &targets)
+                    .is_ok(),
+                "illegal resolution-time division {distribution:?}"
+            );
+            assert!(distribution.len() < targets.len(), "strict subset");
+        }
+
+        let tough = distribution_creature(&mut state, 10, 3, 3);
+        let frail = distribution_creature(&mut state, 11, 1, 1);
+        let pair = vec![TargetRef::Object(tough), TargetRef::Object(frail)];
+        let distributions = prompt(&mut state, 5, &pair);
+        assert!(
+            distributions.iter().any(|distribution| {
+                distribution.contains(&(TargetRef::Object(tough), 4))
+                    && distribution.contains(&(TargetRef::Object(frail), 1))
+            }),
+            "a split killing both bodies must be offered, got {distributions:?}"
+        );
+        for distribution in &distributions {
+            assert!(
+                crate::game::ability_utils::validate_distribution(distribution, 5, &pair).is_ok()
+            );
+        }
     }
 
     /// CR 601.2d + CR 704.5g: 5 damage across a 3-toughness and a 1-toughness

@@ -3318,18 +3318,19 @@ mod tests {
         }
     }
 
-    /// `Effect::AdditionalPhase.after` is now an `ExtraPhaseAnchor`,
-    /// `DelayedTriggerCondition` gained `AtBeginningOfAddedPhase`, and scheduled
-    /// extra phases carry a `TurnSegment`; a v81 peer cannot parse any of
-    /// these, so it must be refused before it receives v82 state.
+    /// `ThisWayCause::Tapped` is new in serialized abilities and
+    /// `WaitingFor::DistributeAmong` gained a resolution-time `scope`
+    /// (CR 608.2d); a v82 peer cannot parse the tag and would misread the
+    /// prompt as an announce-time division, so it must be refused before it
+    /// receives v83 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_82_for_added_phase_anchoring() {
-        assert_eq!(PROTOCOL_VERSION, 82);
+    fn protocol_version_is_83_for_resolution_time_division() {
+        assert_eq!(PROTOCOL_VERSION, 83);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3341,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_82_for_added_phase_anchoring` stays
+    /// `protocol_version_is_83_for_resolution_time_division` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

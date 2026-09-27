@@ -2120,7 +2120,8 @@
     "unitDamage": "dano",
     "unitLife": "vida",
     "title": "Distribuir {{total}} de {{unit}}",
-    "subtitle": "Atribua pelo menos 1 de {{unit}} a cada alvo. Restante: {{remaining}}"
+    "subtitle": "Atribua pelo menos 1 de {{unit}} a cada alvo. Restante: {{remaining}}",
+    "subtitleAnyNumber": "Atribua pelo menos 1 de {{unit}} a cada um que escolher, entre qualquer número deles. Restante: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Escolher uma Masmorra",

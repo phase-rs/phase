@@ -328,6 +328,7 @@ fn maybe_pause_for_cast_distribution(
         total,
         targets: assigned_targets,
         unit: unit.clone(),
+        scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
     }))
 }
 

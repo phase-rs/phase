@@ -8794,28 +8794,92 @@ fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> Mult
     MultiTargetSpec::bounded_expr(QuantityExpr::Fixed { value: 0 }, inner.clone())
 }
 
-/// CR 601.2d: The keywords that introduce a divided/distributed *damage* effect.
-/// Single authority for the "is this a distribution clause?" membership test —
-/// extend here, never inline at a call site.
-///
-/// One caller: `try_parse_distribute_damage` bounds its Pattern-B quantity slice
-/// with this set. (The binary-choice splitter `try_parse_choose_one_of_inline`
-/// formerly also consulted it to bail, but that coupling — and the set-drift
-/// hazard it warned about — is gone: the splitter now keys its bail on the
-/// target-cardinality list `BOUNDED_TARGET_CARDINALITIES`, the axis CR 601.2d
-/// shares across both its "damage or counters" halves. That axis guards the
-/// counter-distribution templating ("Distribute three +1/+1 counters among one,
-/// two, or three target creatures") this damage-verb set never could, so the two
-/// no longer need to agree.)
-pub(super) const DISTRIBUTION_KEYWORDS: [&str; 2] =
-    ["divided as you choose among", "divided evenly"];
+/// CR 601.2d / CR 608.2d: who announces a division — "you choose" (the
+/// controller, the default) or "its controller chooses" (the controller of the
+/// ability's target, `ParentTargetController`).
+fn parse_division_chooser(i: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    alt((
+        value(None, tag("you choose")),
+        value(
+            Some(TargetFilter::ParentTargetController),
+            tag("its controller chooses"),
+        ),
+    ))
+    .parse(i)
+}
 
-/// CR 601.2d: Parse "deal N damage divided as you choose among [targets]" and
-/// "deal N damage distributed among [targets]" → Effect::DealDamage with distribute flag.
+/// CR 601.2d + CR 608.2d: the division marker that introduces a divided damage
+/// recipient phrase — "divided as <chooser> among " (a chosen division) or
+/// "divided evenly, rounded down, among " (an even split, no choice). Returns the
+/// division unit and the chooser; the remainder is the recipient phrase. Single
+/// authority for "is this a damage-division clause?" (the dispatch gate and
+/// `try_parse_distribute_damage` both use it).
+pub(super) fn parse_division_marker(
+    i: &str,
+) -> OracleResult<'_, (DistributionUnit, Option<TargetFilter>)> {
+    preceded(
+        tag("divided "),
+        alt((
+            map(
+                (tag("as "), parse_division_chooser, tag(" among ")),
+                |(_, chooser, _)| (DistributionUnit::Damage, chooser),
+            ),
+            value(
+                (DistributionUnit::EvenSplitDamage, None),
+                tag("evenly, rounded down, among "),
+            ),
+        )),
+    )
+    .parse(i)
+}
+
+/// CR 608.2d + CR 115.10a: an untargeted division recipient — "any number of
+/// those <type>", the population an earlier instruction of the same ability
+/// bound ("those Wolves" = the Wolves tapped this way). Returns the chain's
+/// tracked set narrowed by the type. Anything else (notably a "target" phrase,
+/// or a trailing conjunct) is not this shape.
+fn parse_untargeted_division_recipient(text: &str) -> Option<TargetFilter> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (after_lower, _) = preceded(
+        tag::<_, _, OracleError<'_>>("any number of "),
+        tag("those "),
+    )
+    .parse(tp.lower)
+    .ok()?;
+    let (_, type_tp) = tp.split_at(tp.lower.len() - after_lower.len());
+    let (filter, remainder) = parse_type_phrase_folding(type_tp.original);
+    let TargetFilter::Typed(_) = filter else {
+        return None;
+    };
+    (
+        multispace0::<_, OracleError<'_>>,
+        opt(tag(".")),
+        multispace0,
+        eof,
+    )
+        .parse(remainder)
+        .ok()?;
+    Some(TargetFilter::TrackedSetFiltered {
+        id: crate::types::identifiers::TrackedSetId(0),
+        filter: Box::new(filter),
+        caused_by: None,
+    })
+}
+
+/// CR 601.2d: Parse "deal N damage divided as you choose among [targets]" →
+/// Effect::DealDamage with distribute flag.
 ///
 /// Also handles "deal N damage divided evenly, rounded down, among [targets]" which uses
-/// the same Effect but signals even-split (the engine treats this as a pre-set distribution).
-pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectClause> {
+/// the same Effect but signals even-split (the engine treats this as a pre-set distribution),
+/// and CR 608.2d "deal damage equal to its power divided as its controller chooses among any
+/// number of those Wolves" — an untargeted division chosen while the effect is applied, whose
+/// chooser is recorded in `ctx.target_chooser`.
+pub(super) fn try_parse_distribute_damage(
+    lower: &str,
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let tp = TextPair::new(text, lower);
     // Scan word-by-word for "deals " or "deal " verb.
     let (pos, verb_len) = {
@@ -8837,7 +8901,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     let (_, after_tp) = tp.split_at(pos + verb_len);
 
     let (amount, rest_tp) = if let Some((qty, rem)) = parse_count_expr(after_tp.lower) {
-        // Pattern A: "[qty] damage divided/distributed among …"
+        // Pattern A: "[qty] damage divided … among …"
         if tag::<_, _, OracleError<'_>>("damage").parse(rem).is_ok() {
             let skip = after_tp.lower.len() - rem.len() + "damage".len();
             let (_, rest) = after_tp.split_at(skip);
@@ -8848,57 +8912,54 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
     } else if let Ok((after_prefix, _)) =
         tag::<_, _, OracleError<'_>>("damage equal to ").parse(after_tp.lower)
     {
-        // Pattern B: "damage equal to [qty] divided/distributed among …"
+        // Pattern B: "damage equal to [qty] divided … among …"
         // CR 601.2d: the quantity follows the "equal to" phrase and is a dynamic
         // reference (e.g., "its power" — Emberwilde Captain), so it routes through
         // the CDA quantity layer rather than the fixed/X-only `parse_count_expr`.
-        // The quantity slice is the text between "equal to " and the distribution
-        // keyword; the distribution phrase is then located in `rest` below exactly
-        // as in Pattern A.
+        // The quantity slice is the text between "equal to " and the division
+        // marker.
         let after_prefix_offset = after_tp.lower.len() - after_prefix.len();
         let (_, rest) = after_tp.split_at(after_prefix_offset);
-        let qty_end = DISTRIBUTION_KEYWORDS
-            .iter()
-            // allow-noncombinator: structural slice bound, not parsing dispatch — locate
-            // the earliest distribution keyword so `parse_cda_quantity` receives only the
-            // quantity phrase. The dispatch on *which* distribution kind applies is done
-            // by the `distribute_kind` combinator block below; this only bounds the slice.
-            .filter_map(|kw| rest.lower.find(kw))
-            .min()?;
-        let qty_text = rest.lower[..qty_end].trim();
-        let qty = parse_cda_quantity(qty_text)?;
+        let (before, _, _) = nom_primitives::scan_preceded(rest.lower, parse_division_marker)?;
+        let qty = parse_cda_quantity(before.trim())?;
         (qty, rest)
     } else {
         return None;
     };
 
-    // Detect distribution keywords.
-    // CR 601.2d: "divided as you choose among" / "distributed among" → player chooses.
-    // "divided evenly, rounded down, among" → auto-computed even split.
-    let distribute_kind = if scan_contains_phrase(rest_tp.lower, "divided as you choose among")
-        || scan_contains_phrase(rest_tp.lower, "distributed among")
-    {
-        DistributionUnit::Damage
-    } else if scan_contains_phrase(rest_tp.lower, "divided evenly") {
+    // CR 601.2d / CR 608.2d: the division marker, its chooser, and the recipient
+    // phrase that follows it.
+    let (_, (distribute_kind, chooser), recipient_lower) =
+        nom_primitives::scan_preceded(rest_tp.lower, parse_division_marker)?;
+    let (_, recipient_tp) = rest_tp.split_at(rest_tp.lower.len() - recipient_lower.len());
+    let target_text = recipient_tp.original.trim();
+
+    let untargeted = match distribute_kind {
+        DistributionUnit::Damage => parse_untargeted_division_recipient(target_text),
         DistributionUnit::EvenSplitDamage
-    } else {
-        return None;
+        | DistributionUnit::Counters(_)
+        | DistributionUnit::Life => None,
     };
-
-    // Parse the target after the distribution keyword.
-    let target_tp = rest_tp
-        .strip_after("divided as you choose among ")
-        .or_else(|| rest_tp.strip_after("distributed among "))
-        .or_else(|| {
-            // CR 601.2d: "divided evenly, rounded down, among " variant.
-            rest_tp.strip_after("divided evenly, rounded down, among ")
-        })?;
-    let target_text = target_tp.original.trim();
-
-    // CR 115.1d: Detect the target-count quantifier before the target phrase.
-    let (stripped_target_text, multi_target) =
-        strip_distribute_among_target_quantifier(target_text, &amount);
-    let (target, _) = parse_target(stripped_target_text);
+    let (target, multi_target) = match untargeted {
+        // CR 608.2d + CR 115.10a: untargeted — chosen while the effect is applied,
+        // by the named chooser.
+        Some(population) => {
+            if chooser.is_some() {
+                ctx.target_chooser = chooser;
+            }
+            (population, None)
+        }
+        // CR 601.2d: a targeted division is announced by the spell's or ability's
+        // controller; a different announcer of a targeted division is unattested.
+        None if chooser.is_some() => return None,
+        None => {
+            // CR 115.1d: Detect the target-count quantifier before the target phrase.
+            let (stripped_target_text, multi_target) =
+                strip_distribute_among_target_quantifier(target_text, &amount);
+            let (target, _) = parse_target(stripped_target_text);
+            (target, multi_target)
+        }
+    };
 
     Some(ParsedEffectClause {
         unlowered_guard: None,
@@ -13431,13 +13492,114 @@ mod tests {
         use crate::types::game_state::DistributionUnit;
         let text = "deal damage equal to its power divided as you choose among any number of target creatures and/or players";
         let lower = text.to_lowercase();
-        let clause = super::try_parse_distribute_damage(&lower, text).expect("Gap 1 should parse");
+        let clause = super::try_parse_distribute_damage(
+            &lower,
+            text,
+            &mut crate::parser::oracle_ir::context::ParseContext::default(),
+        )
+        .expect("Gap 1 should parse");
         assert!(matches!(clause.distribute, Some(DistributionUnit::Damage)));
         assert!(
             clause.multi_target.is_some(),
             "must have multi_target for distribute"
         );
         assert!(matches!(clause.effect, Effect::DealDamage { .. }));
+    }
+
+    /// V4-bb: CR 601.2d / CR 608.2d — the division-marker combinator's chooser
+    /// and unit axes, and its non-matches.
+    #[test]
+    fn division_marker_arms_and_non_matches() {
+        use crate::types::game_state::DistributionUnit;
+        assert_eq!(
+            super::parse_division_marker("divided as you choose among x"),
+            Ok(("x", (DistributionUnit::Damage, None)))
+        );
+        assert_eq!(
+            super::parse_division_marker("divided as its controller chooses among x"),
+            Ok((
+                "x",
+                (
+                    DistributionUnit::Damage,
+                    Some(TargetFilter::ParentTargetController)
+                )
+            ))
+        );
+        assert_eq!(
+            super::parse_division_marker("divided evenly, rounded down, among x"),
+            Ok(("x", (DistributionUnit::EvenSplitDamage, None)))
+        );
+        assert!(super::parse_division_marker("divided as they choose among x").is_err());
+        assert!(super::parse_division_marker("divided evenly among x").is_err());
+    }
+
+    /// V4-bb: CR 608.2d + CR 115.10a — "any number of those <type>" is the
+    /// chain's tracked set narrowed by the type; a targeted phrase or a trailing
+    /// conjunct is not this shape.
+    #[test]
+    fn untargeted_division_recipient_is_the_tracked_population() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::identifiers::TrackedSetId;
+        let tracked = |filter: TypedFilter| TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(filter)),
+            caused_by: None,
+        };
+        assert_eq!(
+            super::parse_untargeted_division_recipient("any number of those Wolves"),
+            Some(tracked(TypedFilter::new(TypeFilter::Subtype(
+                "Wolf".to_string()
+            ))))
+        );
+        assert_eq!(
+            super::parse_untargeted_division_recipient("any number of those creatures."),
+            Some(tracked(TypedFilter::creature()))
+        );
+        assert_eq!(
+            super::parse_untargeted_division_recipient("any number of target creatures"),
+            None
+        );
+        assert_eq!(
+            super::parse_untargeted_division_recipient(
+                "any number of those Wolves you control and target player"
+            ),
+            None
+        );
+    }
+
+    /// V4-bb: `try_parse_distribute_damage` records a non-controller chooser only
+    /// for an untargeted division; a targeted division with a non-controller
+    /// announcer is unattested and falls through (CR 601.2d).
+    #[test]
+    fn distribute_damage_chooser_axis() {
+        use crate::parser::oracle_ir::context::ParseContext;
+        use crate::types::game_state::DistributionUnit;
+        let targeted = "deal damage equal to its power divided as its controller chooses among any number of target creatures";
+        let mut ctx = ParseContext::default();
+        assert!(
+            super::try_parse_distribute_damage(&targeted.to_lowercase(), targeted, &mut ctx)
+                .is_none()
+        );
+        assert_eq!(ctx.target_chooser, None);
+
+        let untargeted = "deal damage equal to its power divided as its controller chooses among any number of those Wolves";
+        let mut ctx = ParseContext::default();
+        let clause =
+            super::try_parse_distribute_damage(&untargeted.to_lowercase(), untargeted, &mut ctx)
+                .expect("untargeted division parses");
+        assert_eq!(clause.distribute, Some(DistributionUnit::Damage));
+        assert!(clause.multi_target.is_none());
+        assert!(matches!(
+            clause.effect,
+            Effect::DealDamage {
+                target: TargetFilter::TrackedSetFiltered { .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            ctx.target_chooser,
+            Some(TargetFilter::ParentTargetController)
+        );
     }
 
     #[test]

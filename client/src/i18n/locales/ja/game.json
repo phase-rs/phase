@@ -2163,7 +2163,8 @@
     "unitDamage": "ダメージ",
     "unitLife": "ライフ",
     "title": "{{total}}{{unit}}を分配",
-    "subtitle": "各対象に少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}"
+    "subtitle": "各対象に少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}",
+    "subtitleAnyNumber": "任意の数を選び、選んだそれぞれに少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}"
   },
   "dungeonChoice": {
     "title": "ダンジョンを選択",

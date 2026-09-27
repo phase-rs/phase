@@ -19,9 +19,10 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
     ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, ThisWayCause, TypedFilter,
 };
 use crate::types::game_state::DayNight;
+use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
@@ -7248,27 +7249,25 @@ pub(super) fn try_parse_each_source_deals_damage(
     // The recipient phrase: everything after the "deals N damage to " marker.
     let recipient_phrase = damage_recipient_phrase(&predicate_lower);
 
-    // CR 120.1 + CR 608.2c (DEFERRED §9): two unrepresentable rider shapes the
+    // CR 120.1 + CR 608.2c (DEFERRED §9): an unrepresentable rider shape the
     // filter model cannot express, which would otherwise SILENTLY DEGRADE to a
-    // supported-but-wrong `EachSourceDealsDamage`:
-    //   * a damage predicate carrying "random" — "another random creature that
-    //     player controls" (Season's Beatings) degrades to `Typed{Another}` with
-    //     the random selection AND the "that player controls" scope dropped;
-    //   * a source subject ending in "tapped this way" — "Each Wolf tapped this
-    //     way" (Master of the Wild Hunt) carries a per-source tapped-by-this-
-    //     ability rider the source filter cannot hold, degrading to bare `Typed{Wolf}`.
-    // In both cases fail CLOSED to an honest `Unimplemented` — the same precedent
-    // as the Aura-Barbs attached-host check below. Detection is structural
-    // (word-boundary scan / all_consuming end-anchor), never substring dispatch.
+    // supported-but-wrong `EachSourceDealsDamage`: a damage predicate carrying
+    // "random" — "another random creature that player controls" (Season's
+    // Beatings) degrades to `Typed{Another}` with the random selection AND the
+    // "that player controls" scope dropped. Fail CLOSED to an honest
+    // `Unimplemented` — the same precedent as the Aura-Barbs attached-host
+    // check below. Detection is structural (word-boundary scan), never
+    // substring dispatch. A "<verb> this way" source subject ("Each Wolf
+    // tapped this way", Master of the Wild Hunt) is typed below as the chain
+    // tracked set (CR 608.2c + CR 701.26a), and fails closed there when its
+    // population is untypable or its verb is off the verb axis.
     // The random scan is on the whole damage predicate (not `damage_recipient_phrase`,
     // which only fires on the fixed-"N damage to" form — the own-power recipient is
     // introduced by "to " after the amount, so no clean recipient slice exists); the
     // own-power each-source grammar is the only predicate kind that reaches here, and
     // "random" never appears in a supported damage amount, so a word-boundary match is
     // always a random RECIPIENT.
-    if nom_primitives::scan_contains(&predicate_lower, "random")
-        || subject_sources_tapped_this_way(&subject.to_lowercase())
-    {
+    if nom_primitives::scan_contains(&predicate_lower, "random") {
         return Some(super::parsed_clause(Effect::unimplemented(
             "each_source_unrepresentable_rider",
             text,
@@ -7287,27 +7286,63 @@ pub(super) fn try_parse_each_source_deals_damage(
         )));
     }
 
-    // Require a usable non-player object-class source. The one context-set
-    // exception is an exact pairwise relation: "each of those ... to the
-    // other" reads the previously announced object pair through ParentTarget.
-    // Only `TwoTargets` publishes this two-slot registry; a single multi-target
-    // producer therefore fails closed without typed per-member provenance.
-    let sources = parse_subject_application(subject, ctx)?.affected;
-    let pairwise_filters = match (&sources, ctx.declared_target_slots.as_slice()) {
-        (TargetFilter::ParentTarget, [first, second])
-            if has_pairwise_other_recipient(&predicate_lower)
-                && matches!(first, TargetFilter::Typed(typed)
-                    if !typed.type_filters.is_empty() || !typed.properties.is_empty())
-                && matches!(second, TargetFilter::Typed(typed)
-                    if !typed.type_filters.is_empty() || !typed.properties.is_empty()) =>
-        {
-            Some([Box::new(first.clone()), Box::new(second.clone())])
+    // CR 608.2c + CR 701.26a: "each <type> <verb> this way" — the sources are
+    // exactly the chain tracked set's members stamped with that producer action
+    // (Master of the Wild Hunt: "Each Wolf tapped this way"). An untypable
+    // this-way population fails CLOSED rather than degrading to a bare class.
+    let subject_lower = subject.to_lowercase();
+    let (sources, pairwise_filters) = match split_each_this_way_subject(&subject_lower) {
+        Some((type_phrase, cause)) => match this_way_tracked_sources(type_phrase, cause) {
+            Some(tracked) => (tracked, None),
+            None => {
+                return Some(super::parsed_clause(Effect::unimplemented(
+                    "each_source_unrepresentable_rider",
+                    text,
+                )))
+            }
+        },
+        None => {
+            // CR 608.2c: a "<verb> this way" subject whose verb is off the verb
+            // axis ("each Wolf untapped this way") names a population we cannot
+            // type — fail CLOSED rather than let `parse_subject_application`
+            // drop the rider to a bare class. End-anchored, so an interior
+            // "tapped this way you control" is untouched (Pattern 2).
+            if all_consuming(terminated(
+                take_until::<_, _, OracleError<'_>>(" this way"),
+                tag(" this way"),
+            ))
+            .parse(subject_lower.as_str())
+            .is_ok()
+            {
+                return Some(super::parsed_clause(Effect::unimplemented(
+                    "each_source_unrepresentable_rider",
+                    text,
+                )));
+            }
+            // Require a usable non-player object-class source. The one context-set
+            // exception is an exact pairwise relation: "each of those ... to the
+            // other" reads the previously announced object pair through ParentTarget.
+            // Only `TwoTargets` publishes this two-slot registry; a single multi-target
+            // producer therefore fails closed without typed per-member provenance.
+            let sources = parse_subject_application(subject, ctx)?.affected;
+            let pairwise_filters = match (&sources, ctx.declared_target_slots.as_slice()) {
+                (TargetFilter::ParentTarget, [first, second])
+                    if has_pairwise_other_recipient(&predicate_lower)
+                        && matches!(first, TargetFilter::Typed(typed)
+                            if !typed.type_filters.is_empty() || !typed.properties.is_empty())
+                        && matches!(second, TargetFilter::Typed(typed)
+                            if !typed.type_filters.is_empty() || !typed.properties.is_empty()) =>
+                {
+                    Some([Box::new(first.clone()), Box::new(second.clone())])
+                }
+                _ => None,
+            };
+            if !is_object_class_source(&sources) && pairwise_filters.is_none() {
+                return None;
+            }
+            (sources, pairwise_filters)
         }
-        _ => None,
     };
-    if !is_object_class_source(&sources) && pairwise_filters.is_none() {
-        return None;
-    }
 
     // Delegate the predicate to the shared damage parser so the amount and the
     // recipient anaphora (`ParentTarget`, `TriggeringSource`, `Any`) resolve
@@ -7367,22 +7402,49 @@ fn damage_recipient_phrase(predicate_lower: &str) -> Option<&str> {
     Some(after.trim_end_matches('.').trim())
 }
 
-/// CR 120.1 + CR 608.2c (DEFERRED §9): the source subject ends in
-/// "tapped this way" ("Each Wolf tapped this way deals damage ..." — Master of
-/// the Wild Hunt), a per-source tapped-by-this-ability rider the filter model
-/// cannot hold. `parse_subject_application` degrades it to a bare `Typed{Wolf}`,
-/// dropping the tapped restriction, so the each-source intercept must fail
-/// CLOSED to `Unimplemented`. Pattern 2 (`oracle_nom/PATTERNS.md`): the whole
-/// subject is parsed and the trailing phrase consumed LAST via `all_consuming`,
-/// anchoring the tag to the END so an interior/non-terminal "tapped this way"
-/// is not matched (mirrors `ends_with_of_your_choice`).
-fn subject_sources_tapped_this_way(subject_lower: &str) -> bool {
-    all_consuming(terminated(
-        take_until::<_, _, OracleError<'_>>("tapped this way"),
-        tag("tapped this way"),
-    ))
-    .parse(subject_lower)
-    .is_ok()
+/// CR 608.2c + CR 701.26a: the keyword-action verb of a "<verb> this way"
+/// each-source subject rider, mapped to the producer-action cause the chain
+/// tracked set stamps on its members. This is the verb axis's single
+/// authority; "tapped" is the only verb attested on an each-source damage
+/// subject. A newly attested verb is one more `value(ThisWayCause::X,
+/// tag("<verb>"))` arm under an `alt(..)`.
+fn parse_this_way_verb(input: &str) -> OracleResult<'_, ThisWayCause> {
+    value(ThisWayCause::Tapped, tag("tapped")).parse(input)
+}
+
+/// Pattern 2 (`oracle_nom/PATTERNS.md`): "<verb> this way" consumed as the
+/// END of the subject via `all_consuming`, so an interior rider ("each
+/// creature tapped this way you control") never matches.
+fn parse_this_way_rider_suffix(input: &str) -> OracleResult<'_, ThisWayCause> {
+    all_consuming(terminated(parse_this_way_verb, tag(" this way"))).parse(input)
+}
+
+/// CR 608.2c: split "each <type phrase> <verb> this way" into the type
+/// phrase and the producer cause. `None` when the subject does not end in a
+/// this-way rider on the verb axis (the caller's ordinary each-source subject
+/// path, behind its generic "this way" fail-closed, applies).
+fn split_each_this_way_subject(subject_lower: &str) -> Option<(&str, ThisWayCause)> {
+    let (body, _) = tag::<_, _, OracleError<'_>>("each ")
+        .parse(subject_lower)
+        .ok()?;
+    let (type_phrase, cause, _) = nom_primitives::scan_preceded(body, parse_this_way_rider_suffix)?;
+    Some((type_phrase.trim_end(), cause))
+}
+
+/// CR 120.1 + CR 608.2c: type the this-way population as the chain tracked
+/// set restricted to `cause` members. `None` when the type phrase is empty,
+/// does not fully consume, or is not an object class. The caller then fails
+/// CLOSED instead of degrading to an unrestricted source class.
+fn this_way_tracked_sources(type_phrase: &str, cause: ThisWayCause) -> Option<TargetFilter> {
+    let (filter, remainder) = parse_type_phrase_folding(type_phrase);
+    let typed_nonempty = filter != TargetFilter::Typed(TypedFilter::default());
+    (remainder.trim().is_empty() && typed_nonempty && is_object_class_source(&filter)).then(|| {
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(filter),
+            caused_by: Some(cause),
+        }
+    })
 }
 
 /// CR 109.4 + CR 120.3a: the recipient phrase is exactly "its controller".
@@ -8415,12 +8477,13 @@ mod tests {
     // captures a 10-card class — Bartz and Boko, Judgment of
     // Alexander, Kamahl's Will, Master of the Wild Hunt, Moonlight Hunt, Nissa's
     // Judgment, Sarkhan the Mad, Season's Beatings, Signature Slam, and The Bears
-    // of Littjara. Two of those ten (Master of the Wild Hunt's "tapped this way"
-    // source rider and Season's Beatings' "random" recipient) carry riders the
-    // filter model cannot express and are pinned to fail CLOSED as `Unimplemented`
-    // (see `each_master_of_the_wild_hunt_tapped_this_way_fails_closed` /
-    // `each_seasons_beatings_random_recipient_fails_closed`), leaving EIGHT clean
-    // BatchSource members; the tests below pin each distinct source-filter shape
+    // of Littjara. Master of the Wild Hunt's "tapped this way" source rider now
+    // parses with `TrackedSetFiltered{Wolf, caused_by: Some(Tapped)}` sources
+    // (see `each_tapped_this_way_subject_parses_tracked_set_sources`), leaving
+    // Season's Beatings' "random" recipient as the only rider the filter model
+    // cannot express, pinned to fail CLOSED as `Unimplemented` (see
+    // `each_seasons_beatings_random_recipient_fails_closed`). EIGHT members are
+    // clean filter-class BatchSource members; the tests below pin each distinct source-filter shape
     // (own-power "any target", "each other", composed amount, union subtype,
     // +1/+1-counter property). The "any target" recipient
     // stays `Shared(Any)` (pinned by `each_source_deals_damage_any_target_recipient`
@@ -8774,24 +8837,152 @@ mod tests {
         }
     }
 
-    // CR 120.1 + CR 608.2c (DEFERRED §9): Master of the Wild Hunt's source rider
-    // ("Each Wolf tapped this way") is a per-source tapped-by-this-ability
-    // constraint the source filter cannot hold — fail CLOSED to `Unimplemented`
-    // rather than degrade the sources to bare `Typed{Wolf}`.
+    // CR 608.2c + CR 701.26a + CR 120.1: Master of the Wild Hunt clause 2 — the
+    // sources are the chain tracked set's Tapped-cause Wolves, each dealing its
+    // own power to the announced target creature.
     #[test]
-    fn each_master_of_the_wild_hunt_tapped_this_way_fails_closed() {
+    fn each_tapped_this_way_subject_parses_tracked_set_sources() {
         let effect = super::super::parse_effect(
             "Each Wolf tapped this way deals damage equal to its power to target creature",
         );
-        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
-        match &effect {
-            Effect::Unimplemented { name, .. } if name.as_str() == RIDER_KEY => {}
-            other => panic!(
-                "Master of the Wild Hunt tapped-this-way source rider must fail closed to \
-                 each_source_unrepresentable_rider (per-source tapped-by-this-ability is \
-                 unmodeled, not a degradation to bare Typed{{Wolf}}), got {other:?}"
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(
+            sources,
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(
+                    TypedFilter::default().subtype("Wolf".to_string())
+                )),
+                caused_by: Some(crate::types::ability::ThisWayCause::Tapped),
+            }
+        );
+        assert_eq!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource
+                }
+            }
+        );
+        assert!(
+            matches!(
+                &recipient,
+                EachDamageRecipient::Shared(TargetFilter::Typed(t))
+                    if t.type_filters == vec![crate::types::ability::TypeFilter::Creature]
             ),
-        }
+            "recipient must be the announced target creature, got {recipient:?}"
+        );
+    }
+
+    // Building-block rows for the splitter (verb axis + end anchor).
+    #[test]
+    fn each_this_way_subject_splitter_rows() {
+        use crate::types::ability::ThisWayCause;
+        assert_eq!(
+            split_each_this_way_subject("each wolf tapped this way"),
+            Some(("wolf", ThisWayCause::Tapped))
+        );
+        assert_eq!(
+            split_each_this_way_subject("each creature you control tapped this way"),
+            Some(("creature you control", ThisWayCause::Tapped))
+        );
+        assert_eq!(split_each_this_way_subject("each wolf"), None);
+        assert_eq!(
+            split_each_this_way_subject("each creature tapped this way you control"),
+            None
+        );
+        assert_eq!(
+            split_each_this_way_subject("each wolf untapped this way"),
+            None
+        );
+        assert_eq!(split_each_this_way_subject("wolf tapped this way"), None);
+    }
+
+    // Negative (c): an untypable this-way population fails CLOSED.
+    #[test]
+    fn each_untypable_this_way_subject_fails_closed() {
+        let effect = super::super::parse_effect(
+            "Each of them tapped this way deals damage equal to its power to target creature",
+        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. }
+                if name.as_str() == RIDER_KEY),
+            "got {effect:?}"
+        );
+    }
+
+    // Negative (e): an off-axis this-way verb keeps BASE's fail-closed — the
+    // splitter returns None ("untapped" is not on the verb axis), and the
+    // generic end-anchored " this way" guard in the None branch catches it.
+    #[test]
+    fn each_off_axis_this_way_verb_fails_closed() {
+        let effect = super::super::parse_effect(
+            "Each Wolf untapped this way deals damage equal to its power to target creature",
+        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. }
+                if name.as_str() == RIDER_KEY),
+            "got {effect:?}"
+        );
+    }
+
+    // Negative (b): an interior (non-terminal) rider never yields tracked sources.
+    #[test]
+    fn interior_tapped_this_way_is_not_tracked_source() {
+        let effect = super::super::parse_effect(
+            "each creature tapped this way you control deals 1 damage to target creature",
+        );
+        assert!(
+            !matches!(
+                &effect,
+                Effect::EachSourceDealsDamage {
+                    sources: TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                }
+            ),
+            "got {effect:?}"
+        );
+    }
+
+    // Negative (a): the random rider still fails closed on a this-way subject.
+    #[test]
+    fn tapped_this_way_random_recipient_still_fails_closed() {
+        let effect = super::super::parse_effect(
+            "Each Wolf tapped this way deals 2 damage to another random creature",
+        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. }
+                if name.as_str() == RIDER_KEY),
+            "got {effect:?}"
+        );
+    }
+
+    // Negative (d): the plain each-source sibling keeps ordinary typed sources.
+    #[test]
+    fn plain_each_source_subject_keeps_typed_sources() {
+        let effect = super::super::parse_effect(
+            "each creature you control deals 1 damage to target creature",
+        );
+        assert!(
+            matches!(
+                &effect,
+                Effect::EachSourceDealsDamage {
+                    sources: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "got {effect:?}"
+        );
     }
 
     // Negative: the targeted own-power team-up shape still routes to

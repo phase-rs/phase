@@ -4160,6 +4160,7 @@ pub(crate) fn handle_unattach_for_cost(
                 total,
                 targets,
                 unit,
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
             });
         }
     }
@@ -14773,6 +14774,7 @@ fn finalize_mana_payment_with_resume(
                 total: x_value,
                 targets,
                 unit,
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
             };
             park_deferred_cost_triggers_if_paused(
                 state,
@@ -15264,6 +15266,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 total: x_value,
                 targets,
                 unit,
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
             };
             park_deferred_cost_triggers_if_paused(
                 state,

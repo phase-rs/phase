@@ -3549,6 +3549,7 @@ mod tests {
             total: 1,
             targets: vec![TargetRef::Object(target)],
             unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
         };
 
         let actions = legal_actions(&state);

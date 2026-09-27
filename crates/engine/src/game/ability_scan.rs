@@ -8876,6 +8876,14 @@ mod tests {
                  (library/graveyard/exile)",
             ),
             (
+                "deal_damage.rs",
+                false,
+                "bounded selection: resolution_division_candidates (CR 608.2d \
+                 resolution-time division) are the \
+                 chain's tracked set (published by an earlier instruction of the same \
+                 resolution) intersected with the battlefield, not a board-scaling mass read",
+            ),
+            (
                 "mana.rs",
                 false,
                 "bounded aggregate: distinct_colors_among_permanents returns <=5 colors, \
