@@ -34,17 +34,10 @@ import {
   canonicalNameMap,
   deckCardNames,
   isCanonicalizableDeck,
+  isNameEntryArray,
+  isObject,
 } from "./canonicalCardNames";
 
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-function isNameEntryArray(v: unknown): boolean {
-  return Array.isArray(v) && v.every((entry) => isObject(entry) && typeof entry.name === "string");
-}
-
-/** `repairParsedDeck` reads these with `?.map`/`?.length`, so a stored `null` is as safe as absent. */
 function isNullableStringArray(v: unknown): boolean {
   return v === undefined || v === null || (Array.isArray(v) && v.every((entry) => typeof entry === "string"));
 }
@@ -53,9 +46,9 @@ function isNullableStringArray(v: unknown): boolean {
  * True when `repairParsedDeck` and `projectSavedDeckSpecialSlots` can read `deck` without
  * throwing: `main`/`sideboard` as arrays of objects with a string `name`, and the optional
  * name-list fields absent, `null`, or an array of strings. Looser than `isCanonicalizableDeck`
- * about `null`, which that guard rejects because `deckCardNames` needs the stricter string-array
- * shape — legacy records written before 5093be87c stored `commander: null`, and the repair here
- * reads it with `?.length`/`?.map`, so it is as safe to migrate as an absent field.
+ * about `null`, which that guard rejects — legacy records written before 5093be87c stored
+ * `commander: null`, and the repair here reads it with `?.length`/`?.map`, so it is as safe to
+ * migrate as an absent field.
  */
 function isRepairableDeckRecord(value: unknown): value is ParsedDeck & Record<string, unknown> {
   if (!isObject(value)) return false;

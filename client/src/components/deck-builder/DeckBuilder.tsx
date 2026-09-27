@@ -19,6 +19,7 @@ import { DeckBuilderToolbar } from "./DeckBuilderToolbar";
 import { DeckBuilderTabBar } from "./DeckBuilderTabBar";
 import { panelId, tabId } from "./deckBuilderTabs";
 import { useDeckBuilder } from "./useDeckBuilder";
+import type { SaveConflictResolution } from "./useDeckBuilder";
 import type { CardHoverInfo } from "../card/CardPreview";
 
 interface DeckBuilderProps {
@@ -200,9 +201,8 @@ export function DeckBuilder({
   // Unsaved-changes guard. beforeunload covers tab close / refresh / browser
   // back; an in-app confirm covers the back button and loading another deck.
   const navigate = useNavigate();
-  const [pendingAction, setPendingAction] = useState<
-    { type: "back" } | { type: "load"; name: string } | null
-  >(null);
+  type PendingAction = { type: "back" } | { type: "load"; name: string };
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
 
   useEffect(() => {
     if (!dirty) return;
@@ -215,7 +215,7 @@ export function DeckBuilder({
   }, [dirty]);
 
   const performAction = useCallback(
-    (action: { type: "back" } | { type: "load"; name: string }) => {
+    (action: PendingAction) => {
       if (action.type === "back") navigate(backPath);
       else handleLoad(action.name);
     },
@@ -245,21 +245,55 @@ export function DeckBuilder({
     };
   }, []);
 
+  // Shared by Save & continue's own button, by a same-name conflict's "Save my version", and by
+  // "Load saved version" when the conflict was raised mid-Save-&-continue: only a positive
+  // outcome ("saved", or "loaded" once the conflict's load actually replaced the editor) for the
+  // SAME pending request may still perform it — either can change while the async work awaited.
+  const continuePendingAfterSave = useCallback(
+    (outcome: SaveConflictResolution | undefined, action: PendingAction) => {
+      if ((outcome !== "saved" && outcome !== "loaded") || pendingActionRef.current !== action) return;
+      setPendingAction(null);
+      performAction(action);
+    },
+    [performAction],
+  );
+
   const confirmSaveThen = useCallback(async () => {
     const action = pendingAction;
     if (!action) return;
     const outcome = await handleSave();
-    // Continue only if this is still the pending request and the editor still holds what was saved: either can change while the save waits.
-    if (outcome !== "saved" || pendingActionRef.current !== action) return;
-    setPendingAction(null);
-    performAction(action);
-  }, [pendingAction, handleSave, performAction]);
+    continuePendingAfterSave(outcome, action);
+  }, [pendingAction, handleSave, continuePendingAfterSave]);
 
   const confirmDiscardThen = useCallback(() => {
     const action = pendingAction;
     setPendingAction(null);
     if (action) performAction(action);
   }, [pendingAction, performAction]);
+
+  // "Save my version" resolving a conflict raised mid-Save-&-continue must still perform the
+  // pending request on success — otherwise the save lands but the unsaved-changes dialog comes
+  // back over it, asking to save changes that are already saved. A plain Save's "Save my version"
+  // (no pendingAction) leaves continuePendingAfterSave a no-op, unchanged from before.
+  const confirmSaveConflictKeepMine = useCallback(() => {
+    const action = pendingAction;
+    void resolveSaveConflict("keepMine").then((outcome) => {
+      if (action) continuePendingAfterSave(outcome, action);
+    });
+  }, [pendingAction, resolveSaveConflict, continuePendingAfterSave]);
+
+  // "Load saved version" resolving a conflict raised mid-Save-&-continue is the user explicitly
+  // discarding their edits (the unsaved dialog's own Discard choice), so it must still perform
+  // the pending request once the load actually replaces the editor. Gated on resolveSaveConflict
+  // returning "loaded" rather than firing unconditionally: a newer Load/edit racing the load
+  // makes it bail, and continuePendingAfterSave's pendingActionRef check leaves that case alone. A
+  // plain Save's conflict (no pendingAction) leaves continuePendingAfterSave a no-op, unchanged.
+  const confirmSaveConflictLoad = useCallback(() => {
+    const action = pendingAction;
+    void resolveSaveConflict("load").then((outcome) => {
+      if (action) continuePendingAfterSave(outcome, action);
+    });
+  }, [pendingAction, resolveSaveConflict, continuePendingAfterSave]);
 
   // Phone: tab bar picks one surface. md+: both columns show.
   const mainVisible = activeSurface === "deck" ? "flex" : "hidden md:flex";
@@ -598,7 +632,7 @@ export function DeckBuilder({
               {saveConflict.snapshot.raw !== null && (
                 <button
                   type="button"
-                  onClick={() => void resolveSaveConflict("load")}
+                  onClick={confirmSaveConflictLoad}
                   className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
                 >
                   {t("saveConflict.loadSaved")}
@@ -606,7 +640,7 @@ export function DeckBuilder({
               )}
               <button
                 type="button"
-                onClick={() => void resolveSaveConflict("keepMine")}
+                onClick={confirmSaveConflictKeepMine}
                 className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-sm text-red-200 hover:bg-red-500/20"
               >
                 {t("saveConflict.saveMine")}

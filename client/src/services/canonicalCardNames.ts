@@ -1,11 +1,11 @@
 import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { deduplicateEntries, type DeckEntry, type ParsedDeck } from "./deckParser";
 
-function isObject(v: unknown): v is Record<string, unknown> {
+export function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function isNameEntryArray(v: unknown): boolean {
+export function isNameEntryArray(v: unknown): boolean {
   return Array.isArray(v) && v.every((entry) => isObject(entry) && typeof entry.name === "string");
 }
 

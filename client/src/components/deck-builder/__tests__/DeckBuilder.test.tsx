@@ -2295,6 +2295,48 @@ describe("DeckBuilder", () => {
       expect(await screen.findByRole("dialog", { name: "Unsaved changes" })).toBeInTheDocument();
     });
 
+    it("Save my version resolving Save & continue's own conflict continues and shows no unsaved dialog", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", otherTab));
+
+      await user.click(screen.getByRole("button", { name: /Menu/ }));
+      await user.click(await screen.findByRole("button", { name: "Save & continue" }));
+      await screen.findByRole("dialog", { name: CONFLICT });
+      expect(navigateMock).not.toHaveBeenCalled();
+
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
+      await vi.waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/"));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Unsaved changes" })).toBeNull());
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "P") ?? "{}");
+      expect(stored.main).toEqual([{ name: "Lightning Bolt", count: 3 }]);
+    });
+
+    it("Load saved version resolving Save & continue's own conflict continues and shows no unsaved dialog", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", otherTab));
+
+      await user.click(screen.getByRole("button", { name: /Menu/ }));
+      await user.click(await screen.findByRole("button", { name: "Save & continue" }));
+      await screen.findByRole("dialog", { name: CONFLICT });
+      expect(navigateMock).not.toHaveBeenCalled();
+
+      // Loading the saved version is the user discarding their edits, so the pending Back
+      // navigation from Menu (queued behind the failed same-name save) must still run.
+      await user.click(screen.getByRole("button", { name: "Load saved version" }));
+      await vi.waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/"));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Unsaved changes" })).toBeNull());
+      expect(await screen.findByText("60 Mountain")).toBeInTheDocument();
+      expect(screen.queryByText("3 Lightning Bolt")).toBeNull();
+    });
+
     // A write that lands after the refusal but while the dialog is still open must not be lost:
     // Save my version re-bases onto the bytes the refusal saw, not a fresh read taken at the click.
     it("a write that lands while the conflict dialog is open survives Save my version, which is refused again", async () => {

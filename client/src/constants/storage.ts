@@ -286,7 +286,7 @@ export interface SavedDeckSnapshot {
   readonly raw: string | null;
 }
 
-/** Read the deck saved under `deckName` before waiting for the library lock; pass the result into the transaction. */
+/** Read the deck saved under `deckName`; pass the result into the transaction. */
 export function captureSavedDeck(deckName: string): SavedDeckSnapshot {
   return { name: deckName, raw: localStorage.getItem(STORAGE_KEY_PREFIX + deckName) };
 }
