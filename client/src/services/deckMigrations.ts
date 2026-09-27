@@ -47,8 +47,7 @@ function isNullableStringArray(v: unknown): boolean {
  * throwing: `main`/`sideboard` as arrays of objects with a string `name`, and the optional
  * name-list fields absent, `null`, or an array of strings. Looser than `isCanonicalizableDeck`
  * about `null`, which that guard rejects — legacy records written before 5093be87c stored
- * `commander: null`, and the repair here reads it with `?.length`/`?.map`, so it is as safe to
- * migrate as an absent field.
+ * `commander: null`, so it is as safe to migrate as an absent field.
  */
 function isRepairableDeckRecord(value: unknown): value is ParsedDeck & Record<string, unknown> {
   if (!isObject(value)) return false;

@@ -55,7 +55,7 @@ export type SaveOutcome = "refused" | "saved" | "saved-then-changed";
 
 /** Outcome of resolving a save conflict: a `SaveOutcome` for "keepMine", `"loaded"` once a
  *  "load" choice actually replaced the editor with the saved deck, or `undefined` for "dismiss"
- *  or a "load"/"keepMine" that bailed (a newer Load/edit won the race). */
+ *  or a "load" that bailed (a newer Load/edit won the race). */
 export type SaveConflictResolution = SaveOutcome | "loaded";
 
 /** A same-name Save refused because `snapshot.name` no longer held what this editor last loaded
@@ -684,7 +684,7 @@ export function useDeckBuilder({
 
   // Returns whether the load actually replaced the editor. Callers that only fire-and-forget a
   // Load ignore it; resolveSaveConflict's "load" case uses it to tell a genuine load from a bail
-  // (a newer Load/edit won the race) so it knows whether to continue a pending action.
+  // so it knows whether to continue a pending action.
   const handleLoad = useCallback(async (name: string): Promise<boolean> => {
     // Captured before the resolveCommander await below: a newer Load/Clone (reloaded) or any edit
     // that marks the deck dirty, including an Import (edited), must win over this Load.

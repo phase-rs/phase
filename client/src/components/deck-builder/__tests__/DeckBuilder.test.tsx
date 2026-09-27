@@ -2337,6 +2337,66 @@ describe("DeckBuilder", () => {
       expect(screen.queryByText("3 Lightning Bolt")).toBeNull();
     });
 
+    it("Save my version resolving Save & continue's own conflict, refused again by a third write, does not navigate and keeps the edit", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", otherTab));
+
+      await user.click(screen.getByRole("button", { name: /Menu/ }));
+      await user.click(await screen.findByRole("button", { name: "Save & continue" }));
+      await screen.findByRole("dialog", { name: CONFLICT });
+      expect(navigateMock).not.toHaveBeenCalled();
+
+      const thirdWrite = JSON.stringify({ main: [{ name: "Island", count: 40 }], sideboard: [] });
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", thirdWrite));
+
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
+      const dialog = await screen.findByRole("dialog", { name: CONFLICT });
+      expect(dialog).toHaveTextContent('"P" was changed somewhere else');
+      expect(navigateMock).not.toHaveBeenCalled();
+      expect(screen.getByText("3 Lightning Bolt")).toBeInTheDocument();
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(thirdWrite);
+    });
+
+    it("Load saved version resolving Save & continue's own conflict, when a further edit wins the race, does not navigate and keeps that edit", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", otherTab));
+
+      await user.click(screen.getByRole("button", { name: /Menu/ }));
+      await user.click(await screen.findByRole("button", { name: "Save & continue" }));
+      await screen.findByRole("dialog", { name: CONFLICT });
+      expect(navigateMock).not.toHaveBeenCalled();
+
+      let resolveLoad!: (deck: unknown) => void;
+      const held = new Promise((resolve) => {
+        resolveLoad = resolve;
+      });
+      vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
+
+      await user.click(screen.getByRole("button", { name: "Load saved version" }));
+      await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalled());
+
+      // An edit lands while resolveCommander is still pending: it must win the race and keep
+      // "Load saved version" from replacing the editor or continuing the pending navigation.
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+
+      await act(async () => {
+        resolveLoad({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(navigateMock).not.toHaveBeenCalled();
+      expect(screen.getByText("2 Lightning Bolt")).toBeInTheDocument();
+    });
+
     // A write that lands after the refusal but while the dialog is still open must not be lost:
     // Save my version re-bases onto the bytes the refusal saw, not a fresh read taken at the click.
     it("a write that lands while the conflict dialog is open survives Save my version, which is refused again", async () => {

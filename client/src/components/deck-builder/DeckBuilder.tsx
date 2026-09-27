@@ -246,9 +246,9 @@ export function DeckBuilder({
   }, []);
 
   // Shared by Save & continue's own button, by a same-name conflict's "Save my version", and by
-  // "Load saved version" when the conflict was raised mid-Save-&-continue: only a positive
-  // outcome ("saved", or "loaded" once the conflict's load actually replaced the editor) for the
-  // SAME pending request may still perform it — either can change while the async work awaited.
+  // "Load saved version": only a positive outcome ("saved", or "loaded" once the conflict's load
+  // actually replaced the editor) for the SAME pending request may still perform it — either can
+  // change while the async work awaited.
   const continuePendingAfterSave = useCallback(
     (outcome: SaveConflictResolution | undefined, action: PendingAction) => {
       if ((outcome !== "saved" && outcome !== "loaded") || pendingActionRef.current !== action) return;
@@ -273,8 +273,7 @@ export function DeckBuilder({
 
   // "Save my version" resolving a conflict raised mid-Save-&-continue must still perform the
   // pending request on success — otherwise the save lands but the unsaved-changes dialog comes
-  // back over it, asking to save changes that are already saved. A plain Save's "Save my version"
-  // (no pendingAction) leaves continuePendingAfterSave a no-op, unchanged from before.
+  // back over it, asking to save changes that are already saved.
   const confirmSaveConflictKeepMine = useCallback(() => {
     const action = pendingAction;
     void resolveSaveConflict("keepMine").then((outcome) => {
@@ -286,8 +285,7 @@ export function DeckBuilder({
   // discarding their edits (the unsaved dialog's own Discard choice), so it must still perform
   // the pending request once the load actually replaces the editor. Gated on resolveSaveConflict
   // returning "loaded" rather than firing unconditionally: a newer Load/edit racing the load
-  // makes it bail, and continuePendingAfterSave's pendingActionRef check leaves that case alone. A
-  // plain Save's conflict (no pendingAction) leaves continuePendingAfterSave a no-op, unchanged.
+  // makes it bail.
   const confirmSaveConflictLoad = useCallback(() => {
     const action = pendingAction;
     void resolveSaveConflict("load").then((outcome) => {
