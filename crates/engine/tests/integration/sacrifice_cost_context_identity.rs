@@ -1,7 +1,5 @@
 //! Synthetic typed selected sacrifice cost regressions.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
-
 use engine::ai_support::legal_actions_full;
 use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -582,7 +580,7 @@ fn public_zero_and_positive_count_bounds_preserve_selected_payments() {
 }
 
 #[test]
-fn original_x_mana_sacrifice_guard_still_refuses_the_unsupported_route() {
+fn x_mana_sacrifice_keeps_payer_after_source_exits() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let one = AbilityCost::Sacrifice(SacrificeCost::count(
@@ -641,24 +639,98 @@ fn original_x_mana_sacrifice_guard_still_refuses_the_unsupported_route() {
     ));
     assert!(root.activation_cost.is_some());
     assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        runner.act(GameAction::ChooseX { value: 1 })
-    }));
-    match result {
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| payload.downcast_ref::<&str>().copied());
-            assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"));
-        }
-        Ok(Err(engine::game::engine::EngineError::ActionNotAllowed(message))) => {
-            assert_eq!(message, "non-self sacrifice/exile cost unhandled");
-        }
-        Ok(other) => panic!("unsupported X sacrifice suffix unexpectedly proceeded: {other:?}"),
-    }
+    runner.act(GameAction::ChooseX { value: 1 }).unwrap();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        min_count,
+        count,
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("first X sacrifice prompt: {:?}", runner.state().waiting_for);
+    };
+    assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+    assert!(choices.contains(&source) && choices.contains(&other));
+    assert!(matches!(
+        spell.activation_residual,
+        ActivationResidual::XMana
+    ));
+    assert_eq!(spell.ability.chosen_x, Some(1));
+    assert_eq!(
+        (spell.object_id, spell.activation_ability_index),
+        (source, Some(0))
+    );
+    assert_eq!(
+        (spell.ability.source_id, spell.ability.controller),
+        (source, P0)
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![source],
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        min_count,
+        count,
+        resume: CostResume::Spell { spell },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "second X sacrifice prompt: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+    assert_eq!(choices, &vec![other]);
+    assert!(matches!(
+        spell.activation_residual,
+        ActivationResidual::XMana
+    ));
+    assert_eq!(spell.ability.chosen_x, Some(1));
+    assert_eq!(
+        (spell.object_id, spell.activation_ability_index),
+        (source, Some(0))
+    );
+    assert_eq!(
+        (spell.ability.source_id, spell.ability.controller),
+        (source, P0)
+    );
+    assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&source].owner, P1);
+    assert!(runner.state().players[1].graveyard.contains(&source));
+    runner
+        .act(GameAction::SelectCards { cards: vec![other] })
+        .unwrap();
+    let entry = runner.state().stack.back().unwrap();
+    assert_eq!((entry.source_id, entry.controller), (source, P0));
+    let ability = entry.ability().unwrap();
+    assert_eq!(
+        (ability.source_id, ability.controller, ability.ability_index),
+        (source, P0, Some(0))
+    );
+    assert_eq!(ability.chosen_x, Some(1));
+    let paid: Vec<_> = ability
+        .cost_paid_objects
+        .iter()
+        .map(|record| record.snapshot().unwrap().object_id)
+        .collect();
+    assert_eq!(paid, vec![source, other]);
+    assert!(runner.state().players[0].graveyard.contains(&other));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+    runner.resolve_top();
+    assert_eq!(runner.state().players[0].life, 21);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
-
 #[test]
 fn distinct_sources_and_ability_indices_keep_separate_selected_payments() {
     let mut scenario = GameScenario::new();
