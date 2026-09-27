@@ -139,8 +139,8 @@ fn the_swarmweaver_delirium_gates_insects_and_spiders_by_graveyard_types() {
             .add_creature(P1, "Opp Insect", 1, 1)
             .with_subtypes(vec!["Insect"])
             .id();
-        // CR 207.2c + CR 205.2: three unambiguous card types stay below the
-        // Delirium threshold; a fourth (a creature card) crosses it.
+        // CR 205.2a: land, instant, sorcery, and creature are distinct card
+        // types. The Swarmweaver's Oracle text requires four or more.
         scenario.add_land_to_graveyard(P0, "Graveyard Land");
         scenario.add_spell_to_graveyard(P0, "Graveyard Instant", true);
         scenario.add_spell_to_graveyard(P0, "Graveyard Sorcery", false);
