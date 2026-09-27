@@ -49,8 +49,8 @@ impl GapClass {
     }
 }
 
-/// Counts and card lists for one category or family. Each count is the length of the
-/// list beside it.
+/// Counts and card lists for one category or family. `cards_affected` and `fixes_alone`
+/// are the lengths of the lists beside them; `count` counts gaps, not cards.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GapTally {
     /// Gaps in this category or family. A gap with several diagnoses here counts once.
@@ -347,8 +347,8 @@ mod tests {
         analysis.categories.keys().cloned().collect()
     }
 
-    /// The expected tally: every count is its list's length, so a count and its list
-    /// are asserted together.
+    /// The expected tally. `cards_affected` and `fixes_alone` are taken from their lists'
+    /// lengths, so each card count and its list are asserted together.
     fn tally(count: usize, affected: &[&str], alone: &[&str]) -> GapTally {
         let owned = |cards: &[&str]| {
             cards

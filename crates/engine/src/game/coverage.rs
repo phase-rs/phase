@@ -386,9 +386,8 @@ impl ResolverFeatureFamily {
     /// is not under any family.
     ///
     /// A family whose classifier has no `Unhandled` arm never produces a `ResolverFeature`
-    /// gap, so it never reaches this decode from a coverage gap. When this was written that
-    /// held for `Structural` and `Condition`; it is a snapshot, and a new `Unhandled` arm
-    /// changes it.
+    /// gap, so it never reaches this decode from a coverage gap. Which families that
+    /// describes changes whenever a classifier gains or loses an `Unhandled` arm.
     pub fn from_feature_key(key: &str) -> Option<(Self, &str)> {
         Self::iter().find_map(|family| {
             key.strip_prefix(family.tag())?
