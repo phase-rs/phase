@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::bracket_estimate::estimate_bracket;
 use engine::game::deck_loading::{DeckEntry, PlayerDeckPayload};
 use engine::game::ComboDeclaration;
@@ -57,7 +57,9 @@ fn resolve_entries(
 /// Returns Err listing unresolvable card names if any lookup fails.
 pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayload, String> {
     let list = engine::game::deck_loading::PlayerDeckList::from(deck);
-    let estimated_bracket_tier = estimate_bracket(&list, db).map(|estimate| estimate.tier);
+    // No combo table is loaded here, so the estimated tier the AI acts on excludes the combo floors — follow-up: load the table on this path.
+    let estimated_bracket_tier =
+        estimate_bracket(&list, db, &ComboTable::default()).map(|estimate| estimate.tier);
     let (main_deck, mut missing) = resolve_entries(db, &deck.main_deck, "main");
     let (sideboard, mut sideboard_missing) = resolve_entries(db, &deck.sideboard, "sideboard");
     missing.append(&mut sideboard_missing);

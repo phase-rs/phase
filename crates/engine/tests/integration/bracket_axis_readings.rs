@@ -1,6 +1,6 @@
 //! Pins the legacy bracket-signal wire shape through database loading and estimation.
 
-use engine::database::{BracketLists, CardDatabase};
+use engine::database::{BracketLists, CardDatabase, ComboTable};
 use engine::game::bracket_estimate::{
     estimate_bracket, BracketAxis, BracketCheckOutcome, CommanderBracketTier, EstimateConfidence,
 };
@@ -91,7 +91,7 @@ fn estimate_over_a_legacy_export_reports_an_axis_keyed_reading() {
         ..Default::default()
     };
 
-    let estimate = estimate_bracket(&deck, &db).unwrap();
+    let estimate = estimate_bracket(&deck, &db, &ComboTable::default()).unwrap();
     assert_eq!(estimate.tier, CommanderBracketTier::Upgraded);
     assert_eq!(estimate.axes[&BracketAxis::GameChangers].count, 1);
     assert_eq!(

@@ -1,10 +1,11 @@
 //! Commander bracket estimator. Profiles a Commander deck along four
 //! card-derived axes (Game Changers, Mass Land Denial, Extra Turns, Efficient
-//! Tutors), folds in the deck owner's two-card-combo declaration, and returns a
-//! `BracketEstimate` placing the deck in bracket B2–B4.
+//! Tutors), folds in table-backed combo evidence and the deck owner's
+//! two-card-combo declaration, and returns a `BracketEstimate` placing the deck
+//! in bracket B2–B4.
 //!
-//! Pure: no game state, no I/O, no randomness. Same `(deck, db)` →
-//! identical `BracketEstimate`.
+//! Pure: no game state, no I/O, no randomness. Same `(deck, db, combo_table)`
+//! → identical `BracketEstimate`.
 //!
 //! Bracket policy is **not** part of the Comprehensive Rules — it is WotC's
 //! Commander Format Panel guidance. No Comprehensive Rules annotations apply.
@@ -13,7 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::database::CardDatabase;
+use crate::database::{
+    combo_cardinality, detect_combos, CardDatabase, ComboCardinality, ComboCoverage, ComboEntry,
+    ComboMatch, ComboProvenance, ComboRelevance, ComboTable, EarlyComboReading, SignalSource,
+};
 use crate::game::deck_loading::PlayerDeckList;
 use crate::types::ability::Comparator;
 
@@ -131,7 +135,8 @@ impl Default for EffectiveBracketTier {
 /// Brackets are a self-declaration system and this barometer is a statement about
 /// deck-building INTENT ("no *intentional* two-card infinite combos" — Introducing
 /// Commander Brackets Beta, Bracket 1 and Bracket 2 Deck Building; archived copy read
-/// 2026-09-12), so no card list can answer it and only the deck's owner can.
+/// 2026-09-12). This declaration therefore remains the owner's answer even when
+/// a measured combo table independently finds a matching line in the card list.
 ///
 /// Three states, not two: an UNANSWERED barometer is not a declared absence, and
 /// collapsing them would let a deck nobody asked about read as a clean one.
@@ -229,7 +234,7 @@ pub enum Barometer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BarometerAuthority {
-    /// Read from the deck's cards against a dated, curated list.
+    /// Read from the deck's cards against a dated curated list or combo table.
     Engine,
     /// Stated by the deck's owner. The engine cannot verify it.
     DeckOwner,
@@ -270,6 +275,10 @@ pub struct AxisReading {
     pub count: u8,
     /// Cards that counted toward this axis, in deck order (commander first).
     pub contributing: Vec<String>,
+    /// Pair-sourced contributions, kept separate so display layers do not have
+    /// to infer provenance from the flattened card-name evidence.
+    #[serde(default)]
+    pub combo_pairs: Vec<[String; 2]>,
 }
 
 /// Where a floor rule's official line was read from. A `&'static str` struct,
@@ -310,6 +319,14 @@ const SRC_INTRO: FloorRuleSource = FloorRuleSource {
     document: "Introducing Commander Brackets Beta",
     published: "2025-02-11",
     url: "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+};
+
+/// The canonical article path follows the archive name recorded by plan 61-08.
+/// URL needs manual verification.
+pub const SRC_UPDATE_2025_10_21: FloorRuleSource = FloorRuleSource {
+    document: "Commander Brackets Beta Update",
+    published: "2025-10-21",
+    url: "https://magic.wizards.com/en/news/announcements/commander-brackets-beta-update-october-21-2025",
 };
 
 const FLOOR_RULES: &[FloorRule] = &[
@@ -363,6 +380,61 @@ const FLOOR_RULES: &[FloorRule] = &[
     // cards the Game Changer rows already price.
 ];
 
+/// The typed predicate carried by one combo-specific floor row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComboFloorTrigger {
+    StandaloneTwoCard,
+    EarlyTwoCard {
+        reading: EarlyComboReading,
+        assemble_ceiling: u16,
+    },
+}
+
+/// One official combo-bracket line encoded as data. This is separate from
+/// [`FloorRule`] because a pair predicate cannot be represented by an axis
+/// count/comparator/threshold row.
+#[derive(Debug, Clone, Copy)]
+pub struct ComboFloorRule {
+    pub trigger: ComboFloorTrigger,
+    pub floor: CommanderBracketTier,
+    pub official_line: &'static str,
+    pub source: FloorRuleSource,
+}
+
+/// Derived from the official sentence, not from a runtime tuning control: B3
+/// expects "at least six turns", and one land per turn is the format's
+/// baseline, so six total mana is what a B3 deck expects to have available
+/// inside the window the rule names. This states the derivation so a reviewer
+/// can dispute the derivation rather than the number.
+pub const EARLY_ASSEMBLE_CEILING: u16 = 6;
+
+/// B1: "No intentional two-card infinite combos, mass land denial, or
+/// extra-turn cards." B2: "No intentional two-card infinite combos or mass
+/// land denial."
+const STANDALONE_TWO_CARD_FLOOR: ComboFloorRule = ComboFloorRule {
+    trigger: ComboFloorTrigger::StandaloneTwoCard,
+    floor: CommanderBracketTier::Upgraded,
+    official_line: "No intentional two-card infinite combos, mass land denial, or extra-turn cards. / No intentional two-card infinite combos or mass land denial.",
+    source: SRC_INTRO,
+};
+
+/// B3: "No intentional early-game two-card infinite combos." Experience:
+/// "two-card infinite combos that can happen cheaply and in about the first
+/// six or so turns of the game". The later restatement is "not ones that tend
+/// to happen in the first six turns" ([`SRC_UPDATE_2025_10_21`]).
+const EARLY_TWO_CARD_FLOOR: ComboFloorRule = ComboFloorRule {
+    trigger: ComboFloorTrigger::EarlyTwoCard {
+        reading: EarlyComboReading::IncludingArguable,
+        assemble_ceiling: EARLY_ASSEMBLE_CEILING,
+    },
+    floor: CommanderBracketTier::Optimized,
+    official_line: "No intentional early-game two-card infinite combos. / two-card infinite combos that can happen cheaply and in about the first six or so turns of the game",
+    source: SRC_INTRO,
+};
+
+const COMBO_FLOOR_RULES: &[ComboFloorRule] = &[STANDALONE_TWO_CARD_FLOOR, EARLY_TWO_CARD_FLOOR];
+
 /// Where the estimator starts before any rule fires.
 ///
 /// NOT Exhibition. Bracket 1 is defined by theme, not by power: "A deck is not
@@ -407,6 +479,20 @@ pub struct BracketCheck {
     pub source_url: String,
     /// Card names on this axis, in deck order. The evidence for `observed`.
     pub evidence: Vec<String>,
+}
+
+/// One evaluated [`ComboFloorRule`]. Kept separate from [`BracketCheck`] so
+/// the axis-count rule wire shape and ratcheted corpus rows remain unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComboCheck {
+    pub trigger: ComboFloorTrigger,
+    pub floor: CommanderBracketTier,
+    pub outcome: BracketCheckOutcome,
+    pub official_line: String,
+    pub source_document: String,
+    pub source_published: String,
+    pub source_url: String,
+    pub evidence: Vec<ComboMatch>,
 }
 
 /// How much of the deck the estimator could actually read.
@@ -458,6 +544,19 @@ pub struct BracketEstimate {
     /// barometer" is expressed in the type.
     #[serde(default)]
     pub barometers: BTreeMap<Barometer, BarometerAuthority>,
+    /// Every table match, including matches that do not fire a floor.
+    #[serde(default)]
+    pub combos: Vec<ComboMatch>,
+    /// One row per combo floor when combo coverage was measured. Unmeasured
+    /// tables produce no rows rather than misleading `Clear` outcomes.
+    #[serde(default)]
+    pub combo_checks: Vec<ComboCheck>,
+    /// Whether a combo artifact was available for this estimate.
+    #[serde(default)]
+    pub combo_coverage: ComboCoverage,
+    /// Snapshot attribution, present once per estimate rather than per match.
+    #[serde(default)]
+    pub combo_provenance: Option<ComboProvenance>,
 }
 
 /// How a player's declared bracket relates to the floor the deck's contents
@@ -492,10 +591,13 @@ pub enum DeclarationVerdict {
     /// here, so there is exactly one name alphabet on the wire. `raised_by`
     /// names card-derived axes only and is empty when the floor rests on the
     /// owner's own combo declaration (the panel reads `combo_barometer.floor`
-    /// for that case).
+    /// for that case). `raised_by_combo_floor` identifies the table-backed
+    /// combo row when one established the estimate's tier.
     BelowFloor {
         floor: CommanderBracketTier,
         raised_by: Vec<BracketAxis>,
+        #[serde(default)]
+        raised_by_combo_floor: Option<ComboFloorTrigger>,
     },
 }
 
@@ -529,6 +631,15 @@ pub fn reconcile(declared: CommanderBracketTier, estimate: &BracketEstimate) -> 
     DeclarationVerdict::BelowFloor {
         floor: estimate.tier,
         raised_by: floor_raising_axes(estimate),
+        raised_by_combo_floor: estimate
+            .combo_checks
+            .iter()
+            .rev()
+            .find(|check| {
+                check.outcome == BracketCheckOutcome::Fired
+                    && check.floor.as_u8() == estimate.tier.as_u8()
+            })
+            .map(|check| check.trigger),
     }
 }
 
@@ -546,7 +657,11 @@ fn floor_raising_axes(estimate: &BracketEstimate) -> Vec<BracketAxis> {
 
 /// Profiles the deck's cards and folds in the owner's combo declaration.
 /// Returns `None` when the deck has no commander.
-pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<BracketEstimate> {
+pub fn estimate_bracket(
+    deck: &PlayerDeckList,
+    db: &CardDatabase,
+    combo_table: &ComboTable,
+) -> Option<BracketEstimate> {
     use strum::IntoEnumIterator;
 
     if deck.commander.is_empty() {
@@ -609,13 +724,22 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
         }
     }
 
+    let combos = detect_combos(deck, combo_table);
+    contribute_combo_mass_land_denial(deck, &combos, &mut axes);
+
     let unresolved: Vec<String> = unresolved.into_iter().collect();
     let confidence = if unresolved.is_empty() {
         EstimateConfidence::Complete
     } else {
         EstimateConfidence::Partial
     };
-    let (tier, checks) = decide_tier(&axes);
+    let (mut tier, checks) = decide_tier(&axes);
+    let combo_checks = evaluate_combo_floors(deck, combo_table, &combos);
+    for check in &combo_checks {
+        if check.outcome == BracketCheckOutcome::Fired && check.floor.as_u8() > tier.as_u8() {
+            tier = check.floor;
+        }
+    }
     let combo_floor = combo_declaration_floor(*combo_declaration);
     // The published combo lines are floors like any other; the resolved tier is the
     // highest floor across every checkpoint. Ordering goes through `as_u8()` —
@@ -630,11 +754,14 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
         (Barometer::MassLandDenial, BarometerAuthority::Engine),
         (
             Barometer::TwoCardCombos,
-            match combo_declaration {
-                ComboDeclaration::Undeclared => BarometerAuthority::Unanswered,
-                ComboDeclaration::NoneIntended | ComboDeclaration::Intended { .. } => {
-                    BarometerAuthority::DeckOwner
-                }
+            match combo_table.coverage() {
+                ComboCoverage::Measured => BarometerAuthority::Engine,
+                ComboCoverage::Unmeasured => match combo_declaration {
+                    ComboDeclaration::Undeclared => BarometerAuthority::Unanswered,
+                    ComboDeclaration::NoneIntended | ComboDeclaration::Intended { .. } => {
+                        BarometerAuthority::DeckOwner
+                    }
+                },
             },
         ),
     ]);
@@ -656,6 +783,10 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
             floor: combo_floor,
         },
         barometers,
+        combos,
+        combo_checks,
+        combo_coverage: combo_table.coverage(),
+        combo_provenance: combo_table.provenance().cloned(),
     })
 }
 
@@ -664,12 +795,176 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
 pub fn estimate_bracket_for_request(
     request: &BracketEstimateRequest,
     db: &CardDatabase,
+    combos: &ComboTable,
 ) -> Option<BracketEstimate> {
-    let mut estimate = estimate_bracket(&request.deck, db)?;
+    let mut estimate = estimate_bracket(&request.deck, db, combos)?;
     estimate.declaration = request
         .declared_tier
         .map(|declared| reconcile(declared, &estimate));
     Some(estimate)
+}
+
+/// Floor A uses its own fixed cardinality reading. It intentionally does not
+/// share a helper with the early-combo floor.
+fn is_standalone_two_card(m: &ComboMatch) -> bool {
+    m.relevance == ComboRelevance::Standalone
+        && matches!(
+            m.cardinality,
+            ComboCardinality::DefinitelyTwoCard | ComboCardinality::ArguablyTwoCard
+        )
+}
+
+/// Floor B applies the reading and cost ceiling encoded on its data row. It
+/// intentionally does not share a helper with the standalone-combo floor.
+fn is_early_two_card(m: &ComboMatch, reading: EarlyComboReading, ceiling: u16) -> bool {
+    m.relevance == ComboRelevance::Standalone
+        && reading.accepts(m.cardinality)
+        && m.assemble_cost <= ceiling
+}
+
+fn combo_floor_matches(trigger: ComboFloorTrigger, combo: &ComboMatch) -> bool {
+    match trigger {
+        ComboFloorTrigger::StandaloneTwoCard => is_standalone_two_card(combo),
+        ComboFloorTrigger::EarlyTwoCard {
+            reading,
+            assemble_ceiling,
+        } => is_early_two_card(combo, reading, assemble_ceiling),
+    }
+}
+
+fn match_from_entry(entry: &ComboEntry, cardinality: ComboCardinality) -> ComboMatch {
+    ComboMatch {
+        pieces: entry.pieces.clone(),
+        relevance: entry.relevance,
+        cardinality,
+        assemble_cost: entry.assemble_cost,
+        popularity: entry.popularity,
+        outcomes: entry.outcomes.clone(),
+        axes: entry.axes.clone(),
+        source: SignalSource::ComboPair,
+    }
+}
+
+/// Evaluates both combo rows while walking table entries exactly once for the
+/// clear-row lookahead.
+fn evaluate_combo_floors(
+    deck: &PlayerDeckList,
+    table: &ComboTable,
+    detected: &[ComboMatch],
+) -> Vec<ComboCheck> {
+    match table.coverage() {
+        ComboCoverage::Unmeasured => return Vec::new(),
+        ComboCoverage::Measured => {}
+    }
+
+    let commanders: BTreeSet<String> = deck
+        .commander
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect();
+    let deck_keys: BTreeSet<String> = deck
+        .commander
+        .iter()
+        .chain(&deck.main_deck)
+        .chain(&deck.companion)
+        .chain(&deck.signature_spell)
+        .map(|name| name.to_lowercase())
+        .collect();
+    let mut qualifying_entry = vec![false; COMBO_FLOOR_RULES.len()];
+    let mut one_piece_present = vec![false; COMBO_FLOOR_RULES.len()];
+
+    for entry in table.entries() {
+        let combo = match_from_entry(entry, combo_cardinality(entry, &commanders));
+        let pieces_present = entry
+            .pieces
+            .iter()
+            .filter(|piece| deck_keys.contains(&piece.key))
+            .count();
+        for (index, rule) in COMBO_FLOOR_RULES.iter().enumerate() {
+            if combo_floor_matches(rule.trigger, &combo) {
+                qualifying_entry[index] = true;
+                one_piece_present[index] |= pieces_present == 1;
+            }
+        }
+    }
+
+    COMBO_FLOOR_RULES
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| {
+            let evidence: Vec<ComboMatch> = detected
+                .iter()
+                .filter(|combo| combo_floor_matches(rule.trigger, combo))
+                .cloned()
+                .collect();
+            let outcome = if evidence.is_empty() {
+                BracketCheckOutcome::Clear {
+                    cards_until_fired: if one_piece_present[index] {
+                        Some(1)
+                    } else if qualifying_entry[index] {
+                        Some(2)
+                    } else {
+                        None
+                    },
+                }
+            } else {
+                BracketCheckOutcome::Fired
+            };
+            ComboCheck {
+                trigger: rule.trigger,
+                floor: rule.floor,
+                outcome,
+                official_line: rule.official_line.to_owned(),
+                source_document: rule.source.document.to_owned(),
+                source_published: rule.source.published.to_owned(),
+                source_url: rule.source.url.to_owned(),
+                evidence,
+            }
+        })
+        .collect()
+}
+
+fn contribute_combo_mass_land_denial(
+    deck: &PlayerDeckList,
+    combos: &[ComboMatch],
+    axes: &mut BTreeMap<BracketAxis, AxisReading>,
+) {
+    let relevant: Vec<&ComboMatch> = combos
+        .iter()
+        .filter(|combo| combo.axes.contains(&BracketAxis::MassLandDenial))
+        .collect();
+    let reading = axes.entry(BracketAxis::MassLandDenial).or_default();
+    reading.combo_pairs.extend(relevant.iter().map(|combo| {
+        [
+            combo.pieces[0].display.clone(),
+            combo.pieces[1].display.clone(),
+        ]
+    }));
+
+    for deck_name in deck
+        .commander
+        .iter()
+        .chain(&deck.main_deck)
+        .chain(&deck.companion)
+        .chain(&deck.signature_spell)
+    {
+        let Some(piece) = relevant
+            .iter()
+            .flat_map(|combo| combo.pieces.iter())
+            .find(|piece| piece.key == deck_name.to_lowercase())
+        else {
+            continue;
+        };
+        if reading
+            .contributing
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&piece.display))
+        {
+            continue;
+        }
+        reading.count = reading.count.saturating_add(1);
+        reading.contributing.push(piece.display.clone());
+    }
 }
 
 /// Smallest `d >= 0` that makes the rule fire, or `None` if additions cannot.
@@ -865,7 +1160,7 @@ mod tests {
             },
             ..deck(vec!["Cmdr"], vec!["Forest"])
         };
-        let estimate = estimate_bracket(&d, &db_with_signals(&[])).unwrap();
+        let estimate = estimate_bracket(&d, &db_with_signals(&[]), &ComboTable::default()).unwrap();
 
         assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
         assert_eq!(
@@ -887,7 +1182,7 @@ mod tests {
             combo_declaration: ComboDeclaration::Intended { window: None },
             ..deck(vec!["Cmdr"], vec!["Armageddon"])
         };
-        let estimate = estimate_bracket(&d, &db).unwrap();
+        let estimate = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
 
         assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
         assert_eq!(
@@ -915,7 +1210,8 @@ mod tests {
                 combo_declaration: declaration,
                 ..deck(vec!["Cmdr"], vec!["Forest"])
             };
-            let estimate = estimate_bracket(&d, &db_with_signals(&[])).unwrap();
+            let estimate =
+                estimate_bracket(&d, &db_with_signals(&[]), &ComboTable::default()).unwrap();
 
             assert_eq!(estimate.barometers.len(), 4);
             assert_eq!(
@@ -991,21 +1287,21 @@ mod tests {
     fn empty_deck_returns_none() {
         let db = CardDatabase::default();
         let d = deck(vec![], vec![]);
-        assert!(estimate_bracket(&d, &db).is_none());
+        assert!(estimate_bracket(&d, &db, &ComboTable::default()).is_none());
     }
 
     #[test]
     fn no_commander_returns_none() {
         let db = CardDatabase::default();
         let d = deck(vec![], vec!["Forest", "Island"]);
-        assert!(estimate_bracket(&d, &db).is_none());
+        assert!(estimate_bracket(&d, &db, &ComboTable::default()).is_none());
     }
 
     #[test]
     fn clean_deck_is_base_floor_core() {
         let db = db_with_signals(&[]);
         let d = deck(vec!["Atraxa, Praetors' Voice"], vec!["Forest", "Island"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Core);
         assert!(e
             .axes
@@ -1027,7 +1323,7 @@ mod tests {
             },
         )]);
         let d = deck(vec!["Atraxa, Praetors' Voice"], vec!["Smothering Tithe"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
         assert_eq!(e.axes[&BracketAxis::GameChangers].count, 1);
         assert!(e
@@ -1051,7 +1347,7 @@ mod tests {
             companion: vec!["Lutri, the Spellchaser".to_string()],
             ..deck(vec!["Cmdr"], vec!["Forest"])
         };
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
 
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
         assert_eq!(
@@ -1073,7 +1369,7 @@ mod tests {
             signature_spell: vec!["Smothering Tithe".to_string()],
             ..deck(vec!["Cmdr"], vec!["Forest"])
         };
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
 
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
         assert_eq!(
@@ -1095,7 +1391,7 @@ mod tests {
             sideboard: vec!["Smothering Tithe".to_string()],
             ..deck(vec!["Cmdr"], vec!["Forest"])
         };
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
 
         assert_eq!(e.tier, BASE_FLOOR);
         assert!(e.axes[&BracketAxis::GameChangers].contributing.is_empty());
@@ -1119,7 +1415,7 @@ mod tests {
             sticker_sheets: excluded_card,
             ..deck(vec!["Cmdr"], vec!["Forest"])
         };
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
 
         assert_eq!(e.tier, BASE_FLOOR);
         assert!(e.axes[&BracketAxis::GameChangers].contributing.is_empty());
@@ -1133,7 +1429,7 @@ mod tests {
         };
         let db = db_with_signals(&[("A", sig), ("B", sig), ("C", sig), ("D", sig)]);
         let d = deck(vec!["Cmdr"], vec!["A", "B", "C", "D"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Optimized);
         assert_eq!(e.axes[&BracketAxis::GameChangers].count, 4);
     }
@@ -1148,7 +1444,7 @@ mod tests {
             },
         )]);
         let d = deck(vec!["Cmdr"], vec!["Armageddon"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Optimized);
     }
 
@@ -1162,7 +1458,7 @@ mod tests {
             },
         )]);
         let d = deck(vec!["Cmdr"], vec!["Time Warp"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Core);
     }
 
@@ -1177,7 +1473,7 @@ mod tests {
             },
         )]);
         let d = deck(vec!["Cmdr"], vec!["Demonic Tutor"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.axes[&BracketAxis::GameChangers].count, 1);
         assert_eq!(e.axes[&BracketAxis::EfficientTutors].count, 1);
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
@@ -1208,7 +1504,7 @@ mod tests {
         let db = db_with_signals(&entry_refs);
         let main: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
         let d = deck(vec!["Cmdr"], main);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(
             e.tier,
             CommanderBracketTier::Optimized,
@@ -1233,7 +1529,8 @@ mod tests {
             .collect();
         let db = db_with_signals(&entry_refs);
         let main = entries.iter().map(|(name, _)| name.as_str()).collect();
-        let estimate = estimate_bracket(&deck(vec!["Cmdr"], main), &db).unwrap();
+        let estimate =
+            estimate_bracket(&deck(vec!["Cmdr"], main), &db, &ComboTable::default()).unwrap();
 
         assert_eq!(
             reconcile(CommanderBracketTier::Cedh, &estimate),
@@ -1250,8 +1547,12 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        let estimate =
-            estimate_bracket(&deck(vec!["Cmdr"], vec!["Smothering Tithe"]), &db).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Smothering Tithe"]),
+            &db,
+            &ComboTable::default(),
+        )
+        .unwrap();
 
         assert_eq!(estimate.tier, CommanderBracketTier::Upgraded);
         assert_eq!(
@@ -1269,21 +1570,31 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        let estimate = estimate_bracket(&deck(vec!["Cmdr"], vec!["Armageddon"]), &db).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Armageddon"]),
+            &db,
+            &ComboTable::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             reconcile(CommanderBracketTier::Core, &estimate),
             DeclarationVerdict::BelowFloor {
                 floor: CommanderBracketTier::Optimized,
                 raised_by: vec![BracketAxis::MassLandDenial],
+                raised_by_combo_floor: None,
             }
         );
     }
 
     #[test]
     fn declaration_above_floor_is_at_or_above() {
-        let estimate =
-            estimate_bracket(&deck(vec!["Cmdr"], vec!["Forest"]), &db_with_signals(&[])).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Forest"]),
+            &db_with_signals(&[]),
+            &ComboTable::default(),
+        )
+        .unwrap();
 
         assert_eq!(estimate.tier, CommanderBracketTier::Core);
         assert_eq!(
@@ -1298,7 +1609,9 @@ mod tests {
             deck: deck(vec!["Cmdr"], vec!["Forest"]),
             declared_tier: None,
         };
-        let estimate = estimate_bracket_for_request(&request, &db_with_signals(&[])).unwrap();
+        let estimate =
+            estimate_bracket_for_request(&request, &db_with_signals(&[]), &ComboTable::default())
+                .unwrap();
 
         assert_eq!(estimate.declaration, None);
     }
@@ -1324,12 +1637,14 @@ mod tests {
             serde_json::to_value(DeclarationVerdict::BelowFloor {
                 floor: CommanderBracketTier::Optimized,
                 raised_by: vec![BracketAxis::MassLandDenial],
+                raised_by_combo_floor: None,
             })
             .unwrap(),
             serde_json::json!({
                 "kind": "below_floor",
                 "floor": "optimized",
                 "raised_by": ["mass_land_denial"],
+                "raised_by_combo_floor": null,
             })
         );
     }
@@ -1363,7 +1678,7 @@ mod tests {
             vec!["Cmdr"],
             vec!["Smothering Tithe", "Cyclonic Rift", "Demonic Tutor"],
         );
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(
             e.axes[&BracketAxis::GameChangers].contributing,
             vec!["Smothering Tithe", "Cyclonic Rift"]
@@ -1384,8 +1699,8 @@ mod tests {
             },
         )]);
         let d = deck(vec!["Cmdr"], vec!["Demonic Tutor"]);
-        let a = estimate_bracket(&d, &db).unwrap();
-        let b = estimate_bracket(&d, &db).unwrap();
+        let a = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
+        let b = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(a, b);
     }
 
@@ -1393,7 +1708,7 @@ mod tests {
     fn data_version_is_passed_through() {
         let db = db_with_signals(&[]);
         let d = deck(vec!["Cmdr"], vec!["Forest"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.data_version, "test-1");
     }
 
@@ -1407,7 +1722,7 @@ mod tests {
             },
         )]);
         let d = deck(vec!["Sol Ring"], vec!["Forest", "Forest"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.axes[&BracketAxis::GameChangers].count, 1);
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
     }
@@ -1431,7 +1746,7 @@ mod tests {
             ),
         ]);
         let d = deck(vec!["Cmdr"], vec!["Smothering Tithe", "Armageddon"]);
-        let e = estimate_bracket(&d, &db).unwrap();
+        let e = estimate_bracket(&d, &db, &ComboTable::default()).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Optimized, "MLD pushes to B4");
         assert!(e
             .checks
@@ -1451,8 +1766,12 @@ mod tests {
     fn every_axis_is_present_even_at_zero() {
         use strum::IntoEnumIterator;
 
-        let estimate =
-            estimate_bracket(&deck(vec!["Cmdr"], vec!["Forest"]), &db_with_signals(&[])).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Forest"]),
+            &db_with_signals(&[]),
+            &ComboTable::default(),
+        )
+        .unwrap();
         assert_eq!(estimate.axes.len(), BracketAxis::iter().count());
         for axis in BracketAxis::iter() {
             let reading = &estimate.axes[&axis];
@@ -1476,6 +1795,7 @@ mod tests {
         let estimate = estimate_bracket(
             &deck(vec!["Cmdr"], names.to_vec()),
             &db_with_signals(&entries),
+            &ComboTable::default(),
         )
         .unwrap();
 
@@ -1489,8 +1809,12 @@ mod tests {
 
     #[test]
     fn every_rule_emits_a_check_row() {
-        let estimate =
-            estimate_bracket(&deck(vec!["Cmdr"], vec!["Forest"]), &db_with_signals(&[])).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Forest"]),
+            &db_with_signals(&[]),
+            &ComboTable::default(),
+        )
+        .unwrap();
         assert_eq!(estimate.checks.len(), FLOOR_RULES.len());
         assert!(estimate
             .checks
@@ -1505,7 +1829,12 @@ mod tests {
             ..Default::default()
         };
         let db = db_with_signals(&[("A", signal), ("B", signal), ("C", signal)]);
-        let estimate = estimate_bracket(&deck(vec!["Cmdr"], vec!["A", "B", "C"]), &db).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["A", "B", "C"]),
+            &db,
+            &ComboTable::default(),
+        )
+        .unwrap();
         let row = estimate
             .checks
             .iter()
@@ -1521,8 +1850,12 @@ mod tests {
 
     #[test]
     fn two_game_changer_rules_both_present() {
-        let estimate =
-            estimate_bracket(&deck(vec!["Cmdr"], vec![]), &db_with_signals(&[])).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec![]),
+            &db_with_signals(&[]),
+            &ComboTable::default(),
+        )
+        .unwrap();
         let thresholds: Vec<u8> = estimate
             .checks
             .iter()
@@ -1569,6 +1902,7 @@ mod tests {
         let estimate = estimate_bracket(
             &deck(vec!["Cmdr"], vec!["Smothering Tithe", "Armageddon"]),
             &db,
+            &ComboTable::default(),
         )
         .unwrap();
         assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
@@ -1603,6 +1937,7 @@ mod tests {
                 vec!["Zulu Missing", "Alpha Missing"],
             ),
             &db_with_known_faces(),
+            &ComboTable::default(),
         )
         .unwrap();
         assert_eq!(
@@ -1617,6 +1952,7 @@ mod tests {
         let estimate = estimate_bracket(
             &deck(vec!["Cmdr"], vec!["Forest", "Island"]),
             &CardDatabase::default(),
+            &ComboTable::default(),
         )
         .unwrap();
         assert_eq!(estimate.coverage.counted, 3);
@@ -1629,6 +1965,7 @@ mod tests {
         let estimate = estimate_bracket(
             &deck(vec!["Known Commander"], vec!["Forest"]),
             &db_with_known_faces(),
+            &ComboTable::default(),
         )
         .unwrap();
         assert_eq!(estimate.coverage.counted, 2);
@@ -1645,6 +1982,7 @@ mod tests {
                 vec!["Missing A", "Missing B", "Missing B", "Missing B"],
             ),
             &CardDatabase::default(),
+            &ComboTable::default(),
         )
         .unwrap();
         assert_eq!(estimate.coverage.unresolved, ["Missing A", "Missing B"]);
@@ -1660,7 +1998,12 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        let estimate = estimate_bracket(&deck(vec!["Cmdr"], vec!["Armageddon"]), &db).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Armageddon"]),
+            &db,
+            &ComboTable::default(),
+        )
+        .unwrap();
         assert_eq!(estimate.axes[&BracketAxis::MassLandDenial].count, 1);
         assert!(estimate
             .coverage
@@ -1681,8 +2024,8 @@ mod tests {
             .bracket_signals_by_name
             .insert("smothering tithe".to_string(), signal);
         let input = deck(vec!["Known Commander"], vec!["Smothering Tithe"]);
-        let unresolved = estimate_bracket(&input, &unresolved_db).unwrap();
-        let resolved = estimate_bracket(&input, &resolved_db).unwrap();
+        let unresolved = estimate_bracket(&input, &unresolved_db, &ComboTable::default()).unwrap();
+        let resolved = estimate_bracket(&input, &resolved_db, &ComboTable::default()).unwrap();
         assert_eq!(unresolved.tier, resolved.tier);
         assert_eq!(unresolved.axes, resolved.axes);
         assert_eq!(unresolved.checks, resolved.checks);
@@ -1699,8 +2042,12 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        let estimate =
-            estimate_bracket(&deck(vec!["Cmdr"], vec!["Smothering Tithe"]), &db).unwrap();
+        let estimate = estimate_bracket(
+            &deck(vec!["Cmdr"], vec!["Smothering Tithe"]),
+            &db,
+            &ComboTable::default(),
+        )
+        .unwrap();
         let value = serde_json::to_value(estimate).unwrap();
 
         assert_eq!(value["axes"]["game_changers"]["count"], 1);
@@ -1722,6 +2069,7 @@ mod tests {
         let complete = estimate_bracket(
             &deck(vec!["Known Commander"], vec!["Forest"]),
             &db_with_known_faces(),
+            &ComboTable::default(),
         )
         .unwrap();
         assert_eq!(

@@ -131,6 +131,7 @@ mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;
 mod combat_lifelink_replacement_ordering;
 mod combat_target_support;
+mod combo_floors;
 mod combo_infinite_pile;
 mod combo_table;
 mod combustible_gearhulk;

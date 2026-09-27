@@ -215,8 +215,9 @@ pub use bracket_corpus::{
 pub use bracket_estimate::{
     combo_declaration_floor, estimate_bracket, estimate_bracket_for_request, AxisReading,
     Barometer, BarometerAuthority, BracketAxis, BracketCheck, BracketCheckOutcome, BracketCoverage,
-    BracketEstimate, BracketEstimateRequest, ComboBarometer, ComboDeclaration, ComboWindow,
-    CommanderBracketTier, DeclarationVerdict, EstimateConfidence, FloorRule, FloorRuleSource,
+    BracketEstimate, BracketEstimateRequest, ComboBarometer, ComboCheck, ComboDeclaration,
+    ComboFloorRule, ComboFloorTrigger, ComboWindow, CommanderBracketTier, DeclarationVerdict,
+    EstimateConfidence, FloorRule, FloorRuleSource, EARLY_ASSEMBLE_CEILING,
 };
 // Plumbing: read-only re-export of the X-affordability authority
 // (`max_x_value`) and the cost-leg extractor that feeds it

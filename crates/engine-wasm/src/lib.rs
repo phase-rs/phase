@@ -14,7 +14,7 @@ use engine::ai_support::{
 };
 use engine::analysis::deck_signals::{deck_signals, DeckSignals};
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
-use engine::database::{CardDatabase, CardSearchQuery};
+use engine::database::{CardDatabase, CardSearchQuery, ComboTable};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
@@ -1414,7 +1414,8 @@ fn estimate_bracket_inner(request: &BracketEstimateRequest) -> Option<BracketEst
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let db = db.as_ref()?;
-        estimate_bracket_for_request(request, db)
+        // No combo table is loaded here yet, so combo floors remain unmeasured on this path.
+        estimate_bracket_for_request(request, db, &ComboTable::default())
     })
 }
 
@@ -4071,6 +4072,7 @@ mod bracket_estimate_tests {
             Some(DeclarationVerdict::BelowFloor {
                 floor: CommanderBracketTier::Upgraded,
                 raised_by: vec![BracketAxis::GameChangers],
+                raised_by_combo_floor: None,
             })
         );
 

@@ -14,7 +14,7 @@ use strum::IntoEnumIterator;
 use thiserror::Error;
 
 use crate::database::set_catalog::ReleaseDate;
-use crate::database::CardDatabase;
+use crate::database::{CardDatabase, ComboTable};
 use crate::game::bracket_estimate::{
     estimate_bracket, BracketAxis, BracketCheckOutcome, BracketEstimate, CommanderBracketTier,
 };
@@ -579,7 +579,8 @@ pub fn score_corpus(fixtures: &[CorpusFixture], db: &CardDatabase) -> CorpusScor
     let mut disputed_ids = Vec::new();
 
     for fixture in fixtures {
-        let Some(estimate) = estimate_bracket(&fixture.decklist, db) else {
+        // Combo floors are unmeasured on this path by design (goldens are ratcheted).
+        let Some(estimate) = estimate_bracket(&fixture.decklist, db, &ComboTable::default()) else {
             continue;
         };
         let reading = reading_from_estimate(&estimate);
@@ -1262,7 +1263,8 @@ mod tests {
             main_deck: vec![String::new(), String::new(), String::new()],
             ..Default::default()
         };
-        let estimate = estimate_bracket(&deck, &db).unwrap();
+        // Combo floors are unmeasured on this path by design (goldens are ratcheted).
+        let estimate = estimate_bracket(&deck, &db, &ComboTable::default()).unwrap();
         let reading = reading_from_estimate(&estimate);
         assert_eq!(reading.observed[&BracketAxis::GameChangers], 4);
         assert_eq!(

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-use crate::database::CardDatabase;
+use crate::database::{CardDatabase, ComboTable};
 use crate::game::bracket_estimate::{estimate_bracket, ComboDeclaration, CommanderBracketTier};
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -289,7 +289,9 @@ fn estimate_tier_for_seat(
     list: &PlayerDeckList,
     seat: &str,
 ) -> Option<CommanderBracketTier> {
-    let estimated = estimate_bracket(list, db).map(|estimate| estimate.tier);
+    // No combo table is loaded here, so the estimated tier the AI acts on excludes the combo floors — follow-up: load the table on this path.
+    let estimated =
+        estimate_bracket(list, db, &ComboTable::default()).map(|estimate| estimate.tier);
     tracing::debug!(
         seat,
         declared_tier = %list.bracket_tier,

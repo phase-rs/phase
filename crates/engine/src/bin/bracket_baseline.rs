@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use engine::database::bracket_lists::BracketLists;
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::bracket_estimate::{estimate_bracket, BracketEstimate, CommanderBracketTier};
 use engine::game::deck_loading::PlayerDeckList;
 use engine::game::BracketAxis;
@@ -243,7 +243,7 @@ enum NotEstimatedReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum BaselineEstimateResult {
-    Estimated { estimate: BracketEstimate },
+    Estimated { estimate: Box<BracketEstimate> },
     NotEstimated { reason: NotEstimatedReason },
 }
 
@@ -271,8 +271,11 @@ fn baseline_row(
     db: &CardDatabase,
 ) -> BracketBaselineRow {
     let deck_list = deck.to_player_deck_list();
-    let result = match estimate_bracket(&deck_list, db) {
-        Some(estimate) => BaselineEstimateResult::Estimated { estimate },
+    // Combo floors are unmeasured on this path by design (goldens are ratcheted).
+    let result = match estimate_bracket(&deck_list, db, &ComboTable::default()) {
+        Some(estimate) => BaselineEstimateResult::Estimated {
+            estimate: Box::new(estimate),
+        },
         None => BaselineEstimateResult::NotEstimated {
             reason: NotEstimatedReason::EmptyCommander,
         },
@@ -468,7 +471,7 @@ mod tests {
             name: "Test deck".to_string(),
             deck_type: "Test".to_string(),
             result: BaselineEstimateResult::Estimated {
-                estimate: BracketEstimate {
+                estimate: Box::new(BracketEstimate {
                     tier,
                     axes: BracketAxis::iter()
                         .map(|axis| (axis, AxisReading::default()))
@@ -484,7 +487,11 @@ mod tests {
                     declaration: None,
                     combo_barometer: Default::default(),
                     barometers: Default::default(),
-                },
+                    combos: Default::default(),
+                    combo_checks: Default::default(),
+                    combo_coverage: Default::default(),
+                    combo_provenance: Default::default(),
+                }),
             },
         }
     }

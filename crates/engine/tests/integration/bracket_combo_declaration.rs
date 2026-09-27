@@ -1,4 +1,4 @@
-use engine::database::{BracketLists, CardDatabase};
+use engine::database::{BracketLists, CardDatabase, ComboTable};
 use engine::game::{
     estimate_bracket_for_request, Barometer, BarometerAuthority, BracketEstimateRequest,
     ComboDeclaration, ComboWindow, CommanderBracketTier, PlayerDeckList,
@@ -40,7 +40,7 @@ fn declaration_survives_deck_data_to_player_deck_list() {
         declared_tier: None,
     };
     let db = CardDatabase::default().with_bracket_lists(BracketLists::from_pairs("t", &[]));
-    let estimate = estimate_bracket_for_request(&request, &db).unwrap();
+    let estimate = estimate_bracket_for_request(&request, &db, &ComboTable::default()).unwrap();
 
     assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
     assert_eq!(

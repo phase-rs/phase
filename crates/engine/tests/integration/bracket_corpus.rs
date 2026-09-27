@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use engine::database::ComboTable;
 use engine::game::{
     assert_floor_matches_population, assert_ratchet_history, estimate_bracket,
     expectation_row_from_reading, held_out_split, load_corpus_dir, load_expectations,
@@ -244,7 +245,8 @@ fn golden_expectations_match_the_engine() {
     let rows: BTreeMap<String, ExpectationRow> = fixtures()
         .into_iter()
         .map(|fixture| {
-            let estimate = estimate_bracket(&fixture.decklist, db)
+            // Combo floors are unmeasured on this path by design (goldens are ratcheted).
+            let estimate = estimate_bracket(&fixture.decklist, db, &ComboTable::default())
                 .unwrap_or_else(|| panic!("{} did not produce an estimate", fixture.id));
             let row = expectation_row_from_reading(&reading_from_estimate(&estimate));
             (fixture.id, row)

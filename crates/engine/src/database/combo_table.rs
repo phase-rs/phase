@@ -172,9 +172,10 @@ impl ComboOutcome {
 ///
 /// This is deliberately separate from `EstimateConfidence`, which describes
 /// card-name resolution rather than whether a combo artifact was present.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComboCoverage {
+    #[default]
     Unmeasured,
     Measured,
 }
@@ -191,7 +192,8 @@ pub enum ComboCardinality {
 /// Which cardinality reading an early-combo floor accepts.
 ///
 /// This is a named constant on a floor row, never a runtime tunable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EarlyComboReading {
     DefinitelyOnly,
     IncludingArguable,
@@ -300,6 +302,12 @@ impl ComboTable {
         usize::try_from(index)
             .ok()
             .and_then(|index| self.entries.get(index))
+    }
+
+    /// Returns all rows in artifact order for consumers that must evaluate
+    /// table-wide policy without repeatedly walking the inverted index.
+    pub fn entries(&self) -> &[ComboEntry] {
+        &self.entries
     }
 
     pub fn len(&self) -> usize {
