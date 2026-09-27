@@ -15,9 +15,9 @@ use crate::parser::oracle_nom::filter::ChosenColorGrantReference;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ControllerRef,
-    CostReduction, DelayedTriggerCondition, Duration, MultiTargetSpec, OpponentMayScope,
-    PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, UnlessPayModifier,
+    CostReduction, DelayedTriggerCondition, Duration, ManaSpendPermission, MultiTargetSpec,
+    OpponentMayScope, PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -765,6 +765,15 @@ pub(crate) enum PriorModifier {
     AltCost(AbilityCost),
     /// CR 106.4: fold a mana-retention expiry onto the prior Mana effect.
     ManaRetention(ManaExpiry),
+    /// CR 118.14 + CR 609.4b: fold an any-color / any-type mana concession
+    /// ("you may spend mana as though it were mana of any color to cast that
+    /// spell", Siphon Insight; "Mana of any type can be spent to cast a spell
+    /// this way", Gonti, Night Minister) onto the prior cast grant — a
+    /// `CastFromZone` or a `GrantCastingPermission { PlayFromExile }` — since
+    /// it applies only to mana spent casting through that grant (CR 118.14 for
+    /// "any type"; the "any color" rider names its own object). The rider
+    /// states no permission of its own.
+    ManaSpendPermission(ManaSpendPermission),
     /// CR 508.4 / CR 614.1: mark the prior token/copy/zone-change to enter tapped
     /// and attacking (conditional modifier; carries the gate on the clause's
     /// `condition`, with the unpatched original stashed in `else_ability`).

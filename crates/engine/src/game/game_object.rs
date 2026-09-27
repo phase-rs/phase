@@ -2089,10 +2089,11 @@ impl GameObject {
                         // and an effect) reach here. A quoted body that instead
                         // reads as a STATIC (CR 113.3d) but was misclassified by
                         // `classify_quoted_inner`'s spell/activated fallback --
-                        // Agent of Raffine's "You may spend mana as though it
-                        // were mana of any color to cast this spell.", a
-                        // `GenericEffect`-wrapped static smuggled in as a
-                        // costless spell-kind body -- never reaches this arm:
+                        // a `GenericEffect`-wrapped static smuggled in as a
+                        // costless spell-kind body (Agent of Raffine's "You may
+                        // spend mana as though it were mana of any color to cast
+                        // this spell." used to be one; it is now the standalone
+                        // concession gap) -- never reaches this arm:
                         // `PerpetualGrantModification::try_from`
                         // (`types/ability.rs`) rejects that shape upstream,
                         // since this installer has no step that would extract

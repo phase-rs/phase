@@ -36,10 +36,10 @@
 //! |---|---|---|
 //! | `1542918445870489660__game-state-turn-26-2026-08-28T16-37-37-913Z.zip` (JPUTK) | 4 284 800 | `a7196a2711e4554ddab89a40905f18c5de60dc195582c2e7b20078538d83ccb2` |
 //! | member `game-state-turn-26-2026-08-28T16-37-37-913Z.json` | 21 647 575 | `d1466fd9d287a2aa5789c6bdb29d6767d1235629b9babeae93aa013461bd7c7c` |
-//! | derived `issue_8024_spell_rest_turn26.json.gz` | 693 325 | `569b921447b0158c1e6db3fa423423e3e8da7f841edfec0782746dec9f029be1` |
+//! | derived `issue_8024_spell_rest_turn26.json.gz` | 693 328 | `4d6eb3b208fd4241ef3b0d41986d01e7359adbacf72db9f4e7def8f637f947dd` |
 //! | `1542937675252764732__game-state-turn-10-2026-08-28T16-41-59-062Z.zip` (Prentiss) | 4 530 428 | `10f762d72ac1a6e554db46ef0f0c89ced6999156af769e927501276e83fc2f78` |
 //! | member `game-state-turn-10-2026-08-28T16-41-59-062Z.json` | 22 582 452 | `ee22f83dd46916e52141ed380a511487db44350a232e6511c33c736550692156` |
-//! | derived `issue_8024_devour_rest_turn10.json.gz` | 732 847 | `966a5762f19d76218a50cd3ab82202993add37f6770aea89781b42fbb378d957` |
+//! | derived `issue_8024_devour_rest_turn10.json.gz` | 732 847 | `150ac7ac61669a0ede6e109e724a52732c48eadad3b701c5345f5ea0df3a92c9` |
 //!
 //! Byte-reproducible regeneration — `-n` is load-bearing, since without it gzip
 //! stamps an mtime and the digest never lands:
@@ -51,7 +51,11 @@
 //!
 //! Unlike the pre-U5 captures elsewhere in this suite, no `deck_size` migration
 //! is owed: both dumps already carry the adjacently-tagged
-//! `{"type":"Exactly","data":100}` form.
+//! `{"type":"Exactly","data":100}` form. The recipe alone is still not
+//! sufficient: the retired `combat_phases_started_this_turn` /
+//! `end_steps_started_this_turn` keys must also be rewritten to
+//! `steps_started_this_turn` (`{"BeginCombat": n, "End": m}`, zeros dropped,
+//! placed at the first old key).
 
 use engine::types::game_state::{GameState, PersistedGameState, WaitingFor};
 

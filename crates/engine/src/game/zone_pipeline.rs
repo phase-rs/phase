@@ -3746,6 +3746,7 @@ pub(crate) fn deliver_replaced_zone_change(
         }
         if face_down_in_exile.is_face_down() && to == Zone::Exile {
             zones::mark_face_down_in_exile(state, events, object_id);
+            crate::game::exile_links::link_search_look(state, object_id, source_id);
         }
         // CR 730.3e: the survivor split (inside `move_to_zone` above) has consumed
         // any clause-2 routing override; clear it so it never leaks into a later

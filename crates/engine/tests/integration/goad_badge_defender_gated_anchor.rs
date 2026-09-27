@@ -1073,14 +1073,46 @@ fn deferred_anchor_prohibition_published_state_is_unchanged_by_the_permission_au
          `CantAttack` to `Permission`, or returning `Some(true)` for a \
          prohibition, moves this; got {valid:?}"
     );
+    // #9265: this observable INVERTED, deliberately. It previously asserted the
+    // deferred-anchor creature carries NO badge — "the pre-existing display gap,
+    // held UNCHANGED". That gap is now closed: a creature that is eligible but has
+    // an empty legal-target set carries a `CantAttack` badge so the UI can explain
+    // the refusal it was already enforcing.
+    //
+    // The row still earns its place. It pins that the badge is attributed, not just
+    // present — an unattributed badge tells the player nothing about WHY — and the
+    // `valid.contains(&gated)` assertion above still holds, so the creature remains
+    // OFFERED. Eligibility and display are still separate observables; only the
+    // display half moved.
     assert!(
-        !matches!(
+        matches!(
             constraints.get(&gated),
             Some(CombatRequirement::CantAttack { .. })
         ),
-        "C2.7 ({LABEL}): base observable 2 of 3 — it carries NO CantAttack badge. \
-         This is the pre-existing display gap, held UNCHANGED; got {:?}",
+        "C2.7 ({LABEL}): base observable 2 of 3 — the deferred-anchor creature now \
+         carries a CantAttack badge (#9265 closed the display gap); got {:?}",
         constraints.get(&gated)
+    );
+    // An `if let` here would be a GUARD, not an assertion: a badge of another shape
+    // would skip the block and the row would pass having checked nothing. Destructure
+    // with `else { panic! }` so the shape is asserted on the way in.
+    let Some(CombatRequirement::CantAttack { sources }) = constraints.get(&gated) else {
+        panic!(
+            "C2.7 ({LABEL}): expected a CantAttack badge on the deferred-anchor \
+             creature before its sources can be read; got {:?}",
+            constraints.get(&gated)
+        );
+    };
+    // EXACT, not `!is_empty()`. A nonempty check passes when the badge names some
+    // unrelated carrier, which is precisely the attribution defect this row exists
+    // to catch — `bear` and `badged` are both on this board carrying statics of
+    // their own, so a mode-only attribution has candidates to wrongly offer.
+    assert_eq!(
+        sources.as_slice(),
+        &[gated],
+        "C2.7 ({LABEL}): the badge must name EXACTLY the creature whose own \
+         anchored prohibition explains the refusal — not merely some carrier; \
+         got {sources:?} (gated={gated:?} badged={badged:?} bear={bear:?})"
     );
     let gated_targets = legal_targets.get(&gated).cloned().unwrap_or_default();
     assert!(
@@ -1089,5 +1121,168 @@ fn deferred_anchor_prohibition_published_state_is_unchanged_by_the_permission_au
          is EMPTY, because the per-pairing authority refuses every pairing. This \
          is the half a permission-side change is most likely to move, which is why \
          the badge half is not asserted alone; got {gated_targets:?}"
+    );
+}
+
+/// ROW 5 — CR 702.3b + CR 508.1c: the no-legal-target badge must name the
+/// definition that actually explains the refusal, not every object that happens
+/// to carry a matching MODE.
+///
+/// `static_abilities::functioning_static_carriers` answers exactly one question:
+/// "which objects carry a functioning definition of this mode?" It does not ask
+/// whose `affected` filter reaches the badged creature, and it does not ask whether
+/// the definition is the per-pairing kind. Attribution that stops there hands the
+/// player a tooltip pointing at an unrelated permanent.
+///
+/// THE BOARD. `defender` is a Defender creature that is ELIGIBLE — a remote
+/// unconditional permission grants it the ability to attack despite CR 702.3b — but
+/// has NO legal target, because its own defending-player-anchored `CantAttack`
+/// applies at every pairing. Two decoy permission carriers sit beside it, and each
+/// fails a DIFFERENT conjunct of the attribution test:
+///
+///  * `remote_uncond` — reaches `defender` through its `affected` filter, but its
+///    permission is UNCONDITIONAL. An unconditional permission holds for every
+///    pairing, so it is never the reason a pairing was refused; the refusal here
+///    comes from the prohibition. Fails the ANCHOR conjunct.
+///  * `remote_excluding` — carries a properly ANCHORED permission, but its
+///    `affected` filter names `decoy`, not `defender`. Fails the AFFECTED conjunct.
+///
+/// THE ASSERTION IS AN EXACT SET. `!sources.is_empty()` would pass on this board
+/// with either decoy wrongly included, which is the whole defect; so would
+/// `sources.contains(&defender)`. Only equality catches an over-broad source list.
+///
+/// WHY BOTH DECOYS ARE REQUIRED. Each conjunct needs its own witness. A fixture
+/// carrying only `remote_excluding` is satisfied by an affected-filter check alone
+/// and says nothing about the anchor test; a fixture carrying only `remote_uncond`
+/// says nothing about the affected test. Dropping either decoy leaves half the
+/// attribution rule unpinned.
+#[test]
+fn no_legal_target_badge_names_only_the_definition_that_explains_the_refusal() {
+    const LABEL: &str = "badge attribution";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // P1 is the defending player and DOES control this land, so the anchored
+    // prohibition applies at every pairing and the legal-target list empties.
+    let land = scenario.add_basic_land(P1, ManaColor::Green);
+    let decoy = scenario.add_creature(P0, "Decoy Walker", 1, 1).id();
+    let defender = scenario
+        .add_creature(P0, "Anchored Sentinel", 0, 4)
+        .with_keyword(engine::types::keywords::Keyword::Defender)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CantAttack)
+                .affected(TargetFilter::SelfRef)
+                .condition(StaticCondition::DefendingPlayerControls {
+                    filter: TargetFilter::SpecificObject { id: land },
+                }),
+        )
+        .id();
+    // DECOY 1 — reaches `defender`, but UNCONDITIONAL: fails the anchor conjunct.
+    // It is also what makes `defender` eligible at all, so this object is load
+    // bearing twice over and cannot be dropped from the fixture.
+    let remote_uncond = scenario
+        .add_creature(P0, "Unconditional Banner", 1, 1)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                .affected(TargetFilter::SpecificObject { id: defender }),
+        )
+        .id();
+    // DECOY 2 — properly ANCHORED, but names `decoy`: fails the affected conjunct.
+    let remote_excluding = scenario
+        .add_creature(P0, "Misdirected Standard", 1, 1)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CanAttackWithDefender)
+                .affected(TargetFilter::SpecificObject { id: decoy })
+                .condition(StaticCondition::DefendingPlayerControls {
+                    filter: TargetFilter::SpecificObject { id: land },
+                }),
+        )
+        .id();
+    let mut runner = scenario.build();
+
+    // --- REACH-GUARDS: the board really has the shape the claims above assume. ---
+    assert_land_with_subtype(&runner, land, P1, "Forest", LABEL);
+    assert!(
+        runner.state().objects[&defender].has_keyword(&engine::types::keywords::Keyword::Defender),
+        "REACH-GUARD ({LABEL}): the badged creature must actually carry Defender, \
+         or the permission arm of the attribution is never consulted"
+    );
+    assert_one_defender_gated_static(&runner, defender, &StaticMode::CantAttack, LABEL);
+    // Both decoys must really be FUNCTIONING carriers of the permission mode —
+    // otherwise they are filtered out upstream and never test attribution at all.
+    for (id, name) in [
+        (remote_uncond, "remote_uncond"),
+        (remote_excluding, "remote_excluding"),
+    ] {
+        assert!(
+            runner.state().objects[&id]
+                .static_definitions
+                .iter_unchecked()
+                .any(|def| def.mode == StaticMode::CanAttackWithDefender),
+            "REACH-GUARD ({LABEL}): {name} must carry a CanAttackWithDefender \
+             definition, or it is not a decoy the attribution could wrongly name"
+        );
+    }
+    // And they must differ on the conjunct each one is here to witness.
+    assert!(
+        runner.state().objects[&remote_uncond]
+            .static_definitions
+            .iter_unchecked()
+            .find(|def| def.mode == StaticMode::CanAttackWithDefender)
+            .is_some_and(|def| def.condition.is_none()),
+        "REACH-GUARD ({LABEL}): remote_uncond's permission must be UNCONDITIONAL, \
+         or it does not witness the anchor conjunct"
+    );
+    assert!(
+        runner.state().objects[&remote_excluding]
+            .static_definitions
+            .iter_unchecked()
+            .find(|def| def.mode == StaticMode::CanAttackWithDefender)
+            .is_some_and(|def| def
+                .condition
+                .as_ref()
+                .is_some_and(mentions_defending_player_controls)),
+        "REACH-GUARD ({LABEL}): remote_excluding's permission must be ANCHORED, \
+         or it does not witness the affected conjunct"
+    );
+
+    advance_to_declare_attackers(&mut runner, LABEL);
+    let AttackersPayload {
+        valid,
+        constraints,
+        legal_targets,
+    } = attackers_payload(&runner);
+
+    // --- The preconditions, ASSERTED. The badge only fires for a creature that is
+    // --- eligible AND has no legal target; if either half moved, an exact-set
+    // --- assertion below would be checking a badge that arrived for another reason.
+    assert!(
+        valid.contains(&defender),
+        "PRECONDITION ({LABEL}): the Defender must be ELIGIBLE — the unconditional \
+         remote permission grants it CR 702.3b relief; got valid={valid:?}"
+    );
+    let defender_targets = legal_targets.get(&defender).cloned().unwrap_or_default();
+    assert!(
+        defender_targets.is_empty(),
+        "PRECONDITION ({LABEL}): its legal-target list must be EMPTY — the anchored \
+         prohibition refuses every pairing; got {defender_targets:?}"
+    );
+
+    let Some(CombatRequirement::CantAttack { sources }) = constraints.get(&defender) else {
+        panic!(
+            "({LABEL}): expected a CantAttack badge on the eligible, target-less \
+             Defender; got {:?}",
+            constraints.get(&defender)
+        );
+    };
+    assert_eq!(
+        sources.as_slice(),
+        &[defender],
+        "({LABEL}): the badge must name EXACTLY the creature whose own anchored \
+         prohibition refuses every pairing. Naming remote_uncond={remote_uncond:?} \
+         means the ANCHOR conjunct was dropped (an unconditional permission cannot \
+         explain a refused pairing); naming remote_excluding={remote_excluding:?} \
+         means the AFFECTED conjunct was dropped (its permission names \
+         decoy={decoy:?}, not this creature); got {sources:?}"
     );
 }

@@ -1797,6 +1797,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Coloque o resto no fundo",
+      "subtitle_one": "Coloque {{count}} card revelado no fundo do seu grimório",
+      "subtitle_other": "Coloque {{count}} cards revelados no fundo do seu grimório em qualquer ordem",
+      "hint": "Arraste para reordenar · a posição 1 fica no topo desta pilha",
+      "moveLeft": "Mover para a esquerda",
+      "moveRight": "Mover para a direita"
     }
   },
   "specializeColor": {
@@ -1908,6 +1916,10 @@
     "prowlNormalLabel": "Conjurar Normalmente",
     "prowlAltLabel": "Conjurar com Prowl",
     "prowlSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Prowl (disponível porque uma criatura correspondente causou dano de combate a um jogador neste turno).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Conjurar Normalmente",
+    "surgeAltLabel": "Conjurar com Surge",
+    "surgeSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Surge (disponível porque você ou um companheiro de equipe conjurou outra mágica neste turno).",
     "overloadEyebrow": "Sobrecarregar",
     "overloadNormalLabel": "Conjurar Normalmente",
     "overloadAltLabel": "Conjurar com Sobrecarregar",
@@ -2380,10 +2392,11 @@
     "reachSpills": "Pode reduzir mana genérico",
     "multiplier": "×{{count}}",
     "confirmOrder": "Confirmar Ordem",
-    "cancelCast": "Cancelar Conjuração",
+    "cancel": "Cancelar",
     "moveUp": "Mover para cima",
     "moveDown": "Mover para baixo",
-    "reductionFallback": "Redução {{number}}"
+    "reductionFallback": "Redução {{number}}",
+    "floor": "Não pode reduzir o custo abaixo de {{count}} de mana"
   },
   "unhandledWaitingFor": {
     "title": "Ação necessária, mas a interface está ausente",

@@ -41,6 +41,14 @@ vi.mock("../connectivityStore", () => ({
 
 import { adoptCloudSyncHmrState, disposeCloudSyncModuleForTest, useCloudSyncStore } from "../cloudSyncStore";
 import { SyncConflictError } from "../../services/cloudSync";
+import { profileReplacementGeneration } from "../../constants/storage";
+import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { useAppNotificationStore } from "../appToastStore";
+import {
+  installFifoWebLocks,
+  resetSavedDeckLibraryForTests,
+  uninstallWebLocks,
+} from "../../test/helpers/webLocks";
 
 const identity = { userId: "user-1", label: "Tester" };
 
@@ -505,7 +513,7 @@ describe("cloud sync serialization", () => {
     await useCloudSyncStore.getState().syncNow();
 
     expect(mocks.suppress).toHaveBeenCalled();
-    expect(mocks.applyBackup).toHaveBeenCalledWith(remote(2).backup, "overwrite");
+    expect(mocks.applyBackup).toHaveBeenCalledWith(expect.anything(), remote(2).backup, "overwrite");
     expect(profileReplaced).toHaveBeenCalledTimes(1);
     expect(useCloudSyncStore.getState()).toMatchObject({ lastSyncedRevision: 2, dirty: false });
     window.removeEventListener("phase:profile-replaced", profileReplaced);
@@ -679,7 +687,7 @@ describe("cloud sync serialization", () => {
     await useCloudSyncStore.getState().resolveConflict("merge");
 
     expect(mocks.suppress).toHaveBeenCalled();
-    expect(mocks.applyBackup).toHaveBeenCalledWith(merged, "overwrite");
+    expect(mocks.applyBackup).toHaveBeenCalledWith(expect.anything(), merged, "overwrite");
     expect(profileReplaced).toHaveBeenCalledTimes(1);
     expect(useCloudSyncStore.getState()).toMatchObject({ status: "synced", lastSyncedRevision: 4 });
     window.removeEventListener("phase:profile-replaced", profileReplaced);
@@ -1342,5 +1350,297 @@ describe("cloud sync serialization", () => {
     await Promise.resolve();
     expect(disposer).toHaveBeenCalledTimes(2);
     expect(provider.subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  describe("saved-deck lock", () => {
+    beforeEach(async () => {
+      installFifoWebLocks();
+      await resetSavedDeckLibraryForTests();
+    });
+    afterEach(() => {
+      uninstallWebLocks();
+    });
+
+    it("re-checks staleness inside the lock: a same-tab write that arrives while applyRemote waits for the lock blocks the apply", async () => {
+      await readySignedIn();
+      useCloudSyncStore.setState({ dirty: false, lastSyncedRevision: 1 });
+      provider.pullMeta.mockResolvedValue(meta(2));
+      provider.pull.mockResolvedValue(remote(2));
+      const generationBefore = profileReplacementGeneration();
+
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      const sync = useCloudSyncStore.getState().syncNow();
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+      });
+      watched?.();
+      releaseHolder();
+      await holder;
+      await sync;
+
+      expect(mocks.applyBackup).not.toHaveBeenCalled();
+      expect(useCloudSyncStore.getState().dirty).toBe(true);
+      expect(profileReplacementGeneration()).toBe(generationBefore);
+    });
+
+    it("paired positive: without a same-tab write while waiting, applyRemote applies the snapshot", async () => {
+      await readySignedIn();
+      useCloudSyncStore.setState({ dirty: false, lastSyncedRevision: 1 });
+      provider.pullMeta.mockResolvedValue(meta(2));
+      provider.pull.mockResolvedValue(remote(2));
+
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      const sync = useCloudSyncStore.getState().syncNow();
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+      });
+      releaseHolder();
+      await holder;
+      await sync;
+
+      expect(mocks.applyBackup).toHaveBeenCalledWith(expect.anything(), remote(2).backup, "overwrite");
+      expect(mocks.applyBackup).toHaveBeenCalledTimes(1);
+      expect(useCloudSyncStore.getState()).toMatchObject({ status: "synced", dirty: false });
+    });
+
+    it("re-checks staleness inside the lock: a same-tab write that arrives while applyMerged waits for the lock blocks the apply", async () => {
+      const merged = backup({ decks: { Merged: "{}" } });
+      await readySignedIn();
+      useCloudSyncStore.setState({ conflict: remote(3), status: "conflict" });
+      provider.pullMeta.mockResolvedValue(meta(3));
+      provider.push.mockResolvedValue(meta(4));
+      mocks.mergeDeckCollections.mockReturnValue(merged);
+      const generationBefore = profileReplacementGeneration();
+
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      const merge = useCloudSyncStore.getState().resolveConflict("merge");
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+      });
+      watched?.();
+      releaseHolder();
+      await holder;
+      await merge;
+
+      expect(mocks.applyBackup).not.toHaveBeenCalled();
+      expect(useCloudSyncStore.getState()).toMatchObject({
+        status: "conflict",
+        dirty: true,
+        lastSyncedRevision: 4,
+        conflict: { backup: merged, meta: meta(4) },
+      });
+      expect(profileReplacementGeneration()).toBe(generationBefore);
+    });
+
+    it("paired positive: without a same-tab write while waiting, applyMerged applies the merge", async () => {
+      const merged = backup({ decks: { Merged: "{}" } });
+      await readySignedIn();
+      useCloudSyncStore.setState({ conflict: remote(3), status: "conflict" });
+      provider.pullMeta.mockResolvedValue(meta(3));
+      provider.push.mockResolvedValue(meta(4));
+      mocks.mergeDeckCollections.mockReturnValue(merged);
+
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      const merge = useCloudSyncStore.getState().resolveConflict("merge");
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).pending).toHaveLength(1);
+      });
+      releaseHolder();
+      await holder;
+      await merge;
+
+      expect(mocks.applyBackup).toHaveBeenCalledWith(expect.anything(), merged, "overwrite");
+      expect(mocks.applyBackup).toHaveBeenCalledTimes(1);
+      expect(useCloudSyncStore.getState()).toMatchObject({ status: "synced", lastSyncedRevision: 4 });
+    });
+
+    it("a background remote apply refused by a busy library reports an error and writes nothing", async () => {
+      await readySignedIn();
+      useCloudSyncStore.setState({ dirty: false, lastSyncedRevision: 1 });
+      provider.pullMeta.mockResolvedValue(meta(2));
+      provider.pull.mockResolvedValue(remote(2));
+      const generationBefore = profileReplacementGeneration();
+
+      setSavedDeckTxnLockWaitForTests(20);
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      await useCloudSyncStore.getState().syncNow();
+
+      expect(mocks.applyBackup).not.toHaveBeenCalled();
+      expect(useCloudSyncStore.getState().status).toBe("error");
+      expect(useCloudSyncStore.getState().error).toBe(
+        "Another Phase tab is busy. Close other Phase tabs and try again.",
+      );
+      expect(profileReplacementGeneration()).toBe(generationBefore);
+
+      setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+      releaseHolder();
+      await holder;
+    });
+
+    it("choosing the cloud copy while the library is busy keeps the conflict and tells the user", async () => {
+      await readySignedIn();
+      useCloudSyncStore.setState({ conflict: remote(2), status: "conflict" });
+      provider.pullMeta.mockResolvedValue(meta(2));
+      provider.pull.mockResolvedValue(remote(2));
+
+      setSavedDeckTxnLockWaitForTests(20);
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      await useCloudSyncStore.getState().resolveConflict("cloud");
+
+      expect(mocks.applyBackup).not.toHaveBeenCalled();
+      expect(useCloudSyncStore.getState().conflict).not.toBeNull();
+      expect(useAppNotificationStore.getState().notification?.title).toBe("Couldn't apply cloud decks");
+
+      setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+      releaseHolder();
+      await holder;
+    });
+
+    it("a merge refused by a busy library re-publishes the merged conflict", async () => {
+      const merged = backup({ decks: { Merged: "{}" } });
+      await readySignedIn();
+      useCloudSyncStore.setState({ conflict: remote(3), status: "conflict" });
+      provider.pullMeta.mockResolvedValue(meta(3));
+      provider.push.mockResolvedValue(meta(4));
+      mocks.mergeDeckCollections.mockReturnValue(merged);
+
+      setSavedDeckTxnLockWaitForTests(20);
+      let releaseHolder!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseHolder = resolve;
+      });
+      const holder = withSavedDeckLibrary(() => held);
+      await vi.waitFor(async () => {
+        expect((await navigator.locks.query()).held).toHaveLength(1);
+      });
+
+      await useCloudSyncStore.getState().resolveConflict("merge");
+
+      expect(mocks.applyBackup).not.toHaveBeenCalled();
+      expect(useCloudSyncStore.getState()).toMatchObject({
+        status: "conflict",
+        conflict: { backup: merged, meta: meta(4) },
+      });
+      expect(useAppNotificationStore.getState().notification?.title).toBe("Couldn't apply cloud decks");
+
+      setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
+      releaseHolder();
+      await holder;
+    });
+
+    it("choosing the cloud copy while IDB is unreadable tells the user it's a storage failure, not a busy tab", async () => {
+      await readySignedIn();
+      useCloudSyncStore.setState({ conflict: remote(2), status: "conflict" });
+      provider.pullMeta.mockResolvedValue(meta(2));
+      provider.pull.mockResolvedValue(remote(2));
+      const transactionSpy = vi.spyOn(IDBDatabase.prototype, "transaction").mockImplementation(() => {
+        throw new Error("IDB unavailable");
+      });
+
+      try {
+        await useCloudSyncStore.getState().resolveConflict("cloud");
+
+        expect(mocks.applyBackup).not.toHaveBeenCalled();
+        expect(useCloudSyncStore.getState().conflict).not.toBeNull();
+        expect(useAppNotificationStore.getState().notification?.description).toBe(
+          "Phase couldn't reach browser storage. Try again in a moment.",
+        );
+      } finally {
+        transactionSpy.mockRestore();
+      }
+    });
+
+    it("a background remote apply refused while IDB is unreadable reports the storage description, not the busy one", async () => {
+      await readySignedIn();
+      useCloudSyncStore.setState({ dirty: false, lastSyncedRevision: 1 });
+      provider.pullMeta.mockResolvedValue(meta(2));
+      provider.pull.mockResolvedValue(remote(2));
+      const transactionSpy = vi.spyOn(IDBDatabase.prototype, "transaction").mockImplementation(() => {
+        throw new Error("IDB unavailable");
+      });
+
+      try {
+        await useCloudSyncStore.getState().syncNow();
+
+        expect(mocks.applyBackup).not.toHaveBeenCalled();
+        expect(useCloudSyncStore.getState().status).toBe("error");
+        expect(useCloudSyncStore.getState().error).toBe(
+          "Phase couldn't reach browser storage. Try again in a moment.",
+        );
+      } finally {
+        transactionSpy.mockRestore();
+      }
+    });
+
+    it("a merge refused while IDB is unreadable tells the user it's a storage failure, not a busy tab", async () => {
+      const merged = backup({ decks: { Merged: "{}" } });
+      await readySignedIn();
+      useCloudSyncStore.setState({ conflict: remote(3), status: "conflict" });
+      provider.pullMeta.mockResolvedValue(meta(3));
+      provider.push.mockResolvedValue(meta(4));
+      mocks.mergeDeckCollections.mockReturnValue(merged);
+      const transactionSpy = vi.spyOn(IDBDatabase.prototype, "transaction").mockImplementation(() => {
+        throw new Error("IDB unavailable");
+      });
+
+      try {
+        await useCloudSyncStore.getState().resolveConflict("merge");
+
+        expect(mocks.applyBackup).not.toHaveBeenCalled();
+        expect(useAppNotificationStore.getState().notification?.description).toBe(
+          "Phase couldn't reach browser storage. Try again in a moment.",
+        );
+      } finally {
+        transactionSpy.mockRestore();
+      }
+    });
   });
 });

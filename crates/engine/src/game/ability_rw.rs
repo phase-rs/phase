@@ -2179,7 +2179,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3017,7 +3017,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::DestroyAll { target, .. }
         | Effect::SwitchPT { target }
         | Effect::ExileHaunting { target }
-        | Effect::HideawayConceal { target }
+        | Effect::HideawayConceal { target, .. }
         | Effect::ChooseCard { target, .. }
         // CR 701.27a: both scopes write ObjectPt on the target/population filter.
         | Effect::Transform { target, .. }
@@ -5288,6 +5288,7 @@ fn rw_effect(
             matched_disposition: _,
             kept_destination: _,
             rest_destination: _,
+            rest_order: _,
             enter_tapped: _,
             enters_attacking: _,
             kept_optional_to: _,
@@ -6335,7 +6336,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::LifeTotal { player: _ } | QuantityRef::LifeAboveStarting => {
             reads_player_of(StateKind::PlayerLife)
         }
-        QuantityRef::StartingLifeTotal => RwProfile::empty(),
+        QuantityRef::StartingLifeTotal { player } => rw_player_scope(player),
         // CR 701.57a: reads the transient last-discover scalar, written only by
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.
@@ -6422,7 +6423,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // row, which `Effect::GivePlayerCounter` writes for the matching feed).
         QuantityRef::TargetControllerCounter { kind: _ } => reads_player_of(StateKind::PlayerLife),
         QuantityRef::Variable { name: _ } | QuantityRef::SelfManaValue => RwProfile::empty(),
-        QuantityRef::TargetZoneCardCount { zone: _ } => reads_zone_membership(),
+        // `binding` selects which announced choice the count reads; the zone
+        // membership profile is unchanged.
+        QuantityRef::TargetZoneCardCount { zone: _, scope: _, binding: _ } => reads_zone_membership(),
         QuantityRef::Devotion { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. } => reads_zone_membership(),
@@ -6926,9 +6929,9 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
             reads_player_of(StateKind::JournalCast)
         }
-        // CR 508.6 + CR 514.2: reads the cleanup-time attack-history snapshot
-        // (`attacked_defenders_last_turn`), which changes only at turn
-        // boundaries. `TurnStructure` is the sequencing kind written by
+        // CR 508.6 defines when a player has attacked another player. This reads
+        // `attacked_defenders_last_turn`, the cleanup-time snapshot. It changes
+        // only at turn boundaries. `TurnStructure` is the sequencing kind written by
         // cleanup/turn advance; conservatively depending on it invalidates the
         // cached gate whenever the turn sequence changes.
         StaticCondition::AnyPlayerAttackedYouLastTurn {
@@ -9107,7 +9110,7 @@ mod tests {
         let ap = ability_rw_profile(&ra(Effect::AdditionalPhase {
             target: TargetFilter::Controller,
             phase: crate::types::phase::Phase::PostCombatMain,
-            after: crate::types::phase::Phase::PostCombatMain,
+            after: crate::types::ability::ExtraPhaseAnchor::ThisPhase { named: None },
             followed_by: vec![],
             count: qfix(1),
             attacker_restriction: None,

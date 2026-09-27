@@ -18,13 +18,13 @@ use super::game_state::{
     TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{
-    CardId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
 };
-use super::phase::Phase;
+use super::phase::{Phase, PhaseGroup};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::proposed_event::AppliedReplacementKey;
 use super::replacements::ReplacementEvent;
@@ -4767,7 +4767,7 @@ pub enum CastingPermission {
         /// CR 609.4b: Optional payment permission scoped to this specific grant.
         /// `AnyColor` and `AnyTypeOrColor` both relax colored mana requirements;
         /// only the latter also relaxes mana-type requirements. Read at payment
-        /// time by `casting::player_can_spend_as_any_color_for_optional_spell`,
+        /// time by `casting::player_mana_spend_permission_for_optional_spell`,
         /// keyed on `granted_to == player`. Mirrors
         /// `PlayFromExile.mana_spend_permission`; `None` (the common case) leaves
         /// payment unchanged for every other exile/graveyard alt-cost grant.
@@ -5182,25 +5182,57 @@ pub enum PlayPermissionInvalidation {
 }
 
 /// CR 609.4b: Permission modifying how mana may be spent to pay a cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaSpendPermission {
     /// CR 609.4b + CR 106.1a: Mana may be spent as though it were mana of any
     /// color for this payment. This relaxes colored requirements but does not
     /// make colored mana satisfy a colorless (`{C}`) or snow (`{S}`) requirement.
+    #[default]
     AnyColor,
-    /// CR 609.4b + CR 106.1b: Mana may be spent as though it were mana of any
-    /// type or color for this payment. This preserves the broader Oracle
-    /// distinction without changing the actual mana spent.
+    /// CR 118.14 + CR 106.1b: "Mana of any type can be spent" — mana may be
+    /// spent as though it were colorless mana or mana of any color, so it also
+    /// pays a colorless (`{C}`) requirement. Like `AnyColor`, it never changes
+    /// the mana actually spent (CR 609.4b), and never pays `{S}`.
     AnyTypeOrColor,
 }
 
 impl ManaSpendPermission {
-    /// CR 609.4b: Projects the shared colored-requirement relaxation without
-    /// claiming that `AnyColor` and `AnyTypeOrColor` are semantically equal.
-    pub const fn allows_spending_as_any_color(self) -> bool {
+    /// CR 118.14 + CR 609.4b: May any mana pay a `required` mana type under this
+    /// permission? "Any type" includes colorless (CR 106.1b); "any color" does
+    /// not (CR 106.1a). The single payment-time projection of the permission:
+    /// it decides eligibility, never the type of mana actually spent.
+    pub const fn allows_payment_as(self, required: crate::types::mana::ManaType) -> bool {
         match self {
-            Self::AnyColor | Self::AnyTypeOrColor => true,
+            Self::AnyColor => !matches!(required, crate::types::mana::ManaType::Colorless),
+            Self::AnyTypeOrColor => true,
         }
+    }
+
+    /// CR 609.4b: each concession only changes how the cost may be paid; with
+    /// several in force the payment may use any of them, so the broader decides
+    /// ("any type" covers "any color").
+    pub const fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::AnyColor, Self::AnyColor) => Self::AnyColor,
+            (Self::AnyColor, Self::AnyTypeOrColor)
+            | (Self::AnyTypeOrColor, Self::AnyColor)
+            | (Self::AnyTypeOrColor, Self::AnyTypeOrColor) => Self::AnyTypeOrColor,
+        }
+    }
+
+    /// CR 609.4b: `union` over optional concessions — `None` means "no
+    /// concession" and yields to the other side.
+    pub const fn union_optional(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        }
+    }
+
+    /// Serde helper: `AnyColor` is the default a static concession omits.
+    pub const fn is_any_color(&self) -> bool {
+        matches!(self, Self::AnyColor)
     }
 }
 
@@ -5710,6 +5742,17 @@ pub enum DelayedTriggerCondition {
             skip_serializing_if = "DelayedTriggerPlayerBinding::is_controller"
         )]
         binding: DelayedTriggerPlayerBinding,
+    },
+    /// CR 603.7a + CR 500.6: "at the beginning of that combat" — names the phase
+    /// that the preceding instruction of the same resolution added (CR 500.8),
+    /// and fires when its step `phase` begins as that phase begins, never at
+    /// another occurrence of the same step. The parser emits `entry: None` (the
+    /// anaphor); `effects::delayed_trigger::resolve` binds it to the added
+    /// phase's `ExtraPhaseId`, or creates no trigger if no phase was added.
+    AtBeginningOfAddedPhase {
+        phase: Phase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<ExtraPhaseId>,
     },
     /// "when [object] leaves the battlefield"
     WhenLeavesPlay {
@@ -8789,6 +8832,41 @@ fn quantity_ref_from_value<E: serde::de::Error>(
     }
 }
 
+/// CR 115.1 + CR 601.2c: Whether a target-bound player zone count declares
+/// its own target announcement or rides another announcement.
+///
+/// `Explicit` ("target player's …", "target opponent's …") is a distinct
+/// instance of the word "target" (CR 115.3): it surfaces its own target slot
+/// and is never rebound to an enclosing anchor by the scope-rewrite walkers.
+/// `Anaphoric` ("their …", "that player's …") reuses an announced or
+/// event-bound choice: it surfaces no slot of its own when a primary player
+/// choice is declared, and the walkers rebind it to the enclosing anchor
+/// (`ScopedPlayer`, `SourceChosenPlayer`).
+///
+/// Instance-sharing resolution (Tibalt, the Fiend-Blooded −4: "deals damage
+/// equal to the number of cards in target player's hand to that player"):
+/// the recipient anaphor inherits the count's instance, so the damage rebind
+/// (`rebind_dead_event_player_damage_recipient`) flips the count
+/// `Explicit→Anaphoric` — one announcement, read by both. The flip runs only
+/// outside triggers, so explicit counts in trigger bodies always keep their
+/// binding.
+///
+/// `Default` is `Anaphoric`: pre-binding payloads (saved games, stale
+/// card-data) predate the distinction, and every printed card behaves
+/// correctly under "assume shared" — no printed card declares two separate
+/// player-count instances. Deserializing old data as `Explicit` would
+/// surface a spurious second slot on anaphoric-plus-primary shapes (Balor
+/// mode 3); `Anaphoric` preserves observed behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CountBinding {
+    /// The count declares its own instance of "target" (CR 115.1).
+    Explicit,
+    /// The count reuses an announced or event-bound player choice (CR 115.3:
+    /// not a separate instance of "target", so no separate announcement).
+    #[default]
+    Anaphoric,
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -8809,8 +8887,16 @@ pub enum QuantityRef {
     /// Controller's life total minus the format's starting life total.
     /// Used for "N or more life more than your starting life total" conditions.
     LifeAboveStarting,
-    /// CR 103.4: The format's starting life total (20 for Standard, 40 for Commander, etc.).
-    StartingLifeTotal,
+    /// CR 103.4: The format's starting life total for `player` (20 for Standard,
+    /// 40 for Commander or Archenemy, etc.). Legacy serialized unit values
+    /// default to `Controller`.
+    StartingLifeTotal {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 701.57a: The mana-value limit `N` of the discover that fired the
     /// current "whenever you discover" trigger — read from
     /// `GameState::last_discover_value`. Curator of Sun's Creation: "discover
@@ -9046,7 +9132,28 @@ pub enum QuantityRef {
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
     /// Used for "half of target player's library" and similar patterns.
-    TargetZoneCardCount { zone: ZoneRef },
+    TargetZoneCardCount {
+        zone: ZoneRef,
+        /// CR 109.4 + CR 115.1 / CR 102.2: legality scope of the count's
+        /// announcement slot — `TargetPlayer` ("target player's ...") or
+        /// `TargetOpponent` ("target opponent's ..."). The scope exists ONLY
+        /// to size the slot's legal-target set, mirroring the
+        /// `ControllerRef::{TargetPlayer, TargetOpponent}` legality-scope
+        /// pair; whether the count declares its own announcement is the
+        /// orthogonal `binding` axis below. The parser always emits one of
+        /// the two `Target*` values; `TargetOpponent` is the serde default
+        /// so pre-scope payloads keep their opponent-slot behavior.
+        #[serde(
+            default = "target_zone_count_scope_default",
+            skip_serializing_if = "is_target_zone_count_scope_default"
+        )]
+        scope: ControllerRef,
+        /// CR 115.1 + CR 601.2c: whether this count declares its own target
+        /// announcement (`Explicit`) or rides another announcement
+        /// (`Anaphoric`). See [`CountBinding`].
+        #[serde(default, skip_serializing_if = "is_count_binding_default")]
+        binding: CountBinding,
+    },
     /// CR 700.5: Devotion to one or more colors.
     Devotion { colors: DevotionColors },
     /// CR 205.2a: Count distinct card types (CoreType) across a parameterized
@@ -9691,6 +9798,7 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -9699,7 +9807,6 @@ impl QuantityRef {
             | QuantityRef::TokensCreatedThisTurn { player, .. }
             | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
             QuantityRef::LifeAboveStarting
-            | QuantityRef::StartingLifeTotal
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
             | QuantityRef::TriggeringScryBottomCount
@@ -10529,6 +10636,18 @@ fn is_player_relation_all(relation: &PlayerRelation) -> bool {
     matches!(relation, PlayerRelation::All)
 }
 
+fn target_zone_count_scope_default() -> ControllerRef {
+    ControllerRef::TargetOpponent
+}
+
+fn is_target_zone_count_scope_default(scope: &ControllerRef) -> bool {
+    matches!(scope, ControllerRef::TargetOpponent)
+}
+
+fn is_count_binding_default(binding: &CountBinding) -> bool {
+    matches!(binding, CountBinding::Anaphoric)
+}
+
 /// CR 108.3 + CR 109.4: Which possession relation binds a player to an object.
 ///
 /// A parameter, not a variant pair. The codebase already proliferates this axis
@@ -10788,16 +10907,14 @@ pub enum PlayerFilter {
     /// CR 402.1 (hand) / CR 119.1 (life) / CR 122.1f (poison) / CR 404.1
     /// (graveyard): Each player satisfying `relation` whose scalar player
     /// attribute `attr`, read PER CANDIDATE PLAYER, satisfies `comparator`
-    /// against `value`. `attr` is the per-player-scalar `QuantityRef` subset
-    /// (`HandSize` / `LifeTotal` / `GraveyardSize` / `PlayerCounter`) — read
-    /// directly off the candidate `Player` at runtime, never via the
-    /// controller-scoped quantity resolver, so its embedded `PlayerScope` /
-    /// `CountScope` carries no game-state meaning here.
+    /// against `value`. `attr` uses the per-player scalar reader (which can
+    /// consult game state for team life or ledger-backed values), so its
+    /// embedded `PlayerScope` / `CountScope` does not choose another player.
     ///
     /// Covers "opponents who have N or more poison counters" (Glissa's
     /// Retriever) and "your opponents with N or more cards in hand"
-    /// (Wolfcaller's Howl). `value` is the controller-relative threshold,
-    /// resolved once per evaluation (candidate-independent).
+    /// (Wolfcaller's Howl). `value` keeps the ability controller and source,
+    /// while `ScopedPlayer` binds to each candidate during evaluation.
     ///
     /// `attr` and `value` are boxed to break the `QuantityExpr →
     /// QuantityRef::PlayerCount → PlayerFilter::PlayerAttribute →
@@ -11173,6 +11290,20 @@ impl QuantityExpr {
             }
             QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
         }
+    }
+
+    /// Returns true if this expression reads a
+    /// `QuantityRef::TargetZoneCardCount` anywhere in its tree — i.e. its
+    /// value is the number of cards in a zone of the ability's announced
+    /// player target ("the number of cards in target opponent's hand",
+    /// Recurring Insight). Delegates to `any_ref`, which visits every
+    /// expression form exhaustively — a new `QuantityExpr` variant forces
+    /// `any_ref` (and therefore this predicate) to account for it rather
+    /// than silently defaulting to false. Used by the damage parser (CR
+    /// 115.1 recipient rebind) and the target-slot builder to prove a
+    /// clause declares a player target.
+    pub fn contains_target_zone_card_count(&self) -> bool {
+        self.any_ref(&mut |reference| matches!(reference, QuantityRef::TargetZoneCardCount { .. }))
     }
 
     /// Construct an `UpTo { max }` expression, debug-asserting the
@@ -15447,6 +15578,44 @@ impl StepSkipTarget {
     }
 }
 
+/// CR 500.8 + CR 500.9 + CR 500.10: where an added phase or step is inserted.
+/// `ThisStep` and `ThisPhase` are resolved when the effect resolves, against
+/// the step it resolves in; `FirstOfTurn`, against the steps begun this turn.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ExtraPhaseAnchor {
+    /// A fixed step, independent of where the effect resolves.
+    Step(Phase),
+    /// CR 500.9: "after this step" — the step in which the effect resolves.
+    ThisStep,
+    /// CR 500.8 + CR 500.10: "after this phase" — the final step of the phase in
+    /// which the effect resolves. `named` is the phase the text names, as the
+    /// CR 500.1 phases it may be: `None` for a bare "this phase"; for
+    /// "this main phase", both main phases (CR 505.1: "individually and
+    /// collectively known as the main phase"). If the effect resolves in a phase
+    /// outside `named`, there is no such phase to add after and nothing is added
+    /// (CR 500.8).
+    ThisPhase { named: Option<Vec<PhaseGroup>> },
+    /// CR 500.8 + CR 505.1a + CR 505.1b: "after the first combat phase this
+    /// turn" / "after the second main phase this turn" — the first phase of
+    /// this group this turn (every main phase after the first is a postcombat
+    /// main phase, so the second main phase is the first postcombat one). The
+    /// insert follows that phase's last step. If that phase has already ended
+    /// there is no such phase to add after, and nothing is added (World at War
+    /// and Swinging Ship rulings). The parser names only `Combat` and
+    /// `PostcombatMain`.
+    FirstOfTurn(PhaseGroup),
+}
+
+impl ExtraPhaseAnchor {
+    /// CR 505.1: "after this main phase".
+    pub fn this_main_phase() -> Self {
+        Self::ThisPhase {
+            named: Some(vec![PhaseGroup::PrecombatMain, PhaseGroup::PostcombatMain]),
+        }
+    }
+}
+
 /// CR 614.10 + CR 614.10a: How long a skip effect persists.
 ///
 /// CR 614.10: "Skip [something]" is a replacement effect equivalent to
@@ -15767,9 +15936,10 @@ pub enum PerpetualGrantModification {
     /// `abilities` + `base_abilities`. Agent of Raffine's superficially similar
     /// "You may spend mana as though it were mana of any color to cast this
     /// spell." is REJECTED before it ever reaches this variant — see
-    /// `TryFrom<ContinuousModification>`'s `GenericEffect`-static gate below,
-    /// which fails the whole grant closed rather than install a board-wide
-    /// mana concession under a "this spell only" card.
+    /// `TryFrom<ContinuousModification>`'s `Unimplemented` gate below (the quoted
+    /// concession is the standalone concession gap), which fails the whole grant
+    /// closed rather than install a board-wide mana concession under a "this
+    /// spell only" card.
     GrantAbility { definition: Box<AbilityDefinition> },
 }
 
@@ -15839,22 +16009,26 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // the static this clause describes is never installed as a
             // functioning ability by that arm.
             //
-            // Agent of Raffine (MTGJSON-verified) is the regression case: "It
-            // perpetually gains \"You may spend mana as though it were mana of
-            // any color to cast this spell.\"" has no cost separator, so
-            // `parse_quoted_ability` treats the whole quoted sentence as a
-            // spell-like effect chain and `classify_quoted_inner` falls through
-            // its default `GrantAbility` fallback (no static/trigger/keyword
-            // recognizer matched), wrapping
-            // `Effect::GenericEffect { static_abilities: [SpendManaAsAnyColor
-            // { spell_filter: None, .. }], target: Some(Controller), .. }`.
-            // Accepting it here would look green (`Effect::ApplyPerpetual`,
+            // Pinned by `perpetual_grant_ability_rejects_resolution_time_generic_effect_body`
+            // ("Until end of turn, creatures you control gain flying."). Agent
+            // of Raffine (MTGJSON-verified) was the original case — its quoted
+            // concession is now the standalone concession gap, rejected by the
+            // `Unimplemented` arm above. "It perpetually gains \"You may spend
+            // mana as though it were mana of any color to cast this spell.\""
+            // has no cost separator, so `parse_quoted_ability` treats the whole
+            // quoted sentence as a spell-like effect chain and
+            // `classify_quoted_inner` falls through its default `GrantAbility`
+            // fallback (no static/trigger/keyword recognizer matched), which
+            // wrapped `Effect::GenericEffect { static_abilities:
+            // [SpendManaAsAnyColor { spell_filter: None, .. }], target:
+            // Some(Controller), .. }` until that clause became the gap.
+            // Accepting such a grant here would look green (`Effect::ApplyPerpetual`,
             // never `Effect::Unimplemented`) while being wrong on TWO independent
             // axes: (1) `spell_filter: None` is the documented BOARD-WIDE path
             // (every spell the controller casts), not "this spell" -- a real
             // rules defect, not just a coverage gap; and (2) even a correctly
             // self-scoped static would still need a NEW self-referential runtime
-            // check, because `player_can_spend_as_any_color_for_spell_object`
+            // check, because `player_mana_spend_permission_for_spell_object`
             // (static_abilities.rs) only scans `game_active_statics`
             // (battlefield + command zone) for a granting permanent's OWN
             // static, while CR 113.6e says an ability that modifies how that
@@ -15963,8 +16137,8 @@ pub enum PerpetualModification {
     /// conjured duplicate is the architectural motivator for that LastCreated
     /// antecedent, but Agent of Raffine's OWN granted ability text ("You may
     /// spend mana as though it were mana of any color to cast this spell.") is
-    /// currently REJECTED by `PerpetualGrantModification::try_from`'s
-    /// `GenericEffect`-static gate (see its doc comment), so Agent of Raffine
+    /// currently REJECTED by `PerpetualGrantModification::try_from` (the quoted
+    /// concession is the standalone concession gap), so Agent of Raffine
     /// does not itself reach `Effect::ApplyPerpetual` — it fails closed to
     /// `Effect::Unimplemented` — a future card whose conjured-duplicate grant
     /// classifies to an installable kind would exercise this binding end to
@@ -15991,6 +16165,7 @@ pub enum DigRestOrder {
     #[default]
     Preserve,
     Random,
+    PlayerChoice,
 }
 
 impl DigRestOrder {
@@ -17285,6 +17460,10 @@ pub enum Effect {
     HideawayConceal {
         #[serde(default = "default_target_filter_parent")]
         target: TargetFilter,
+        /// CR 406.3: `Some` binds the look to that player at resolution; `None`
+        /// leaves it with the source's controller (CR 702.75a).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grantee: Option<PermissionGrantee>,
     },
     /// CR 509.1g + CR 506.3e + CR 707.2: For each attacking creature matched by
     /// `source_filter`, create a token that's a copy of it and put that token
@@ -19121,6 +19300,12 @@ pub enum Effect {
         kept_destination: Zone,
         /// Where non-matching revealed cards go (Library bottom or Graveyard).
         rest_destination: Zone,
+        /// CR 401.4: The required placement order when revealed cards go to a
+        /// library. `PlayerChoice` lets their owner arrange them; `Preserve`
+        /// retains encounter order for legacy payloads; `Random` follows an
+        /// explicit randomization instruction.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
         /// CR 110.5b: The matching card enters the battlefield tapped.
         #[serde(
             default,
@@ -19204,8 +19389,8 @@ pub enum Effect {
     /// Heist finalizer — continuation stashed by `Effect::Heist`. The chosen
     /// card (carried on `ability.targets` by the `ChooseFromZoneChoice` answer
     /// handler) is exiled from its owner's library, turned face down (CR 406.3),
-    /// linked to the source so the controller may look at it (mirrors Hideaway's
-    /// `ExileLinkKind::HideawayLookable`), and granted a permanent
+    /// linked to the source with a look link bound to the heister (CR 406.3),
+    /// and granted a permanent
     /// `PlayFromExile` permission with any-type-or-color mana so it can be cast
     /// for as long as it remains exiled. Unit variant — no fields; the target is
     /// implicit in `ability.targets`.
@@ -19512,11 +19697,14 @@ pub enum Effect {
     /// Splitter of Seconds' "that many additional upkeep steps" thread the
     /// triggering event amount through `QuantityRef::EventContextAmount`. Legacy
     /// callers and explicit "an additional" wording deserialize to a Fixed 1.
+    /// `after` is the CR 500.8/500.9/500.10 insertion point, resolved at
+    /// resolution time by `additional_phase::resolve`; `ThisStep`/`ThisPhase` are
+    /// relative to the step the effect resolves in.
     AdditionalPhase {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
         phase: Phase,
-        after: Phase,
+        after: ExtraPhaseAnchor,
         #[serde(default)]
         followed_by: Vec<Phase>,
         #[serde(default = "default_quantity_one")]
@@ -21596,7 +21784,7 @@ impl Effect {
             // from the parent `Dig` continuation (`ParentTarget`); it is never
             // announced as a target, but surfacing the filter keeps chain-time
             // resolution consistent.
-            Effect::HideawayConceal { target } => Some(target),
+            Effect::HideawayConceal { target, .. } => Some(target),
 
             // Heist targets the opponent whose library is heisted.
             Effect::Heist { target, .. } => Some(target),
@@ -33360,8 +33548,22 @@ impl ResolvedAbility {
         &self,
         state: &crate::types::game_state::GameState,
     ) -> Vec<TargetRef> {
+        self.live_object_targets_excluding(state, None)
+    }
+
+    /// Live announced targets minus the announced entry at `excluded` (a
+    /// separately announced quantity slot serving the magnitude, not receipt —
+    /// CR 115.1 + CR 601.2c). `None` is exactly [`Self::live_object_targets`].
+    pub fn live_object_targets_excluding(
+        &self,
+        state: &crate::types::game_state::GameState,
+        excluded: Option<usize>,
+    ) -> Vec<TargetRef> {
         self.targets
             .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != excluded)
+            .map(|(_, target)| target)
             .filter(|target| match target {
                 TargetRef::Object(id) => self.target_pin_is_current(*id, state),
                 TargetRef::Player(_) => true,
@@ -35020,6 +35222,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn starting_life_total_scope_defaults_for_legacy_json_and_round_trips() {
+        let legacy: QuantityRef = serde_json::from_str(r#"{"type":"StartingLifeTotal"}"#)
+            .expect("legacy unit payload defaults to controller scope");
+        assert_eq!(
+            legacy,
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("serializes legacy controller payload"),
+            r#"{"type":"StartingLifeTotal"}"#,
+            "controller scope must preserve the legacy serialized shape",
+        );
+
+        let scoped = QuantityRef::StartingLifeTotal {
+            player: PlayerScope::ScopedPlayer,
+        };
+        let json = serde_json::to_string(&scoped).expect("serializes scoped payload");
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).expect("scoped payload round-trips"),
+            scoped,
+        );
+    }
+
     /// The legacy lift must never capture a CURRENT payload. `TargetFilter` and
     /// `CardTypeSetSource` are both internally tagged on `"type"` and share
     /// exactly two tag names (`ExiledBySource`, `TrackedSet`), so those are the
@@ -35587,7 +35815,7 @@ mod tests {
     /// leaf by whether its lowered runtime gate can return `true` at a reachable
     /// production payment site today, and short-circuit `Any` in both directions.
     /// CR 609.4b + CR 106.1a + CR 106.1b: the two spend permissions are distinct wire
-    /// discriminants even though both project the colored-payment relaxation.
+    /// discriminants, and they differ at payment: only "any type" pays `{C}`.
     #[test]
     fn mana_spend_permission_serde_preserves_color_vs_type_distinction() {
         let any_color = ManaSpendPermission::AnyColor;
@@ -35606,8 +35834,10 @@ mod tests {
             serde_json::from_str::<ManaSpendPermission>(r#""AnyTypeOrColor""#).unwrap(),
             any_type_or_color
         );
-        assert!(any_color.allows_spending_as_any_color());
-        assert!(any_type_or_color.allows_spending_as_any_color());
+        assert!(any_color.allows_payment_as(crate::types::mana::ManaType::Green));
+        assert!(any_type_or_color.allows_payment_as(crate::types::mana::ManaType::Green));
+        assert!(!any_color.allows_payment_as(crate::types::mana::ManaType::Colorless));
+        assert!(any_type_or_color.allows_payment_as(crate::types::mana::ManaType::Colorless));
         assert_ne!(any_color, any_type_or_color);
     }
 
@@ -36045,6 +36275,71 @@ mod tests {
             .count_expr()
             .expect("count slot present")
             .contains_vote_count());
+    }
+
+    #[test]
+    fn contains_target_zone_card_count_finds_nested_ref() {
+        let direct = QuantityExpr::Ref {
+            qty: QuantityRef::TargetZoneCardCount {
+                zone: ZoneRef::Hand,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Explicit,
+            },
+        };
+        assert!(direct.contains_target_zone_card_count());
+        let wrapped = QuantityExpr::DivideRounded {
+            inner: Box::new(direct),
+            divisor: 2,
+            rounding: RoundingMode::Down,
+        };
+        assert!(wrapped.contains_target_zone_card_count());
+        assert!(!QuantityExpr::Fixed { value: 3 }.contains_target_zone_card_count());
+        assert!(!QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+        .contains_target_zone_card_count());
+    }
+
+    #[test]
+    fn target_zone_card_count_binding_serde_defaults_to_anaphoric() {
+        // Pre-binding payloads (saved games, stale card-data) carry no
+        // binding key; they must load as Anaphoric ("assume shared"),
+        // preserving observed single-slot behavior on every printed card.
+        let old: QuantityRef = serde_json::from_value(serde_json::json!({
+            "type": "TargetZoneCardCount",
+            "zone": "Hand",
+            "scope": "TargetPlayer",
+        }))
+        .expect("old payload loads");
+        assert_eq!(
+            old,
+            QuantityRef::TargetZoneCardCount {
+                zone: ZoneRef::Hand,
+                scope: ControllerRef::TargetPlayer,
+                binding: CountBinding::Anaphoric,
+            }
+        );
+        // Anaphoric is the default: skipped on serialize.
+        let value = serde_json::to_value(&old).expect("serialize");
+        assert!(
+            value.get("binding").is_none(),
+            "default binding must be skipped, got {value}"
+        );
+        // Explicit round-trips.
+        let explicit = QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Hand,
+            scope: ControllerRef::TargetOpponent,
+            binding: CountBinding::Explicit,
+        };
+        let value = serde_json::to_value(&explicit).expect("serialize");
+        assert_eq!(
+            value.get("binding").and_then(|b| b.as_str()),
+            Some("Explicit")
+        );
+        let back: QuantityRef = serde_json::from_value(value).expect("round-trip");
+        assert_eq!(back, explicit);
     }
 
     #[test]

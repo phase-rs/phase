@@ -104,7 +104,7 @@ export function CostReductionOrderModal() {
             onClick={handleCancel}
             className="min-h-11 rounded-[16px] border border-white/15 px-5 py-3 font-semibold text-white/70 transition hover:bg-white/10"
           >
-            {t("costReductionOrder.cancelCast")}
+            {t("costReductionOrder.cancel")}
           </button>
           <button
             type="button"
@@ -150,6 +150,13 @@ export function CostReductionOrderModal() {
                       ? t("costReductionOrder.reachColoredOnly")
                       : t("costReductionOrder.reachSpills")}
                   </div>
+                  {(reduction.minimum_mana ?? 0) > 0 && (
+                    <div className="text-xs text-amber-200/80">
+                      {t("costReductionOrder.floor", {
+                        count: reduction.minimum_mana,
+                      })}
+                    </div>
+                  )}
                 </div>
                 <div className="flex flex-col gap-1">
                   <button

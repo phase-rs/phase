@@ -34,17 +34,17 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
     CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
-    ManaSpendPermission, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter,
-    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
-    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration,
+    Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
+    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
+    PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::CostModifyMode;
 use crate::types::zones::{EtbTapState, Zone};
 
 // Parse-phase functions from the parent module (oracle_effect/mod.rs).
@@ -989,72 +989,6 @@ pub(super) fn normalize_exile_until_cast_bottom_cleanup(effect: &mut Effect) {
     }
 }
 
-pub(super) fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
-    let Effect::GenericEffect {
-        static_abilities, ..
-    } = &clause.parsed.effect
-    else {
-        return false;
-    };
-    if static_abilities.len() != 1
-        || static_abilities[0].mode
-            != (StaticMode::SpendManaAsAnyColor {
-                spell_filter: None,
-                activation_source_filter: None,
-            })
-    {
-        return false;
-    }
-
-    let lower = clause
-        .source
-        .fragment()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let parsed = all_consuming((
-        opt(alt((
-            tag::<_, _, OracleError<'_>>("if you cast a spell this way, "),
-            tag("if you cast it this way, "),
-        ))),
-        tag("you may spend mana as though it were mana of any "),
-        alt((tag("color"), tag("type"))),
-        tag(" to cast "),
-        alt((
-            tag("it"),
-            tag("that spell"),
-            tag("a spell this way"),
-            tag("spells this way"),
-            tag("those spells"),
-        )),
-        opt(tag(".")),
-    ))
-    .parse(lower.trim())
-    .is_ok();
-    parsed
-}
-
-pub(super) fn attach_any_color_mana_rider_to_previous_play_from_exile(
-    defs: &mut [AbilityDefinition],
-) -> bool {
-    let Some(previous) = defs.last_mut() else {
-        return false;
-    };
-    let Effect::GrantCastingPermission {
-        permission:
-            CastingPermission::PlayFromExile {
-                mana_spend_permission,
-                ..
-            },
-        ..
-    } = previous.effect.as_mut()
-    else {
-        return false;
-    };
-
-    *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
-    true
-}
-
 /// CR 614.1a + CR 608.2n: Fold a "if that spell would be put into a graveyard,
 /// [put it on the library / return it to its owner's hand] instead" rider onto
 /// the immediately-preceding optional `CastFromZone` as its canonical
@@ -1604,6 +1538,74 @@ pub(super) fn gate_other_revealed_card_on_multiplayer_reveal(def: &mut AbilityDe
         return;
     }
     rewrite_other_revealed_card_to_unimplemented(def);
+}
+
+/// The honest-gap name for a lingering cast grant whose "If you do, …" rider
+/// cannot be carried to the spell cast through it.
+pub(super) const CAST_RIDER_ON_LINGERING_GRANT_GAP: &str = "cast_rider_on_lingering_grant";
+
+/// CR 608.2c + CR 611.2f: refuse a `GrantCastingPermission` whose "If you do, …" rider cannot
+/// reach the spell it describes.
+///
+/// The two rules are the two halves of the problem. CR 608.2c: the rider is an
+/// instruction of the SAME resolution as the grant, followed in printed order, so
+/// it executes before any spell has been cast. CR 611.2f: an effect that modifies
+/// "the next spell a player casts" does not begin immediately; it applies when that
+/// spell is put on the stack. The card's rider needs the second behaviour, and this
+/// grant has no channel to deliver it.
+///
+/// A lingering grant is exercised at a LATER priority window. But its "If you do"
+/// rider — a sibling gated on `EffectOutcome(OptionalEffectPerformed)` — runs
+/// during the SAME resolution as the grant, when no spell has been cast yet. So
+/// the rider has nothing to act on and silently does nothing. Chiss-Goria, Forge
+/// Tyrant ("You may cast an artifact spell from among them this turn. If you do,
+/// it has affinity for artifacts") measured exactly that: the grant installed
+/// correctly, and the chosen artifact never gained affinity — no keyword and no
+/// transient effect anywhere.
+///
+/// Leaving that in place would make the card count as supported while part of
+/// its printed text is inert. The honest outcome is to report the grant as a gap
+/// until the grant can carry the rider to the cast. `PlayFromExile` has no channel
+/// for that today (`cast_cost_modifier` holds only a fixed `ManaCost`, and affinity
+/// is dynamic; `StaticMode::CastWithKeyword` is a battlefield static, not a
+/// per-permission rider).
+///
+/// SCOPED TO `GrantCastingPermission`, and that is deliberate. A lingering
+/// `Effect::CastFromZone` CAN carry a deferred rider: The Tomb of Aclazotz ("You
+/// may cast a creature spell from your graveyard this turn. If you do, it enters
+/// with a finality counter …") lowers its rider to `AddPendingETBCounters`, which
+/// binds when the spell later enters. Refusing every lingering cast with a rider
+/// would sweep that in. Measured over the card-data export: the only
+/// `GrantCastingPermission` followed by an `OptionalEffectPerformed`-gated rider is
+/// Chiss-Goria's, so this gate moves exactly one card. Should a deferred-binding
+/// rider ever reach this grant, the gate refuses it — fail-closed, an honest gap
+/// rather than a silent drop.
+pub(super) fn refuse_cast_rider_on_lingering_grant(def: &mut AbilityDefinition) {
+    let rider_is_if_you_do = def.sub_ability.as_deref().is_some_and(|sub| {
+        matches!(
+            sub.condition,
+            Some(crate::types::ability::AbilityCondition::EffectOutcome {
+                signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+                ..
+            })
+        )
+    });
+    if rider_is_if_you_do && matches!(&*def.effect, Effect::GrantCastingPermission { .. }) {
+        let fragment = def
+            .description
+            .clone()
+            .unwrap_or_else(|| "cast grant with an \"if you do\" rider on the cast spell".into());
+        *def.effect = Effect::unimplemented(CAST_RIDER_ON_LINGERING_GRANT_GAP, fragment);
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        refuse_cast_rider_on_lingering_grant(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        refuse_cast_rider_on_lingering_grant(els);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        refuse_cast_rider_on_lingering_grant(mode);
+    }
 }
 
 /// True when any def in the chain is a `RevealTop` carrying a `multi_target` spec.
@@ -7377,14 +7379,16 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of your next main phase, "),
             ),
-            // CR 500.8 + CR 603.7a: "at the beginning of that combat" refers to an
-            // additional combat phase just scheduled by the parent effect
-            // (e.g., Moraug, Fury of Akoum's landfall trigger). The additional
-            // combat is pushed as the very next phase, so we fire on the next
-            // BeginCombat.
+            // CR 603.7a + CR 500.6: "at the beginning of that combat" names the
+            // combat phase the preceding instruction added (Moraug, Fury of
+            // Akoum; World at War; Swinging Ship). That combat need not be the
+            // next one (CR 500.8: it follows its anchor, and the most recently
+            // created phase occurs first), so the condition names the added
+            // phase itself; `entry` is bound at creation.
             value(
-                DelayedTriggerCondition::AtNextPhase {
+                DelayedTriggerCondition::AtBeginningOfAddedPhase {
                     phase: Phase::BeginCombat,
+                    entry: None,
                 },
                 tag("at the beginning of that combat, "),
             ),
@@ -9196,6 +9200,44 @@ pub(super) fn parse_contextual_bare_card_aggregate(
 /// Safety: `pos` is computed from `lower.find(...)` and used to slice both `text`
 /// and `lower` at the same byte offset. This is sound because Oracle text is ASCII
 /// and `to_lowercase()` preserves byte length for ASCII characters.
+/// CR 115.1 + CR 601.2c: Rebind a dead event-context damage recipient to the
+/// clause's announced player target. "Tibalt deals damage equal to the number
+/// of cards in target player's hand to that player": the "that player" anaphor
+/// falls back to `TriggeringPlayer`, but a loyalty ability has no triggering
+/// event, so the ref can never resolve — and the amount's
+/// `TargetZoneCardCount` proves the clause declares a player target (it reads
+/// `ability.targets`, empty without a slot). Rebind to `Player` so
+/// announcement prompts and both halves read the same choice. The rebind
+/// targets `Player` (any player): the only printed card in this shape reads
+/// "target player's ...". Gated to non-trigger contexts: inside a trigger
+/// body "that player" is the live event player and must stay event-bound.
+///
+/// Instance sharing: the recipient anaphor inherits the count's target
+/// instance — one announcement, read by both halves — so every `Explicit`
+/// count in the amount flips to `Anaphoric` (shared). Without the flip the
+/// slot gate would surface a second slot for a single CR 601.2c instance.
+fn rebind_dead_event_player_damage_recipient(
+    target: TargetFilter,
+    amount: &mut QuantityExpr,
+    ctx: &ParseContext,
+) -> TargetFilter {
+    if matches!(target, TargetFilter::TriggeringPlayer)
+        && !ctx.in_trigger
+        && amount.contains_target_zone_card_count()
+    {
+        super::each_quantity_ref_mut(amount, &mut |qty| {
+            if let QuantityRef::TargetZoneCardCount { binding, .. } = qty {
+                if *binding == CountBinding::Explicit {
+                    *binding = CountBinding::Anaphoric;
+                }
+            }
+        });
+        TargetFilter::Player
+    } else {
+        target
+    }
+}
+
 pub(super) fn try_parse_damage_with_remainder<'a>(
     text: &'a str,
     lower: &'a str,
@@ -9418,6 +9460,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     parse_event_context_ref_with_ctx(target_phrase, ctx)
                 {
                     let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
+                    let mut qty = qty;
+                    let target = rebind_dead_event_player_damage_recipient(target, &mut qty, ctx);
                     #[cfg(debug_assertions)]
                     assert_no_compound_remainder(ecr_rem, target_phrase);
                     return Some((
@@ -9696,6 +9740,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
     // CR 608.2k: Check for event-context references before standard target parsing.
     if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(after_to, ctx) {
         let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
+        let mut amount = amount;
+        let target = rebind_dead_event_player_damage_recipient(target, &mut amount, ctx);
         return Some((
             Effect::DealDamage {
                 amount: amount.clone(),
@@ -14020,6 +14066,73 @@ mod tests {
                 phase: Phase::EndCombat,
             })
         );
+    }
+
+    /// CR 603.7a + CR 500.6: "at the beginning of that combat" is the anaphor
+    /// for the combat phase the preceding instruction added, so it parses to
+    /// the added-phase condition, unbound (`entry: None`; bound at creation).
+    /// Every printed producer (Moraug, Fury of Akoum; World at War; Swinging
+    /// Ship) carries it as the sibling of its `AdditionalPhase`. Negative: "at
+    /// the beginning of the next end step" stays an occurrence filter.
+    #[test]
+    fn that_combat_prefix_parses_to_an_unbound_added_phase_condition() {
+        fn delayed_condition_in(def: &AbilityDefinition) -> Option<DelayedTriggerCondition> {
+            match &*def.effect {
+                Effect::CreateDelayedTrigger { condition, .. } => Some(condition.clone()),
+                _ => def.sub_ability.as_deref().and_then(delayed_condition_in),
+            }
+        }
+        let that_combat = DelayedTriggerCondition::AtBeginningOfAddedPhase {
+            phase: Phase::BeginCombat,
+            entry: None,
+        };
+
+        let (body, condition) = strip_temporal_prefix(
+            "at the beginning of that combat, untap all creatures you control",
+        );
+        assert_eq!(body, "untap all creatures you control");
+        assert_eq!(condition, Some(that_combat.clone()));
+
+        let (_, next_end) =
+            strip_temporal_prefix("at the beginning of the next end step, sacrifice it");
+        assert_eq!(
+            next_end,
+            Some(DelayedTriggerCondition::AtNextPhase { phase: Phase::End })
+        );
+
+        let moraug = crate::parser::oracle::parse_oracle_text(
+            "Each creature you control gets +1/+0 for each time it has attacked this turn.\nLandfall — Whenever a land you control enters, if it's your main phase, there's an additional combat phase after this phase. At the beginning of that combat, untap all creatures you control.",
+            "Moraug, Fury of Akoum",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Minotaur".to_string(), "Warrior".to_string()],
+        );
+        let world_at_war = crate::parser::oracle::parse_oracle_text(
+            "After the second main phase this turn, there's an additional combat phase followed by an additional main phase. At the beginning of that combat, untap all creatures that attacked this turn.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)",
+            "World at War",
+            &["Rebound".to_string()],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let swinging_ship = crate::parser::oracle::parse_oracle_text(
+            "Visit — After the first combat phase this turn, there's an additional combat phase. At the beginning of that combat, untap all creatures that attacked this turn.",
+            "Swinging Ship",
+            &[],
+            &["Artifact".to_string()],
+            &["Attraction".to_string()],
+        );
+        for (card, parsed) in [
+            ("Moraug", &moraug),
+            ("World at War", &world_at_war),
+            ("Swinging Ship", &swinging_ship),
+        ] {
+            let found = parsed
+                .abilities
+                .iter()
+                .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                .find_map(delayed_condition_in);
+            assert_eq!(found, Some(that_combat.clone()), "{card}");
+        }
     }
 
     /// CR 603.7a + CR 701.31: the inline "When a player planeswalks, …" delayed

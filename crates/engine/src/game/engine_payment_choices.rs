@@ -2872,11 +2872,7 @@ fn set_active_priority(state: &mut GameState) {
 }
 
 fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> ActionResult {
-    ActionResult {
-        events: std::mem::take(events),
-        waiting_for,
-        log_entries: vec![],
-    }
+    ActionResult::applied(std::mem::take(events), waiting_for)
 }
 
 #[cfg(test)]
