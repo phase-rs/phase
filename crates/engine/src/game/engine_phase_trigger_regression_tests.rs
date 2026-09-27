@@ -232,6 +232,7 @@ fn combat_phase_stops_pause_damage_and_end_combat_windows() {
         valid_block_targets: Default::default(),
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
+        must_be_blocked_targets: Default::default(),
     };
     state.phase_stops.insert(
         PlayerId(0),

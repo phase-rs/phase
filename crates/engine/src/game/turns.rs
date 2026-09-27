@@ -3739,24 +3739,9 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 // CR 509.2 gives the active player priority after the declaration.
                 let defending = combat::next_defending_player_to_declare_blockers(state)
                     .unwrap_or_else(|| super::players::next_player(state, state.active_player));
-                let valid_block_targets =
-                    super::combat::get_valid_block_targets_for_player(state, defending);
-                let valid_blocker_ids =
-                    super::combat::ordered_valid_blocker_ids(&valid_block_targets);
-                let block_requirements =
-                    super::combat::block_requirements_for_player(state, defending);
-                let blocker_constraints = super::combat::blocker_constraints_for_player(
-                    state,
-                    defending,
-                    &valid_block_targets,
+                return AutoAdvanceStep::waiting(
+                    super::combat::build_declare_blockers_waiting_for(state, defending),
                 );
-                return AutoAdvanceStep::waiting(WaitingFor::DeclareBlockers {
-                    player: defending,
-                    valid_blocker_ids,
-                    valid_block_targets,
-                    block_requirements,
-                    blocker_constraints,
-                });
             } else {
                 // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.
                 mark_empty_attackers_end_combat(state, events);
