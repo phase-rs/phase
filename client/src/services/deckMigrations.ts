@@ -1,5 +1,5 @@
 /**
- * One-shot, boot-time deck migrations.
+ * Saved-deck migrations run from `App.tsx`.
  *
  * The legacy `loadSavedDeck` helper used to call `repairParsedDeck` and write
  * the repaired JSON back to localStorage as a side effect of every read. That
@@ -16,9 +16,20 @@
  * repaired form straight from localStorage with no side effect.
  */
 import { repairParsedDeck, type ParsedDeck } from "./deckParser";
-import { STORAGE_KEY_PREFIX } from "../constants/storage";
+import {
+  captureSavedDeck,
+  listSavedDeckNames,
+  loadDeckOrigins,
+  notifySavedDeckRewritten,
+  savedDeckUnchanged,
+  writeSavedDeckData,
+  STORAGE_KEY_PREFIX,
+  type SavedDeckRewrite,
+} from "../constants/storage";
+import { withSavedDeckLibraryOrSkip } from "./savedDeckTransaction";
 import { withStorageWatchSuppressed } from "./cloudSync/storageWatcher";
 import { projectSavedDeckSpecialSlots } from "./savedDeckProjection";
+import { applyCanonicalNames, canonicalNameMap, deckCardNames } from "./canonicalCardNames";
 
 /**
  * Walk every saved deck, repair its JSON, and persist the repaired form when
@@ -55,4 +66,49 @@ export function migrateSavedDecks(): void {
   withStorageWatchSuppressed(() => {
     for (const [key, value] of repairs) localStorage.setItem(key, value);
   });
+}
+
+/**
+ * Rewrite saved decks' card names to the engine's canonical spelling. Needs
+ * the loaded card database, so `App.tsx` runs it once the card data is ready.
+ * Feed-owned decks are skipped: feed sync rewrites them from the feed.
+ * A deck is written only if it still holds what was read before the engine
+ * call, under the saved-deck library lock and, like `migrateSavedDecks`,
+ * with the storage watcher suppressed. Each deck written is announced with
+ * `SAVED_DECK_REWRITTEN_EVENT` in the same transaction, so an open deck
+ * builder keeps it as its Save baseline.
+ */
+export async function canonicalizeSavedDeckNames(): Promise<void> {
+  const feedOwned = new Set(Object.keys(loadDeckOrigins()));
+  const saved = listSavedDeckNames()
+    .filter((name) => !feedOwned.has(name))
+    .map(captureSavedDeck)
+    .flatMap((snapshot) => {
+      if (snapshot.raw === null) return [];
+      try {
+        return [{ snapshot, deck: JSON.parse(snapshot.raw) as ParsedDeck & Record<string, unknown> }];
+      } catch {
+        return [];
+      }
+    });
+  const renamed = await canonicalNameMap(saved.flatMap(({ deck }) => deckCardNames(deck)));
+  const rewrites = saved
+    .filter(({ deck }) => deckCardNames(deck).some((name) => renamed.has(name)))
+    .map(({ snapshot, deck }) => ({
+      snapshot,
+      raw: JSON.stringify({ ...deck, ...applyCanonicalNames(deck, renamed) }),
+    }));
+  if (rewrites.length === 0) return;
+  await withSavedDeckLibraryOrSkip((txn) => {
+    const written: SavedDeckRewrite[] = [];
+    withStorageWatchSuppressed(() => {
+      for (const { snapshot, raw } of rewrites) {
+        const previousRaw = snapshot.raw;
+        if (previousRaw === null || !savedDeckUnchanged(txn, snapshot)) continue;
+        writeSavedDeckData(txn, snapshot.name, raw);
+        written.push({ name: snapshot.name, previousRaw, raw });
+      }
+    });
+    for (const rewrite of written) notifySavedDeckRewritten(txn, rewrite);
+  }, "run-unguarded");
 }

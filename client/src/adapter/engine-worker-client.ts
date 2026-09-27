@@ -258,6 +258,10 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "getCardRulings", cardName });
   }
 
+  async canonicalCardNames(names: string[]): Promise<unknown> {
+    return this.request<unknown>({ type: "canonicalCardNames", names });
+  }
+
   async initializeGame(
     deckData: unknown | null,
     seed: number,

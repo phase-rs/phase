@@ -21,6 +21,9 @@ import { ImportDeckModal } from "../ImportDeckModal";
 
 const mocks = vi.hoisted(() => ({
   fetchDeckFromUrl: vi.fn(),
+  canonicalCardNames: vi.fn(
+    async (names: string[]): Promise<(string | null)[]> => names.map(() => null),
+  ),
 }));
 
 vi.mock("../../../services/engineRuntime", () => ({
@@ -33,6 +36,10 @@ vi.mock("../../../services/deckUrlImport", () => ({
   fetchDeckFromUrl: mocks.fetchDeckFromUrl,
 }));
 
+vi.mock("../../../adapter/wasm-adapter", () => ({
+  getSharedAdapter: () => ({ canonicalCardNames: mocks.canonicalCardNames }),
+}));
+
 describe("ImportDeckModal", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -41,6 +48,8 @@ describe("ImportDeckModal", () => {
     vi.mocked(isCardCommanderEligibleForFormat).mockReset();
     vi.mocked(signatureSpellSelectionPolicy).mockReset();
     mocks.fetchDeckFromUrl.mockReset();
+    mocks.canonicalCardNames.mockReset();
+    mocks.canonicalCardNames.mockImplementation(async (names: string[]) => names.map(() => null));
     useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
   });
 
@@ -84,6 +93,32 @@ describe("ImportDeckModal", () => {
     await waitFor(() => expect(onImported).toHaveBeenCalledWith("URL Deck", ["URL Deck"], "open"));
     expect(mocks.fetchDeckFromUrl).toHaveBeenCalledWith("https://moxfield.com/decks/abc");
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "URL Deck")).not.toBeNull();
+  });
+
+  it("saves imported card names in the engine's canonical spelling", async () => {
+    const user = userEvent.setup();
+    const onImported = vi.fn();
+    mocks.canonicalCardNames.mockImplementation(async (names: string[]) =>
+      names.map((name) => {
+        if (name === "Revival/Revenge" || name === "Revival // Revenge") return "Revival // Revenge";
+        if (name === "Summon: Choco // Mog") return "Summon: Choco/Mog";
+        return null;
+      }),
+    );
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={onImported} />);
+
+    await user.type(
+      screen.getByPlaceholderText(/Paste deck list here/i),
+      "Name: Slash Deck\n[Main]\n1 Revival/Revenge\n1 Summon: Choco // Mog\n1 Revival // Revenge",
+    );
+    await user.click(screen.getByRole("button", { name: "Import" }));
+
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith("Slash Deck", ["Slash Deck"], "open"));
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Slash Deck") ?? "{}");
+    expect(stored.main).toEqual([
+      { count: 2, name: "Revival // Revenge" },
+      { count: 1, name: "Summon: Choco/Mog" },
+    ]);
   });
 
   it("keeps pasted and file deck imports local while offline", async () => {

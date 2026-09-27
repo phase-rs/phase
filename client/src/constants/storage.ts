@@ -52,6 +52,11 @@ export const DECK_FOLDERS_KEY = "phase-deck-folders";
  * themselves are tracked separately (callers re-list saved-deck keys). */
 export const DECKS_CHANGED_EVENT = "phase-decks-changed";
 
+/** Window event fired for each saved deck a background pass rewrote without
+ * changing which cards it holds, inside the library transaction that wrote
+ * it. `detail` is a {@link SavedDeckRewrite}. */
+export const SAVED_DECK_REWRITTEN_EVENT = "phase:saved-deck-rewritten";
+
 /** Max length for a folder name; longer input is trimmed on create/rename. */
 export const MAX_FOLDER_NAME_LENGTH = 40;
 
@@ -302,6 +307,35 @@ export function writeSavedDeckData(txn: SavedDeckTxn, deckName: string, raw: str
   void txn;
   localStorage.setItem(STORAGE_KEY_PREFIX + deckName, raw);
   return { name: deckName, raw };
+}
+
+/** A rewrite announced by {@link SAVED_DECK_REWRITTEN_EVENT}: the bytes `name` held before it and after it. */
+export interface SavedDeckRewrite {
+  name: string;
+  previousRaw: string;
+  raw: string;
+}
+
+/** Announce `rewrite` from inside the transaction that wrote it. */
+export function notifySavedDeckRewritten(txn: SavedDeckTxn, rewrite: SavedDeckRewrite): void {
+  void txn;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent<SavedDeckRewrite>(SAVED_DECK_REWRITTEN_EVENT, { detail: rewrite }));
+  }
+}
+
+/** Call `listener` with each {@link SAVED_DECK_REWRITTEN_EVENT}'s rewrite; returns the unsubscribe. */
+export function onSavedDeckRewritten(listener: (rewrite: SavedDeckRewrite) => void): () => void {
+  const handler = (event: Event) => listener((event as CustomEvent<SavedDeckRewrite>).detail);
+  window.addEventListener(SAVED_DECK_REWRITTEN_EVENT, handler);
+  return () => window.removeEventListener(SAVED_DECK_REWRITTEN_EVENT, handler);
+}
+
+/** `baseline` moved past `rewrite` when it holds exactly the bytes `rewrite` replaced; otherwise `baseline`. */
+export function adoptSavedDeckRewrite(baseline: SavedDeckSnapshot, rewrite: SavedDeckRewrite): SavedDeckSnapshot {
+  return baseline.name === rewrite.name && baseline.raw === rewrite.previousRaw
+    ? { name: rewrite.name, raw: rewrite.raw }
+    : baseline;
 }
 
 /** Remove a saved deck's data. */

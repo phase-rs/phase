@@ -5,7 +5,9 @@ import userEvent from "@testing-library/user-event";
 
 import { DeckBuilder } from "../DeckBuilder";
 import type { GameFormat } from "../../../adapter/types";
+import { getSharedAdapter } from "../../../adapter/wasm-adapter";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
+import { canonicalizeSavedDeckNames } from "../../../services/deckMigrations";
 import { resolveCommander } from "../../../services/deckParser";
 import { useIsMobile } from "../../../hooks/useIsMobile";
 import {
@@ -245,6 +247,211 @@ describe("DeckBuilder", () => {
     expect(useAppNotificationStore.getState().notification).toEqual({
       title: "Deck saved",
       description: '"Renamed Deck" was saved to your decks.',
+    });
+  });
+
+  describe("saved-deck name repair announces to the builder", () => {
+    const mapRevival = async (names: string[]) =>
+      names.map((name) => (name === "Revival/Revenge" ? "Revival // Revenge" : null));
+
+    it("a rename after the saved-deck name repair rewrote the open deck moves it", async () => {
+      const user = userEvent.setup();
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "Old Deck",
+        JSON.stringify({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [], format: "Standard" }),
+      );
+      localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
+      const spy = vi.spyOn(getSharedAdapter(), "canonicalCardNames").mockImplementation(mapRevival);
+
+      try {
+        render(
+          <DeckBuilder
+            format="Standard"
+            onFormatChange={vi.fn()}
+            initialDeckName="Old Deck"
+            searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+            onSearchFiltersChange={vi.fn()}
+            onResetSearch={vi.fn()}
+          />,
+        );
+        const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+        await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
+
+        await act(async () => {
+          await canonicalizeSavedDeckNames();
+        });
+
+        // Reach guard: the pass rewrote the open deck's stored bytes.
+        const rewritten = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck") ?? "{}");
+        expect(rewritten.main).toEqual([{ name: "Revival // Revenge", count: 4 }]);
+
+        await user.clear(nameInput);
+        await user.type(nameInput, "Renamed Deck");
+        await user.click(screen.getByRole("button", { name: "Save" }));
+
+        await waitFor(() => {
+          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck")).toBeNull();
+          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a rename moves the deck when the repair rewrote it while its Load was resolving", async () => {
+      const user = userEvent.setup();
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "Old Deck",
+        JSON.stringify({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [], format: "Standard" }),
+      );
+      localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
+      const spy = vi.spyOn(getSharedAdapter(), "canonicalCardNames").mockImplementation(mapRevival);
+
+      let release!: (deck: { main: Array<{ name: string; count: number }>; sideboard: never[] }) => void;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
+
+      try {
+        render(
+          <DeckBuilder
+            format="Standard"
+            onFormatChange={vi.fn()}
+            initialDeckName="Old Deck"
+            searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+            onSearchFiltersChange={vi.fn()}
+            onResetSearch={vi.fn()}
+          />,
+        );
+        await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
+
+        await act(async () => {
+          await canonicalizeSavedDeckNames();
+        });
+        // Reach guard: the pass rewrote the open deck's stored bytes while the Load awaited.
+        const rewritten = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck") ?? "{}");
+        expect(rewritten.main).toEqual([{ name: "Revival // Revenge", count: 4 }]);
+
+        await act(async () => {
+          release({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [] });
+        });
+
+        const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+        await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
+        await user.clear(nameInput);
+        await user.type(nameInput, "Renamed Deck");
+        await user.click(screen.getByRole("button", { name: "Save" }));
+
+        await waitFor(() => {
+          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck")).toBeNull();
+          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a rename leaves a deck that changed elsewhere in place even after the repair rewrote it", async () => {
+      const user = userEvent.setup();
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "Old Deck",
+        JSON.stringify({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [], format: "Standard" }),
+      );
+      localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
+      const spy = vi.spyOn(getSharedAdapter(), "canonicalCardNames").mockImplementation(mapRevival);
+
+      try {
+        render(
+          <DeckBuilder
+            format="Standard"
+            onFormatChange={vi.fn()}
+            initialDeckName="Old Deck"
+            searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+            onSearchFiltersChange={vi.fn()}
+            onResetSearch={vi.fn()}
+          />,
+        );
+        const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+        await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
+
+        // Standing in for another tab or a cloud pull the builder is not told about.
+        localStorage.setItem(
+          STORAGE_KEY_PREFIX + "Old Deck",
+          JSON.stringify({ main: [{ name: "Revival/Revenge", count: 3 }], sideboard: [], format: "Standard" }),
+        );
+
+        await act(async () => {
+          await canonicalizeSavedDeckNames();
+        });
+        // Reach guard: the pass rewrote the externally-changed content.
+        const rewritten = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck") ?? "{}");
+        expect(rewritten.main).toEqual([{ name: "Revival // Revenge", count: 3 }]);
+
+        await user.clear(nameInput);
+        await user.type(nameInput, "Renamed Deck");
+        await user.click(screen.getByRole("button", { name: "Save" }));
+
+        await waitFor(() => {
+          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
+        });
+        const stillThere = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck") ?? "{}");
+        expect(stillThere.main).toEqual([{ name: "Revival // Revenge", count: 3 }]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it.each([1, 2, 3])("adopts a rewrite that lands k microtasks after a pending Load resolves (k=%i)", async (k) => {
+      const user = userEvent.setup();
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "Old Deck",
+        JSON.stringify({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [], format: "Standard" }),
+      );
+      localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
+      const spy = vi.spyOn(getSharedAdapter(), "canonicalCardNames").mockImplementation(mapRevival);
+
+      let release!: (deck: { main: Array<{ name: string; count: number }>; sideboard: never[] }) => void;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
+
+      try {
+        render(
+          <DeckBuilder
+            format="Standard"
+            onFormatChange={vi.fn()}
+            initialDeckName="Old Deck"
+            searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+            onSearchFiltersChange={vi.fn()}
+            onResetSearch={vi.fn()}
+          />,
+        );
+        await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
+
+        await act(async () => {
+          release({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [] });
+          // Let the released promise's `.then` chain (resolveCommander's await,
+          // then handleLoad's continuation) run `k` microtask turns before the
+          // rewrite event fires.
+          for (let i = 0; i < k; i++) await Promise.resolve();
+          await canonicalizeSavedDeckNames();
+        });
+
+        const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+        await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
+        await user.clear(nameInput);
+        await user.type(nameInput, "Renamed Deck");
+        await user.click(screen.getByRole("button", { name: "Save" }));
+
+        await waitFor(() => {
+          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck")).toBeNull();
+          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
+        });
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 

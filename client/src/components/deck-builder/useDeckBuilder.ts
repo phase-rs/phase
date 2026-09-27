@@ -9,12 +9,14 @@ import { deduplicateEntries, expandParsedDeck, resolveCommander } from "../../se
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
   STORAGE_KEY_PREFIX,
+  adoptSavedDeckRewrite,
   captureSavedDeck,
   freeDeckName,
   getDeckMeta,
   listFolders,
   loadSavedDeck,
   loadSavedDeckBracket,
+  onSavedDeckRewritten,
   saveBuilderDeck,
   setDeckFolder,
   stampDeckMeta,
@@ -86,6 +88,16 @@ export function useDeckBuilder({
   // just wrote, so a save queued behind an earlier one to the same name sees that write and not
   // a value captured before it (see saveBuilderDeck's doc).
   const savedDeckRef = useRef<SavedDeckSnapshot | null>(null);
+  // A SAVED_DECK_REWRITTEN_EVENT that replaced the open deck's stored bytes moves the Save
+  // baseline with it, so a later rename still moves that deck.
+  useEffect(
+    () =>
+      onSavedDeckRewritten((rewrite) => {
+        const baseline = savedDeckRef.current;
+        if (baseline) savedDeckRef.current = adoptSavedDeckRewrite(baseline, rewrite);
+      }),
+    [],
+  );
   const [justSaved, setJustSaved] = useState(false);
   const [commanders, setCommanders] = useState<string[]>([]);
   // Which surface is foregrounded on phone (tablet/desktop show columns and
@@ -668,9 +680,18 @@ export function useDeckBuilder({
       return;
     }
     const persisted = JSON.parse(stored.raw) as ParsedDeck & { format?: string };
+    // A rewrite that lands while resolveCommander runs is missed by the hook-level
+    // subscription, which follows savedDeckRef and not this Load.
+    let baseline: SavedDeckSnapshot = stored;
+    const stopAdopting = onSavedDeckRewritten((rewrite) => {
+      baseline = adoptSavedDeckRewrite(baseline, rewrite);
+    });
     const resolved = await resolveCommander(parsed);
     const changedAfterLoad = editorChangedSince(captured);
-    if (changedAfterLoad.reloaded || changedAfterLoad.edited) return;
+    if (changedAfterLoad.reloaded || changedAfterLoad.edited) {
+      stopAdopting();
+      return;
+    }
     const savedFormat = persisted.format
       ? DECK_CONSTRUCTION_FORMATS.find(
           (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
@@ -686,7 +707,8 @@ export function useDeckBuilder({
       onFormatChange("Commander");
     }
     setDeckName(name);
-    savedDeckRef.current = stored;
+    savedDeckRef.current = baseline;
+    stopAdopting();
     setBracket(loadSavedDeckBracket(name));
   }, [applyDeckToEditor, onFormatChange, captureEditor, editorChangedSince]);
 

@@ -16,6 +16,7 @@ import {
   resolveCommander,
   type ParsedDeck,
 } from "../../services/deckParser";
+import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import { fetchDeckFromUrl } from "../../services/deckUrlImport";
 import {
   isCardCommanderEligibleForFormat,
@@ -167,7 +168,7 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
   };
 
   const stageImport = async (started: number, content: string, fallbackName?: string): Promise<boolean> => {
-    const deck = await resolveCommander(detectAndParseDeck(content));
+    const deck = await resolveCommander(await canonicalizeDeckNames(detectAndParseDeck(content)));
     if (!parsedDeckHasCards(deck)) return false;
 
     const name = resolveImportDeckName(deckName, content, deck, fallbackName);

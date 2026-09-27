@@ -984,6 +984,26 @@ pub fn get_card_face_data(name: &str) -> JsValue {
     })
 }
 
+/// The canonical printed name of each of `names`, index-aligned, `null` where
+/// `CardDatabase::canonical_name` has none. Errors if the card database is
+/// not loaded.
+#[wasm_bindgen(js_name = canonicalCardNames)]
+pub fn canonical_card_names(names: JsValue) -> Result<JsValue, JsValue> {
+    let names: Vec<String> = serde_wasm_bindgen::from_value(names)
+        .map_err(|e| JsValue::from_str(&format!("Invalid card name list: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        let canonical: Vec<Option<String>> =
+            names.iter().map(|name| db.canonical_name(name)).collect();
+        Ok(to_js(&canonical))
+    })
+}
+
 /// Search the loaded card database. The engine is the single authority for the
 /// rules data search filters on — format legality, set membership, card types,
 /// mana value, and colors — so deck-builder search runs here, never as a
