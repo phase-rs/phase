@@ -464,13 +464,11 @@ export function writeDraftAutosaveDeck(
  * Save the deck builder's deck as `nextName`. When renamed, move it from `previous.name` only if
  * that name still holds the deck `previous` captured; otherwise leave that name's deck alone.
  * When `previous.name` is `nextName`, throw `SavedDeckChangedError`, writing nothing, unless that
- * name still holds the deck `previous` captured or the draft autosave still owns it
- * (`DeckMeta.autosaveSlot`). Both checks read `savedDeckRef` under the lock, not just `previous`:
- * when an earlier queued save or clone to that same name has already committed by the time this
- * transaction runs, its write is what `previous` should be compared against, not the value
- * captured back at this click. On a same-name refusal, `savedDeckRef` is cleared to `null` when
- * this save still claims the editor, so the next Save (whether a retry under the same name or a
- * rename) captures `previous = null` and writes fresh at its `nextName`.
+ * name still holds exactly what `previous` captured (`raw: null` meaning no deck is saved there).
+ * Both checks read `savedDeckRef` under the lock, not just `previous`: when an earlier queued save
+ * or clone to that same name has already committed by the time this transaction runs, its write is
+ * what `previous` should be compared against, not the value captured back at this click. A refusal
+ * leaves `savedDeckRef` as it was.
  *
  * On success, `savedDeckRef` is updated to this write's snapshot only if `claimsEditor` (checked
  * again after the write) still says so — a Load that switched the editor to a different deck
@@ -487,16 +485,11 @@ export function saveBuilderDeck(
     const live = savedDeckRef.current;
     const effective = claimsEditor() && previous && live && live.name === previous.name ? live : previous;
     if (effective && effective.name === nextName) {
-      if (getDeckMeta(nextName)?.autosaveSlot === undefined && !savedDeckUnchanged(txn, effective)) {
-        if (claimsEditor()) {
-          // Clear instead of rebasing onto the other writer's bytes: rebasing made a later
-          // rename-Save treat that snapshot as "unchanged" and move + overwrite the other
-          // writer's deck the user never saw. Clearing makes the retry the "try again" toast
-          // asks for a first save (overwrite or recreate) instead.
-          savedDeckRef.current = null;
-        }
-        throw new SavedDeckChangedError(nextName);
-      }
+      // Captured under this transaction's own lock, not a fresh read by the caller after this
+      // throws: that is what lets a caller (the conflict dialog's "keep mine") act on exactly the
+      // bytes this refusal saw instead of racing whatever lands next.
+      const stored = captureSavedDeck(nextName);
+      if (stored.raw !== effective.raw) throw new SavedDeckChangedError(nextName, stored.raw);
     } else if (effective && savedDeckUnchanged(txn, effective)) {
       // If nextName already names another deck, the writeSavedDeckData below overwrites
       // its data (pre-existing Save behavior) and moveSavedDeck's metadata

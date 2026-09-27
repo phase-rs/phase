@@ -1664,7 +1664,7 @@ describe("DeckBuilder", () => {
       setSavedDeckTxnLockWaitForTests(Number.POSITIVE_INFINITY);
     });
 
-    it("a manual save refused while the autosave holds the ownership transition writes nothing, stays dirty, and succeeds on retry", async () => {
+    it("a manual save refused while the autosave holds the ownership transition writes nothing, stays dirty, and saves over the autosave once the user chooses to", async () => {
       const user = userEvent.setup();
       await seedAutosave();
 
@@ -1726,6 +1726,10 @@ describe("DeckBuilder", () => {
       expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBe("Sealed");
 
       await user.click(screen.getByRole("button", { name: "Save" }));
+      await screen.findByRole("dialog", { name: "Deck changed elsewhere" });
+      const afterRetry = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed") ?? "{}");
+      expect(afterRetry.main).toEqual([{ name: "Mountain", count: 2 }]);
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
       await waitFor(() => {
         const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed") ?? "{}");
         expect(stored.main).toEqual([]);
@@ -1897,8 +1901,15 @@ describe("DeckBuilder", () => {
         expect((await navigator.locks.query()).pending).toHaveLength(0);
       });
 
-      const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed") ?? "{}");
-      expect(persisted.main).toEqual([]);
+      await screen.findByRole("dialog", { name: "Deck changed elsewhere" });
+      const autosaved = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed") ?? "{}");
+      expect(autosaved.main).toEqual([{ name: "Mountain", count: 2 }]);
+      expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBe("Sealed");
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
+      await waitFor(() => {
+        const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed") ?? "{}");
+        expect(persisted.main).toEqual([]);
+      });
       expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBeUndefined();
       await expect(autosave).resolves.toEqual({ status: "committed", value: "[Autosave] Sealed" });
     });
@@ -2026,13 +2037,15 @@ describe("DeckBuilder", () => {
       title: "Couldn't save deck",
       description: "This deck changed before your action ran, so nothing was changed. Check the deck and try again.",
     };
+    const CONFLICT = "Deck changed elsewhere";
+    const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
 
-    it("a same-name save queued behind another tab's write to the open deck is refused and leaves that write", async () => {
-      const user = userEvent.setup();
+    function mountP(extra?: () => void) {
       localStorage.setItem(
         STORAGE_KEY_PREFIX + "P",
         JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
       );
+      extra?.();
       render(
         <DeckBuilder
           format="Standard"
@@ -2043,15 +2056,15 @@ describe("DeckBuilder", () => {
           onResetSearch={vi.fn()}
         />,
       );
-      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
-      await waitFor(() => expect(nameInput).toHaveValue("P"));
-      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+    }
 
+    // Removes one Lightning Bolt from P, then Saves while another writer holds the lock and replaces P.
+    async function saveRacingOtherWriter(user: ReturnType<typeof userEvent.setup>, whileWaiting?: () => Promise<void>) {
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
       let release!: () => void;
       const held = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
       const holder = withSavedDeckLibrary(async (txn) => {
         await held;
         writeSavedDeckData(txn, "P", otherTab);
@@ -2059,83 +2072,83 @@ describe("DeckBuilder", () => {
       await vi.waitFor(async () => {
         expect((await navigator.locks.query()).held).toHaveLength(1);
       });
-
       await user.click(screen.getByRole("button", { name: "Save" }));
       await vi.waitFor(async () => {
         expect((await navigator.locks.query()).pending).toHaveLength(1);
       });
+      await whileWaiting?.();
       release();
       await holder;
+    }
 
-      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+    it("a same-name save queued behind another tab's write to the open deck is refused and leaves that write", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await saveRacingOtherWriter(user);
+
+      const dialog = await screen.findByRole("dialog", { name: CONFLICT });
+      expect(dialog).toHaveTextContent('"P" was changed somewhere else');
+      expect(useAppNotificationStore.getState().notification).toBeNull();
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
       // The refused write leaves the edit in the editor, not just in storage.
       expect(screen.getByText("3 Lightning Bolt")).toBeInTheDocument();
     });
 
-    it("a second same-name save after another tab's write replaced the deck writes the editor's deck", async () => {
+    it("an ordinary second save after another tab's write replaced the deck is refused again and leaves that write", async () => {
       const user = userEvent.setup();
-      localStorage.setItem(
-        STORAGE_KEY_PREFIX + "P",
-        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
-      );
-      render(
-        <DeckBuilder
-          format="Standard"
-          onFormatChange={vi.fn()}
-          initialDeckName="P"
-          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
-          onSearchFiltersChange={vi.fn()}
-          onResetSearch={vi.fn()}
-        />,
-      );
+      mountP();
       const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
       await waitFor(() => expect(nameInput).toHaveValue("P"));
-      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
-
-      let release!: () => void;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
-      const holder = withSavedDeckLibrary(async (txn) => {
-        await held;
-        writeSavedDeckData(txn, "P", otherTab);
-      });
-      await vi.waitFor(async () => {
-        expect((await navigator.locks.query()).held).toHaveLength(1);
-      });
-
-      await user.click(screen.getByRole("button", { name: "Save" }));
-      await vi.waitFor(async () => {
-        expect((await navigator.locks.query()).pending).toHaveLength(1);
-      });
-      release();
-      await holder;
-      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+      await saveRacingOtherWriter(user);
+      await screen.findByRole("dialog", { name: CONFLICT });
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: CONFLICT })).toBeNull());
 
       await user.click(screen.getByRole("button", { name: /^(Save|Saved ✓)$/ }));
+      await screen.findByRole("dialog", { name: CONFLICT });
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+      expect(screen.getByText("3 Lightning Bolt")).toBeInTheDocument();
+    });
+
+    it("choosing Save my version after another tab's write replaced the deck writes the editor's deck", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await saveRacingOtherWriter(user);
+      await screen.findByRole("dialog", { name: CONFLICT });
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
       await vi.waitFor(() => expect(useAppNotificationStore.getState().notification?.title).toBe("Deck saved"));
       const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "P") ?? "{}");
       expect(stored.main).toEqual([{ name: "Lightning Bolt", count: 3 }]);
     });
 
-    it("a same-name save after the open deck was deleted elsewhere is refused", async () => {
+    it("choosing Load saved version after another tab's write replaced the deck opens that write, and a Save then writes", async () => {
       const user = userEvent.setup();
-      localStorage.setItem(
-        STORAGE_KEY_PREFIX + "P",
-        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
-      );
-      render(
-        <DeckBuilder
-          format="Standard"
-          onFormatChange={vi.fn()}
-          initialDeckName="P"
-          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
-          onSearchFiltersChange={vi.fn()}
-          onResetSearch={vi.fn()}
-        />,
-      );
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await saveRacingOtherWriter(user);
+      await screen.findByRole("dialog", { name: CONFLICT });
+
+      await user.click(screen.getByRole("button", { name: "Load saved version" }));
+      expect(await screen.findByText("60 Mountain")).toBeInTheDocument();
+      expect(screen.queryByText("3 Lightning Bolt")).toBeNull();
+
+      await user.click(screen.getByRole("button", { name: "remove-Mountain" }));
+      await user.click(screen.getByRole("button", { name: /^(Save|Saved ✓)$/ }));
+      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification?.title).toBe("Deck saved"));
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "P") ?? "{}");
+      expect(stored.main).toEqual([{ name: "Mountain", count: 59 }]);
+    });
+
+    it("a same-name save after the open deck was deleted elsewhere is refused, and an ordinary retry does not recreate it", async () => {
+      const user = userEvent.setup();
+      mountP();
       const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
       await waitFor(() => expect(nameInput).toHaveValue("P"));
 
@@ -2143,35 +2156,29 @@ describe("DeckBuilder", () => {
       await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
       await user.click(screen.getByRole("button", { name: "Save" }));
 
-      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+      const dialog = await screen.findByRole("dialog", { name: CONFLICT });
+      expect(dialog).toHaveTextContent('"P" was deleted somewhere else');
+      expect(screen.queryByRole("button", { name: "Load saved version" })).toBeNull();
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBeNull();
+
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      await user.click(screen.getByRole("button", { name: /^(Save|Saved ✓)$/ }));
+      await screen.findByRole("dialog", { name: CONFLICT });
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBeNull();
     });
 
-    it("a second same-name save after the deck was deleted elsewhere recreates it", async () => {
+    it("choosing Save my version after the open deck was deleted elsewhere recreates it", async () => {
       const user = userEvent.setup();
-      localStorage.setItem(
-        STORAGE_KEY_PREFIX + "P",
-        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
-      );
-      render(
-        <DeckBuilder
-          format="Standard"
-          onFormatChange={vi.fn()}
-          initialDeckName="P"
-          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
-          onSearchFiltersChange={vi.fn()}
-          onResetSearch={vi.fn()}
-        />,
-      );
+      mountP();
       const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
       await waitFor(() => expect(nameInput).toHaveValue("P"));
 
       await withSavedDeckLibrary((txn) => removeSavedDeckData(txn, "P"));
       await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
       await user.click(screen.getByRole("button", { name: "Save" }));
-      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+      await screen.findByRole("dialog", { name: CONFLICT });
 
-      await user.click(screen.getByRole("button", { name: /^(Save|Saved ✓)$/ }));
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
       await vi.waitFor(() => expect(useAppNotificationStore.getState().notification?.title).toBe("Deck saved"));
       const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "P") ?? "{}");
       expect(stored.main).toEqual([{ name: "Lightning Bolt", count: 3 }]);
@@ -2179,45 +2186,12 @@ describe("DeckBuilder", () => {
 
     it("a rename-Save made after a same-name refusal leaves the other writer's deck in place", async () => {
       const user = userEvent.setup();
-      localStorage.setItem(
-        STORAGE_KEY_PREFIX + "P",
-        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
-      );
-      render(
-        <DeckBuilder
-          format="Standard"
-          onFormatChange={vi.fn()}
-          initialDeckName="P"
-          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
-          onSearchFiltersChange={vi.fn()}
-          onResetSearch={vi.fn()}
-        />,
-      );
+      mountP();
       const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
       await waitFor(() => expect(nameInput).toHaveValue("P"));
-      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
-
-      let release!: () => void;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
-      const holder = withSavedDeckLibrary(async (txn) => {
-        await held;
-        writeSavedDeckData(txn, "P", otherTab);
-      });
-      await vi.waitFor(async () => {
-        expect((await navigator.locks.query()).held).toHaveLength(1);
-      });
-
-      await user.click(screen.getByRole("button", { name: "Save" }));
-      await vi.waitFor(async () => {
-        expect((await navigator.locks.query()).pending).toHaveLength(1);
-      });
-      release();
-      await holder;
-      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
-      // Reach guard: the refusal left the other writer's bytes in place before the rename.
+      await saveRacingOtherWriter(user);
+      await screen.findByRole("dialog", { name: CONFLICT });
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
 
       await user.clear(nameInput);
@@ -2231,127 +2205,134 @@ describe("DeckBuilder", () => {
       expect(atQ.main).toEqual([{ name: "Lightning Bolt", count: 3 }]);
     });
 
+    it("Save my version after the name was changed while the refused save waited saves under that name and leaves the other writer's deck", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await saveRacingOtherWriter(user, async () => {
+        await user.clear(nameInput);
+        await user.type(nameInput, "Q");
+      });
+      await screen.findByRole("dialog", { name: CONFLICT });
+      expect(nameInput).toHaveValue("Q");
+
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
+      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification?.title).toBe("Deck saved"));
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+      const atQ = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Q") ?? "{}");
+      expect(atQ.main).toEqual([{ name: "Lightning Bolt", count: 3 }]);
+    });
+
     it("a same-name refusal on P, after a Load moved the editor to D, does not blunt D's own change detection", async () => {
       const user = userEvent.setup();
-      localStorage.setItem(
-        STORAGE_KEY_PREFIX + "P",
-        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
-      );
-      localStorage.setItem(
-        STORAGE_KEY_PREFIX + "D",
-        JSON.stringify({ main: [{ name: "Counterspell", count: 4 }], sideboard: [], format: "Standard" }),
-      );
-      render(
-        <DeckBuilder
-          format="Standard"
-          onFormatChange={vi.fn()}
-          initialDeckName="P"
-          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
-          onSearchFiltersChange={vi.fn()}
-          onResetSearch={vi.fn()}
-        />,
+      mountP(() =>
+        localStorage.setItem(
+          STORAGE_KEY_PREFIX + "D",
+          JSON.stringify({ main: [{ name: "Counterspell", count: 4 }], sideboard: [], format: "Standard" }),
+        ),
       );
       const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
       await waitFor(() => expect(nameInput).toHaveValue("P"));
-      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
-
-      let release!: () => void;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
+      await saveRacingOtherWriter(user, async () => {
+        await user.click(screen.getByRole("button", { name: "Load deck..." }));
+        await user.click(screen.getByRole("option", { name: "D" }));
+        await user.click(screen.getByRole("button", { name: "Discard" }));
+        await waitFor(() => expect(nameInput).toHaveValue("D"));
       });
-      const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
-      const holder = withSavedDeckLibrary(async (txn) => {
-        await held;
-        writeSavedDeckData(txn, "P", otherTab);
-      });
-      await vi.waitFor(async () => {
-        expect((await navigator.locks.query()).held).toHaveLength(1);
-      });
-
-      await user.click(screen.getByRole("button", { name: "Save" }));
-      await vi.waitFor(async () => {
-        expect((await navigator.locks.query()).pending).toHaveLength(1);
-      });
-
-      await user.click(screen.getByRole("button", { name: "Load deck..." }));
-      await user.click(screen.getByRole("option", { name: "D" }));
-      await user.click(screen.getByRole("button", { name: "Discard" }));
-      await waitFor(() => expect(nameInput).toHaveValue("D"));
-
-      release();
-      await holder;
       // P's refusal ran after the Load, so it must not touch savedDeckRef — D owns it now.
       await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+      expect(screen.queryByRole("dialog", { name: CONFLICT })).toBeNull();
 
       const changedElsewhere = JSON.stringify({ main: [{ name: "Island", count: 40 }], sideboard: [] });
       localStorage.setItem(STORAGE_KEY_PREFIX + "D", changedElsewhere);
 
-      // Clear the notification left by P's refusal so the closing waitFor below can only be
-      // satisfied by D's own Save producing CHANGED, not by the stale value still sitting there.
-      useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
-
-      // If P's refusal had cleared savedDeckRef anyway, this Save of D would have no snapshot
+      // If P's refusal had touched savedDeckRef anyway, this Save of D would have no snapshot
       // to compare against and would silently overwrite the change above instead of refusing.
       await user.click(await screen.findByRole("button", { name: "remove-Counterspell" }));
       await user.click(screen.getByRole("button", { name: "Save" }));
-      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
+      const dialog = await screen.findByRole("dialog", { name: CONFLICT });
+      expect(dialog).toHaveTextContent('"D"');
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "D")).toBe(changedElsewhere);
     });
 
-    it("a Clone made after a same-name refusal lands unfiled, not in the source's folder", async () => {
+    it("a Clone made after a same-name refusal lands in the source's folder", async () => {
       const user = userEvent.setup();
-      localStorage.setItem(
-        STORAGE_KEY_PREFIX + "P",
-        JSON.stringify({ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [], format: "Standard" }),
-      );
-      const folderF = createFolder(testSavedDeckTxn, "F")!;
-      setDeckFolder(testSavedDeckTxn, "P", folderF.id);
-      render(
-        <DeckBuilder
-          format="Standard"
-          onFormatChange={vi.fn()}
-          initialDeckName="P"
-          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
-          onSearchFiltersChange={vi.fn()}
-          onResetSearch={vi.fn()}
-        />,
-      );
+      let folderId = "";
+      mountP(() => {
+        const folderF = createFolder(testSavedDeckTxn, "F")!;
+        folderId = folderF.id;
+        setDeckFolder(testSavedDeckTxn, "P", folderF.id);
+      });
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await saveRacingOtherWriter(user);
+      await screen.findByRole("dialog", { name: CONFLICT });
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+      await user.click(screen.getByRole("button", { name: "Clone" }));
+      await waitFor(() => expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P copy")).not.toBeNull());
+      expect(getDeckMeta("P copy")?.folderId).toBe(folderId);
+      // The other writer's bytes at the old name are untouched by the Clone.
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+    });
+
+    it("Save & continue refused as changed shows the conflict and does not continue", async () => {
+      const user = userEvent.setup();
+      mountP();
       const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
       await waitFor(() => expect(nameInput).toHaveValue("P"));
       await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", otherTab));
 
-      let release!: () => void;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      const otherTab = JSON.stringify({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
-      const holder = withSavedDeckLibrary(async (txn) => {
-        await held;
-        writeSavedDeckData(txn, "P", otherTab);
-      });
-      await vi.waitFor(async () => {
-        expect((await navigator.locks.query()).held).toHaveLength(1);
-      });
+      await user.click(screen.getByRole("button", { name: /Menu/ }));
+      await user.click(await screen.findByRole("button", { name: "Save & continue" }));
+      await screen.findByRole("dialog", { name: CONFLICT });
+      expect(navigateMock).not.toHaveBeenCalled();
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
 
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(await screen.findByRole("dialog", { name: "Unsaved changes" })).toBeInTheDocument();
+    });
+
+    // A write that lands after the refusal but while the dialog is still open must not be lost:
+    // Save my version re-bases onto the bytes the refusal saw, not a fresh read taken at the click.
+    it("a write that lands while the conflict dialog is open survives Save my version, which is refused again", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+      await saveRacingOtherWriter(user);
+      await screen.findByRole("dialog", { name: CONFLICT });
+
+      const thirdWrite = JSON.stringify({ main: [{ name: "Island", count: 40 }], sideboard: [] });
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", thirdWrite));
+
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
+      const dialog = await screen.findByRole("dialog", { name: CONFLICT });
+      expect(dialog).toHaveTextContent('"P" was changed somewhere else');
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(thirdWrite);
+    });
+
+    it("a deck recreated while the conflict dialog says deleted survives Save my version, which reopens as changed", async () => {
+      const user = userEvent.setup();
+      mountP();
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("P"));
+
+      await withSavedDeckLibrary((txn) => removeSavedDeckData(txn, "P"));
+      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
       await user.click(screen.getByRole("button", { name: "Save" }));
-      await vi.waitFor(async () => {
-        expect((await navigator.locks.query()).pending).toHaveLength(1);
-      });
-      release();
-      await holder;
-      await vi.waitFor(() => expect(useAppNotificationStore.getState().notification).toEqual(CHANGED));
-      // Reach guard: the refusal left the other writer's bytes in place before the Clone.
-      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+      const deletedDialog = await screen.findByRole("dialog", { name: CONFLICT });
+      expect(deletedDialog).toHaveTextContent('"P" was deleted somewhere else');
 
-      await user.click(screen.getByRole("button", { name: "Clone" }));
-      await waitFor(() =>
-        expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P copy")).not.toBeNull(),
-      );
-      // Pins current behaviour: the refusal cleared savedDeckRef, so Clone's click-time folder
-      // lookup finds nothing and the copy lands unfiled.
-      expect(getDeckMeta("P copy")?.folderId).toBeUndefined();
-      // The other writer's bytes at the old name are untouched by the Clone.
-      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
+      const recreated = JSON.stringify({ main: [{ name: "Island", count: 40 }], sideboard: [] });
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", recreated));
+
+      await user.click(screen.getByRole("button", { name: "Save my version" }));
+      const changedDialog = await screen.findByRole("dialog", { name: CONFLICT });
+      expect(changedDialog).toHaveTextContent('"P" was changed somewhere else');
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(recreated);
     });
   });
 

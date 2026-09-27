@@ -36,10 +36,43 @@ import {
   isCanonicalizableDeck,
 } from "./canonicalCardNames";
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isNameEntryArray(v: unknown): boolean {
+  return Array.isArray(v) && v.every((entry) => isObject(entry) && typeof entry.name === "string");
+}
+
+/** `repairParsedDeck` reads these with `?.map`/`?.length`, so a stored `null` is as safe as absent. */
+function isNullableStringArray(v: unknown): boolean {
+  return v === undefined || v === null || (Array.isArray(v) && v.every((entry) => typeof entry === "string"));
+}
+
 /**
- * Walk every saved deck, repair its JSON, and persist the repaired form when
- * it differs from what's on disk. Idempotent: a second call is effectively
- * a no-op (each deck's repair is already on disk).
+ * True when `repairParsedDeck` and `projectSavedDeckSpecialSlots` can read `deck` without
+ * throwing: `main`/`sideboard` as arrays of objects with a string `name`, and the optional
+ * name-list fields absent, `null`, or an array of strings. Looser than `isCanonicalizableDeck`
+ * about `null`, which that guard rejects because `deckCardNames` needs the stricter string-array
+ * shape — legacy records written before 5093be87c stored `commander: null`, and the repair here
+ * reads it with `?.length`/`?.map`, so it is as safe to migrate as an absent field.
+ */
+function isRepairableDeckRecord(value: unknown): value is ParsedDeck & Record<string, unknown> {
+  if (!isObject(value)) return false;
+  if (!isNameEntryArray(value.main) || !isNameEntryArray(value.sideboard)) return false;
+  if (!isNullableStringArray(value.commander)) return false;
+  if (!isNullableStringArray(value.signature_spell)) return false;
+  if (!isNullableStringArray(value.planar_deck)) return false;
+  if (!isNullableStringArray(value.scheme_deck)) return false;
+  if (!isNullableStringArray(value.sticker_sheets)) return false;
+  if (value.companion !== undefined && value.companion !== null && typeof value.companion !== "string") return false;
+  return true;
+}
+
+/**
+ * Walk every saved deck, repair the JSON of each that `isRepairableDeckRecord` accepts, and
+ * persist the repaired form when it differs from what's on disk. Idempotent: a second call is
+ * effectively a no-op (each deck's repair is already on disk).
  *
  * Safe to call multiple times; cheap when nothing needs repair (a JSON parse
  * + structural compare per deck, no writes).
@@ -53,12 +86,15 @@ export function migrateSavedDecks(): void {
     const raw = localStorage.getItem(key);
     if (!raw) continue;
 
-    let parsed: ParsedDeck & Record<string, unknown>;
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(raw) as ParsedDeck & Record<string, unknown>;
+      parsed = JSON.parse(raw);
     } catch {
       continue;
     }
+    // A malformed record is left untouched: `repairParsedDeck` assumes this shape, and one bad
+    // record must not abort the repair of every other saved deck.
+    if (!isRepairableDeckRecord(parsed)) continue;
     const repaired = projectSavedDeckSpecialSlots(parsed, repairParsedDeck(parsed));
     const repairedRaw = JSON.stringify({ ...parsed, ...repaired });
     if (repairedRaw !== raw) repairs.push([key, repairedRaw]);

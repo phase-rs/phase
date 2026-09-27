@@ -56,6 +56,40 @@ describe("migrateSavedDecks — bare-slash names", () => {
   });
 });
 
+describe("migrateSavedDecks — malformed records", () => {
+  it("skips malformed records stored before a well-formed deck that needs repair", () => {
+    const malformed = [
+      "{}",
+      JSON.stringify(null),
+      JSON.stringify({ main: "x", sideboard: [] }),
+      JSON.stringify({ main: [], sideboard: [], companion: 5 }),
+    ];
+    malformed.forEach((raw, i) => localStorage.setItem(STORAGE_KEY_PREFIX + `Bad${i}`, raw));
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Spacing Deck",
+      JSON.stringify({ main: [{ count: 1, name: "Fire// Ice" }], sideboard: [] }),
+    );
+
+    expect(() => migrateSavedDecks()).not.toThrow();
+
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Spacing Deck") ?? "{}");
+    expect(stored.main).toEqual([{ count: 1, name: "Fire // Ice" }]);
+    malformed.forEach((raw, i) => expect(localStorage.getItem(STORAGE_KEY_PREFIX + `Bad${i}`)).toBe(raw));
+  });
+
+  it("still repairs a legacy deck whose commander and companion were stored as null", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Legacy Deck",
+      JSON.stringify({ main: [{ count: 1, name: "Fire// Ice" }], sideboard: [], commander: null, companion: null }),
+    );
+
+    migrateSavedDecks();
+
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Legacy Deck") ?? "{}");
+    expect(stored.main).toEqual([{ count: 1, name: "Fire // Ice" }]);
+  });
+});
+
 describe("canonicalizeSavedDeckNames", () => {
   it("rewrites saved decks to the engine's canonical names", async () => {
     localStorage.setItem(

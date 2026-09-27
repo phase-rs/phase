@@ -94,6 +94,8 @@ export function DeckBuilder({
     handleSave,
     handleClone,
     handleLoad,
+    saveConflict,
+    resolveSaveConflict,
     handleSetCommander,
     isCommanderEligible,
     handleRemoveCommander,
@@ -565,53 +567,102 @@ export function DeckBuilder({
         />
       )}
 
-      {pendingAction && (
+      {saveConflict ? (
         <div
           className="fixed inset-0 z-[120] flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
-          aria-label={t("unsaved.title")}
+          aria-label={t("saveConflict.title")}
         >
           <button
             type="button"
             aria-label={t("unsaved.dismiss")}
             className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
-            onClick={() => setPendingAction(null)}
+            onClick={() => void resolveSaveConflict("dismiss")}
           />
           <div className="relative z-10 w-full max-w-sm rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
-            <h2 className="text-base font-semibold text-white">{t("unsaved.title")}</h2>
+            <h2 className="text-base font-semibold text-white">{t("saveConflict.title")}</h2>
             <p className="mt-1.5 text-sm text-slate-400">
-              {pendingAction.type === "back"
-                ? t("unsaved.bodyLeaving")
-                : t("unsaved.bodyLoading")}
+              {saveConflict.snapshot.raw === null
+                ? t("saveConflict.bodyDeleted", { name: saveConflict.snapshot.name })
+                : t("saveConflict.bodyChanged", { name: saveConflict.snapshot.name })}
             </p>
             <div className="mt-4 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setPendingAction(null)}
+                onClick={() => void resolveSaveConflict("dismiss")}
                 className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
               >
                 {t("common:actions.cancel")}
               </button>
+              {saveConflict.snapshot.raw !== null && (
+                <button
+                  type="button"
+                  onClick={() => void resolveSaveConflict("load")}
+                  className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
+                >
+                  {t("saveConflict.loadSaved")}
+                </button>
+              )}
               <button
                 type="button"
-                onClick={confirmDiscardThen}
+                onClick={() => void resolveSaveConflict("keepMine")}
                 className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-sm text-red-200 hover:bg-red-500/20"
               >
-                {t("unsaved.discard")}
-              </button>
-              <button
-                type="button"
-                onClick={confirmSaveThen}
-                disabled={!deckName.trim()}
-                title={deckName.trim() ? undefined : t("toolbar.nameToSave")}
-                className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-sm text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
-              >
-                {t("unsaved.saveAndContinue")}
+                {t("saveConflict.saveMine")}
               </button>
             </div>
           </div>
         </div>
+      ) : (
+        pendingAction && (
+          <div
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("unsaved.title")}
+          >
+            <button
+              type="button"
+              aria-label={t("unsaved.dismiss")}
+              className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
+              onClick={() => setPendingAction(null)}
+            />
+            <div className="relative z-10 w-full max-w-sm rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-5 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md">
+              <h2 className="text-base font-semibold text-white">{t("unsaved.title")}</h2>
+              <p className="mt-1.5 text-sm text-slate-400">
+                {pendingAction.type === "back"
+                  ? t("unsaved.bodyLeaving")
+                  : t("unsaved.bodyLoading")}
+              </p>
+              <div className="mt-4 flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPendingAction(null)}
+                  className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-slate-200 hover:bg-white/6"
+                >
+                  {t("common:actions.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDiscardThen}
+                  className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-sm text-red-200 hover:bg-red-500/20"
+                >
+                  {t("unsaved.discard")}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmSaveThen}
+                  disabled={!deckName.trim()}
+                  title={deckName.trim() ? undefined : t("toolbar.nameToSave")}
+                  className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-sm text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-40"
+                >
+                  {t("unsaved.saveAndContinue")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )
       )}
     </div>
   );
