@@ -4910,8 +4910,8 @@ fn ai_seat_setups(
 ) -> Result<Vec<server_core::session::AiSeatSetup>, String> {
     use engine::game::bracket_estimate::CommanderBracketTier;
     use phase_ai::pod_selection::{
-        commander_color_identity, select_pod, PodConstraint, PodSeatOccupant, PodSelectionRequest,
-        SeatAttribute, TierEnforcement, TierSet,
+        select_pod, PodConstraint, PodSeatOccupant, PodSelectionRequest, SeatAttribute,
+        TierEnforcement, TierSet,
     };
     use seat_reducer::types::DeckChoice;
 
@@ -4963,14 +4963,12 @@ fn ai_seat_setups(
             .map(|(index, deck)| {
                 let deck_id = manifest_deck_id(manifest, deck)
                     .unwrap_or_else(|| format!("explicit-seat-{}", seats[index].seat_index));
-                Ok(PodSeatOccupant {
-                    color_identity: commander_color_identity(db, &deck.commander, &deck_id)?,
+                PodSeatOccupant {
                     deck_id,
                     commander: deck.commander.clone(),
-                })
+                }
             })
-            .collect::<Result<Vec<_>, phase_ai::pod_selection::PodSelectionError>>()
-            .map_err(|error| format!("AI Commander pod selection failed: {error:?}"))?;
+            .collect();
         let cedh_only = seats
             .iter()
             .all(|seat| seat.difficulty == phase_ai::config::AiDifficulty::CEDH);
@@ -6005,11 +6003,10 @@ fn first_unoccupied_commander_deck(
 }
 
 fn occupied_ai_seats(
-    db: &CardDatabase,
     manifest: &AiDeckManifest,
     seat_state: &seat_reducer::types::SeatState,
-) -> Result<Vec<phase_ai::pod_selection::PodSeatOccupant>, String> {
-    use phase_ai::pod_selection::{commander_color_identity, PodSeatOccupant};
+) -> Vec<phase_ai::pod_selection::PodSeatOccupant> {
+    use phase_ai::pod_selection::PodSeatOccupant;
     use seat_reducer::types::SeatKind;
 
     seat_state
@@ -6027,15 +6024,10 @@ fn occupied_ai_seats(
             }?;
             Some((seat_index, effective))
         })
-        .map(|(seat_index, effective)| {
-            let deck_id = manifest_deck_id(manifest, &effective)
-                .unwrap_or_else(|| format!("occupied-seat-{seat_index}"));
-            Ok(PodSeatOccupant {
-                color_identity: commander_color_identity(db, &effective.commander, &deck_id)
-                    .map_err(|error| format!("AI Commander pod selection failed: {error:?}"))?,
-                deck_id,
-                commander: effective.commander,
-            })
+        .map(|(seat_index, effective)| PodSeatOccupant {
+            deck_id: manifest_deck_id(manifest, &effective)
+                .unwrap_or_else(|| format!("occupied-seat-{seat_index}")),
+            commander: effective.commander,
         })
         .collect()
 }
@@ -10390,25 +10382,19 @@ async fn handle_client_message(
                 let public_before = session.lobby_meta.as_ref().is_some_and(|meta| meta.public);
                 let mut seat_state = session.seat_state();
                 let delta_result = {
-                    match occupied_ai_seats(db, &context.ai_deck_manifest, &seat_state) {
-                        Ok(occupied) => {
-                            let format_config = seat_state.format.clone();
-                            let resolver = ServerDeckResolver {
-                                db: db.as_ref(),
-                                manifest: &context.ai_deck_manifest,
-                                format_config: &format_config,
-                                occupied,
-                            };
-                            let ctx = ReducerCtx {
-                                platform: phase_ai::config::Platform::Native,
-                                deck_resolver: &resolver,
-                            };
-                            seat_reducer::apply(&mut seat_state, mutation, &ctx)
-                        }
-                        Err(error) => {
-                            Err(seat_reducer::types::SeatError::DeckResolutionFailed(error))
-                        }
-                    }
+                    let occupied = occupied_ai_seats(&context.ai_deck_manifest, &seat_state);
+                    let format_config = seat_state.format.clone();
+                    let resolver = ServerDeckResolver {
+                        db: db.as_ref(),
+                        manifest: &context.ai_deck_manifest,
+                        format_config: &format_config,
+                        occupied,
+                    };
+                    let ctx = ReducerCtx {
+                        platform: phase_ai::config::Platform::Native,
+                        deck_resolver: &resolver,
+                    };
+                    seat_reducer::apply(&mut seat_state, mutation, &ctx)
                 };
                 let delta = match delta_result {
                     Ok(delta) => delta,

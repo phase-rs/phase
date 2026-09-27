@@ -90,12 +90,12 @@ pub enum TierEnforcement {
 }
 
 /// A seat already filled by an explicit choice that automatic selection must
-/// not collide with.
+/// not collide with. The engine resolves its commander identity so no
+/// transport ever computes CR 903.4 color identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PodSeatOccupant {
     pub deck_id: String,
     pub commander: Vec<String>,
-    pub color_identity: Vec<ManaColor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

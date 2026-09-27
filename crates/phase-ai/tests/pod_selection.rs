@@ -534,8 +534,13 @@ fn stale_declared_label_is_demoted_to_estimated() {
 #[test]
 fn occupied_seats_block_collisions() {
     let candidates = vec![
-        candidate("occupied-deck", "Commander A", None),
-        candidate("commander-collision", "Commander B", None),
+        candidate("occupied-deck", "Commander B", None),
+        candidate("commander-collision", "White Commander", None),
+        candidate(
+            "identity-collision",
+            "Commander A",
+            label(CommanderBracketTier::Core, LabelProvenance::Declared),
+        ),
         candidate("safe-c", "Commander C", None),
         candidate("safe-d", "Commander D", None),
     ];
@@ -547,13 +552,13 @@ fn occupied_seats_block_collisions() {
         vec![
             PodConstraint::Distinct(SeatAttribute::Deck),
             PodConstraint::Distinct(SeatAttribute::Commander),
+            PodConstraint::Distinct(SeatAttribute::ColorIdentity),
         ],
         9,
     )
     .with_occupied(vec![PodSeatOccupant {
         deck_id: "occupied-deck".to_string(),
-        commander: vec!["Commander B".to_string()],
-        color_identity: vec![ManaColor::Green],
+        commander: vec!["White Commander".to_string()],
     }]);
     let assignment = select_pod(&candidates, &req, &synthetic_db()).unwrap();
     let ids: std::collections::BTreeSet<_> = assignment

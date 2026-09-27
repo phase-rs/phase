@@ -34,6 +34,12 @@ struct ResolvedCandidate<'a> {
     color_identity: Vec<ManaColor>,
 }
 
+#[derive(Clone)]
+struct ResolvedOccupant<'a> {
+    occupant: &'a super::PodSeatOccupant,
+    color_identity: Vec<ManaColor>,
+}
+
 /// Select one deck per AI seat for a whole table at once.
 ///
 /// The only nondeterminism is `request.seed`, consumed by `ChaCha8Rng`; equal
@@ -52,9 +58,10 @@ pub fn select_pod(
     }
 
     let resolved = resolve_candidates(candidates, db)?;
+    let occupied = resolve_occupants(&request.occupied, db)?;
     let mut active = canonical_constraints(request.constraints.clone());
 
-    let base_available = available_distinct_decks(&resolved, request, &active, false);
+    let base_available = available_distinct_decks(&resolved, request, &occupied, &active, false);
     if base_available < usize::from(request.seats) {
         return Err(PodSelectionError::InsufficientCandidates {
             requested: request.seats,
@@ -63,7 +70,7 @@ pub fn select_pod(
     }
 
     if request.enforcement == TierEnforcement::HardGate {
-        let hard_available = available_distinct_decks(&resolved, request, &active, true);
+        let hard_available = available_distinct_decks(&resolved, request, &occupied, &active, true);
         if hard_available < usize::from(request.seats) {
             return Err(PodSelectionError::HardGateUnsatisfiable {
                 requested: request.seats,
@@ -83,7 +90,14 @@ pub fn select_pod(
                 .iter()
                 .enumerate()
                 .filter(|(_, candidate)| {
-                    candidate_satisfies(candidate, request, &active, &seats, &selected_commanders)
+                    candidate_satisfies(
+                        candidate,
+                        request,
+                        &occupied,
+                        &active,
+                        &seats,
+                        &selected_commanders,
+                    )
                 })
                 .map(|(index, _)| index)
                 .collect();
@@ -158,6 +172,25 @@ fn resolve_candidates<'a>(
         .collect()
 }
 
+fn resolve_occupants<'a>(
+    occupants: &'a [super::PodSeatOccupant],
+    db: &CardDatabase,
+) -> Result<Vec<ResolvedOccupant<'a>>, PodSelectionError> {
+    occupants
+        .iter()
+        .map(|occupant| {
+            Ok(ResolvedOccupant {
+                color_identity: commander_color_identity(
+                    db,
+                    &occupant.commander,
+                    &occupant.deck_id,
+                )?,
+                occupant,
+            })
+        })
+        .collect()
+}
+
 /// Resolves the combined identity of one or more commanders in canonical WUBRG
 /// order. `candidate_id` is copied into [`PodSelectionError::UnknownCommander`]
 /// so callers retain precise diagnostics for either candidates or occupied seats.
@@ -188,12 +221,13 @@ pub fn commander_color_identity(
 fn available_distinct_decks(
     candidates: &[ResolvedCandidate<'_>],
     request: &PodSelectionRequest,
+    occupied: &[ResolvedOccupant<'_>],
     active: &[PodConstraint],
     enforce_hard_tier: bool,
 ) -> usize {
     candidates
         .iter()
-        .filter(|candidate| passes_never_relaxed(candidate, request, active))
+        .filter(|candidate| passes_never_relaxed(candidate, request, occupied, active))
         .filter(|candidate| !enforce_hard_tier || passes_allowed_tier(candidate, request))
         .map(|candidate| candidate.candidate.id.as_str())
         .collect::<BTreeSet<_>>()
@@ -206,6 +240,7 @@ fn available_distinct_decks(
 fn passes_never_relaxed(
     candidate: &ResolvedCandidate<'_>,
     request: &PodSelectionRequest,
+    occupied: &[ResolvedOccupant<'_>],
     active: &[PodConstraint],
 ) -> bool {
     if active.contains(&PodConstraint::CoverageFloor)
@@ -217,10 +252,9 @@ fn passes_never_relaxed(
         return false;
     }
     if active.contains(&PodConstraint::Distinct(SeatAttribute::Deck))
-        && request
-            .occupied
+        && occupied
             .iter()
-            .any(|seat| seat.deck_id == candidate.candidate.id)
+            .any(|seat| seat.occupant.deck_id == candidate.candidate.id)
     {
         return false;
     }
@@ -230,11 +264,12 @@ fn passes_never_relaxed(
 fn candidate_satisfies(
     candidate: &ResolvedCandidate<'_>,
     request: &PodSelectionRequest,
+    occupied: &[ResolvedOccupant<'_>],
     active: &[PodConstraint],
     seats: &[PodSeat],
     selected_commanders: &[Vec<String>],
 ) -> bool {
-    if !passes_never_relaxed(candidate, request, active) {
+    if !passes_never_relaxed(candidate, request, occupied, active) {
         return false;
     }
     if seats
@@ -263,12 +298,12 @@ fn candidate_satisfies(
         return false;
     }
     if active.contains(&PodConstraint::Distinct(SeatAttribute::Commander))
-        && commander_collides(candidate, request, selected_commanders)
+        && commander_collides(candidate, occupied, selected_commanders)
     {
         return false;
     }
     if active.contains(&PodConstraint::Distinct(SeatAttribute::ColorIdentity))
-        && color_identity_collides(candidate, request, seats)
+        && color_identity_collides(candidate, occupied, seats)
     {
         return false;
     }
@@ -286,14 +321,13 @@ fn passes_allowed_tier(candidate: &ResolvedCandidate<'_>, request: &PodSelection
 
 fn commander_collides(
     candidate: &ResolvedCandidate<'_>,
-    request: &PodSelectionRequest,
+    occupied: &[ResolvedOccupant<'_>],
     selected_commanders: &[Vec<String>],
 ) -> bool {
     candidate.candidate.commander.iter().any(|commander| {
-        request
-            .occupied
+        occupied
             .iter()
-            .any(|seat| seat.commander.contains(commander))
+            .any(|seat| seat.occupant.commander.contains(commander))
             || selected_commanders
                 .iter()
                 .any(|commanders| commanders.contains(commander))
@@ -302,13 +336,12 @@ fn commander_collides(
 
 fn color_identity_collides(
     candidate: &ResolvedCandidate<'_>,
-    request: &PodSelectionRequest,
+    occupied: &[ResolvedOccupant<'_>],
     seats: &[PodSeat],
 ) -> bool {
-    request
-        .occupied
+    occupied
         .iter()
-        .any(|seat| canonical_colors(&seat.color_identity) == candidate.color_identity)
+        .any(|seat| seat.color_identity == candidate.color_identity)
         || seats
             .iter()
             .any(|seat| seat.color_identity == candidate.color_identity)
