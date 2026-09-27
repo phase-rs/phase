@@ -8256,6 +8256,18 @@ pub(crate) fn defiler_reduced_cost_alongside(
     Some(reduced)
 }
 
+/// CR 601.2f + CR 601.2h: whether a paused cast still owes committed non-mana
+/// costs that only `finish_pending_cost_or_cast` pays: a required (imposed)
+/// cost on `additional_cost_flow`, or a deferred required cost (a compound
+/// alternative cost's residual). A continuation that rebuilt the cast with
+/// `pay_and_push_with_lock` instead would drop them.
+pub(crate) fn pending_carries_unpaid_committed_costs(pending: &PendingCast) -> bool {
+    matches!(
+        pending.additional_cost_flow,
+        Some(AdditionalCost::Required(_))
+    ) || pending.deferred_required_additional_cost.is_some()
+}
+
 /// CR 601.2b: Handle the player's decision on Defiler life payment.
 /// If accepted, pays life and reduces the spell's mana cost, then continues to mana payment.
 /// If declined, continues with the original cost.
@@ -8326,10 +8338,11 @@ pub(crate) fn handle_defiler_payment(
                 return Ok(state.waiting_for.clone());
             }
             PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
-                // CR 601.2h: a compound alternative cost's non-mana residual is
-                // stashed on the pending cast (`pay_alternative_cost_residual`);
+                // CR 601.2f + CR 601.2h: a compound alternative cost's non-mana
+                // residual (`pay_alternative_cost_residual`) or an imposed
+                // required cost (a target's tax) is stashed on the pending cast;
                 // resume through the pending so it is still paid.
-                if pending.deferred_required_additional_cost.is_some() {
+                if pending_carries_unpaid_committed_costs(&pending) {
                     return finish_pending_cost_or_cast(state, player, pending, events);
                 }
                 // Proceed with the original cost; no reduction.
@@ -8370,7 +8383,9 @@ pub(crate) fn handle_defiler_payment(
     // `finish_pending_cost_or_cast`, which pays the residual and then locks the
     // total from the pending — as the paused-life branch above does.
     // `pay_and_push_with_lock` would rebuild the pending from scratch and drop it.
-    if pending.deferred_required_additional_cost.is_some() {
+    // CR 601.2f: the same holds for an imposed required cost carried on the
+    // pending (a tax on a spell targeting Terror of the Peaks).
+    if pending_carries_unpaid_committed_costs(&pending) {
         let mut pending = pending;
         if pay {
             pending

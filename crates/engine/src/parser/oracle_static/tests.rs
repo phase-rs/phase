@@ -15172,12 +15172,37 @@ fn disjunctive_graveyard_permission_classifies_static_not_replacement() {
 
 // --- Alt-cost rider tests (CR 118.9b) ---
 
+/// Positive reach guard for a declined rider: `text` without its `rider` parses
+/// as a graveyard-cast permission, so the rider is what declines it, and the
+/// rider parser reads the rider as `expected` (`None`: unrecognized).
+fn assert_rider_reaches_the_rider_branch(text: &str, rider: &str, expected: Option<KeywordKind>) {
+    let base = text.replacen(rider, "", 1);
+    assert_ne!(base, text, "{text}: the rider is in the line");
+    assert!(
+        parse_static_line(&base)
+            .is_some_and(|def| matches!(def.mode, StaticMode::GraveyardCastPermission { .. })),
+        "reach: {base:?} parses as a graveyard permission, so only the rider declines {text:?}"
+    );
+    let read = super::grammar::parse_alt_cost_rider(rider)
+        .ok()
+        .map(|(rest, kind)| {
+            assert!(rest.is_empty(), "{rider:?}: the rider is fully read");
+            kind
+        });
+    assert_eq!(read, expected, "{rider:?}");
+}
+
 /// CR 118.9b: Ninja Teen's Level 3 rider requires sneak, which the engine can't
 /// cast from the graveyard, so the permission is declined (an honest gap)
 /// rather than modeled with a method that has no legal cast.
 #[test]
 fn graveyard_cast_permission_ninja_teen_sneak_rider_is_declined() {
     let text = "You may cast creature spells from your graveyard using their sneak abilities.";
+    assert_rider_reaches_the_rider_branch(
+        text,
+        " using their sneak abilities",
+        Some(KeywordKind::Sneak),
+    );
     assert!(
         parse_static_line(text)
             .is_none_or(|def| !matches!(def.mode, StaticMode::GraveyardCastPermission { .. })),
@@ -15191,13 +15216,20 @@ fn graveyard_cast_permission_ninja_teen_sneak_rider_is_declined() {
 #[test]
 fn graveyard_cast_permission_self_ref_rider_all_keywords() {
     let cases = [
-        ("mutate", None),
-        ("bestow", Some(KeywordKind::Bestow)),
-        ("blitz", Some(KeywordKind::Blitz)),
-        ("warp", None),
+        ("mutate", None, KeywordKind::Mutate),
+        ("bestow", Some(KeywordKind::Bestow), KeywordKind::Bestow),
+        ("blitz", Some(KeywordKind::Blitz), KeywordKind::Blitz),
+        ("warp", None, KeywordKind::Warp),
     ];
-    for (name, expected) in cases {
+    for (name, expected, rider_kind) in cases {
         let text = format!("You may cast this card from your graveyard using its {name} ability.");
+        if expected.is_none() {
+            assert_rider_reaches_the_rider_branch(
+                &text,
+                &format!(" using its {name} ability"),
+                Some(rider_kind),
+            );
+        }
         let permission = parse_static_line(&text)
             .filter(|def| matches!(def.mode, StaticMode::GraveyardCastPermission { .. }));
         match (expected, permission) {
@@ -15229,6 +15261,7 @@ fn graveyard_cast_permission_self_ref_rider_all_keywords() {
 #[test]
 fn graveyard_cast_permission_unknown_rider_is_declined() {
     let text = "You may cast this card from your graveyard using its frobnicate ability.";
+    assert_rider_reaches_the_rider_branch(text, " using its frobnicate ability", None);
     assert!(
         parse_static_line(text)
             .is_none_or(|def| !matches!(def.mode, StaticMode::GraveyardCastPermission { .. })),

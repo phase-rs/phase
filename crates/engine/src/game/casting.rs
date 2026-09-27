@@ -3991,7 +3991,7 @@ pub(super) fn selected_static_permission_enters_with_counter(
         CastingVariant::ExilePermission { source, .. } => (*source, false),
         _ => return None,
     };
-    let source_obj = state.objects.get(&source)?;
+    let source_obj = state.objects.get(&source);
     fn permission_counter(def: &StaticDefinition) -> Option<crate::types::counter::CounterType> {
         match &def.mode {
             StaticMode::GraveyardCastPermission {
@@ -4008,8 +4008,10 @@ pub(super) fn selected_static_permission_enters_with_counter(
     // Existing path (unchanged for BB3 separate-battlefield-source cards): the
     // permission still functions in zone on a source that never left the
     // battlefield during the cast.
-    active_static_definitions(state, source_obj)
-        .find_map(permission_counter)
+    source_obj
+        .and_then(|source_obj| {
+            active_static_definitions(state, source_obj).find_map(permission_counter)
+        })
         // CR 601.3 + CR 607.1 + CR 113.6b: self-granting-permission fallback.
         // A self-granting source (Undead Sprinter — Gravecrawler shape) IS the
         // cast object, now on the Stack, so its Graveyard-scoped permission no
@@ -4022,17 +4024,21 @@ pub(super) fn selected_static_permission_enters_with_counter(
         // (Noctis / Leonardo / Intrepid) stay byte-identical. (CR 614.1c: the
         // rider is a replacement effect applied as the object enters.)
         .or_else(|| {
-            source_obj
-                .static_definitions
-                .iter_all()
-                .find_map(permission_counter)
+            source_obj.and_then(|source_obj| {
+                source_obj
+                    .static_definitions
+                    .iter_all()
+                    .find_map(permission_counter)
+            })
         })
         // CR 611.2a + CR 614.1c: a RESOLUTION-CREATED graveyard permission ("Until
         // end of turn, you may ... cast spells from your graveyard") is not on any
         // object's statics; it is a grant on a transient continuous effect keyed
         // on the card that created it. Read the rider from that same transient
         // source, the one the permission election saw. Additive: fires only when
-        // neither static path finds a rider.
+        // neither static path finds a rider. The creating object need not still
+        // exist: the effect outlives it (a copied spell ceases to exist as it
+        // leaves the stack, CR 707.10a), so this path doesn't look it up.
         .or_else(|| {
             if !from_graveyard {
                 return None;
@@ -23374,6 +23380,8 @@ fn blitz_offer(
     let (mana_part, residual) = split_blitz_cost_components(&blitz_cost);
     let mana = mana_part
         .map(|m| apply_cost_modifiers_to_base(state, player, object_id, m.clone()).unwrap_or(m));
+    // CR 601.2c: a creature spell cast for its blitz cost has no targets, so
+    // its total is priced against the one empty target assignment.
     let affordable = alternative_cost_offer_payable(
         state,
         player,
@@ -23381,6 +23389,7 @@ fn blitz_offer(
         CastingVariant::Blitz,
         &mana,
         &residual,
+        &[Vec::new()],
     );
     Some(BlitzOffer {
         mana,
@@ -23428,8 +23437,8 @@ fn bestow_offer(
     // legal target. If no creature is legally enchantable, bestow can't be
     // chosen.
     let creature_filter = TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
-    let has_legal_creature_target =
-        !targeting::find_legal_targets(state, &creature_filter, player, object_id).is_empty();
+    let legal_creature_targets =
+        targeting::find_legal_targets(state, &creature_filter, player, object_id);
     // CR 601.2f-h + CR 118.9d: split the (possibly compound) bestow cost into its
     // mana sub-cost and Collect-evidence residual, then apply active cost
     // modifiers to the mana sub-cost.
@@ -23438,19 +23447,26 @@ fn bestow_offer(
         apply_cost_modifiers_to_base(state, player, object_id, m.clone())
             .unwrap_or_else(|| m.clone())
     });
+    // CR 601.2c + CR 601.2f-h: bestow is on offer when its total is payable for
+    // at least one legal Aura target: a tax that depends on the target (Terror
+    // of the Peaks) is priced against each candidate. The committed target is
+    // priced again by payment once it is chosen.
+    let target_assignments: Vec<Vec<TargetRef>> = legal_creature_targets
+        .into_iter()
+        .map(|target| vec![target])
+        .collect();
     // CR 601.2a + CR 110.4: from the graveyard, bestow needs a permission it can
     // commit to, judged on the bestowed form (see
     // `graveyard_bestow_authority_usable`).
-    let offerable = has_legal_creature_target
-        && alternative_cost_offer_payable(
-            state,
-            player,
-            object_id,
-            CastingVariant::Bestow,
-            &mana,
-            &residual,
-        )
-        && (from_hand || graveyard_bestow_authority_usable(state, player, object_id));
+    let offerable = alternative_cost_offer_payable(
+        state,
+        player,
+        object_id,
+        CastingVariant::Bestow,
+        &mana,
+        &residual,
+        &target_assignments,
+    ) && (from_hand || graveyard_bestow_authority_usable(state, player, object_id));
     Some(BestowOffer {
         mana,
         residual,
@@ -23462,14 +23478,19 @@ fn bestow_offer(
 /// sub-cost AND its non-mana residual are each payable now; otherwise the offer
 /// would promise a cost the player can't complete.
 ///
-/// CR 601.2h + CR 119.4: a Defiler's reduction is credited to the mana only
-/// when its life is payable together with the life the rest of the total pays
-/// (the residual and every other required cost), the same eligibility the
-/// Defiler payment prompt applies (`committed_life_besides_defiler`). The
-/// required costs come from `committed_required_cast_cost`, the object's
-/// required additional cost merged with every imposed cost as payment merges
-/// them, read with no targets chosen yet: a tax that depends on the spell's
-/// targets (Terror of the Peaks) is not in this total.
+/// CR 601.2c + CR 601.2f: the required costs a cast commits to come from
+/// `committed_required_cast_cost` (the object's required additional cost merged
+/// with every imposed cost, as payment merges them), priced against a target
+/// assignment: an imposed tax can depend on the spell's targets (Terror of the
+/// Peaks). `target_assignments` lists the candidate assignments, one empty
+/// assignment for a spell with no targets, and the offer holds when at least
+/// one is payable. Payment prices the committed targets again once chosen.
+///
+/// CR 601.2h + CR 119.4: the life the assignment commits (the residual's plus
+/// the required costs') must be payable together, and a Defiler's reduction is
+/// credited to the mana only when its life is payable alongside that, the same
+/// eligibility the Defiler payment prompt applies
+/// (`committed_life_besides_defiler`).
 fn alternative_cost_offer_payable(
     state: &GameState,
     player: PlayerId,
@@ -23477,22 +23498,14 @@ fn alternative_cost_offer_payable(
     variant: CastingVariant,
     mana: &Option<crate::types::mana::ManaCost>,
     residual: &Option<AbilityCost>,
+    target_assignments: &[Vec<TargetRef>],
 ) -> bool {
-    let imposed = casting_costs::committed_required_cast_cost(
-        state,
-        player,
-        object_id,
-        &ResolvedAbility::new(Effect::NoOp, Vec::new(), object_id, player),
-        variant,
-        None,
-    );
-    let committed_life = casting_costs::committed_life_besides_defiler(
-        state,
-        player,
-        object_id,
-        residual.as_ref(),
-        imposed.as_ref(),
-    );
+    if !residual
+        .as_ref()
+        .is_none_or(|cost| cost.is_payable(state, player, object_id))
+    {
+        return false;
+    }
     // CR 601.2b + CR 601.2h: a cast whose object carries its own REQUIRED
     // additional cost pays that cost's declaration before the Defiler prompt,
     // and that declaration can't see a Defiler's reduction, so the payment
@@ -23504,23 +23517,39 @@ fn alternative_cost_offer_payable(
         .objects
         .get(&object_id)
         .is_some_and(|obj| matches!(obj.additional_cost, Some(AdditionalCost::Required(_))));
-    // CR 118.3: a zero mana cost is always payable.
-    mana.as_ref().is_none_or(|m| {
-        can_pay_cost_after_auto_tap(state, player, object_id, m)
-            || (defiler_creditable
-                && casting_costs::defiler_reduced_cost_alongside(
-                    state,
-                    player,
-                    object_id,
-                    m,
-                    committed_life,
-                )
-                .is_some_and(|reduced| {
-                    can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
-                }))
-    }) && residual
-        .as_ref()
-        .is_none_or(|cost| cost.is_payable(state, player, object_id))
+    target_assignments.iter().any(|targets| {
+        let imposed = casting_costs::committed_required_cast_cost(
+            state,
+            player,
+            object_id,
+            &ResolvedAbility::new(Effect::NoOp, targets.clone(), object_id, player),
+            variant,
+            None,
+        );
+        let committed_life = casting_costs::committed_life_besides_defiler(
+            state,
+            player,
+            object_id,
+            residual.as_ref(),
+            imposed.as_ref(),
+        );
+        super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
+            // CR 118.3: a zero mana cost is always payable.
+            && mana.as_ref().is_none_or(|m| {
+                can_pay_cost_after_auto_tap(state, player, object_id, m)
+                    || (defiler_creditable
+                        && casting_costs::defiler_reduced_cost_alongside(
+                            state,
+                            player,
+                            object_id,
+                            m,
+                            committed_life,
+                        )
+                        .is_some_and(|reduced| {
+                            can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+                        }))
+            })
+    })
 }
 
 /// CR 601.2a + CR 601.2f + CR 118.9: the single graveyard-permission casting

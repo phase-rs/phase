@@ -17,6 +17,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::TargetRef;
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -1798,9 +1799,12 @@ fn set_granted_permission_counter(
 
 /// Resolve Yawgmoth's Will with its granted graveyard permission's
 /// enters-with rider set to `counter`, cast a creature from the graveyard
-/// through it, and return the counters the creature entered with.
+/// through it, and return the counters the creature entered with. With
+/// `source_gone`, the Will's object no longer exists when the creature is cast,
+/// as for a copied spell that ceased to exist on leaving the stack.
 fn counters_after_casting_under_a_transient_permission(
     counter: Option<CounterType>,
+    source_gone: bool,
 ) -> std::collections::HashMap<CounterType, u32> {
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
@@ -1835,6 +1839,12 @@ fn counters_after_casting_under_a_transient_permission(
             let will = will.id();
             let mut runner = scenario.build();
             let _ = runner.cast(will).resolve();
+            if source_gone {
+                let zone = runner.state().objects[&will].zone;
+                engine::game::zones::remove_from_zone(runner.state_mut(), will, zone, P0);
+                runner.state_mut().objects.remove(&will);
+                assert!(!runner.state().objects.contains_key(&will));
+            }
             fill_mana(&mut runner, ManaType::Green);
 
             let card_id = runner.state().objects[&bears].card_id;
@@ -1863,7 +1873,8 @@ fn counters_after_casting_under_a_transient_permission(
 /// through the engine exactly as the card's does.
 #[test]
 fn a_resolution_created_permissions_counter_rider_applies() {
-    let counters = counters_after_casting_under_a_transient_permission(Some(CounterType::Finality));
+    let counters =
+        counters_after_casting_under_a_transient_permission(Some(CounterType::Finality), false);
     assert_eq!(
         counters.get(&CounterType::Finality).copied(),
         Some(1),
@@ -1871,10 +1882,25 @@ fn a_resolution_created_permissions_counter_rider_applies() {
     );
 }
 
+/// CR 611.2a + CR 707.10a: the rider rides the resolution-created effect, not
+/// the object that created it, so it still applies when that object no longer
+/// exists (a copied spell ceases to exist as it leaves the stack). The cast is
+/// admitted by the same transient permission either way.
+#[test]
+fn a_resolution_created_permissions_counter_rider_applies_after_its_source_is_gone() {
+    let counters =
+        counters_after_casting_under_a_transient_permission(Some(CounterType::Finality), true);
+    assert_eq!(
+        counters.get(&CounterType::Finality).copied(),
+        Some(1),
+        "the rider must apply without its source object, counters: {counters:?}"
+    );
+}
+
 /// Control: with no rider on the transient permission, no counter is added.
 #[test]
 fn a_resolution_created_permission_without_a_rider_adds_no_counter() {
-    let counters = counters_after_casting_under_a_transient_permission(None);
+    let counters = counters_after_casting_under_a_transient_permission(None, false);
     assert!(
         counters.is_empty(),
         "no rider, so no counter, counters: {counters:?}"
@@ -2734,6 +2760,23 @@ const TERROR_OF_THE_PEAKS: &str = "Flying\nSpells your opponents cast that targe
 /// opponent's Terror of the Peaks as the only legal creature to enchant; P0 at
 /// `life`.
 fn phoenix_with_only_terror_to_enchant(life: i32) -> (GameRunner, ObjectId, ObjectId) {
+    let (runner, phoenix, terror, _, _) = phoenix_enchanting_near_terror(life, false);
+    (runner, phoenix, terror)
+}
+
+/// As `phoenix_with_only_terror_to_enchant`, and, when `tax_free_target`, P0's
+/// own vanilla creature as a second legal creature to enchant, one no tax
+/// applies to. Also returns that creature and the evidence cards.
+fn phoenix_enchanting_near_terror(
+    life: i32,
+    tax_free_target: bool,
+) -> (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    Option<ObjectId>,
+    Vec<ObjectId>,
+) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let defiler_statics = parse_oracle_text(
@@ -2753,6 +2796,7 @@ fn phoenix_with_only_terror_to_enchant(life: i32) -> (GameRunner, ObjectId, Obje
         .add_creature(engine::game::scenario::P1, "Terror of the Peaks", 5, 4)
         .from_oracle_text_with_keywords(&["Flying"], TERROR_OF_THE_PEAKS)
         .id();
+    let bear = tax_free_target.then(|| scenario.add_creature(P0, "Grizzly Bears", 2, 2).id());
     let mut builder = scenario.add_creature_to_graveyard(P0, "Detective's Phoenix", 2, 2);
     builder.with_mana_cost(ManaCost::Cost {
         shards: vec![ManaCostShard::Red],
@@ -2774,47 +2818,291 @@ fn phoenix_with_only_terror_to_enchant(life: i32) -> (GameRunner, ObjectId, Obje
             }
         }
     }
-    for i in 0..2 {
-        let card_id = engine::types::identifiers::CardId(runner.state().next_object_id);
-        let id = engine::game::zones::create_object(
-            runner.state_mut(),
-            card_id,
-            P0,
-            format!("Evidence {i}"),
-            Zone::Graveyard,
-        );
-        runner.state_mut().objects.get_mut(&id).unwrap().mana_cost = ManaCost::generic(3);
-    }
+    let evidence: Vec<ObjectId> = (0..2)
+        .map(|i| {
+            let card_id = engine::types::identifiers::CardId(runner.state().next_object_id);
+            let id = engine::game::zones::create_object(
+                runner.state_mut(),
+                card_id,
+                P0,
+                format!("Evidence {i}"),
+                Zone::Graveyard,
+            );
+            runner.state_mut().objects.get_mut(&id).unwrap().mana_cost = ManaCost::generic(3);
+            id
+        })
+        .collect();
     engine::game::layers::flush_layers(runner.state_mut());
     runner.state_mut().players[0].life = life;
-    (runner, phoenix, terror)
+    (runner, phoenix, terror, bear, evidence)
 }
 
-/// Reach guard for the deferred case below: at 5 life the board reaches the
-/// offer, because the Defiler's 2 life and Terror's 3-life tax (5) are payable.
+/// Reach guard for the negative below: at 5 life the board reaches the offer,
+/// because the Defiler's 2 life and Terror's 3-life tax (5) are payable.
 #[test]
 fn bestow_onto_terror_with_a_defiler_is_offered_when_its_total_life_is_payable() {
     let (runner, phoenix, _terror) = phoenix_with_only_terror_to_enchant(5);
     assert!(offered_cast(&runner, phoenix).is_some());
 }
 
-/// CR 601.2h + CR 119.4: the REQUIRED behavior, not today's. At 4 life the only
-/// Aura target is Terror of the Peaks, whose tax ("cost an additional 3 life")
-/// applies to a spell targeting it; with no red mana the bestow {R} needs the
-/// Defiler's 2 life too, and 5 life can't be paid from 4, so the cast must not
-/// be offered.
-///
-/// Currently fails: the offer reads imposed taxes with no targets chosen, so a
-/// target-dependent tax is not in its life total (a stated limitation of this
-/// change; follow-up logged).
+/// CR 601.2c + CR 601.2f-h: the offered cast completes at the price the offer
+/// read. Terror is the only creature to enchant, the Defiler's {R} reduction is
+/// taken for 2 life, Terror's tax charges 3 more, and Collect evidence is still
+/// paid. Run at 6 life so the payment leaves P0 alive; the 5-life case above is
+/// the offer's boundary.
 #[test]
-#[ignore = "target-dependent imposed tax (Terror of the Peaks) is not in the alternative-cost offer's life total; follow-up"]
+fn bestow_onto_terror_with_a_defiler_completes_through_the_offered_cast() {
+    let (mut runner, phoenix, terror, _, evidence) = phoenix_enchanting_near_terror(6, false);
+    let action = offered_cast(&runner, phoenix).expect("6 life pays the Defiler and the tax");
+    runner.act(action).expect("the offered cast is accepted");
+    if let WaitingFor::TargetSelection { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(terror)),
+            })
+            .expect("Terror is a legal creature to enchant");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DefilerPayment { .. }
+        ),
+        "the Defiler is offered alongside Terror's tax, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("paying the Defiler's life");
+    let WaitingFor::CollectEvidenceChoice { .. } = runner.state().waiting_for else {
+        panic!(
+            "Collect evidence is still asked for, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    runner
+        .act(GameAction::SelectCards {
+            cards: evidence.clone(),
+        })
+        .expect("collecting evidence completes the cast");
+    assert_eq!(runner.state().objects[&phoenix].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].life,
+        1,
+        "the Defiler's 2 and Terror's 3 are paid"
+    );
+    for id in &evidence {
+        assert_eq!(runner.state().objects[id].zone, Zone::Exile);
+    }
+}
+
+/// CR 601.2c + CR 601.2h + CR 119.4: at 4 life the only Aura target is Terror of
+/// the Peaks, whose tax ("cost an additional 3 life") applies to a spell
+/// targeting it; with no red mana the bestow {R} needs the Defiler's 2 life too,
+/// and 5 life can't be paid from 4, so the cast is not offered.
+#[test]
 fn bestow_onto_terror_with_a_defiler_is_not_offered_when_its_total_life_is_unpayable() {
     let (runner, phoenix, _terror) = phoenix_with_only_terror_to_enchant(4);
     assert!(
         offered_cast(&runner, phoenix).is_none(),
         "4 life can't pay the Defiler's 2 and Terror's 3"
     );
+}
+
+/// CR 601.2c + CR 601.2f-h: the offer holds when ANY legal target makes the
+/// total payable. At 4 life P0's own Grizzly Bears is a tax-free creature to
+/// enchant, so bestow is offered (with Terror alone it is not; see above), and
+/// enchanting the Bears completes for the Defiler's 2 life.
+///
+/// Targeting Terror instead commits its 3-life tax. CR 119.4: the Defiler's 2
+/// can't be paid alongside it from 4, so the Defiler isn't offered, and the {R}
+/// can't be paid without it: CR 601.2h refuses the payment, and cancelling
+/// returns the game to before the cast was proposed (CR 601.2 + CR 733), with
+/// no life paid and no evidence exiled.
+#[test]
+fn bestow_with_a_tax_free_target_is_offered_and_enchanting_terror_is_refused_at_payment() {
+    let (mut runner, phoenix, terror, bear, evidence) = phoenix_enchanting_near_terror(4, true);
+    let bear = bear.expect("the tax-free target is on the board");
+    let action = offered_cast(&runner, phoenix).expect("the Bears make bestow payable");
+
+    let mut onto_bear = GameRunner::from_state(runner.state().clone());
+    onto_bear
+        .act(action.clone())
+        .expect("the offered cast is accepted");
+    onto_bear
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bear)),
+        })
+        .expect("the Bears are a legal creature to enchant");
+    onto_bear
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("the Defiler is offered with no tax committed");
+    onto_bear
+        .act(GameAction::SelectCards {
+            cards: evidence.clone(),
+        })
+        .expect("collecting evidence completes the cast");
+    assert_eq!(onto_bear.state().objects[&phoenix].zone, Zone::Stack);
+    assert_eq!(onto_bear.state().players[0].life, 2);
+
+    runner.act(action).expect("the offered cast is accepted");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(terror)),
+        })
+        .expect("Terror is a legal creature to enchant");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::CollectEvidenceChoice { .. }
+        ),
+        "no Defiler alongside Terror's tax at 4 life, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: evidence.clone(),
+            })
+            .is_err(),
+        "the {{R}} can't be paid without the Defiler"
+    );
+    runner
+        .act(GameAction::CancelCast)
+        .expect("the refused cast is cancelled");
+    assert_eq!(runner.state().objects[&phoenix].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].life, 4);
+    for id in &evidence {
+        assert_eq!(runner.state().objects[id].zone, Zone::Graveyard);
+    }
+}
+
+/// CR 601.2c + CR 601.2h + CR 119.4: a target's tax is priced even when no
+/// Defiler reduction is needed. With a red mana the bestow {R} is payable, but
+/// Terror, the only creature to enchant, taxes 3 life, which 2 life can't pay,
+/// so bestow is not offered.
+#[test]
+fn bestow_onto_terror_is_not_offered_when_its_tax_is_unpayable() {
+    let (mut runner, phoenix, _terror, _, _) = phoenix_enchanting_near_terror(2, false);
+    add_mana(&mut runner, ManaType::Red, 1);
+    assert!(
+        offered_cast(&runner, phoenix).is_none(),
+        "2 life can't pay Terror's 3"
+    );
+}
+
+/// Control: at 4 life Terror's 3 is payable, so the same bestow is offered and
+/// completes with the red mana, the tax and Collect evidence paid.
+#[test]
+fn bestow_onto_terror_with_its_tax_payable_completes() {
+    let (mut runner, phoenix, _terror, _, evidence) = phoenix_enchanting_near_terror(4, false);
+    add_mana(&mut runner, ManaType::Red, 1);
+    let action = offered_cast(&runner, phoenix).expect("4 life pays Terror's 3");
+    runner.act(action).expect("the offered cast is accepted");
+    if let WaitingFor::DefilerPayment { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining the Defiler");
+    }
+    let WaitingFor::CollectEvidenceChoice { .. } = runner.state().waiting_for else {
+        panic!(
+            "Collect evidence is asked for, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    runner
+        .act(GameAction::SelectCards {
+            cards: evidence.clone(),
+        })
+        .expect("collecting evidence completes the cast");
+    assert_eq!(runner.state().objects[&phoenix].zone, Zone::Stack);
+    assert_eq!(runner.state().players[0].life, 1, "Terror's 3 is paid");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{R}} paid");
+}
+
+const EVERFLAME_EIDOLON: &str = "Bestow {2}{R} (If you cast this card for its bestow cost, it's an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\n{R}: This creature gets +1/+0 until end of turn. If it's an Aura, enchanted creature gets +1/+0 until end of turn instead.\nEnchanted creature gets +1/+1.";
+
+/// CR 601.2f + CR 601.2h: a bestow with no non-mana residual still pays the
+/// target's tax through the Defiler. Everflame Eidolon (Bestow {2}{R}) from
+/// hand, two colorless mana and no red, Defiler of Instinct, and Terror of the
+/// Peaks as the only creature to enchant: the Defiler's 2 life removes the {R},
+/// and Terror's 3 life is charged on top.
+#[test]
+fn bestow_without_a_residual_pays_terrors_tax_alongside_the_defiler() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let defiler_statics = parse_oracle_text(
+        DEFILER_OF_INSTINCT,
+        "Defiler of Instinct",
+        &["First strike".into()],
+        &["Creature".into()],
+        &["Phyrexian".into(), "Kavu".into()],
+    )
+    .statics;
+    let mut defiler = scenario.add_creature(P0, "Defiler of Instinct", 3, 3);
+    for s in defiler_statics {
+        defiler.with_static_definition(s);
+    }
+    defiler.with_keyword(Keyword::Shroud);
+    let terror = scenario
+        .add_creature(engine::game::scenario::P1, "Terror of the Peaks", 5, 4)
+        .from_oracle_text_with_keywords(&["Flying"], TERROR_OF_THE_PEAKS)
+        .id();
+    let mut builder = scenario.add_creature_to_hand(P0, "Everflame Eidolon", 1, 1);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 1,
+    });
+    builder.with_subtypes(vec!["Spirit"]);
+    builder.with_color(vec![ManaColor::Red]);
+    builder.from_oracle_text_with_keywords(&["Bestow"], EVERFLAME_EIDOLON);
+    let eidolon = builder.id();
+    let mut runner = scenario.build();
+    {
+        let obj = runner.state_mut().objects.get_mut(&eidolon).unwrap();
+        for types in [
+            &mut obj.card_types.core_types,
+            &mut obj.base_card_types.core_types,
+        ] {
+            if !types.contains(&CoreType::Enchantment) {
+                types.push(CoreType::Enchantment);
+            }
+        }
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    runner.state_mut().players[0].life = 6;
+    add_mana(&mut runner, ManaType::Colorless, 2);
+
+    let card_id = runner.state().objects[&eidolon].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: eidolon,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the cast starts");
+    for _ in 0..6 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            },
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(terror)),
+            },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
+            _ => break,
+        };
+        runner
+            .act(action)
+            .expect("each step of the bestow cast is legal");
+    }
+    assert_eq!(runner.state().objects[&eidolon].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].life,
+        1,
+        "the Defiler's 2 and Terror's 3 are paid"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{2}} paid");
 }
 
 /// Sabin with Defiler of Instinct, `red` red mana, a card to discard, P0 at
@@ -2976,7 +3264,9 @@ fn blitz_option_life(runner: &GameRunner, dog: ObjectId) -> engine::types::abili
 fn menu_resolves_a_previewable_life_amount() {
     use engine::types::ability::{QuantityExpr, QuantityRef};
     let (runner, dog) = underdog_under_breach_paying(QuantityExpr::Ref {
-        qty: QuantityRef::StartingLifeTotal,
+        qty: QuantityRef::StartingLifeTotal {
+            player: engine::types::ability::PlayerScope::Controller,
+        },
     });
     assert_eq!(
         blitz_option_life(&runner, dog),
