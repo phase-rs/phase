@@ -18,6 +18,8 @@ type EngineModule = typeof import("@wasm/engine");
 let engineModulePromise: Promise<EngineModule> | null = null;
 let wasmInitPromise: Promise<void> | null = null;
 let cardDbPromise: Promise<number> | null = null;
+type ComboTableLoadOutcome = "loaded" | "unavailable";
+let comboTablePromise: Promise<ComboTableLoadOutcome> | null = null;
 
 /**
  * A browser's module map retains failed dynamic imports for the document
@@ -87,6 +89,29 @@ export async function ensureCardDatabase(): Promise<number> {
     });
   }
   return cardDbPromise;
+}
+
+/**
+ * Lazily loads the optional combo artifact once per browser session. Missing,
+ * unreachable, or malformed data resolves as unavailable so bracket estimates
+ * retain the engine's explicit `Unmeasured` coverage instead of failing.
+ */
+export function ensureComboTable(): Promise<ComboTableLoadOutcome> {
+  if (!comboTablePromise) {
+    comboTablePromise = (async () => {
+      try {
+        await ensureWasmInit();
+        const engine = await loadEngineModule();
+        const response = await fetch(__COMBO_TABLE_URL__);
+        if (!response.ok) return "unavailable";
+        await engine.load_combo_table(await response.text());
+        return "loaded";
+      } catch {
+        return "unavailable";
+      }
+    })();
+  }
+  return comboTablePromise;
 }
 
 export async function getCardFaceData(cardName: string) {

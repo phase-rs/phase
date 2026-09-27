@@ -512,6 +512,12 @@ thread_local! {
     /// Cell::take() + Cell::set() has no borrow guard, making it panic-resilient.
     static GAME_STATE: Cell<Option<GameState>> = const { Cell::new(None) };
     static CARD_DB: RefCell<Option<std::sync::Arc<CardDatabase>>> = const { RefCell::new(None) };
+    /// Deliberately NOT a field on `CardDatabase`: the combo table is external,
+    /// unlicensed, separately dated community data with its own refresh cadence.
+    /// Keeping it out of the card pool keeps the provenance boundary visible in
+    /// the type system instead of inside a struct that everything already trusts.
+    static COMBO_TABLE: RefCell<Option<std::sync::Arc<ComboTable>>> =
+        const { RefCell::new(None) };
     /// When set, this engine is claimed by a multiplayer host session. The
     /// engine claims it itself, in the same call that installs the game
     /// (`initialize_multiplayer_host_game`, `resume_multiplayer_host_state`),
@@ -875,6 +881,20 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
     let count = db.card_count() as u32;
     CARD_DB.with(|cell| {
         *cell.borrow_mut() = Some(std::sync::Arc::new(db));
+    });
+    Ok(count)
+}
+
+/// Load the combo table (combo-table.json). Optional: with no table loaded the
+/// estimator reports `ComboCoverage::Unmeasured` and no combo floor can fire.
+#[wasm_bindgen]
+pub fn load_combo_table(json_str: &str) -> Result<u32, JsValue> {
+    let table = ComboTable::from_json_str(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse combo table: {e}")))?;
+    let count = u32::try_from(table.len())
+        .map_err(|_| JsValue::from_str("Combo table contains more than u32::MAX entries"))?;
+    COMBO_TABLE.with(|cell| {
+        *cell.borrow_mut() = Some(std::sync::Arc::new(table));
     });
     Ok(count)
 }
@@ -1409,13 +1429,17 @@ pub fn estimate_bracket_for_deck(request_js: JsValue) -> Result<JsValue, JsError
     Ok(to_js(&result))
 }
 
-/// Pure helper, exposed for native-side tests. Reads `CARD_DB` thread-local.
+/// Pure helper, exposed for native-side tests. Reads the card and combo table
+/// thread-locals.
 fn estimate_bracket_inner(request: &BracketEstimateRequest) -> Option<BracketEstimate> {
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let db = db.as_ref()?;
-        // No combo table is loaded here yet, so combo floors remain unmeasured on this path.
-        estimate_bracket_for_request(request, db, &ComboTable::default())
+        COMBO_TABLE.with(|combo_cell| {
+            let combos = combo_cell.borrow();
+            let empty = ComboTable::default();
+            estimate_bracket_for_request(request, db, combos.as_deref().unwrap_or(&empty))
+        })
     })
 }
 
@@ -3979,7 +4003,13 @@ mod deck_signals_tests {
 #[cfg(test)]
 mod bracket_estimate_tests {
     use super::*;
-    use engine::database::{BracketLists, CardDatabase};
+    use std::collections::BTreeSet;
+
+    use engine::database::{
+        BracketLists, CardDatabase, ComboCoverage, ComboEntry, ComboFilterCounts, ComboOmission,
+        ComboOutcome, ComboPiece, ComboPieceZone, ComboProvenance, ComboRelevance, ComboResource,
+        ComboSetup, ComboTableDoc,
+    };
     use engine::game::bracket_estimate::{BracketAxis, CommanderBracketTier, DeclarationVerdict};
     use engine::game::deck_loading::PlayerDeckList;
 
@@ -4013,8 +4043,61 @@ mod bracket_estimate_tests {
         .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap())
     }
 
+    fn reset_bracket_thread_locals() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        COMBO_TABLE.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    fn one_row_combo_table_json() -> String {
+        let piece = |name: &str| ComboPiece {
+            key: name.to_lowercase(),
+            display: name.to_owned(),
+            zone: ComboPieceZone::Anywhere,
+        };
+        serde_json::to_string(&ComboTableDoc {
+            provenance: ComboProvenance {
+                snapshot_date: "2026-09-27".to_owned(),
+                table_version: "wasm-test-v1".to_owned(),
+                attribution: "Commander Spellbook test fixture".to_owned(),
+                card_pool_version: "wasm-test-pool".to_owned(),
+                filtered: ComboFilterCounts {
+                    kept: 1,
+                    ..ComboFilterCounts::default()
+                },
+                omitted: vec![
+                    ComboOmission::PrerequisiteText,
+                    ComboOmission::ResultText,
+                    ComboOmission::UnmodeledResultClasses,
+                ],
+            },
+            entries: vec![ComboEntry {
+                pieces: [piece("Devoted Druid"), piece("Vizier of Remedies")],
+                relevance: ComboRelevance::Standalone,
+                setup: ComboSetup::AsPrinted,
+                mana_value_needed: 2,
+                assemble_cost: 6,
+                popularity: 1,
+                outcomes: BTreeSet::from([ComboOutcome::Unbounded(ComboResource::Mana)]),
+                axes: BTreeSet::new(),
+            }],
+        })
+        .expect("combo table fixture serializes")
+    }
+
+    fn combo_request() -> BracketEstimateRequest {
+        BracketEstimateRequest {
+            deck: PlayerDeckList {
+                commander: vec!["Test Commander".into()],
+                main_deck: vec!["Devoted Druid".into(), "Vizier of Remedies".into()],
+                ..Default::default()
+            },
+            declared_tier: None,
+        }
+    }
+
     #[test]
     fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
+        reset_bracket_thread_locals();
         let db = db_with_one_game_changer();
         CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
@@ -4033,12 +4116,12 @@ mod bracket_estimate_tests {
         assert_eq!(est.tier, CommanderBracketTier::Upgraded);
 
         // Reset to avoid leaking state to other tests in this module.
-        CARD_DB.with(|c| *c.borrow_mut() = None);
+        reset_bracket_thread_locals();
     }
 
     #[test]
     fn estimate_bracket_inner_returns_none_with_no_db() {
-        CARD_DB.with(|c| *c.borrow_mut() = None);
+        reset_bracket_thread_locals();
         let deck = PlayerDeckList {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
@@ -4054,6 +4137,7 @@ mod bracket_estimate_tests {
 
     #[test]
     fn estimate_bracket_inner_reconciles_declared_tier() {
+        reset_bracket_thread_locals();
         CARD_DB.with(|cell| {
             *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
         });
@@ -4076,7 +4160,36 @@ mod bracket_estimate_tests {
             })
         );
 
-        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn estimate_bracket_inner_reports_unmeasured_without_a_combo_table() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+
+        let estimate = estimate_bracket_inner(&combo_request()).expect("estimate present");
+        assert_eq!(estimate.combo_coverage, ComboCoverage::Unmeasured);
+
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn load_combo_table_makes_estimate_bracket_inner_measured() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+
+        let count = load_combo_table(&one_row_combo_table_json()).expect("combo table loads");
+        assert_eq!(count, 1);
+        let estimate = estimate_bracket_inner(&combo_request()).expect("estimate present");
+        assert_eq!(estimate.combo_coverage, ComboCoverage::Measured);
+        assert_eq!(estimate.combos.len(), 1);
+
+        reset_bracket_thread_locals();
     }
 }
 

@@ -414,6 +414,12 @@ export function list_token_presets_js(): any;
 export function load_card_database(json_str: string): number;
 
 /**
+ * Load the combo table (combo-table.json). Optional: with no table loaded the
+ * estimator reports `ComboCoverage::Unmeasured` and no combo floor can fire.
+ */
+export function load_combo_table(json_str: string): number;
+
+/**
  * Load a replay log (the JSON produced by `export_replay_log`) for
  * scrubbing/playback. Independent of the live `GAME_STATE` — does not
  * require, and does not affect, an active game. Uses the loaded `CARD_DB`
@@ -695,6 +701,7 @@ export interface InitOutput {
     readonly legal_targets_for_castable_js: (a: number) => any;
     readonly legal_targets_for_castables_js: (a: any) => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
+    readonly load_combo_table: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
     readonly ping: () => [number, number];

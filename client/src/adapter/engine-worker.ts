@@ -28,6 +28,7 @@ import init, {
   resume_restored_game_state,
   resume_multiplayer_host_state,
   load_card_database,
+  load_combo_table,
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
   evaluateDeckFormatGate,
@@ -156,6 +157,26 @@ type EngineResponse =
 // ── State ────────────────────────────────────────────────────────────────
 
 let cardDbLoaded = false;
+
+type ComboTableLoadOutcome = "loaded" | "unavailable";
+
+let comboTablePromise: Promise<ComboTableLoadOutcome> | null = null;
+
+function ensureComboTable(): Promise<ComboTableLoadOutcome> {
+  if (!comboTablePromise) {
+    comboTablePromise = (async () => {
+      try {
+        const response = await fetch(__COMBO_TABLE_URL__);
+        if (!response.ok) return "unavailable";
+        await load_combo_table(await response.text());
+        return "loaded";
+      } catch {
+        return "unavailable";
+      }
+    })();
+  }
+  return comboTablePromise;
+}
 
 function respond(msg: EngineResponse): void {
   self.postMessage(msg);
@@ -652,6 +673,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         // Pure, stateless — does not require an active game state. Returns
         // null only when the deck has no commander; the caller has already
         // ensured that the card database is loaded.
+        await ensureComboTable();
         const estimate = estimate_bracket_for_deck(msg.request);
         result(msg.id, estimate ?? null);
         break;

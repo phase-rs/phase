@@ -1340,6 +1340,7 @@ function throwInitFailure(result: unknown): void {
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
   const wasm = await import("@wasm/engine");
   const cardData = await import("../services/cardData");
+  const engineRuntime = await import("../services/engineRuntime");
   await cardData.ensureWasmInit();
 
   let queue: Promise<void> = Promise.resolve();
@@ -1534,13 +1535,15 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
 
-    estimateBracketForDeck: (request: BracketEstimateRequest) =>
-      enqueue(() => {
+    estimateBracketForDeck: async (request: BracketEstimateRequest) => {
+      await engineRuntime.ensureComboTable();
+      return enqueue(() => {
         const r = wasm.estimate_bracket_for_deck(request);
         if (r === null || r === undefined) return null;
         if (isBracketEstimate(r)) return r;
         throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
-      }),
+      });
+    },
 
     selectAiPod: (candidates: AiDeckCandidateWire[], request: PodSelectionRequest) =>
       enqueue(() => {
