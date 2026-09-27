@@ -23,7 +23,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // `ExtraPhase.phase` and the `extra_phase_resume` element with
 // `TurnSegment`-carrying records and minted ids, and replaces the two
 // per-turn step counters with the `steps_started_this_turn` tally; v83 adds
-// the CR 118.9b required casting method on graveyard permissions
+// target-gated activation costs (`ReduceAbilityCost { targets, frequency }`,
+// the per-turn activation journal and the target-settlement carrier fields);
+// v84 adds the CR 118.9b required casting method on graveyard permissions
 // (`GraveyardCastPermission.required_cast_keyword`) and the casting-menu
 // option's `additional_cost`.
 // Keep the measured base so a future merge cannot collapse independent wire
@@ -35,8 +37,9 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // cost-reduction election, the v80 exile look-link reshape, and the v81 Surge
 // cast election tag.
 // +11: the v82 CR 500.8–500.10 added-phase anchoring parse bump.
-// +12: the v83 graveyard cast-method requirement.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 12;
+// +12: the v83 target-gated activation costs.
+// +13: the v84 graveyard cast-method requirement.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 13;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -69,8 +72,9 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +8: wire 62 moves with full-game v80 for the exile look-link reshape.
 // +9: wire 63 moves with full-game v81 for the Surge cast election tag.
 // +10: wire 64 moves with full-game v82 for added-phase anchoring.
-// +11: wire 65 moves with full-game v83 for the graveyard cast-method requirement.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 11;
+// +11: wire 65 moves with full-game v83 for target-gated activation costs.
+// +12: wire 66 moves with full-game v84 for the graveyard cast-method requirement.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 12;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

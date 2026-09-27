@@ -60,15 +60,24 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 83 — CR 118.9b graveyard permissions that require a casting method ("You
+/// 84 — CR 118.9b graveyard permissions that require a casting method ("You
 ///      may cast this card from your graveyard using its blitz ability.":
 ///      Sabin, Master Monk; Tenacious Underdog; Detective's Phoenix):
 ///      `StaticMode::GraveyardCastPermission` gains `required_cast_keyword`,
 ///      no longer carried as a card-filter `HasKeywordKind`, and
-///      `CastingVariantChoiceOption` gains `additional_cost`. A v82 peer
+///      `CastingVariantChoiceOption` gains `additional_cost`. A v83 peer
 ///      would drop the method silently and admit a printed-cost cast the
 ///      permission forbids. Full-game peers and P2P move in lockstep (wire
-///      65); lobby messages are unchanged.
+///      66); lobby messages are unchanged.
+/// 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
+///      Kopala): `StaticMode::ReduceAbilityCost` gains `targets` and
+///      `frequency`, `GameState` gains the per-turn activation journal
+///      `abilities_activated_this_turn_by_player`, `ResolvedAbility` gains its
+///      pre-payment `activation_record`, the `AbilityActivated` ledger edit
+///      gains its record, and the `ActivationCostSnapshot` carrier gains
+///      `mana_carrier`, `settlement_tail` and the `TargetSettlement` lock point.
+///      A v82 peer would drop the new fields silently, which in P2P prices
+///      one activation differently on host and guest.
 ///
 /// 82 — Added phases and steps anchored, identified and counted per
 ///      CR 500.8–500.10. Every change rides full-game state; lobby messages
@@ -691,7 +700,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 83;
+pub const PROTOCOL_VERSION: u32 = 84;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1907,12 +1916,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 83);
+        assert_eq!(PROTOCOL_VERSION, 84);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 82);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 83);
     }
 
     #[test]

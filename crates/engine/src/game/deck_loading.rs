@@ -1484,6 +1484,40 @@ mod tests {
     }
 
     #[test]
+    fn resolve_names_groups_slash_spellings_of_one_card() {
+        let mut cards = serde_json::Map::new();
+        cards.insert(
+            "summon: choco/mog".to_string(),
+            single_face_card_json("Summon: Choco/Mog"),
+        );
+        cards.insert("revival".to_string(), single_face_card_json("Revival"));
+        let db =
+            CardDatabase::from_json_str(&serde_json::Value::Object(cards).to_string()).unwrap();
+
+        let entries = resolve_names(
+            &db,
+            &[
+                "Summon: Choco/Mog".to_string(),
+                "Summon: Choco // Mog".to_string(),
+                "Revival/Revenge".to_string(),
+                "Revival // Revenge".to_string(),
+            ],
+        );
+
+        assert_eq!(entries.len(), 2, "two cards, four spellings");
+        let choco = entries
+            .iter()
+            .find(|entry| entry.card.name == "Summon: Choco/Mog")
+            .expect("Summon: Choco/Mog must resolve");
+        assert_eq!(choco.count, 2);
+        let revival = entries
+            .iter()
+            .find(|entry| entry.card.name == "Revival")
+            .expect("Revival must resolve");
+        assert_eq!(revival.count, 2);
+    }
+
+    #[test]
     fn create_object_from_card_face_populates_characteristics() {
         let mut state = GameState::new_two_player(42);
         let face = make_creature_face();

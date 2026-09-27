@@ -88,6 +88,43 @@ pub struct PriorTargetBindingCounters {
     pub selection_bindings: u64,
 }
 
+/// Test-only counters for the CR 601.2f + CR 602.2b activation cost-determination
+/// routes. They pin that a target-first activation's mana leg is priced at the
+/// settlement write-back, and that the separate "is there mana left to pay?"
+/// decision (`try_finalize_pending_activation_mana_leg`'s zero-leg skip) is a
+/// distinct site. A change to one can't silently move into the other. Kept out
+/// of [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActivationCostRouteCounters {
+    /// Times the settlement write-back chose which carrier holds the unpaid mana.
+    pub settlement_writebacks: u64,
+    /// Times the mana-leg finalizer found a zero leg and skipped payment.
+    pub zero_mana_leg_skips: u64,
+    /// Times `settle_activation_cost` ran, whatever its carrier.
+    pub settlements: u64,
+    /// Of those, the ones that found an `Open` carrier (a deferred lock).
+    pub open_settlements: u64,
+    /// Of those, the ones that found no carrier at all.
+    pub carrierless_settlements: u64,
+    /// Times pre-activation feasibility had to walk target assignments because
+    /// the target-free bounds didn't decide it.
+    pub window_searches: u64,
+    /// Reaches of each unlocked-cost guard, indexed by `ActivationCostGuardSite`.
+    pub guard_reaches: [u64; crate::game::casting::ActivationCostGuardSite::COUNT],
+}
+
+/// Test-only count of work the target-completion walk actually PERFORMED, per
+/// [`WalkOp`](crate::game::ability_utils::WalkOp), recorded inside each
+/// operation rather than at its budget charge. Comparing it with the budget's
+/// own `charged` counts is what proves every unit of work was paid for.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompletionWalkWork {
+    pub per_op: [u32; crate::game::ability_utils::WalkOp::COUNT],
+}
+
 /// Test-only counters for the CR 508.1d attack-declaration solver
 /// (`combat::selectable_targets_by_attacker` and the strict validator it
 /// drives). Kept out of [`PerfCounterSnapshot`] for the same reason the two
@@ -211,6 +248,24 @@ thread_local! {
             cap_static_sweeps: 0,
             pairability_evaluations: 0,
             defender_permission_lookups: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static ACTIVATION_COST_ROUTE_COUNTERS: Cell<ActivationCostRouteCounters> = const {
+        Cell::new(ActivationCostRouteCounters {
+            settlement_writebacks: 0,
+            zero_mana_leg_skips: 0,
+            settlements: 0,
+            open_settlements: 0,
+            carrierless_settlements: 0,
+            window_searches: 0,
+            guard_reaches: [0; crate::game::casting::ActivationCostGuardSite::COUNT],
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static COMPLETION_WALK_WORK: Cell<CompletionWalkWork> = const {
+        Cell::new(CompletionWalkWork {
+            per_op: [0; crate::game::ability_utils::WalkOp::COUNT],
         })
     };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
@@ -591,6 +646,86 @@ pub fn attack_declaration_solver_snapshot() -> AttackDeclarationSolverCounters {
     ATTACK_DECLARATION_SOLVER_COUNTERS.with(Cell::get)
 }
 
+/// CR 601.2f + CR 602.2b: one settlement write-back choosing the mana carrier.
+#[cfg(feature = "test-support")]
+pub fn record_activation_settlement_writeback() {
+    ACTIVATION_COST_ROUTE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.settlement_writebacks += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 601.2h: one mana-leg finalization that found nothing left to pay.
+#[cfg(feature = "test-support")]
+pub fn record_activation_zero_mana_leg_skip() {
+    ACTIVATION_COST_ROUTE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.zero_mana_leg_skips += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 601.2c + CR 602.2b: one run of the target-settlement cost lock.
+#[cfg(feature = "test-support")]
+pub fn record_activation_settlement(
+    snapshot: Option<&crate::types::casting_costs::ActivationCostSnapshot>,
+) {
+    ACTIVATION_COST_ROUTE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.settlements += 1;
+        match snapshot.map(|snapshot| &snapshot.lock) {
+            Some(crate::types::casting_costs::ActivationCostLock::Open { .. }) => {
+                counters.open_settlements += 1;
+            }
+            Some(crate::types::casting_costs::ActivationCostLock::Locked { .. }) => {}
+            None => counters.carrierless_settlements += 1,
+        }
+        cell.set(counters);
+    });
+}
+
+/// CR 601.2f: one reach of an unlocked-cost guard.
+#[cfg(feature = "test-support")]
+pub fn record_activation_cost_guard(site: crate::game::casting::ActivationCostGuardSite) {
+    ACTIVATION_COST_ROUTE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.guard_reaches[site as usize] += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 118.3 + CR 601.2c: one pre-activation feasibility walk over target
+/// assignments.
+#[cfg(feature = "test-support")]
+pub fn record_activation_cost_window_search() {
+    ACTIVATION_COST_ROUTE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.window_searches += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn activation_cost_route_snapshot() -> ActivationCostRouteCounters {
+    ACTIVATION_COST_ROUTE_COUNTERS.with(Cell::get)
+}
+
+/// One unit of target-completion walk work, performed after its charge succeeded.
+#[cfg(feature = "test-support")]
+pub fn record_completion_walk_work(op: crate::game::ability_utils::WalkOp) {
+    COMPLETION_WALK_WORK.with(|cell| {
+        let mut work = cell.get();
+        work.per_op[op as usize] += 1;
+        cell.set(work);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn completion_walk_work_snapshot() -> CompletionWalkWork {
+    COMPLETION_WALK_WORK.with(Cell::get)
+}
+
 #[cfg(feature = "test-support")]
 pub fn reset_prior_target_binding_counters() {
     PRIOR_TARGET_BINDING_COUNTERS
@@ -607,4 +742,9 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     ATTACK_DECLARATION_SOLVER_COUNTERS
         .with(|counters| counters.set(AttackDeclarationSolverCounters::default()));
+    #[cfg(feature = "test-support")]
+    ACTIVATION_COST_ROUTE_COUNTERS
+        .with(|counters| counters.set(ActivationCostRouteCounters::default()));
+    #[cfg(feature = "test-support")]
+    COMPLETION_WALK_WORK.with(|counters| counters.set(CompletionWalkWork::default()));
 }

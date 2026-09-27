@@ -8104,6 +8104,9 @@ pub(crate) fn project_object_for_loop(object: &mut crate::game::game_object::Gam
 
 fn project_out_resources(state: &GameState) -> GameState {
     bump_loop_detect_cost(|cost| cost.projected_clones += 1);
+    // Read from the unprojected state: the cost gates judge recorded facts
+    // against the live statics, before any object is projected below.
+    let observable_journal = crate::game::casting::cost_observable_activation_journal(state);
     let mut s = state.normalize_for_loop();
 
     for player in &mut s.players {
@@ -8200,6 +8203,14 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.spells_cast_this_turn_by_player.clear();
     s.spells_cast_this_game.clear();
     s.spells_cast_this_game_by_player.clear();
+    // CR 602.2 + CR 611.3a: the per-turn activation journal is the activation
+    // analog of the cast journal above, and every row of it is pumped history
+    // EXCEPT the one fact a "first activated ability … each turn" cost reads:
+    // each such modifier's first qualifying row. That is kept (see
+    // `cost_observable_activation_journal`), so a period that spends a one-time
+    // discount compares UNEQUAL and can never be certified as repeatable, while
+    // periods after it keep the same row and still compare equal.
+    *s.abilities_activated_this_turn_by_player = observable_journal;
     // CR 400 (zones) / CR 603.6a (ETB) / CR 701.21 (sacrifice) / CR 111 (tokens):
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
@@ -9547,6 +9558,362 @@ mod tests {
             loop_states_equal_modulo_resources(&c, &d),
             "an unrestricted ability's tally is pure history and must be projected out (EQUAL)"
         );
+    }
+
+    /// CR 611.3a + CR 732.2a: a "first activated ability … each turn" discount
+    /// (Professor Hojo) is one-time within the turn, so a period that SPENDS it
+    /// must not compare modulo-equal to one that hasn't: a certificate over that
+    /// period would repeat the one-time discount. The journal is projected to
+    /// the modifier's first qualifying row. PAIRED CONTROLS: without the
+    /// once-per-turn modifier the same pair is pure history (EQUAL), and two
+    /// positions after the discount was spent share that row (EQUAL).
+    #[test]
+    fn a_spent_first_activation_discount_breaks_modulo_equality() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::ability::TargetRef;
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let board = |with_hojo: bool| {
+            let mut s = GameScenario::new_n_player(2, 7);
+            s.at_phase(Phase::PreCombatMain);
+            let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+            let src = s
+                .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+                .id();
+            if with_hojo {
+                s.add_creature_from_oracle(PlayerId(0), "Professor Hojo", 2, 2, HOJO);
+            }
+            (s.build().state().clone(), own, src)
+        };
+        let row = |state: &GameState, own: ObjectId, src: ObjectId| {
+            crate::game::casting::capture_activation_record_from(
+                state,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")
+        };
+        let journaled = |state: &GameState, rows: Vec<_>| {
+            let mut next = state.clone();
+            next.abilities_activated_this_turn_by_player
+                .insert(PlayerId(0), im::Vector::from(rows));
+            next.players[1].life -= 1; // the projected-out resource gain
+            next
+        };
+
+        // Negative: before vs after the discount is spent => UNEQUAL.
+        let (a, own, src) = board(true);
+        let first = row(&a, own, src);
+        let spent = journaled(&a, vec![first.clone()]);
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &spent),
+            "a period that spends the one-time discount must compare UNEQUAL"
+        );
+        // Control: two positions after it was spent keep the same first row.
+        let later = journaled(&spent, vec![first.clone(), first.clone()]);
+        assert!(
+            loop_states_equal_modulo_resources(&spent, &later),
+            "after the discount is spent, later rows are pure history (EQUAL)"
+        );
+
+        // Control: no once-per-turn modifier reads the journal => EQUAL.
+        let (c, own, src) = board(false);
+        let d = journaled(&c, vec![row(&c, own, src)]);
+        assert!(
+            loop_states_equal_modulo_resources(&c, &d),
+            "without a reader the journal is pure history (EQUAL)"
+        );
+    }
+
+    /// CR 611.3a + CR 732.2a: a DORMANT first-activation modifier (Professor
+    /// Hojo in hand) reads the whole turn's journal the moment it takes effect,
+    /// so the journal is cost-relevant before it does. A (no earlier qualifying
+    /// activation) and B (one) must compare UNEQUAL: once Hojo is cast, the
+    /// same activation costs {0} in A and {2} in B. The pair is measured through
+    /// the production pipeline as the reach guard.
+    #[test]
+    fn a_dormant_first_activation_modifier_keeps_the_journal_in_the_loop_key() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::mana::{ManaColor, ManaCost, ManaUnit};
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let build = || {
+            let mut s = GameScenario::new_n_player(2, 7);
+            s.at_phase(Phase::PreCombatMain);
+            let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+            let src = s
+                .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+                .id();
+            let hojo = s
+                .add_creature_to_hand_from_oracle(PlayerId(0), "Professor Hojo", 2, 2, HOJO)
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            s.with_mana_pool(
+                PlayerId(0),
+                (0..10)
+                    .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                    .collect(),
+            );
+            (s.build(), own, src, hojo)
+        };
+        let (a_runner, own, src, hojo) = build();
+        let a = a_runner.state().clone();
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "a dormant Hojo makes the earlier qualifying activation cost-relevant (UNEQUAL)"
+        );
+
+        // Reach guard: after Hojo enters, the same activation is priced apart.
+        let paid_after_hojo = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            r.cast(hojo).resolve();
+            let before = r.state().players[0].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            })
+            .expect("target");
+            while matches!(
+                r.state().waiting_for,
+                crate::types::game_state::WaitingFor::ManaPayment { .. }
+            ) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[0].mana_pool.total()
+        };
+        assert_eq!((paid_after_hojo(a), paid_after_hojo(b)), (0, 2));
+    }
+
+    /// CR 611.3a + CR 701.27a: two first-activation definitions on ONE object
+    /// never mask each other. The object's front face carries active modifier A
+    /// (keyed to boast abilities), its back face dormant modifier B (Hojo's,
+    /// keyed to any activated ability). A tap activation targeting P0's creature
+    /// qualifies for B, not A: state B (which has that row) and state A (which
+    /// doesn't) must compare UNEQUAL, because once the object transforms the same
+    /// activation costs {0} in A and {2} in B (the production reach guard).
+    #[test]
+    fn two_first_activation_definitions_on_one_object_are_projected_separately() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::{CardType, CoreType};
+        use crate::types::mana::{ManaColor, ManaUnit};
+        use crate::types::statics::StaticMode;
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let modifier_b =
+            crate::parser::oracle_static::parse_static_line(HOJO).expect("Hojo's line parses");
+        let mut modifier_a = modifier_b.clone();
+        let StaticMode::ReduceAbilityCost { keyword, .. } = &mut modifier_a.mode else {
+            panic!("reach guard: {:?}", modifier_a.mode);
+        };
+        *keyword = "boast".to_string();
+
+        let mut s = GameScenario::new_n_player(2, 7);
+        s.at_phase(Phase::PreCombatMain);
+        let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+        let src = s
+            .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+            .id();
+        let janus = s
+            .add_creature(PlayerId(0), "Janus Front", 2, 2)
+            .with_static_definition(modifier_a)
+            .id();
+        s.with_mana_pool(
+            PlayerId(0),
+            (0..10)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut runner = s.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&janus)
+            .unwrap()
+            .back_face = Some(BackFaceData {
+            name: "Janus Back".to_string(),
+            power: Some(2),
+            toughness: Some(2),
+            card_types: CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            },
+            static_definitions: vec![modifier_b].into(),
+            ..Default::default()
+        });
+        let a = runner.state().clone();
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "the back face's modifier reads the row the front face's ignores (UNEQUAL)"
+        );
+
+        // Reach guard: transformed, the back face's modifier prices them apart.
+        let paid_after_transform = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            crate::game::transform::transform_permanent(r.state_mut(), janus, &mut Vec::new())
+                .expect("the object transforms");
+            crate::game::layers::flush_layers(r.state_mut());
+            assert_eq!(r.state().objects[&janus].name, "Janus Back", "reach guard");
+            let before = r.state().players[0].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            })
+            .expect("target");
+            while matches!(
+                r.state().waiting_for,
+                crate::types::game_state::WaitingFor::ManaPayment { .. }
+            ) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[0].mana_pool.total()
+        };
+        assert_eq!((paid_after_transform(a), paid_after_transform(b)), (0, 2));
+    }
+
+    /// CR 109.5 + CR 611.3a: "you" is the modifier's CURRENT controller, and
+    /// control can later pass to any player, not just its owner. It's P2's
+    /// turn in a three-player game; P0 owns and controls Hojo; P2 has a creature
+    /// and a tapper. State B has an earlier P2 activation targeting P2's own
+    /// creature, A doesn't. They must compare UNEQUAL: once P2 gains control of
+    /// Hojo (Control Magic), the same P2 activation costs {0} in A and {2} in B
+    /// (the production reach guard).
+    #[test]
+    fn a_first_activation_row_is_kept_for_every_possible_controller() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaColor, ManaUnit};
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+        let (p0, p2) = (PlayerId(0), PlayerId(2));
+
+        let mut s = GameScenario::new_n_player(3, 7);
+        s.at_phase(Phase::PreCombatMain);
+        let hojo = s
+            .add_creature_from_oracle(p0, "Professor Hojo", 2, 2, HOJO)
+            .id();
+        let theirs = s.add_creature(p2, "P2 Creature", 1, 1).id();
+        let src = s
+            .add_artifact_from_oracle(p2, "P2 Tapper", "{2}: Tap target creature.")
+            .id();
+        let magic = s
+            .add_enchantment_from_oracle(
+                p2,
+                "Control Magic",
+                "Enchant creature\nYou control enchanted creature.",
+            )
+            .with_subtypes(vec!["Aura"])
+            .id();
+        s.with_mana_pool(
+            p2,
+            (0..10)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut runner = s.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = p2;
+            state.priority_player = p2;
+            state.waiting_for = WaitingFor::Priority { player: p2 };
+        }
+        let a = runner.state().clone();
+        assert_eq!(
+            a.objects[&hojo].controller, p0,
+            "reach guard: P0 controls Hojo"
+        );
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            p2,
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                p2,
+                src,
+                None,
+                &[TargetRef::Object(theirs)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "P2's qualifying row is cost-relevant should P2 gain Hojo (UNEQUAL)"
+        );
+
+        // Reach guard: P2 gains control of Hojo, then activates.
+        let paid_after_transfer = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            {
+                let state = r.state_mut();
+                state.objects.get_mut(&magic).unwrap().attached_to = Some(hojo.into());
+                state
+                    .objects
+                    .get_mut(&hojo)
+                    .unwrap()
+                    .attachments
+                    .push(magic);
+                state.layers_dirty.mark_full();
+            }
+            crate::game::layers::flush_layers(r.state_mut());
+            assert_eq!(
+                r.state().objects[&hojo].controller,
+                p2,
+                "reach guard: P2 has Hojo"
+            );
+            let before = r.state().players[2].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(theirs)],
+            })
+            .expect("target");
+            while matches!(r.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[2].mana_pool.total()
+        };
+        assert_eq!((paid_after_transfer(a), paid_after_transfer(b)), (0, 2));
     }
 
     /// CR 602.5b: per-GAME ("Activate only once") gate preserved; sibling
@@ -13326,6 +13693,9 @@ mod tests {
             dynamic_count,
             exemption: Default::default(),
             activator: None,
+
+            targets: None,
+            frequency: None,
         };
         assert!(
             !cover_with_static_on_stable(reduce(Some(object_count_ref()))),

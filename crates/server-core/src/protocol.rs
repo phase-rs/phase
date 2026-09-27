@@ -3319,17 +3319,21 @@ mod tests {
     }
 
     /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
-    /// serialized full-game state; a v82 peer would drop it silently and admit
+    /// serialized full-game state; a v83 peer would drop it silently and admit
     /// a printed-cost graveyard cast the permission forbids, so it must be
-    /// refused before it receives v83 state.
+    /// refused before it receives v84 state. The preceding v83 bump added
+    /// target restrictions and once-per-turn frequency to `ReduceAbilityCost`,
+    /// a per-turn activation journal to `GameState`, and a target-settlement
+    /// lock to the activation cost carrier. A v82 peer would drop those fields
+    /// silently and price an activation differently.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_83_for_graveyard_cast_methods() {
-        assert_eq!(PROTOCOL_VERSION, 83);
+    fn protocol_version_is_84_for_graveyard_cast_methods() {
+        assert_eq!(PROTOCOL_VERSION, 84);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3344,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_83_for_graveyard_cast_methods` stays
+    /// `protocol_version_is_84_for_graveyard_cast_methods` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
