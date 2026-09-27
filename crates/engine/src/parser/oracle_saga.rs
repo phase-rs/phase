@@ -318,34 +318,40 @@ fn promote_grant_duration_for_chapter(execute: &mut AbilityDefinition) {
 /// states no duration (see `promote_grant_duration_for_chapter`).
 ///
 /// The chain's root keeps the chapter promotion as it was, now judged on the
-/// root clause's recorded duration. A LATER clause is promoted only where the
-/// result is exact: its own printed instruction (`SequentialSibling`, a new
-/// sentence: Victory of the Pyrohammer I's "Victory of the Pyrohammer gains
-/// …"), granting to the Saga itself, and recorded with no duration at all.
-/// That grant lasts as long as the Saga does (CR 400.7: the Saga that leaves is
-/// a new object), so `UntilHostLeavesPlay` is its CR 611.2a lifetime.
+/// root clause's recorded duration. A LATER clause that isn't a duration-free
+/// grant to the Saga itself is left exactly as the effect-chain parser produced
+/// it: a grant to anything else, or one carrying a duration on its effect ("…
+/// can't be blocked this turn"), states its own lifetime.
 ///
-/// Every other later clause is left exactly as the effect-chain parser produced
-/// it. A grant to anything else, or one carrying a duration on its effect ("…
-/// can't be blocked this turn"), states its own lifetime. A `ContinuationStep`
-/// belongs to its parent's instruction: the second conjunct of a leading
-/// "Until end of turn, … and …" is born duration-less (World War Hulk III's "…
-/// and it gains trample") because the parser does not distribute a stated
-/// duration across a sentence's conjuncts, and the GenericEffect resolver's
-/// end-of-turn fallback is what expires it (effects/effect.rs). Promoting such
-/// a conjunct would outlast the turn its sentence states, so it is not
-/// promoted even when it grants to the Saga.
+/// A later duration-free grant to the Saga lasts as long as the Saga does when
+/// it is its own instruction (CR 400.7: the Saga that leaves is a new object;
+/// CR 611.2a: no stated duration), as Victory of the Pyrohammer I's "Victory of
+/// the Pyrohammer gains …" is, and the parser links such a clause as a
+/// `SequentialSibling`. A `ContinuationStep` is ambiguous here: it is either a
+/// conjunct of an earlier clause, whose leading "Until end of turn, … and …"
+/// the parser does not distribute onto it (World War Hulk III's shape), or a
+/// separate sentence the parser relinked because it depends on the earlier
+/// one. The first expires with the turn and the second lasts while the Saga
+/// does, and the chain doesn't say which, so that grant is an explicit gap
+/// (CR 611.2a) rather than a guess either way. No printed Saga has it.
 fn promote_duration_free_grants(ability: &mut AbilityDefinition) {
     if ability.duration.is_none() {
         promote_generic_effect_duration(&mut ability.effect);
     }
     let mut node = ability.sub_ability.as_deref_mut();
     while let Some(sub) = node {
-        if sub.sub_link == SubAbilityLink::SequentialSibling
-            && sub.duration.is_none()
-            && is_duration_free_grant_to_the_saga(&sub.effect)
-        {
-            promote_generic_effect_duration(&mut sub.effect);
+        if sub.duration.is_none() && is_duration_free_grant_to_the_saga(&sub.effect) {
+            match sub.sub_link {
+                SubAbilityLink::SequentialSibling => {
+                    promote_generic_effect_duration(&mut sub.effect);
+                }
+                SubAbilityLink::ContinuationStep => {
+                    *sub.effect = Effect::unimplemented(
+                        "saga_continuation_self_grant_duration",
+                        "a duration-free grant to this Saga continuing an earlier clause",
+                    );
+                }
+            }
         }
         node = sub.sub_ability.as_deref_mut();
     }
@@ -1336,18 +1342,18 @@ mod tests {
     }
 
     /// CR 611.2a: a duration-free grant to the Saga is promoted only as its own
-    /// printed instruction. Victory of the Pyrohammer I's separate sentence
-    /// ("… Victory gains "…"") lasts while the Saga does; the same grant as the
-    /// second conjunct of a leading "Until end of turn, … and …" belongs to that
-    /// sentence and is left as parsed, so it expires with the turn.
+    /// instruction. Victory of the Pyrohammer I's separate sentence ("? Victory
+    /// gains "?"") lasts while the Saga does. The same grant linked as a
+    /// continuation of an earlier clause is ambiguous (a conjunct of a leading
+    /// "Until end of turn, ? and ?", or a relinked dependent sentence), so it
+    /// becomes an explicit gap either way, never a guessed lifetime.
     ///
-    /// The parser doesn't produce the conjunct-to-the-Saga shape today (it drops
-    /// the grant), so the conjunct is built from Victory's own parsed chain: the
-    /// grant clause relinked as a continuation of a clause stating "until end
-    /// of turn", as the parser links World War Hulk III's "… and it gains
-    /// trample".
+    /// The parser doesn't produce the continuation-to-the-Saga shape today (it
+    /// drops a same-sentence grant), so it is built from Victory's own parsed
+    /// chain: the grant clause relinked as a continuation, as the parser links
+    /// World War Hulk III's "? and it gains trample".
     #[test]
-    fn a_conjunct_grant_to_the_saga_is_not_promoted_but_its_own_sentence_is() {
+    fn a_continuation_grant_to_the_saga_is_a_gap_but_its_own_sentence_is_promoted() {
         let line = "I \u{2014} This Saga deals 4 damage to each creature and each planeswalker. This Saga gains \"Damage isn't removed from creatures during cleanup steps.\"";
         let lines = vec![
             "(As this Saga enters and after your draw step, add a lore counter.)",
@@ -1371,29 +1377,34 @@ mod tests {
             "reach: the clause grants to the Saga"
         );
 
-        let as_unpromoted = |link: SubAbilityLink| {
+        let promoted_as = |link: SubAbilityLink, parent_duration: Option<Duration>| {
             let mut chain = parsed.clone();
-            if link == SubAbilityLink::ContinuationStep {
-                chain.duration = Some(Duration::UntilEndOfTurn);
-            }
+            chain.duration = parent_duration;
             let sub = chain.sub_ability.as_deref_mut().expect("the grant clause");
             sub.sub_link = link;
             if let Effect::GenericEffect { duration, .. } = &mut *sub.effect {
                 *duration = None;
             }
             promote_grant_duration_for_chapter(&mut chain);
-            chain_grant_duration(chain.sub_ability.as_deref().expect("the grant clause"))
+            (*chain.sub_ability.expect("the grant clause").effect).clone()
         };
-        assert_eq!(
-            as_unpromoted(SubAbilityLink::SequentialSibling),
-            Some(Duration::UntilHostLeavesPlay),
+        assert!(
+            matches!(
+                promoted_as(SubAbilityLink::SequentialSibling, None),
+                Effect::GenericEffect {
+                    duration: Some(Duration::UntilHostLeavesPlay),
+                    ..
+                }
+            ),
             "its own duration-free sentence lasts while the Saga does"
         );
-        assert_eq!(
-            as_unpromoted(SubAbilityLink::ContinuationStep),
-            None,
-            "a conjunct under \"Until end of turn,\" is left for the end-of-turn fallback"
-        );
+        for parent_duration in [Some(Duration::UntilEndOfTurn), None] {
+            let effect = promoted_as(SubAbilityLink::ContinuationStep, parent_duration.clone());
+            assert!(
+                effect.unimplemented_description().is_some(),
+                "a continuation grant to the Saga is an explicit gap (parent {parent_duration:?}), got {effect:?}"
+            );
+        }
     }
 
     /// The same, inside a modal chapter's mode chain.
