@@ -575,20 +575,34 @@ pub(crate) fn matches_player_scope(
                     // CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: "each [player class]
                     // whose [scalar attr] [comparator] [value]" — the candidate
                     // satisfies both `relation` and the per-candidate scalar
-                    // comparison. `value` is the controller-relative threshold,
-                    // resolved once; `attr` is read directly off the candidate.
+                    // comparison. `value` keeps the ability controller and binds
+                    // `scoped_player` to this candidate; `attr` is read for
+                    // that candidate.
                     PlayerFilter::PlayerAttribute {
                         relation,
                         attr,
                         comparator,
                         value,
                     } => {
-                        let threshold = crate::game::quantity::resolve_quantity(
-                            state, value, controller, source_id,
-                        );
                         crate::game::players::matches_relation(state, p.id, controller, *relation)
-                            && candidate_player_scalar_with_state(state, p, controller, attr)
-                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                            && {
+                                let threshold = crate::game::quantity::resolve_quantity_with_ctx(
+                                    state,
+                                    value,
+                                    controller,
+                                    crate::game::quantity::QuantityContext {
+                                        entering: None,
+                                        source: source_id,
+                                        trigger_source: None,
+                                        recipient: None,
+                                        scoped_player: Some(p.id),
+                                        damage_source: None,
+                                        event_amount: None,
+                                    },
+                                );
+                                candidate_player_scalar_with_state(state, p, controller, attr)
+                                    .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                            }
                     }
                     // CR 608.2c + CR 608.2h + CR 109.4: "each player who
                     // controlled/owned a <filter> this way" — the candidate must
@@ -2306,6 +2320,10 @@ pub(crate) fn parent_referent_context_from_events(
         return Some(snapshot);
     }
 
+    if let Some(snapshot) = reveal_until_object_context_from_events(events) {
+        return Some(snapshot);
+    }
+
     if let Some(snapshot) = revealed_object_context_from_events(state, events) {
         return Some(snapshot);
     }
@@ -2538,6 +2556,47 @@ fn stack_pushed_object_context_from_events(
     });
     let first = pushed.next()?;
     pushed.next().is_none().then_some(first)
+}
+
+/// CR 608.2c + CR 701.20a: A `RevealUntil` instruction that stopped on a single
+/// matching card introduces that card as the referent for downstream anaphoric
+/// pronouns ("that card's mana value", Erratic Mutation). Captured from
+/// `EffectResolved`'s subject snapshot.
+fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObjectSnapshot> {
+    let mut hits = events.iter().filter_map(|event| match event {
+        GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            subject: Some(subject),
+            ..
+        } => Some(CostPaidObjectSnapshot {
+            object_id: subject.identity.object_id,
+            lki: LKISnapshot {
+                name: subject.name.clone(),
+                token_image_ref: None,
+                power: subject.power,
+                toughness: subject.toughness,
+                base_power: subject.base_power,
+                base_toughness: subject.base_toughness,
+                mana_value: subject.mana_value,
+                controller: subject.controller,
+                owner: subject.owner,
+                card_types: subject.core_types.clone(),
+                subtypes: subject.subtypes.clone(),
+                supertypes: subject.supertypes.clone(),
+                keywords: subject.keywords.clone(),
+                colors: subject.colors.clone(),
+                chosen_attributes: Vec::new(),
+                counters: subject.counters.clone(),
+                tapped: subject.tapped,
+                is_suspected: subject.is_suspected,
+                attachments: Vec::new(),
+            },
+            incarnation: subject.identity.incarnation,
+        }),
+        _ => None,
+    });
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
 }
 
 /// CR 608.2c + CR 608.2h + CR 701.20b: A `reveal` instruction introduces an
@@ -3707,6 +3766,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
                 ..
             }
             | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
             | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::Cascade { .. },
@@ -3868,7 +3928,20 @@ pub(crate) fn optional_decline_branch(
     if let Some(branch) = ability.else_ability.as_deref() {
         return Some(Cow::Borrowed(branch));
     }
-    let sub = ability.sub_ability.as_deref()?;
+    let mut sub = ability.sub_ability.as_deref()?;
+    // CR 608.2c: an unconditional `ContinuationStep` is a resolution step of the
+    // declined instruction itself (Choice of Fortunes' "shuffle them into your
+    // library" = move, then shuffle), so it is skipped with that instruction and
+    // the decline is decided at the next printed node — an "if you do" gate or
+    // the next instruction. A `SequentialSibling`, a conditioned node, or a node
+    // with its own decline branch stops the walk.
+    while sub.sub_link == SubAbilityLink::ContinuationStep
+        && sub.condition.is_none()
+        && sub.else_ability.is_none()
+        && !should_resolve_subability_on_optional_decline(sub)
+    {
+        sub = sub.sub_ability.as_deref()?;
+    }
     let selected = should_resolve_subability_on_optional_decline(sub)
         || (sub.sub_link == SubAbilityLink::SequentialSibling
             && !sub_ability_is_reflexive(sub)
@@ -5125,7 +5198,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -5574,8 +5647,11 @@ fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
 
 fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
-        Effect::CastFromZone { target, .. } => Some(target),
-        Effect::PutAtLibraryPosition { target, .. } => Some(target),
+        Effect::CastFromZone { target, .. }
+        | Effect::PutAtLibraryPosition { target, .. }
+        | Effect::ChangeZone { target, .. }
+        | Effect::Transform { target, .. }
+        | Effect::Reveal { target, .. } => Some(target),
         _ => None,
     }
 }
@@ -5590,13 +5666,20 @@ fn inject_last_revealed_targets(
         // CR 701.20e + CR 608.2c: In an immediate look-then-act chain, an exact
         // `ParentTarget` names the object produced by the parent look even though
         // looking does not move it or create an ordinary target. Bind that one
-        // sentinel through the existing look ledger. Composed filters remain
-        // intact so their concrete restrictions are still evaluated.
-        let filter = if matches!(filter, TargetFilter::ParentTarget) {
-            &TargetFilter::LastRevealed
-        } else {
-            filter
-        };
+        // sentinel through the existing look/reveal ledger across all zones
+        // (library look-then-cast for Planetarium, exile reveal-then-move for
+        // Clone Shell). Composed filters remain intact so their concrete
+        // restrictions are still evaluated.
+        if matches!(filter, TargetFilter::ParentTarget) {
+            return crate::game::filter::last_revealed_ids_matching(
+                state,
+                &TargetFilter::LastRevealed,
+                &ctx,
+            )
+            .into_iter()
+            .map(TargetRef::Object)
+            .collect();
+        }
         return crate::game::filter::last_revealed_library_ids_matching(state, filter, &ctx)
             .into_iter()
             .map(TargetRef::Object)
@@ -8450,6 +8533,10 @@ fn affected_objects_from_events(
                 // to that zone makes a downstream "from among the milled cards"
                 // sub-ability resolve against exactly the milled cards.
                 Effect::Mill { destination, .. } => Some(*destination),
+                // Seek: the sought cards land in the Seek's destination, so a
+                // downstream "them" names exactly those cards (Choice of
+                // Fortunes' "shuffle them into your library").
+                Effect::Seek { destination, .. } => Some(*destination),
                 // CR 701.20a + CR 608.2f: The kept card lands in `kept_destination`; scope the
                 // tracked set to that zone so downstream TrackedSet consumers (e.g. IC's
                 // ChangeZoneAll{Exile→Battlefield}) see only the kept card, not the rest pile.
@@ -10177,6 +10264,14 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
         // least one complete forage mode is currently available.
         Effect::Forage => !forage::can_forage(state, ability),
+        // CR 608.2d: "you may transform/convert ~. If you do, …" cannot be
+        // chosen once the transform is impossible — accepting would record a
+        // performed effect for a no-op and still run the "If you do" rider
+        // (Megatron, Tyrant).
+        Effect::Transform {
+            target: TargetFilter::SelfRef,
+            ..
+        } => transform_effect::optional_self_transform_is_impossible(state, ability),
         Effect::PayCost {
             cost: cost @ AbilityCost::TapCreatures { .. },
             payer,
@@ -14801,9 +14896,8 @@ fn resolve_chain_body(
         && !optionality_is_per_iteration(state, ability)
         && optional_effect_is_infeasible(state, ability);
 
-    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction,
-    // exact object selection, or "put that card" move with no card does not
-    // happen. Route each outcome through the existing
+    // CR 608.2c + CR 608.2d: An infeasible optional instruction in this
+    // dispatch does not happen. Route each outcome through the existing
     // decline authority instead of merely suppressing the prompt and falling
     // through to `resolve_effect`: a missing exact parent could consume an
     // unrelated inherited target, while another current-legality failure (such
@@ -14812,13 +14906,16 @@ fn resolve_chain_body(
     // decline instead of surfacing an unsatisfiable waiting state. The decline path preserves the printed
     // tail semantics: dependent "if you do" riders stay gated while independent
     // sequential siblings and explicit decline branches continue. Other
-    // infeasible optional effects (PutChosenCounter/RemoveCounter) retain their
-    // established resolver no-op.
+    // infeasible optional effects retain their established resolver no-op.
     let auto_decline_infeasible_optional = matches!(
         &ability.effect,
         Effect::CastFromZone { .. }
             | Effect::ChangeZone { .. }
             | Effect::MoveCounters { .. }
+            | Effect::Transform {
+                target: TargetFilter::SelfRef,
+                ..
+            }
             | Effect::ChooseObjectsIntoTrackedSet {
                 cardinality: Some(ObjectSelectionCardinality::Exactly { .. }),
                 ..
@@ -17324,6 +17421,9 @@ fn resolve_chain_body(
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
             && effect_writes_last_revealed_ids(&ability.effect)
+            && (target_filter_for_last_revealed_sub(&sub.effect).is_some()
+                || effect_consumes_parent_object_referent(&sub.effect)
+                || has_member_driven_repeat(sub.as_ref()))
             // CR 701.21a: Sacrifice resolves its own battlefield-scoped eligible
             // pool — injecting library card IDs from a look-only Dig (e.g.
             // Birthing Ritual) would route through effect_object_targets and
@@ -18969,8 +19069,7 @@ fn scoped_player_matches_filter(
         }
         // Set-valued / event-context / aggregate variants: not used by
         // decline-tail today. Fail closed (mirrors the
-        // `TriggerCondition::DuringPlayersTurn` fallthrough pattern at
-        // game/triggers.rs:3703-3723).
+        // `TriggerCondition::DuringPlayersTurn` fallthrough pattern).
         PlayerFilter::DefendingPlayer
         | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentDealtDamage { .. }
@@ -20528,10 +20627,10 @@ mod tests {
         ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
         DamageChannel, DelayedTriggerCondition, Duration, EffectKind, EffectScope, FilterProp,
         ManaSpendPermission, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
-        PlayerScope, PtValue, QuantityExpr, QuantityModification, QuantityRef,
-        ReplacementDefinition, SpellContext, StaticDefinition, SubAbilityLink, TapStateChange,
-        TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter,
-        UnlessPayModifier, UntilCondition, ZoneOwner,
+        PlayerRelation, PlayerScope, PtValue, QuantityExpr, QuantityModification, QuantityRef,
+        ReplacementDefinition, RoundingMode, SpellContext, StaticDefinition, SubAbilityLink,
+        TapStateChange, TargetFilter, TargetRef, TargetSelectionMode, TriggerDefinition,
+        TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -20871,8 +20970,8 @@ mod tests {
         let target = reflexive_test_creature(&mut state, PlayerId(0), "Only target");
         let mut reflexive = reflexive_counter_ability(ObjectId(100));
         // CR 601.2c + CR 603.3d: `Opponent` is the ONLY non-`ScopedPlayer` chooser
-        // the parser ever stamps (`oracle_target.rs:3540`, "of an opponent's
-        // choice"), and it is the shape `resolve_effect_player_ref` resolves
+        // the parser ever stamps ("of an opponent's choice"), and it is the
+        // shape `resolve_effect_player_ref` resolves
         // through the shared authority. A synthetic `SpecificPlayer` chooser is
         // unreachable from any card and falls into that resolver's event-context
         // catch-all, which returns `None` with no trigger event — the prompt would
@@ -21783,6 +21882,91 @@ mod tests {
             ),
             "Angel must still affect the player it attacked",
         );
+    }
+
+    #[test]
+    fn player_attribute_threshold_binds_starting_life_to_candidate() {
+        let mut format = crate::types::format::FormatConfig::archenemy();
+        format.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(format, 3, 42);
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .life = 15;
+        let half_starting_life = QuantityExpr::DivideRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::StartingLifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            }),
+            divisor: 2,
+            rounding: RoundingMode::Down,
+        };
+        let predicate = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::LT,
+            value: Box::new(half_starting_life),
+        };
+        let controller = PlayerId(0);
+        let source = ObjectId(900);
+
+        assert!(matches_player_scope(
+            &state,
+            PlayerId(1),
+            &predicate,
+            controller,
+            source,
+        ));
+        // Strict boundary: 20 is not less than half of the candidate's 40.
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .life = 20;
+        assert!(!matches_player_scope(
+            &state,
+            PlayerId(1),
+            &predicate,
+            controller,
+            source,
+        ));
+
+        // Ordinary baseline sanity: in free-for-all the candidate starts at
+        // 20, so life 11 is below half (10? No: preserve integer rounding; 11
+        // is above). Life 9 is the qualifying control value.
+        let mut ordinary = GameState::new_two_player(43);
+        ordinary
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .life = 11;
+        assert!(!matches_player_scope(
+            &ordinary,
+            PlayerId(1),
+            &predicate,
+            controller,
+            source,
+        ));
+        ordinary
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .life = 9;
+        assert!(matches_player_scope(
+            &ordinary,
+            PlayerId(1),
+            &predicate,
+            controller,
+            source,
+        ));
     }
 
     #[test]
@@ -28055,6 +28239,7 @@ mod tests {
             matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Exile,
             rest_destination: Zone::Library,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -28133,6 +28318,7 @@ mod tests {
             matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,

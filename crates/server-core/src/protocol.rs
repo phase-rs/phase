@@ -3318,18 +3318,18 @@ mod tests {
         }
     }
 
-    /// `ExileLinkKind::HideawayLookable` now carries `{ grant, lookers,
-    /// source_incarnation }` in serialized full-game state; a v79 peer cannot
-    /// parse the new look-link shape, so it must be refused before it receives
-    /// v80 state.
+    /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
+    /// serialized full-game state; a v81 peer would drop it silently and admit
+    /// a printed-cost graveyard cast the permission forbids, so it must be
+    /// refused before it receives v82 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_81_for_graveyard_cast_methods() {
-        assert_eq!(PROTOCOL_VERSION, 81);
+    fn protocol_version_is_82_for_graveyard_cast_methods() {
+        assert_eq!(PROTOCOL_VERSION, 82);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3340,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_81_for_graveyard_cast_methods` stays
+    /// `protocol_version_is_82_for_graveyard_cast_methods` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

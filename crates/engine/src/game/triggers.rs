@@ -11686,6 +11686,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         }
         QuantityRef::HandSize { player, .. }
         | QuantityRef::LifeTotal { player }
+        | QuantityRef::StartingLifeTotal { player }
         | QuantityRef::GraveyardSize { player, .. }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::LifeGainedThisTurn { player }
@@ -11822,7 +11823,6 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         // (`ctx.source`, the same object `ObjectScope::Source` is adjudicated
         // non-divergent for above).
         QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::PlayerCounter { .. }
@@ -16008,7 +16008,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -16470,9 +16470,11 @@ pub mod tests {
         TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::events::{GameEvent, ManaTapState};
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         DamageRecord, DeferredLifeCostResume, DelayedTrigger, DistributionUnit, GameState,
         LayersDirty, LoopDetectionMode, NamedChoiceSourceBinding, PendingCast,
@@ -16492,6 +16494,103 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 103.4e + CR 904.5 + CR 608.2c: Cecil's parsed resolution-time
+    /// "half your starting life" gate reads the trigger controller's own
+    /// topology-specific baseline. The same post-loss life (15) is at or
+    /// below half of the archenemy's 40 (so Cecil untaps/transforms), but not
+    /// half of a hero's 20 (so those gated instructions do not happen).
+    #[test]
+    fn cecil_trigger_resolution_uses_archenemy_or_hero_starting_life() {
+        const ORACLE: &str = "Whenever ~ deals damage, you lose that much life. Then if your life total is less than or equal to half your starting life total, untap ~ and transform it.";
+        let trigger =
+            crate::parser::oracle_trigger::parse_trigger_line(ORACLE, "Cecil, Dark Knight");
+
+        let run_case = |controller: PlayerId| {
+            let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
+            let victim = if controller == PlayerId(0) {
+                PlayerId(1)
+            } else {
+                PlayerId(0)
+            };
+            // Hold current life constant across cases. Only the printed rules
+            // starting total differs: Archenemy P0 begins at 40, hero P1 at 20.
+            state.players[0].life = 20;
+            state.players[1].life = 20;
+            let cecil = create_object(
+                &mut state,
+                CardId(901),
+                controller,
+                "Cecil, Dark Knight".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&cecil).expect("Cecil exists");
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+                obj.tapped = true;
+                obj.back_face = Some(crate::game::game_object::BackFaceData {
+                    layout_kind: Some(LayoutKind::Transform),
+                    ..Default::default()
+                });
+                obj.trigger_definitions.push(trigger.clone());
+                std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
+            }
+
+            // Produce Cecil's damage event through the production effect
+            // resolver, then use the real trigger collection and stack resolver.
+            let damage = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![TargetRef::Player(victim)],
+                cecil,
+                controller,
+            );
+            let mut damage_events = Vec::new();
+            crate::game::effects::resolve_ability_chain(&mut state, &damage, &mut damage_events, 0)
+                .expect("Cecil's damage instruction resolves");
+            assert!(
+                damage_events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::DamageDealt { source_id, amount: 5, .. }
+                        if *source_id == cecil
+                )),
+                "positive reach guard: production resolution emitted Cecil's 5 damage"
+            );
+
+            process_triggers(&mut state, &damage_events);
+            assert!(
+                state.stack.iter().any(|entry| {
+                    entry.source_id == cecil
+                        && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                }),
+                "the parsed Cecil trigger must reach the stack"
+            );
+            let mut resolution_events = Vec::new();
+            crate::game::stack::resolve_top(&mut state, &mut resolution_events);
+
+            assert_eq!(
+                state
+                    .players
+                    .iter()
+                    .find(|p| p.id == controller)
+                    .unwrap()
+                    .life,
+                15,
+                "the queued trigger must resolve its printed 5-life loss"
+            );
+            let resolved_cecil = &state.objects[&cecil];
+            assert_eq!(resolved_cecil.tapped, controller != PlayerId(0));
+            assert_eq!(resolved_cecil.transformed, controller == PlayerId(0));
+        };
+
+        run_case(PlayerId(0));
+        run_case(PlayerId(1));
     }
 
     #[test]
@@ -24373,6 +24472,31 @@ pub mod tests {
              creature card in the controller's graveyard), so a fire-time deletion would \
              have destroyed an ability that was supposed to resolve"
         );
+    }
+
+    #[test]
+    fn starting_life_fire_time_binding_tracks_player_scope() {
+        let state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 0);
+        let starting = |player| QuantityRef::StartingLifeTotal { player };
+
+        let controller = starting(PlayerScope::Controller);
+        assert!(!quantity_ref_binding_diverges(&controller));
+        for (player, expected) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
+            assert_eq!(
+                crate::game::quantity::resolve_quantity(
+                    &state,
+                    &QuantityExpr::Ref {
+                        qty: controller.clone(),
+                    },
+                    player,
+                    ObjectId(0),
+                ),
+                expected,
+            );
+        }
+        for scope in [PlayerScope::Target, PlayerScope::ScopedPlayer] {
+            assert!(quantity_ref_binding_diverges(&starting(scope)));
+        }
     }
 
     /// CR 608.2c + CR 603.4: a RESOLUTION-SCOPED quantity leaf carries no scope,

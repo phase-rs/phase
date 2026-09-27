@@ -2179,7 +2179,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -5288,6 +5288,7 @@ fn rw_effect(
             matched_disposition: _,
             kept_destination: _,
             rest_destination: _,
+            rest_order: _,
             enter_tapped: _,
             enters_attacking: _,
             kept_optional_to: _,
@@ -6335,7 +6336,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::LifeTotal { player: _ } | QuantityRef::LifeAboveStarting => {
             reads_player_of(StateKind::PlayerLife)
         }
-        QuantityRef::StartingLifeTotal => RwProfile::empty(),
+        QuantityRef::StartingLifeTotal { player } => rw_player_scope(player),
         // CR 701.57a: reads the transient last-discover scalar, written only by
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.

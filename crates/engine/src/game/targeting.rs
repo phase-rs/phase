@@ -1398,10 +1398,21 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         }
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
             let effective_filter = resolve_tracked_set_sentinel(state, filter.clone());
-            state
-                .battlefield
-                .iter()
-                .copied()
+            let target_ids: Vec<ObjectId> = match &effective_filter {
+                TargetFilter::TrackedSet { id } => state
+                    .tracked_object_sets
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
+                TargetFilter::TrackedSetFiltered { id, .. } => state
+                    .tracked_object_sets
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
+                _ => state.battlefield.iter().copied().collect(),
+            };
+            target_ids
+                .into_iter()
                 .filter(|id| {
                     super::filter::matches_target_filter(state, *id, &effective_filter, ctx)
                 })

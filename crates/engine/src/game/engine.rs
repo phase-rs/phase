@@ -10381,6 +10381,7 @@ fn apply_action(
                 ..
             }
             | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
     ) {
         state.revealed_cards.clear();
     }
@@ -11515,6 +11516,19 @@ fn apply_non_priority_pass_action(
                     // CR 702.37c / CR 702.168b: Handle the "cast normally vs cast
                     // face down for {3}" choice for a Morph/Megamorph/Disguise card.
                     casting::handle_face_down_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::Surge => {
+                    // CR 702.117a: Handle the "cast normally vs cast for the surge
+                    // cost" choice.
+                    casting::handle_surge_cost_choice_with_payment_mode(
                         state,
                         *player,
                         *object_id,

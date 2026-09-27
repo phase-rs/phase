@@ -210,6 +210,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 82 — CR 118.9b graveyard permissions that require a casting method (Sabin,
+ *      Master Monk: "using its blitz ability"): GraveyardCastPermission gains
+ *      required_cast_keyword and casting-menu options gain additional_cost. A
+ *      v81 peer would drop the method silently and admit a printed-cost cast.
+ * 81 — AlternativeCastChoice.keyword gains { type: "Surge" } in serialized
+ *      GameState (CR 702.117a); an older client's modal cannot render it. The
+ *      exact-match version check at connect refuses the pairing.
  * 80 — ExileLinkKind.HideawayLookable carries { grant, lookers,
  *      source_incarnation } in serialized GameState, and
  *      DerivedViews.linked_exile_ids is new and rendered directly. The
@@ -552,13 +559,8 @@ export class NativeEngineVersionMismatchError extends Error {
  *      PendingCast.activation_cost_snapshot and AbilityModeChoice
  *      activation_cost_snapshot fields are additive and skipped when empty, so
  *      every spell frame is byte-identical to v78.
- *
- * 81 ? CR 118.9b graveyard permissions that require a casting method (Sabin,
- *      Master Monk: "using its blitz ability"): GraveyardCastPermission gains
- *      required_cast_keyword and casting-menu options gain additional_cost. A
- *      v80 peer would drop the method silently and admit a printed-cost cast.
  */
-export const PROTOCOL_VERSION = 81;
+export const PROTOCOL_VERSION = 82;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

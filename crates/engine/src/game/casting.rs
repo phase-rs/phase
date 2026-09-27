@@ -1753,12 +1753,12 @@ fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
 
 /// CR 702.137a: Spectacle's gate — whether any opponent of `caster` lost life
 /// this turn. Mirrors the existing `LifeLostThisTurn`/"an opponent lost life"
-/// predicate (see `game/quantity.rs`) so no new state tracking is introduced.
+/// predicate (see `game/quantity.rs`) so no new state tracking is introduced;
+/// like it, a Two-Headed Giant teammate is not an opponent (CR 102.3).
 fn an_opponent_lost_life_this_turn(state: &GameState, caster: PlayerId) -> bool {
-    state
-        .players
-        .iter()
-        .any(|p| p.id != caster && p.life_lost_this_turn > 0)
+    state.players.iter().any(|p| {
+        crate::game::players::is_opponent(state, caster, p.id) && p.life_lost_this_turn > 0
+    })
 }
 
 /// CR 702.76a: Prowl's gate — whether `player` controlled a creature that dealt
@@ -14475,6 +14475,45 @@ pub fn handle_prowl_cost_choice_with_payment_mode(
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
 }
 
+/// CR 702.117a + CR 601.2b: Resolve the player's Normal-vs-Surge choice.
+/// `Alternative` takes the variant and face from the same authority that
+/// offered them (`casting_variant_choice_set`) rather than from the prompt;
+/// the missing-option error is defensive only — nothing changes state
+/// between the prompt and this answer. `Normal` casts for the printed cost.
+pub fn handle_surge_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            let option = casting_variant_choice_set(state, player, object_id, None)
+                .options
+                .into_iter()
+                .find(|option| option.variant == CastingVariant::Surge)
+                .ok_or_else(|| {
+                    EngineError::ActionNotAllowed("Surge cost is not available".to_string())
+                })?;
+            continue_cast_with_variant(
+                state,
+                player,
+                object_id,
+                option.variant,
+                option.face,
+                payment_mode,
+                events,
+            )
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
 /// Shared continuation: call prepare_spell_cast and run the standard casting
 /// pipeline (modal → targeting → payment). Extracted so handle_warp_cost_choice
 /// and handle_cast_spell can share the same post-prepare logic.
@@ -16089,7 +16128,9 @@ pub fn handle_cast_spell_with_payment_mode(
     // cost-choice handler: ExilePermission and Freerunning. The fall-through below
     // routes single-candidate Warp/Evoke/Dash hand casts through their own
     // cost-choice `WaitingFor` handlers; electing those here would preempt those
-    // prompts. Widen only after auditing those handlers for pre-election.
+    // prompts. Widen only after auditing those handlers for pre-election. Surge
+    // is deliberately not pre-elected here: the block below offers normal vs.
+    // Surge itself.
     if let Some(option) = variant_choices.options.first().filter(|option| {
         matches!(
             option.variant,
@@ -16102,6 +16143,49 @@ pub fn handle_cast_spell_with_payment_mode(
             object_id,
             option.variant,
             option.face,
+            payment_mode,
+            events,
+        );
+    }
+
+    // CR 702.117a + CR 118.9 + CR 601.2b: Surge — the sole prepared option is the
+    // surge variant (the candidate gate already required a hand card with an
+    // effective Surge keyword and another spell cast this turn by the caster or a
+    // teammate; `can_cast_prepared_now` already proved the surge cost payable).
+    // Offer the printed cost alongside it when that is payable too; otherwise the
+    // surge cost is the only way to cast it, so elect it directly.
+    if let Some(option) = variant_choices
+        .options
+        .first()
+        .filter(|option| option.variant == CastingVariant::Surge)
+    {
+        let (variant, face, surge_cost) = (option.variant, option.face, option.mana_cost.clone());
+        let obj = state.objects.get(&object_id).ok_or_else(|| {
+            EngineError::InvalidAction(format!("Object {object_id:?} does not exist"))
+        })?;
+        // CR 601.2f + CR 118.9a: the shared normal-path authority (cost modifiers,
+        // free-cast permissions, unpayable NoCost).
+        let (normal_cost, normal_affordable) =
+            normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
+        if normal_affordable {
+            return Ok(WaitingFor::AlternativeCastChoice {
+                player,
+                object_id,
+                card_id,
+                payment_mode,
+                keyword: crate::types::game_state::AlternativeCastKeyword::Surge,
+                normal_cost,
+                alternative_cost: Some(surge_cost),
+                alternative_additional_cost: None,
+                alternative_additional_cost_description: None,
+            });
+        }
+        return continue_cast_with_variant(
+            state,
+            player,
+            object_id,
+            variant,
+            face,
             payment_mode,
             events,
         );
@@ -22863,7 +22947,13 @@ fn activation_cost_passes_early_affordability_gate(
     cost: &AbilityCost,
     ability_index: usize,
 ) -> bool {
-    if find_one_of_cost(cost).is_some() {
+    if let Some(locked) =
+        super::costs::lock_half_life_activation_cost(state, player, source_id, cost)
+    {
+        // CR 601.2f + CR 602.2b: Refuse an unaffordable locked cost before
+        // target prompts or mana abilities can mutate the activation state.
+        can_pay_ability_cost_now(state, player, source_id, &locked, Some(ability_index))
+    } else if find_one_of_cost(cost).is_some() {
         can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index))
     } else {
         // CR 106.6: the tag reaches the payability gate for the same reason it
@@ -23714,6 +23804,27 @@ enum ActivationStructuralEligibility {
     WrongZone(Zone),
 }
 
+/// CR 113.6b: True when an activation-restriction condition states `zone` as a
+/// zone the ability functions from — "Activate only if ~ is in your graveyard"
+/// (Carrionette), "… is on the battlefield or in the command zone" (M'Odo, the
+/// Gnarled Oracle), "… is suspended" (Greater Gargadon: exile plus a time
+/// counter). A disjunction states each of its zones; a conjunction states the
+/// zone its source-zone conjunct names. The remaining conjuncts are ordinary
+/// mutable restrictions, enforced later by the restriction gate.
+fn restriction_condition_states_activation_zone(
+    condition: &crate::types::ability::ParsedCondition,
+    zone: Zone,
+) -> bool {
+    use crate::types::ability::ParsedCondition;
+    match condition {
+        ParsedCondition::SourceInZone { zone: stated } => *stated == zone,
+        ParsedCondition::Or { conditions } | ParsedCondition::And { conditions } => conditions
+            .iter()
+            .any(|c| restriction_condition_states_activation_zone(c, zone)),
+        _ => false,
+    }
+}
+
 /// CR 113.6 + CR 113.6b + CR 602.2: Classifies the immutable source-zone and activator
 /// prerequisites shared by activation legality and pre-cast payoff discovery.
 /// This deliberately runs before mutable restrictions, targets, and costs: a
@@ -23744,9 +23855,18 @@ fn activation_structural_eligibility(
         return ActivationStructuralEligibility::NinjutsuFamily;
     }
     // CR 113.6 + CR 113.6b: activated abilities default to functioning only
-    // on the battlefield unless their definition names another activation zone.
+    // on the battlefield unless their definition names another activation zone
+    // or their printed restriction states the zone the source is in.
+    let restriction_states_source_zone = ability_def.activation_restrictions.iter().any(|r| {
+        matches!(
+            r,
+            crate::types::ability::ActivationRestriction::RequiresCondition {
+                condition: Some(condition),
+            } if restriction_condition_states_activation_zone(condition, obj.zone)
+        )
+    });
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
-    if obj.zone != required_zone {
+    if obj.zone != required_zone && !restriction_states_source_zone {
         return ActivationStructuralEligibility::WrongZone(required_zone);
     }
     ActivationStructuralEligibility::Eligible
@@ -24146,8 +24266,9 @@ fn quantity_expr_is_board_state_relative(expr: &QuantityExpr) -> bool {
 }
 
 fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
-    // A player axis is concrete (resolvable now) unless it needs a chosen target
-    // or an outer scoped-player iteration context.
+    // Keep the existing sibling-ref admission rule; StartingLifeTotal has its
+    // own player-axis check below because its quantity resolver cannot read
+    // duration-only or resolution-bound scopes in this preview.
     let player_is_concrete =
         |p: &PlayerScope| !matches!(p, PlayerScope::Target | PlayerScope::ScopedPlayer);
     match qty {
@@ -24157,7 +24278,10 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player } => player_is_concrete(player),
-        QuantityRef::LifeAboveStarting | QuantityRef::StartingLifeTotal => true,
+        QuantityRef::StartingLifeTotal { player } => {
+            super::quantity::player_scope_is_source_context_previewable(player)
+        }
+        QuantityRef::LifeAboveStarting => true,
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. } => !filter_references_target_player(filter),
@@ -24193,6 +24317,56 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         // cast/trigger-event context, etc.) makes the condition non-evaluable
         // before activation, so the helper returns `None`.
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod starting_life_board_state_tests {
+    use super::*;
+
+    #[test]
+    fn starting_life_pre_activation_check_requires_a_bound_player() {
+        let state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 0);
+        let condition = |player| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::StartingLifeTotal { player },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 30 },
+        };
+
+        assert!(ability_condition_is_board_state_evaluable(&condition(
+            PlayerScope::Controller,
+        )));
+        for (player, expected) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
+            let AbilityCondition::QuantityCheck { lhs, .. } = condition(PlayerScope::Controller)
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                crate::game::quantity::resolve_quantity(&state, &lhs, player, ObjectId(0)),
+                expected,
+            );
+        }
+        for scope in [
+            PlayerScope::Target,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::RecipientController,
+            PlayerScope::ParentObjectTargetController,
+        ] {
+            assert!(!ability_condition_is_board_state_evaluable(&condition(
+                scope
+            )));
+        }
+        for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
+            assert_eq!(
+                state.format_config.starting_life_total_for_player(id),
+                baseline
+            );
+            assert!(!ability_condition_is_board_state_evaluable(&condition(
+                PlayerScope::SpecificPlayer { id },
+            )));
+        }
     }
 }
 
@@ -25154,6 +25328,20 @@ fn activate_with_cost_carrier(
         // here — it must fall through to the general target-first path below
         // (CR 601.2c: targets are chosen before costs are paid), where the
         // mana-first `Composite` ordering keeps the post-target payment atomic.
+        // CR 601.2f + CR 602.2b: Announcement choices above are complete.
+        // Lock the no-target half-life cost before any mana or payment detour;
+        // the borrowed cost flows through those paths, while the local ability
+        // definition supplies the same fixed cost to final payment.
+        let locked_cost = if !has_effect_targets && find_one_of_cost(cost).is_none() {
+            super::costs::lock_half_life_activation_cost(state, player, source_id, cost)
+        } else {
+            None
+        };
+        let cost = locked_cost.as_ref().unwrap_or(cost);
+        if let Some(locked) = locked_cost.as_ref() {
+            ability_def.cost = Some(locked.clone());
+        }
+
         let loyalty_no_targets =
             crate::types::ability::is_loyalty_ability_cost(cost) && !has_effect_targets;
         if !has_effect_targets
@@ -27825,6 +28013,55 @@ fn is_blocked_by_per_turn_cast_limit_for(
 #[cfg(test)]
 #[path = "casting_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod half_life_activation_verdict_tests {
+    use super::{activation_verdict, restrictions, ActivationQuery, ActivationVerdict};
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::phase::Phase;
+
+    #[test]
+    fn block_reason_requires_a_legal_target_before_reporting_unpayable_half_life() {
+        for has_target in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain).with_life(P0, 3);
+            let source = scenario
+                .add_enchantment_from_oracle(
+                    P0,
+                    "Murderous Betrayal",
+                    "{B}{B}, Pay half your life, rounded up: Destroy target nonblack creature. It can't be regenerated.",
+                )
+                .id();
+            for _ in 0..2 {
+                scenario.add_land_from_oracle(
+                    P0,
+                    "Mana Confluence",
+                    "{T}, Pay 1 life: Add one mana of any color.",
+                );
+            }
+            if has_target {
+                scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+            }
+            let runner = scenario.build();
+            let gates = restrictions::ActivationRestrictionStaticGates::compute(runner.state());
+            assert_eq!(
+                activation_verdict(
+                    runner.state(),
+                    P0,
+                    source,
+                    0,
+                    &gates,
+                    ActivationQuery::BlockReason,
+                ),
+                if has_target {
+                    ActivationVerdict::CostNotPayableNow
+                } else {
+                    ActivationVerdict::Illegal
+                }
+            );
+        }
+    }
+}
 
 /// CR 601.2a + CR 406.3b: the two admission predicates the visibility projection reads.
 ///

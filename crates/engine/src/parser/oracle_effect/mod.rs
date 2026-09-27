@@ -115,7 +115,7 @@ use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
     ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
     CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
     ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NumberDistinctness, ObjectProperty,
@@ -13936,6 +13936,10 @@ fn reveal_filter_separator(input: &str) -> nom::IResult<&str, &str, OracleError<
 fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
     let mut disjuncts = Vec::new();
     let mut remaining = filter_text;
+    // CR 701.20a: only an "or" connective makes the list disjunctive. A comma
+    // list without one ("a nonlegendary, nonland card" — Plargg, Dean of Chaos)
+    // stacks adjectives on one card and must stay a single conjunctive filter.
+    let mut has_or_connective = false;
     loop {
         // Scan to the next separator (or end of input) via the nom combinator.
         let mut split_at = None;
@@ -13952,7 +13956,8 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
                     return None; // malformed: empty disjunct
                 }
                 disjuncts.push(frag);
-                let (after_sep, _) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                let (after_sep, separator) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                has_or_connective |= separator.trim_start_matches(',').trim() == "or";
                 remaining = after_sep;
             }
             None => {
@@ -13963,7 +13968,7 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
             }
         }
     }
-    (disjuncts.len() >= 2).then_some(disjuncts)
+    (disjuncts.len() >= 2 && has_or_connective).then_some(disjuncts)
 }
 
 /// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
@@ -14074,14 +14079,60 @@ fn build_reveal_until_filter(filter_text: &str) -> TargetFilter {
     // ("a creature or land card"); a comma+or list of distinct filters must be
     // split per-disjunct and assembled into an Or.
     if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
-        let filters: Vec<TargetFilter> = disjuncts
+        let mut filters: Vec<TargetFilter> = disjuncts
             .iter()
             .map(|frag| build_reveal_until_disjunct_filter(frag.trim()))
             .collect();
+        distribute_shared_card_qualifier(&disjuncts, &mut filters);
         return TargetFilter::Or { filters };
     }
     let (parsed, _) = parse_target(filter_text);
     parsed
+}
+
+/// CR 701.20a + CR 202.3: In "an instant, sorcery, or enchantment card with
+/// converted mana cost less than N" (Underdark Beholder) the type words share
+/// ONE head noun, so the qualifier after "card" constrains every disjunct, not
+/// just the last. Applies only when the earlier disjuncts are bare type words
+/// (no "card" noun of their own) and the last one carries a post-noun
+/// qualifier; a list of distinct card phrases ("doctor card, a card with
+/// doctor's companion, or a vehicle card" — An Unearthly Child) is untouched.
+fn distribute_shared_card_qualifier(disjuncts: &[&str], filters: &mut [TargetFilter]) {
+    fn has_card_noun(fragment: &str) -> bool {
+        take_until::<_, _, OracleError<'_>>(" card")
+            .parse(fragment)
+            .is_ok()
+    }
+    fn has_post_noun_qualifier(fragment: &str) -> bool {
+        (take_until(" card"), tag::<_, _, OracleError<'_>>(" card "))
+            .parse(fragment)
+            .is_ok_and(|(qualifier, _)| !qualifier.trim().is_empty())
+    }
+    let (Some((last_text, earlier_texts)), Some((last_filter, earlier_filters))) =
+        (disjuncts.split_last(), filters.split_last_mut())
+    else {
+        return;
+    };
+    if earlier_texts.iter().any(|text| has_card_noun(text))
+        || !has_post_noun_qualifier(last_text.trim())
+    {
+        return;
+    }
+    let TargetFilter::Typed(TypedFilter {
+        properties: shared, ..
+    }) = last_filter
+    else {
+        return;
+    };
+    for filter in earlier_filters {
+        if let TargetFilter::Typed(typed) = filter {
+            for property in shared.iter() {
+                if !typed.properties.contains(property) {
+                    typed.properties.push(property.clone());
+                }
+            }
+        }
+    }
 }
 
 /// CR 701.20a: Parse `"reveal[s] cards from the top of <possessive> library until …"`
@@ -14117,6 +14168,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
             matched_disposition: RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
+            rest_order: DigRestOrder::Random,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -14170,6 +14222,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         matched_disposition: RevealUntilDisposition::KeepEach,
         kept_destination,
         rest_destination: Zone::Library,
+        rest_order: DigRestOrder::Random,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         kept_optional_to: None,
@@ -23729,6 +23782,14 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         // `Effect::Unimplemented` -- discovered via a fresh coverage-parse-diff
         // run against this PR's own fix, not assumed.
         | Effect::SetLifeTotal { target, .. } => target,
+        Effect::TurnFaceUp { target } => {
+            return matches!(
+                target,
+                TargetFilter::ExiledBySource
+                    | TargetFilter::ParentTarget
+                    | TargetFilter::LastRevealed
+            ) || filter_introduces_typed_object(target);
+        }
         Effect::GenericEffect {
             target: Some(target),
             ..
@@ -31939,6 +32000,9 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         // publisher so a following "those cards" move receives the tracked-set
         // sentinel that activates that runtime publication.
         || matches!(effect, Effect::SearchLibrary { .. })
+        // Seek publishes its sought cards the same way ("Seek two cards. You may
+        // shuffle them into your library." — Choice of Fortunes).
+        || matches!(effect, Effect::Seek { .. })
         || matches!(
             effect,
             Effect::PutCounter { .. }
@@ -32454,6 +32518,52 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         || copy_token_recall
         || play_from_exile_grant
         || free_cast_that_card_grant
+        || plural_library_shuffle_recall(lower)
+}
+
+/// CR 701.24c + CR 608.2c: the PLURAL library-recall anaphor — "[you may]
+/// shuffle them into <possessive> library" names every object the previous
+/// instruction put elsewhere (Choice of Fortunes: the two sought cards now in
+/// hand). Start-anchored like the other recalls so a same-sentence "create …
+/// and shuffle them into …" (Gunk Slug) is not a cross-clause anaphor.
+pub(crate) fn plural_library_shuffle_recall(lower: &str) -> bool {
+    (
+        opt(tag::<_, _, OracleError<'_>>("you may ")),
+        tag("shuffle them into "),
+    )
+        .parse(lower)
+        .is_ok()
+        && scan_contains_phrase(lower, "library")
+}
+
+/// CR 701.24c + CR 608.2c: "shuffle them into your library" after a tracked-set
+/// publisher moves EVERY member of that set, so the pronoun's singular
+/// `ChangeZone` (whose `TrackedSet` form means "choose one from among" —
+/// Expressive Iteration) becomes a mass `ChangeZoneAll` over the chain set.
+/// CR 701.24a: `TerminalShuffle` leaves the one shuffle to the chained terminal
+/// `Shuffle`, after every member has moved.
+fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
+    if let Effect::ChangeZone {
+        origin,
+        destination: Zone::Library,
+        target: TargetFilter::ParentTarget,
+        ..
+    } = effect
+    {
+        *effect = Effect::ChangeZoneAll {
+            origin: *origin,
+            destination: Zone::Library,
+            target: tracked_set_filter(),
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+        };
+    }
 }
 
 /// CR 608.2c: the SINGULAR battlefield-recall anaphor — "return it " at a
@@ -41209,6 +41319,41 @@ pub(crate) fn parse_effect_chain_ir(
             });
         let effective_prev_effect =
             absorbed_choice_prev.or_else(|| non_absorbed.first().map(|c| effective_effect_of(c)));
+        // CR 701.24c + CR 608.2c: "then shuffle(s) the rest into their library"
+        // directly after a `RevealUntil` whose rest pile went into the library
+        // shuffles that library — the revealing player's (Transmogrify, Blessed
+        // Reincarnation: the exiled creature's controller). The subject-elided
+        // clause parses with the caster default, so bind it to the reveal's
+        // player; an explicit subject ("that player shuffles …") already
+        // produced a non-default target. After any other antecedent the
+        // subject-elided "rest" is not a library pile (Wand of Wonder's exiled
+        // misses, Worldpurge's unchosen hand cards): a bare shuffle would drop
+        // the move, so keep the clause an explicit gap.
+        if let Effect::Shuffle {
+            target: TargetFilter::Controller,
+        } = clause.effect
+        {
+            let rest_library_player = match effective_prev_effect.as_ref() {
+                Some(Effect::RevealUntil {
+                    player,
+                    rest_destination: Zone::Library,
+                    ..
+                }) => Some(player.clone()),
+                _ => None,
+            };
+            match (
+                imperative::shuffle_rest_clause(&normalized_text.to_lowercase()),
+                rest_library_player,
+            ) {
+                (Some(_), Some(player)) => {
+                    clause.effect = Effect::Shuffle { target: player };
+                }
+                (Some(imperative::ShuffleRestClause::ThirdPerson), None) => {
+                    clause.effect = Effect::unimplemented("shuffle", normalized_text);
+                }
+                (Some(imperative::ShuffleRestClause::Imperative) | None, _) => {}
+            }
+        }
         let followup_continuation = effective_prev_effect
             .as_ref()
             .and_then(|eff| {
@@ -41244,6 +41389,42 @@ pub(crate) fn parse_effect_chain_ir(
                         _ => None,
                     }
                 })
+            })
+            .or_else(|| {
+                // CR 701.20a + CR 608.2c: A clause disposing of cards revealed by an
+                // earlier `RevealUntil` ("put all cards revealed this way...",
+                // "put the nonland card into your hand and the rest...", "put the revealed cards...")
+                // may be separated from the `RevealUntil` by intervening transparent
+                // instructions that use the revealed card (such as `Pump` on Erratic Mutation,
+                // or `DealDamage` on Explosive Revelation).
+                // Scan `non_absorbed` (nearest-first) for a preceding `RevealUntil` antecedent.
+                // The parser is the detector: only bind if `parse_followup_continuation_ast`
+                // against the candidate `RevealUntil` produces a recognized pile-disposition
+                // continuation. The scan stops at an unparsed clause: an unrecognized
+                // instruction may itself select or re-bind the referent ("Choose one of the
+                // revealed creature cards", Dance, Pathetic Marionette), so a later "all
+                // other cards revealed this way" can no longer be read as the reveal's rest
+                // pile. `RevealUntilKept` is never bound across clauses: its "put it" /
+                // "put that card" anaphor names the nearest referent, and its application
+                // patches only the immediately preceding definition.
+                non_absorbed
+                    .iter()
+                    .map(|c| effective_effect_of(c))
+                    .take_while(|effect| !matches!(effect, Effect::Unimplemented { .. }))
+                    .find_map(|deeper| match deeper {
+                        Effect::RevealUntil { .. } => {
+                            match parse_followup_continuation_ast(normalized_text, &deeper, ctx) {
+                                Some(
+                                    continuation @ (ContinuationAst::RevealUntilAllToZone {
+                                        ..
+                                    }
+                                    | ContinuationAst::PutRest { .. }),
+                                ) => Some(continuation),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
             })
             .or_else(|| {
                 // CR 707.10c: a "you may choose new targets for the copy/copies"

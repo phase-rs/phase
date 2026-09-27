@@ -60,14 +60,23 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 81 — CR 118.9b graveyard permissions that require a casting method ("You
+/// 82 — CR 118.9b graveyard permissions that require a casting method ("You
 ///      may cast this card from your graveyard using its blitz ability.":
 ///      Sabin, Master Monk; Tenacious Underdog; Detective's Phoenix):
 ///      `StaticMode::GraveyardCastPermission` gains `required_cast_keyword`,
 ///      no longer carried as a card-filter `HasKeywordKind`, and
-///      `CastingVariantChoiceOption` gains `additional_cost`. A v80 peer
+///      `CastingVariantChoiceOption` gains `additional_cost`. A v81 peer
 ///      would drop the method silently and admit a printed-cost cast the
-///      permission forbids.
+///      permission forbids. Full-game peers and P2P move in lockstep (wire
+///      64); lobby messages are unchanged.
+///
+/// 81 — CR 702.117a Surge cast election: `AlternativeCastKeyword::Surge` is a
+///      new tag on a `#[serde(tag = "type")]` enum carried by
+///      `WaitingFor::AlternativeCastChoice` in serialized `GameState`, with no
+///      fallback. A conditional PARSE bump like 76/79: a v80 peer fails to
+///      parse only when a Surge prompt is actually serialized. Full-game peers
+///      and P2P move in lockstep (wire 63); lobby messages are unchanged.
+///
 /// 80 — CR 406.3 exile look authority: `ExileLinkKind::HideawayLookable`
 ///      changed from a unit variant to `{ grant, lookers, source_incarnation }`
 ///      in serialized `GameState`, and `source_incarnation` has no serde
@@ -638,7 +647,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 81;
+pub const PROTOCOL_VERSION: u32 = 82;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1854,12 +1863,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 81);
+        assert_eq!(PROTOCOL_VERSION, 82);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 80);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 81);
     }
 
     #[test]

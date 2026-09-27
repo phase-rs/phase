@@ -1840,6 +1840,14 @@
       "subtitle_one": "置く：{{count}} 公開済み カード 上 一番下 の あなたの ライブラリー",
       "subtitle_other": "置く：{{count}} 公開済み カード 上 一番下 の あなたの ライブラリー, 中 いずれか 順序",
       "hint": "ドラッグして並べ替え · 位置1がこの束の一番上になる"
+    },
+    "revealUntilBottom": {
+      "title": "残りを一番下に並べる",
+      "subtitle_one": "公開したカード{{count}}枚をあなたのライブラリーの一番下に置く",
+      "subtitle_other": "公開したカード{{count}}枚を好きな順番であなたのライブラリーの一番下に置く",
+      "hint": "ドラッグして並べ替え · 位置1がこの束の一番上になる",
+      "moveLeft": "左へ移動",
+      "moveRight": "右へ移動"
     }
   },
   "specializeColor": {
@@ -1951,6 +1959,10 @@
     "prowlNormalLabel": "通常どおり唱える",
     "prowlAltLabel": "徘徊で唱える",
     "prowlSubtitle": "{{name}}を通常どおり唱えるか、徘徊コストを支払う（このターンに条件に一致するクリーチャーがプレイヤーに戦闘ダメージを与えたため使用可能）。",
+    "surgeEyebrow": "怒濤",
+    "surgeNormalLabel": "通常どおり唱える",
+    "surgeAltLabel": "怒濤で唱える",
+    "surgeSubtitle": "{{name}}を通常どおり唱えるか、怒濤コストを支払う（このターンにあなたかチームメイトが他の呪文を唱えたため使用可能）。",
     "overloadEyebrow": "超過",
     "overloadNormalLabel": "通常どおり唱える",
     "overloadAltLabel": "超過で唱える",

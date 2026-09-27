@@ -1797,6 +1797,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Metti il resto in fondo",
+      "subtitle_one": "Metti {{count}} carta rivelata in fondo al tuo grimorio",
+      "subtitle_other": "Metti {{count}} carte rivelate in fondo al tuo grimorio in qualsiasi ordine",
+      "hint": "Trascina per riordinare · la posizione 1 va in cima a questa pila",
+      "moveLeft": "Sposta a sinistra",
+      "moveRight": "Sposta a destra"
     }
   },
   "specializeColor": {
@@ -1908,6 +1916,10 @@
     "prowlNormalLabel": "Lancia normalmente",
     "prowlAltLabel": "Lancia con Prowl",
     "prowlSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Prowl (disponibile perché una creatura corrispondente ha inflitto danno da combattimento a un giocatore in questo turno).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Lancia normalmente",
+    "surgeAltLabel": "Lancia con Surge",
+    "surgeSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Surge (disponibile perché tu o un compagno di squadra avete lanciato un'altra magia in questo turno).",
     "overloadEyebrow": "Sovraccarico",
     "overloadNormalLabel": "Lancia normalmente",
     "overloadAltLabel": "Lancia con Sovraccarico",

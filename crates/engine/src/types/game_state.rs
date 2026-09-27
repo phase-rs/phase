@@ -6257,6 +6257,11 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+        /// CR 608.2h: When `emit_reveal_until_resolved` is `Some`, carries the
+        /// single-hit event snapshot so the downstream anaphoric referent ("that card's mana value")
+        /// resolves even across replacement/as-enters pauses.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_until_hit_snapshot: Option<Box<crate::types::events::EventObjectSnapshot>>,
         /// CR 608.2c + CR 701.62a: a paused manifest-dread entry's
         /// chosen object. The completion drain publishes it as the chain's
         /// fresh tracked set — only once the entry has actually finished
@@ -9447,6 +9452,11 @@ pub enum AlternativeCastKeyword {
     /// the stack (CR 708.4) and resolves to a face-down permanent. Maps to
     /// `CastingVariant::FaceDown`.
     FaceDown,
+    /// CR 702.117a: Surge alternative cost paid from hand, available only if the
+    /// caster or a teammate has cast another spell this turn. A pure cost
+    /// substitution; the surge provenance is recorded at resolution (stack.rs) so
+    /// "if its surge cost was paid" intervening-ifs (Reckless Bushwhacker) can read it.
+    Surge,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -13333,6 +13343,23 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_cast: Option<ObjectId>,
     },
+    /// CR 701.20a + CR 608.2d: In a `RevealUntil` resolution where cards are
+    /// put on the bottom of their owner's library "in any order" (`DigRestOrder::PlayerChoice`),
+    /// the controller announces the order for the revealed cards. The response is
+    /// `GameAction::SelectCards { cards }` carrying a permutation of `cards`;
+    /// the engine places them on the library bottom in that submitted order.
+    /// Raised only when 2+ cards are bottomed — a single card has no ordering choice.
+    RevealUntilBottomOrder {
+        player: PlayerId,
+        source_id: ObjectId,
+        cards: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        clear_markers: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emit_reveal_until_resolved: Option<ObjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_until_hit_snapshot: Option<Box<EventObjectSnapshot>>,
+    },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
     /// rest on the bottom in any order (Susan Foreman).
@@ -14580,6 +14607,8 @@ pub enum WaitingFor {
         enters_attacking: bool,
         revealed_misses: Vec<ObjectId>,
         rest_destination: Zone,
+        #[serde(default)]
+        rest_order: DigRestOrder,
     },
     /// CR 107.1c + CR 608.2c: After one iteration of a "you may repeat this
     /// process any number of times" effect resolves, the controller chooses
@@ -15663,6 +15692,7 @@ impl WaitingFor {
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
+            WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -15825,6 +15855,7 @@ impl WaitingFor {
             | WaitingFor::ScryChoice { player, .. }
             | WaitingFor::RippleRevealChoice { player, .. }
             | WaitingFor::RippleBottomOrder { player, .. }
+            | WaitingFor::RevealUntilBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -16280,10 +16311,10 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
-                // CR 702.60a: the Ripple bottom-order response is a free
-                // permutation of the offered pile — the candidate enumerator
-                // only lists {identity}, so `apply()` is the real validator.
+                // CR 702.60a + CR 401.4: the bottom-order response is a
+                // permutation of the offered pile, verified by `apply()`.
                 | WaitingFor::RippleBottomOrder { .. }
+                | WaitingFor::RevealUntilBottomOrder { .. }
         )
     }
 
@@ -28558,6 +28589,7 @@ mod resolved_information_tests {
                 matched_disposition: RevealUntilDisposition::RevealOnly,
                 kept_destination: Zone::Library,
                 rest_destination: Zone::Library,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
                 enter_tapped: EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
