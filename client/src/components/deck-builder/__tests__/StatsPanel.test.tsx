@@ -17,6 +17,8 @@ describe("StatsPanel", () => {
         estimate={null}
         manualBracket={null}
         onBracketChange={vi.fn()}
+        comboDeclaration={{ kind: "undeclared" }}
+        onComboDeclarationChange={vi.fn()}
         onCardClick={vi.fn()}
       />,
     );

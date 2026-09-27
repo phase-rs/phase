@@ -84,6 +84,13 @@ const estimate: BracketEstimate = {
   },
   data_version: "2025-09-24-wotc",
   declaration: null,
+  combo_barometer: { declaration: { kind: "undeclared" }, floor: null },
+  barometers: {
+    game_changers: "engine",
+    extra_turns: "engine",
+    mass_land_denial: "engine",
+    two_card_combos: "unanswered",
+  },
 };
 
 describe("BracketAuditPanel", () => {
@@ -91,6 +98,34 @@ describe("BracketAuditPanel", () => {
     render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={() => {}} />);
     expect(screen.getByText(/Estimated:/i)).toHaveTextContent("B3");
     expect(screen.getByText(/Upgraded/i)).toBeInTheDocument();
+  });
+
+  it("renders an unanswered combo barometer without a checked affordance", () => {
+    render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={() => {}} />);
+    const row = screen.getByText("Two-Card Infinite Combos").closest("div");
+    expect(row).toHaveTextContent("Not answered");
+    expect(row).not.toHaveTextContent("Checked by phase");
+    expect(row).not.toHaveTextContent("✓");
+  });
+
+  it("attributes an optimized combo floor to the deck owner and names B4", () => {
+    render(
+      <BracketAuditPanel
+        estimate={{
+          ...estimate,
+          combo_barometer: {
+            declaration: { kind: "intended", window: "early_game" },
+            floor: "optimized",
+          },
+          barometers: { ...estimate.barometers, two_card_combos: "deck_owner" },
+        }}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    const row = screen.getByText("Two-Card Infinite Combos").closest("div");
+    expect(row).toHaveTextContent("Declared by you");
+    expect(row).toHaveTextContent("forces B4");
   });
 
   it("shows no warning for a cEDH declaration at or above the floor", () => {

@@ -13,6 +13,7 @@ import {
   getDeckMeta,
   loadSavedDeck,
   loadSavedDeckBracket,
+  loadSavedDeckComboDeclaration,
   migrateDeckMeta,
   setDeckFolder,
   stampDeckMeta,
@@ -25,7 +26,12 @@ import { hasSearchCriteria } from "./searchFilters";
 import type { GroupMode } from "./deckGrouping";
 import type { DeckSizeRule, GameFormat } from "../../adapter/types";
 import { DECK_CONSTRUCTION_FORMATS, formatMetadata } from "../../data/formatRegistry";
-import { BRACKET_TIER_BY_NUMERIC, type CommanderBracket } from "../../types/bracket";
+import {
+  BRACKET_TIER_BY_NUMERIC,
+  UNDECLARED_COMBO,
+  type ComboDeclaration,
+  type CommanderBracket,
+} from "../../types/bracket";
 import { getPreconBracket } from "../../data/preconBrackets";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { projectSignatureSpellForFormat } from "../../services/savedDeckProjection";
@@ -70,6 +76,8 @@ export function useDeckBuilder({
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
   const [deckName, setDeckName] = useState("");
   const [bracket, setBracket] = useState<CommanderBracket | null>(null);
+  const [comboDeclaration, setComboDeclaration] =
+    useState<ComboDeclaration>(UNDECLARED_COMBO);
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
   const [savedDeckName, setSavedDeckName] = useState<string | null>(null);
   const [justSaved, setJustSaved] = useState(false);
@@ -238,6 +246,7 @@ export function useDeckBuilder({
     commanders,
     format,
     declaredTier: bracket === null ? null : BRACKET_TIER_BY_NUMERIC[bracket],
+    comboDeclaration,
   });
 
   const auditEmptyReason:
@@ -508,6 +517,9 @@ export function useDeckBuilder({
       format,
     };
     if (bracket !== null) payload.bracket = bracket;
+    if (comboDeclaration.kind !== "undeclared") {
+      payload.combo_declaration = comboDeclaration;
+    }
     const data = JSON.stringify(payload);
     const nextName = deckName.trim();
     if (
@@ -544,6 +556,7 @@ export function useDeckBuilder({
     applyDeckToEditor,
     format,
     bracket,
+    comboDeclaration,
     savedDeckName,
     showNotification,
     t,
@@ -564,6 +577,9 @@ export function useDeckBuilder({
       format,
     };
     if (bracket !== null) payload.bracket = bracket;
+    if (comboDeclaration.kind !== "undeclared") {
+      payload.combo_declaration = comboDeclaration;
+    }
     localStorage.setItem(STORAGE_KEY_PREFIX + cloneName, JSON.stringify(payload));
     stampDeckMeta(cloneName);
     // A clone lands beside its source: inherit the folder, but start unstarred
@@ -581,7 +597,16 @@ export function useDeckBuilder({
       title: t("toolbar.clonedToastTitle"),
       description: t("toolbar.clonedToastDescription", { name: cloneName }),
     });
-  }, [deckName, currentDeck, format, bracket, savedDeckName, showNotification, t]);
+  }, [
+    deckName,
+    currentDeck,
+    format,
+    bracket,
+    comboDeclaration,
+    savedDeckName,
+    showNotification,
+    t,
+  ]);
 
   useEffect(() => {
     if (!justSaved) return;
@@ -605,6 +630,7 @@ export function useDeckBuilder({
       setDeckName(`${deckEntry.name} (${deckEntry.code})`);
       setSavedDeckName(null);
       setBracket(getPreconBracket(deckId) ?? null);
+      setComboDeclaration(UNDECLARED_COMBO);
       return;
     }
     const persisted = JSON.parse(data) as ParsedDeck & { format?: string };
@@ -625,6 +651,7 @@ export function useDeckBuilder({
     setDeckName(name);
     setSavedDeckName(name);
     setBracket(loadSavedDeckBracket(name));
+    setComboDeclaration(loadSavedDeckComboDeclaration(name));
   }, [applyDeckToEditor, onFormatChange]);
 
   const handleLoadRef = useRef(handleLoad);
@@ -826,6 +853,8 @@ export function useDeckBuilder({
     setDeckName,
     bracket,
     setBracket,
+    comboDeclaration,
+    setComboDeclaration,
     savedDecks,
     justSaved,
     setJustSaved,

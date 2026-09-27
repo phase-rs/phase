@@ -49,6 +49,8 @@ export function DeckBuilder({
     setDeckName,
     bracket,
     setBracket,
+    comboDeclaration,
+    setComboDeclaration,
     savedDecks,
     justSaved,
     setJustSaved,
@@ -521,6 +523,8 @@ export function DeckBuilder({
               estimate={estimate}
               manualBracket={bracket}
               onBracketChange={setBracket}
+              comboDeclaration={comboDeclaration}
+              onComboDeclarationChange={setComboDeclaration}
               auditEmptyReason={auditEmptyReason}
               onCardClick={handleScrollToCard}
             />

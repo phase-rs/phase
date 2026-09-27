@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isBracketEstimate } from "../bracketEstimate";
+import { isBracketEstimate, isComboDeclaration } from "../bracketEstimate";
 
 function estimate() {
   return {
@@ -29,6 +29,13 @@ function estimate() {
     coverage: { counted: 2, resolved: 2, unresolved: [], confidence: "complete" },
     data_version: "test-1",
     declaration: null,
+    combo_barometer: { declaration: { kind: "undeclared" }, floor: null },
+    barometers: {
+      game_changers: "engine",
+      extra_turns: "engine",
+      mass_land_denial: "engine",
+      two_card_combos: "unanswered",
+    },
   };
 }
 
@@ -96,5 +103,26 @@ describe("isBracketEstimate", () => {
     expect(
       isBracketEstimate({ ...estimate(), declaration: { kind: "nonsense" } }),
     ).toBe(false);
+  });
+
+  it("accepts the combo barometer fields and their absence", () => {
+    expect(isBracketEstimate(estimate())).toBe(true);
+    const legacy = estimate();
+    delete (legacy as Partial<typeof legacy>).combo_barometer;
+    delete (legacy as Partial<typeof legacy>).barometers;
+    expect(isBracketEstimate(legacy)).toBe(true);
+  });
+
+  it("rejects an invalid barometer authority", () => {
+    expect(
+      isBracketEstimate({
+        ...estimate(),
+        barometers: { two_card_combos: "guessed" },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects an invalid intended combo window", () => {
+    expect(isComboDeclaration({ kind: "intended", window: "soon" })).toBe(false);
   });
 });

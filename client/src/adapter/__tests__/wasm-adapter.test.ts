@@ -533,6 +533,7 @@ describe("WasmAdapter", () => {
           sideboard: [],
           companion: [],
           signature_spell: [],
+          combo_declaration: { kind: "undeclared" as const },
         },
         declared_tier: null,
       };

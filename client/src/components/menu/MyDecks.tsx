@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
+import { UNDECLARED_COMBO } from "../../types/bracket";
 import {
   ACTIVE_DECK_KEY,
   RANDOM_DECK_SELECTION,
@@ -215,6 +216,7 @@ function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) 
     commanders: candidate.deck.commander ?? [],
     format: candidate.knownFormat,
     declaredTier: null,
+    comboDeclaration: UNDECLARED_COMBO,
   });
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;
 }

@@ -290,6 +290,26 @@
     "ariaLabel": "Bracket del mazzo",
     "unrated": "Senza valutazione"
   },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinita di due carte",
+    "question": "Combo infinita intenzionale di due carte?",
+    "undeclared": "Senza risposta",
+    "noneIntended": "Nessuna intenzionale",
+    "intended": "Intenzionale",
+    "windowAriaLabel": "Quando può essere assemblata?",
+    "windowUnstated": "Non specificato",
+    "windowEarly": "Inizio partita",
+    "windowLate": "Solo a partita avanzata",
+    "declaredFloor": "(dichiarato — impone B{{tier}})",
+    "heading": "Barometri",
+    "authorityEngine": "Verificato da phase",
+    "authorityDeckOwner": "Dichiarato da te",
+    "authorityUnanswered": "Senza risposta",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Turni extra",
+    "rowMassLandDenial": "Negazione di massa delle terre",
+    "rowTwoCardCombos": "Combo infinite di due carte"
+  },
   "warnings": {
     "commanderCount": "Il mazzo ha {{count}} carte (ne servono esattamente {{expected}})",
     "singleton": "{{name}}: più copie (formato singleton)",

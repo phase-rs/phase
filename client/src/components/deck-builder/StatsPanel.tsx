@@ -3,11 +3,16 @@ import { useTranslation } from "react-i18next";
 import type { DeckColorDistributionEntry, DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { scryfallLegalityKey } from "../../services/scryfall";
 import { DECK_CONSTRUCTION_FORMATS } from "../../data/formatRegistry";
-import type { BracketEstimate, CommanderBracket } from "../../types/bracket";
+import type {
+  BracketEstimate,
+  ComboDeclaration,
+  CommanderBracket,
+} from "../../types/bracket";
 import { ColorDistribution } from "./ColorDistribution";
 import { ManaCurve } from "./ManaCurve";
 import { BracketAuditPanel } from "./BracketAuditPanel";
 import { BracketPicker } from "./BracketPicker";
+import { ComboDeclarationPicker } from "./ComboDeclarationPicker";
 
 const LEGALITY_STYLES: Record<string, string> = {
   legal: "bg-emerald-600/70 text-emerald-100",
@@ -44,6 +49,8 @@ interface StatsPanelProps {
   estimate: BracketEstimate | null;
   manualBracket: CommanderBracket | null;
   onBracketChange: (bracket: CommanderBracket | null) => void;
+  comboDeclaration: ComboDeclaration;
+  onComboDeclarationChange: (declaration: ComboDeclaration) => void;
   auditEmptyReason?: "not-commander" | "no-commander" | "card-data-unavailable";
   onCardClick: (cardName: string) => void;
 }
@@ -56,6 +63,8 @@ export function StatsPanel({
   estimate,
   manualBracket,
   onBracketChange,
+  comboDeclaration,
+  onComboDeclarationChange,
   auditEmptyReason,
   onCardClick,
 }: StatsPanelProps) {
@@ -78,6 +87,10 @@ export function StatsPanel({
             </span>
             <BracketPicker value={manualBracket} onChange={onBracketChange} />
           </div>
+          <ComboDeclarationPicker
+            value={comboDeclaration}
+            onChange={onComboDeclarationChange}
+          />
           <BracketAuditPanel
             estimate={estimate}
             manualBracket={manualBracket}

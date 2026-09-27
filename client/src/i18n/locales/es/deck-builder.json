@@ -290,6 +290,26 @@
     "ariaLabel": "Nivel del mazo",
     "unrated": "Sin clasificar"
   },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinito de dos cartas",
+    "question": "¿Combo infinito intencional de dos cartas?",
+    "undeclared": "Sin respuesta",
+    "noneIntended": "Ninguno intencional",
+    "intended": "Intencional",
+    "windowAriaLabel": "¿Cuándo puede montarse?",
+    "windowUnstated": "Sin especificar",
+    "windowEarly": "Juego temprano",
+    "windowLate": "Solo juego tardío",
+    "declaredFloor": "(declarado — fuerza B{{tier}})",
+    "heading": "Barómetros",
+    "authorityEngine": "Comprobado por phase",
+    "authorityDeckOwner": "Declarado por ti",
+    "authorityUnanswered": "Sin respuesta",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Turnos extra",
+    "rowMassLandDenial": "Negación masiva de tierras",
+    "rowTwoCardCombos": "Combos infinitos de dos cartas"
+  },
   "warnings": {
     "commanderCount": "El mazo tiene {{count}} cartas (necesita exactamente {{expected}})",
     "singleton": "{{name}}: copias múltiples (formato singleton)",

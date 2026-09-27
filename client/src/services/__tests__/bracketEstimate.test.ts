@@ -18,6 +18,8 @@ const estimate: BracketEstimate = {
   coverage: { counted: 1, resolved: 1, unresolved: [], confidence: "complete" },
   data_version: "test-1",
   declaration: null,
+  combo_barometer: { declaration: { kind: "undeclared" }, floor: null },
+  barometers: {},
 };
 
 const request: BracketEstimateRequest = {
@@ -27,6 +29,7 @@ const request: BracketEstimateRequest = {
     sideboard: [],
     companion: [],
     signature_spell: [],
+    combo_declaration: { kind: "undeclared" },
   },
   declared_tier: null,
 };

@@ -502,6 +502,7 @@ export interface ReplayPlayerDeckList {
   sticker_sheets: string[];
   signature_spell: string[];
   bracket_tier: string;
+  combo_declaration?: import("../types/bracketEstimate").ComboDeclaration;
 }
 
 /** Mirrors the engine's `DeckList` — the name-only deck payload `initializeGame` accepts. */

@@ -2,9 +2,13 @@ import type { GameFormat } from "../adapter/types";
 import { formatMetadata } from "../data/formatRegistry";
 import type { CommanderBracketTier } from "./bracketEstimate";
 export {
+  BAROMETERS,
   BRACKET_AXES,
   BRACKET_TIER_BY_NUMERIC,
   BRACKET_TIER_NUMERIC,
+  UNDECLARED_COMBO,
+  type Barometer,
+  type BarometerAuthority,
   type BracketAxis,
   type BracketCheck,
   type BracketCheckOutcome,
@@ -13,9 +17,13 @@ export {
   type BracketEstimate,
   type BracketEstimateRequest,
   type CommanderBracketTier,
+  type ComboBarometer,
+  type ComboDeclaration,
+  type ComboWindow,
   type DeclarationVerdict,
   type EstimateConfidence,
   isBracketEstimate,
+  isComboDeclaration,
 } from "./bracketEstimate";
 
 /**

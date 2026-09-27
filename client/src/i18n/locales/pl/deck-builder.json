@@ -290,6 +290,26 @@
     "ariaLabel": "Poziom talii",
     "unrated": "Bez oceny"
   },
+  "comboBarometer": {
+    "ariaLabel": "Nieskończona kombinacja dwóch kart",
+    "question": "Celowa nieskończona kombinacja dwóch kart?",
+    "undeclared": "Bez odpowiedzi",
+    "noneIntended": "Brak zamierzonych",
+    "intended": "Zamierzona",
+    "windowAriaLabel": "Kiedy można ją złożyć?",
+    "windowUnstated": "Nie określono",
+    "windowEarly": "Wczesna faza gry",
+    "windowLate": "Tylko późna faza gry",
+    "declaredFloor": "(zadeklarowano — wymusza B{{tier}})",
+    "heading": "Barometry",
+    "authorityEngine": "Sprawdzone przez phase",
+    "authorityDeckOwner": "Zadeklarowane przez ciebie",
+    "authorityUnanswered": "Bez odpowiedzi",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Dodatkowe tury",
+    "rowMassLandDenial": "Masowe niszczenie lądów",
+    "rowTwoCardCombos": "Nieskończone kombinacje dwóch kart"
+  },
   "warnings": {
     "commanderCount": "Talia ma {{count}} kart (potrzeba dokładnie {{expected}})",
     "singleton": "{{name}}: wiele kopii (format singleton)",
