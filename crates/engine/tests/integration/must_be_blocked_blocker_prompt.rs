@@ -1,10 +1,7 @@
 //! `WaitingFor::DeclareBlockers.must_be_blocked_targets` (CR 509.1c) — the
-//! attacker-carried `MustBeBlocked` / `MustBeBlockedByAll` requirements exposed
-//! to every production `DeclareBlockers` producer: initial step entry
-//! (`turns.rs`), the multiplayer transition to the next defender
-//! (`engine_combat.rs::next_blocker_or_finish_declaration`), and a mid-prompt
-//! debug refresh (`combat.rs::refresh_combat_declaration_waiting_for`). Mirrors
-//! `deterministic_blocker_prompt_order.rs`'s driving helpers.
+//! attacker-carried `MustBeBlocked` / `MustBeBlockedByAll` requirements on the
+//! blocker prompt. Mirrors `deterministic_blocker_prompt_order.rs`'s driving
+//! helpers.
 //!
 //! Oracle text verified verbatim against `data/mtgjson/AtomicCards.json`.
 

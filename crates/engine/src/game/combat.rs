@@ -2172,19 +2172,6 @@ enum BlockDeclarationRequirement {
     },
 }
 
-impl BlockDeclarationRequirement {
-    /// The attacker this requirement names, or `None` for `Generic` (a
-    /// blocker-side obligation with no named attacker).
-    fn named_attacker(&self) -> Option<ObjectId> {
-        match self {
-            BlockDeclarationRequirement::Generic { .. } => None,
-            BlockDeclarationRequirement::Exact { attacker, .. }
-            | BlockDeclarationRequirement::Attacker { attacker, .. }
-            | BlockDeclarationRequirement::Every { attacker, .. } => Some(*attacker),
-        }
-    }
-}
-
 /// Bounded answer for an AI-only existential block-declaration query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaximumBlockDeclarationBlockability {
@@ -2235,9 +2222,7 @@ fn legal_block_pairs(
 
 /// CR 509.1c: the attacker-carried `MustBeBlocked` / `MustBeBlockedByAll`
 /// requirements functioning against `player`'s defense, restricted to the pairs
-/// in `pairs` (the legal blocker/attacker universe). Extracted verbatim from
-/// `BlockDeclarationConstraints::build` so `must_be_blocked_targets_for_player`
-/// reads the exact requirement set the solver scores, not a re-derivation.
+/// in `pairs` (the legal blocker/attacker universe).
 fn must_be_blocked_requirements(
     state: &GameState,
     player: PlayerId,
@@ -2312,8 +2297,7 @@ pub fn must_be_blocked_targets_for_player(
     let mut result: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
     for &(blocker, attacker) in &pairs {
         let obeys = requirements.iter().any(|requirement| {
-            requirement.named_attacker() == Some(attacker)
-                && requirement_is_satisfied(state, requirement, &[(blocker, attacker)])
+            requirement_is_satisfied(state, requirement, &[(blocker, attacker)])
         });
         if obeys {
             result.entry(blocker).or_default().push(attacker);
@@ -7278,10 +7262,9 @@ pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
         crate::types::game_state::WaitingFor::DeclareBlockers { player, .. } => {
             // Copy `player` out before the immutable-borrowing queries below.
             let player = *player;
-            // CR 509.1a-c: rebuild the entire payload — including the new
-            // must-be-blocked projection — from the single builder so this
-            // in-place writer (the one `E0063` cannot flag) cannot silently
-            // leave a field unpopulated.
+            // CR 509.1a-c: rebuild the entire payload from the single
+            // builder so this in-place writer (the one `E0063` cannot flag)
+            // cannot silently leave a field unpopulated.
             let rebuilt = build_declare_blockers_waiting_for(state, player);
             state.waiting_for = rebuilt;
         }
@@ -18232,10 +18215,10 @@ mod tests {
 
     /// CR 509.1c: a blocker-side "must block THAT creature if able" requirement
     /// (`StaticMode::MustBlockAttacker`, e.g. provoke) becomes
-    /// `BlockDeclarationRequirement::Exact`, which `named_attacker` maps to
-    /// `Some(attacker)` — so it would leak into the must-be-blocked projection
-    /// if that projection read `BlockDeclarationConstraints::build`'s full
-    /// requirement list instead of the extracted `must_be_blocked_requirements`.
+    /// `BlockDeclarationRequirement::Exact` — so it would leak into the
+    /// must-be-blocked projection if that projection read
+    /// `BlockDeclarationConstraints::build`'s full requirement list instead of
+    /// the extracted `must_be_blocked_requirements`.
     /// Positive control: the same pair is a genuine `blocker_constraints_for_player`
     /// `MustBlock` entry, so its absence from the new map is the extraction
     /// boundary at work, not a missing requirement.
