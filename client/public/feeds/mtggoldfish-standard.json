@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-09-26T00:00:00Z",
+  "updated": "2026-09-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -558,141 +558,6 @@
       ]
     },
     {
-      "name": "Boros Dwarves",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "W"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Thorin Oakenshield"
-        },
-        {
-          "count": 2,
-          "name": "Zack Fair"
-        },
-        {
-          "count": 1,
-          "name": "Erode"
-        },
-        {
-          "count": 4,
-          "name": "Inspiring Vantage"
-        },
-        {
-          "count": 3,
-          "name": "Buster Sword"
-        },
-        {
-          "count": 2,
-          "name": "Bofur, Reliable Guardian"
-        },
-        {
-          "count": 2,
-          "name": "The Lonely Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Dwarven Mauler"
-        },
-        {
-          "count": 3,
-          "name": "Thorin, Mountain-king"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Skateboard"
-        },
-        {
-          "count": 3,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 4,
-          "name": "Dain's Company"
-        },
-        {
-          "count": 4,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 1,
-          "name": "Mjolnir, Hammer of Thor"
-        },
-        {
-          "count": 4,
-          "name": "Kili the Resourceful"
-        },
-        {
-          "count": 4,
-          "name": "Leyline Axe"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 3,
-          "name": "Chainsaw"
-        },
-        {
-          "count": 3,
-          "name": "Cloud, Midgar Mercenary"
-        },
-        {
-          "count": 1,
-          "name": "Dragonfire Blade"
-        },
-        {
-          "count": 4,
-          "name": "Sunbillow Verge"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Requisition Raid"
-        },
-        {
-          "count": 3,
-          "name": "Sheltered by Ghosts"
-        },
-        {
-          "count": 1,
-          "name": "Swiftfoot Boots"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 2,
-          "name": "Chandra, Spark Hunter"
-        },
-        {
-          "count": 3,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 2,
-          "name": "Bilbo's Gambit"
-        },
-        {
-          "count": 1,
-          "name": "Erode"
-        }
-      ]
-    },
-    {
       "name": "Jund Sacrifice",
       "author": "MTGGoldfish",
       "colors": [
@@ -829,6 +694,141 @@
         {
           "count": 1,
           "name": "Duress"
+        }
+      ]
+    },
+    {
+      "name": "Boros Dwarves",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Thorin Oakenshield"
+        },
+        {
+          "count": 2,
+          "name": "Zack Fair"
+        },
+        {
+          "count": 1,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Inspiring Vantage"
+        },
+        {
+          "count": 3,
+          "name": "Buster Sword"
+        },
+        {
+          "count": 2,
+          "name": "Bofur, Reliable Guardian"
+        },
+        {
+          "count": 2,
+          "name": "The Lonely Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Dwarven Mauler"
+        },
+        {
+          "count": 3,
+          "name": "Thorin, Mountain-king"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Skateboard"
+        },
+        {
+          "count": 3,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 4,
+          "name": "Dain's Company"
+        },
+        {
+          "count": 4,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 1,
+          "name": "Mjolnir, Hammer of Thor"
+        },
+        {
+          "count": 4,
+          "name": "Kili the Resourceful"
+        },
+        {
+          "count": 4,
+          "name": "Leyline Axe"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 3,
+          "name": "Chainsaw"
+        },
+        {
+          "count": 3,
+          "name": "Cloud, Midgar Mercenary"
+        },
+        {
+          "count": 1,
+          "name": "Dragonfire Blade"
+        },
+        {
+          "count": 4,
+          "name": "Sunbillow Verge"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Requisition Raid"
+        },
+        {
+          "count": 3,
+          "name": "Sheltered by Ghosts"
+        },
+        {
+          "count": 1,
+          "name": "Swiftfoot Boots"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 2,
+          "name": "Chandra, Spark Hunter"
+        },
+        {
+          "count": 3,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 2,
+          "name": "Bilbo's Gambit"
+        },
+        {
+          "count": 1,
+          "name": "Erode"
         }
       ]
     },
@@ -1222,109 +1222,134 @@
       ]
     },
     {
-      "name": "Selesnya Landfall",
+      "name": "Mardu Discard",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "G"
+        "B",
+        "R",
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Ba Sing Se"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
           "count": 1,
-          "name": "Hushwood Verge"
+          "name": "Swamp"
         },
         {
           "count": 2,
-          "name": "Dyadrine, Synthesis Amalgam"
-        },
-        {
-          "count": 4,
-          "name": "Mightform Harmonizer"
+          "name": "Inti, Seneschal of the Sun"
         },
         {
           "count": 3,
-          "name": "Esper Origins"
+          "name": "Concealed Courtyard"
         },
         {
           "count": 2,
-          "name": "Shared Roots"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Icetill Explorer"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
           "name": "Erode"
         },
         {
+          "count": 2,
+          "name": "Inspiring Vantage"
+        },
+        {
           "count": 4,
-          "name": "Sazh's Chocobo"
+          "name": "Iron-Shield Elf"
+        },
+        {
+          "count": 4,
+          "name": "Starting Town"
         },
         {
           "count": 3,
-          "name": "Escape Tunnel"
+          "name": "Practiced Offense"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
         },
         {
           "count": 4,
-          "name": "Earthbender Ascension"
+          "name": "Moonshadow"
         },
         {
           "count": 4,
-          "name": "Fabled Passage"
+          "name": "Hardened Academic"
         },
         {
-          "count": 9,
-          "name": "Forest"
+          "count": 4,
+          "name": "Marauding Mako"
+        },
+        {
+          "count": 4,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 4,
+          "name": "Cool but Rude"
+        },
+        {
+          "count": 2,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 4,
+          "name": "Bloodghast"
+        },
+        {
+          "count": 1,
+          "name": "Carnage, Crimson Chaos"
+        },
+        {
+          "count": 2,
+          "name": "Tersa Lightshatter"
+        },
+        {
+          "count": 4,
+          "name": "Blood Crypt"
         },
         {
           "count": 3,
-          "name": "Mossborn Hydra"
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 2,
+          "name": "Casey Jones, Vigilante"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Torpor Orb"
+          "name": "Requisition Raid"
         },
         {
           "count": 1,
-          "name": "Mossborn Hydra"
+          "name": "Deathmark"
         },
         {
           "count": 3,
-          "name": "Sheltered by Ghosts"
+          "name": "Strategic Betrayal"
         },
         {
-          "count": 3,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 4,
-          "name": "Sapling Nursery"
+          "count": 1,
+          "name": "Slagstorm"
         },
         {
           "count": 2,
-          "name": "Dawn's Truce"
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Shoot the Sheriff"
+        },
+        {
+          "count": 2,
+          "name": "Monument to Endurance"
+        },
+        {
+          "count": 3,
+          "name": "Voice of Victory"
         }
       ]
     }
