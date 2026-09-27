@@ -5,6 +5,7 @@ import { ButtonStyle, ComponentType, MessageFlags } from "../discord";
 import { findFormat, FORMATS } from "../formats";
 import type { Lfg } from "../lfg";
 import {
+  BUILD_COLORS,
   customId,
   desktopLink,
   guestLink,
@@ -274,7 +275,7 @@ describe("public post", () => {
     expect(JSON.stringify(post)).not.toContain(CODE);
 
     const [embed] = post.embeds;
-    expect(embed.title).toBe("LFG · Commander");
+    expect(embed.title).toBe("LFG · Commander · RELEASE");
     expect(embed.description).toContain("Players 2/4");
     for (const id of l.seated) expect(embed.description).toContain(`<@${id}>`);
     expect(embed.description).toContain("<@111> (host)");
@@ -290,6 +291,16 @@ describe("public post", () => {
         ],
       },
     ]);
+  });
+
+  test("the title tag and color name the build", () => {
+    const release = renderLfg(lfg({ build: "release" })).embeds[0];
+    const preview = renderLfg(lfg({ build: "preview" })).embeds[0];
+    expect(release.title).toBe("LFG · Commander · RELEASE");
+    expect(preview.title).toBe("LFG · Commander · PREVIEW");
+    expect(release.color).toBe(BUILD_COLORS.release);
+    expect(preview.color).toBe(BUILD_COLORS.preview);
+    expect(release.color).not.toBe(preview.color);
   });
 
   test("open: Join / Leave / Start and the idle footer", () => {

@@ -34,6 +34,7 @@ import {
   type Interaction,
   InteractionType,
   ResponseType,
+  botMessageApi,
   botThreadApi,
   createFollowupMessage,
   editOriginalResponse,
@@ -51,6 +52,7 @@ import {
 } from "./lfgInteractions";
 import { parseCustomId } from "./lfgView";
 import { LfgRoleCache } from "./lfgRoles";
+import { LOBBY_POLL_INTERVAL_MS, type LobbyMirrorDeps, LobbyPostStore, syncLobbyPosts } from "./lobbyMirror";
 import type { Embed } from "./render";
 import {
   renderCardEmbed,
@@ -264,6 +266,34 @@ if (import.meta.main) {
     }, THREAD_SWEEP_INTERVAL_MS);
   }
 
+  const lobbyChannelId = discord.lobbyChannelId();
+  const mirror: LobbyMirrorDeps | null =
+    botToken === undefined || lobbyChannelId === undefined
+      ? null
+      : {
+          posts: new LobbyPostStore(LFG_DB_PATH),
+          messages: botMessageApi(botToken),
+          channelId: lobbyChannelId,
+          fetchFn: fetch,
+          readable: new Map(),
+          now: Date.now,
+        };
+  if (mirror !== null) {
+    // A pass can outlast the interval (Discord rate limits); one never overlaps the last.
+    let syncing = false;
+    const syncLobby = () => {
+      if (syncing) return;
+      syncing = true;
+      void syncLobbyPosts(mirror)
+        .catch((err) => console.error("[lobby-mirror] pass failed:", err))
+        .finally(() => {
+          syncing = false;
+        });
+    };
+    syncLobby();
+    setInterval(syncLobby, LOBBY_POLL_INTERVAL_MS);
+  }
+
   Bun.serve({
     port: PORT,
     async fetch(req) {
@@ -279,6 +309,6 @@ if (import.meta.main) {
   });
 
   console.log(
-    `card-bot listening on :${PORT} (default build: ${DEFAULT_BUILD}, game threads: ${threads === null ? "off, no CARD_BOT_TOKEN" : "on"})`,
+    `card-bot listening on :${PORT} (default build: ${DEFAULT_BUILD}, game threads: ${threads === null ? "off, no CARD_BOT_TOKEN" : "on"}, lobby mirror: ${mirror === null ? "off" : `on (channel ${mirror.channelId})`})`,
   );
 }

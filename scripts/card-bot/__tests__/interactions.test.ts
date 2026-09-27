@@ -12,6 +12,7 @@ import {
   OptionType,
   registerGuildCommands,
   ResponseType,
+  botMessageApi,
   botThreadApi,
   DiscordHttpError,
   type ThreadApi,
@@ -751,6 +752,66 @@ describe("Discord REST helpers", () => {
       expect(JSON.parse(String(f.calls[0].init.body))).toEqual({ archived: true, locked: true });
     } finally {
       f.restore();
+    }
+  });
+
+  test("botMessageApi.create posts with bot auth and an enforced nonce, and returns the message id", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const spy = stubGlobalFetch(async (input, init) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      return Response.json({ id: "m-7" });
+    });
+    try {
+      expect(await botMessageApi("secret").create("c-1", { content: "hi" }, "rAB12CD1700000000")).toBe("m-7");
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("https://discord.com/api/v10/channels/c-1/messages");
+      expect(calls[0].init.method).toBe("POST");
+      expect(new Headers(calls[0].init.headers).get("Authorization")).toBe("Bot secret");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        content: "hi",
+        nonce: "rAB12CD1700000000",
+        enforce_nonce: true,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("botMessageApi.edit patches the message with bot auth, and reports a deleted message (404) as gone", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const statuses = [200, 404];
+    const spy = stubGlobalFetch(async (input, init) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      return Response.json({ id: "m-7" }, { status: statuses.shift() });
+    });
+    try {
+      expect(await botMessageApi("secret").edit("c-1", "m-7", { content: "hi" })).toBe("edited");
+      expect(calls[0].url).toBe("https://discord.com/api/v10/channels/c-1/messages/m-7");
+      expect(calls[0].init.method).toBe("PATCH");
+      expect(new Headers(calls[0].init.headers).get("Authorization")).toBe("Bot secret");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ content: "hi" });
+
+      expect(await botMessageApi("secret").edit("c-1", "m-7", { content: "hi" })).toBe("gone");
+      expect(calls).toHaveLength(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("botThreadApi.post sends the body as given, with no nonce", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const spy = stubGlobalFetch(async (input, init) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      return Response.json({ id: "m-8" });
+    });
+    try {
+      await botThreadApi("secret").post("t-9", { content: "hi" });
+      expect(calls[0].url).toBe("https://discord.com/api/v10/channels/t-9/messages");
+      expect(calls[0].init.method).toBe("POST");
+      expect(new Headers(calls[0].init.headers).get("Authorization")).toBe("Bot secret");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ content: "hi" });
+    } finally {
+      spy.mockRestore();
     }
   });
 
