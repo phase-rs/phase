@@ -117,7 +117,39 @@ type SerializedCost = {
   cost?: { type: string; shards?: string[]; generic?: number };
   filter?: { type: string; type_filters?: unknown[] } | null;
   zone?: string | null;
+  effect?: {
+    type: string;
+    amount?: QuantityExpr | number;
+    player?: {
+      type: string;
+      controller?: string | null;
+      type_filters?: unknown[];
+      properties?: unknown[];
+    };
+  };
 };
+
+/**
+ * Display-only formatting of an engine `EffectCost` (precedent: `formatFilteredCard`).
+ * The engine is the authority on what the cost is; this only renders the one
+ * recipient shape it pays at cast time — "have an opponent gain N life"
+ * (Invigorate). Every other effect-cost keeps the generic label.
+ */
+function formatEffectCost(effect: SerializedCost["effect"]): string {
+  const player = effect?.player;
+  if (
+    effect?.type === "GainLife" &&
+    player?.type === "Typed" &&
+    player.controller === "Opponent" &&
+    (player.type_filters ?? []).length === 0 &&
+    (player.properties ?? []).length === 0
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveOpponentGainLife", {
+      amount: formatQuantity(effect.amount, 1),
+    });
+  }
+  return "Activate";
+}
 
 function formatTypeFilter(filter: unknown): string {
   if (typeof filter === "string") return filter;
@@ -357,6 +389,8 @@ export function formatCost(cost: SerializedCost): string {
       return (cost.costs ?? []).map(formatCost).join(", ");
     case "OneOf":
       return (cost.costs ?? []).map(formatCost).join(" or ");
+    case "EffectCost":
+      return formatEffectCost(cost.effect);
     default:
       return "Activate";
   }

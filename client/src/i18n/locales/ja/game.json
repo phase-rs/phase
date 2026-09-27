@@ -2006,6 +2006,10 @@
     "title": "贈り物の受け取り手を選択",
     "subtitle": "約束した贈り物を受け取る対戦相手を選択"
   },
+  "costRecipient": {
+    "title": "対戦相手を選択",
+    "subtitle": "このコストで選ぶ対戦相手を選んでください：{{cost}}"
+  },
   "entryController": {
     "title": "戦場に出る際のコントローラーを選択",
     "subtitle": "このパーマネントが戦場に出る際にコントロールする対戦相手を選択"
@@ -2307,7 +2311,8 @@
       "zoneExile": "追放領域",
       "zoneHand": "あなたの手札",
       "discard": "{{count}}{{cards}}を捨てる",
-      "exile": "{{zone}}から{{count}}{{cards}}を追放"
+      "exile": "{{zone}}から{{count}}{{cards}}を追放",
+      "haveOpponentGainLife": "対戦相手1人に{{amount}}点のライフを得させる"
     }
   },
   "topOrBottom": {

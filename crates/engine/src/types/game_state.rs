@@ -7323,15 +7323,21 @@ fn default_origin_zone() -> Zone {
 }
 
 /// CR 118.3b + CR 119.4 + CR 616.1: Exact outer cost action suspended after a
-/// life payment committed but its replacement's interactive post-effect did
-/// not finish. The replacement continuation remains the immediate child; this
-/// owner resumes only after that child drains.
+/// life payment (CR 119.4) or a life-gain cost event (CR 119.3) committed but
+/// its replacement's interactive post-effect did not finish. The replacement
+/// continuation remains the immediate child; this owner resumes only after that
+/// child drains.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DeferredLifeCostResume {
     /// Continue a spell cast or activated-ability payment without replaying the
     /// life payment. Mana-payment callers set `cost` to `NoCost` and preserve
     /// the amount already spent in `prepaid_actual_mana_spent`.
+    ///
+    /// `player` is always the payer whose cast resumes. The prompt that parked
+    /// the root may belong to a different player: for a life-gain cost, CR 616.1
+    /// gives the replacement choice to the recipient. Consumers must key on the
+    /// resolution depth and `Priority` window, never on the answering player.
     Cast {
         player: PlayerId,
         /// The announcing caller attaches its complete cast/activation root
@@ -12883,6 +12889,29 @@ impl ZoneOpponentChooserPurpose {
     }
 }
 
+/// CR 601.2 + CR 115.10a: Why the caster is choosing an opponent mid-cast in
+/// `WaitingFor::ChooseGiftRecipient`. The choice is a CHOICE, not a target; the
+/// purpose decides how `handle_choose_gift_recipient` consumes the answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CastOpponentChoicePurpose {
+    /// CR 702.174a: the promised gift's recipient (latched into
+    /// `SpellContext::gift_recipient`). Default so pre-existing serialized Gift
+    /// prompts (which carry no `purpose`) read back unchanged.
+    #[default]
+    Gift,
+    /// CR 601.2h + CR 118.3: the player an effect-as-cost acts on ("have an
+    /// opponent gain 3 life"). `cost` is the spell cost being paid; the answer
+    /// pays it for the chosen player (`casting_costs::pay_recipient_effect_cost`).
+    EffectCost { cost: Box<AbilityCost> },
+}
+
+impl CastOpponentChoicePurpose {
+    fn is_gift(&self) -> bool {
+        matches!(self, Self::Gift)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -13952,14 +13981,19 @@ pub enum WaitingFor {
         gift_kind: Option<crate::types::keywords::GiftKind>,
         pending_cast: Box<PendingCast>,
     },
-    /// CR 702.174a: After promising a Gift with ≥2 opponents, choose which
-    /// opponent receives the gift. Distinct from `ChooseAnnouncingOpponent`
-    /// (CR 115.1 target-chooser).
+    /// CR 601.2 + CR 115.10a: the caster chooses one opponent from `candidates`
+    /// while casting. `purpose` says why: CR 702.174a Gift recipient (default),
+    /// or CR 601.2h + CR 118.3 the player an effect-as-cost acts on. Distinct
+    /// from `ChooseAnnouncingOpponent` (CR 115.1 target-chooser).
     ChooseGiftRecipient {
         player: PlayerId,
         candidates: Vec<PlayerId>,
+        /// CR 702.174: the gift kind for UI labels. `Some` only when `purpose`
+        /// is `Gift` (kept top-level so the Gift wire shape is unchanged).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gift_kind: Option<crate::types::keywords::GiftKind>,
+        #[serde(default, skip_serializing_if = "CastOpponentChoicePurpose::is_gift")]
+        purpose: CastOpponentChoicePurpose,
         pending_cast: Box<PendingCast>,
     },
     /// CR 702.47a–e: As an Arcane (or other matching-subtype) spell is cast, its
@@ -37747,6 +37781,19 @@ mod tests {
             player: PlayerId(0),
             candidates: vec![PlayerId(1)],
             gift_kind: Some(crate::types::keywords::GiftKind::Card),
+            purpose: CastOpponentChoicePurpose::Gift,
+            pending_cast: dummy_pending(),
+        }));
+        // CR 601.2h + CR 118.3: the same prompt asking for an effect-as-cost's player.
+        variants.push(Box::new(WaitingFor::ChooseGiftRecipient {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+            gift_kind: None,
+            purpose: CastOpponentChoicePurpose::EffectCost {
+                cost: Box::new(crate::parser::oracle_cost::parse_oracle_cost(
+                    "have an opponent gain 3 life",
+                )),
+            },
             pending_cast: dummy_pending(),
         }));
         variants.push(Box::new(WaitingFor::AbilityModeChoice {
@@ -37901,7 +37948,86 @@ mod tests {
             outcomes: Vec::new(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 40);
+        assert_eq!(variants.len(), 41);
+    }
+
+    fn cast_opponent_prompt(purpose: CastOpponentChoicePurpose) -> WaitingFor {
+        let ability = ResolvedAbility::new(
+            crate::types::ability::Effect::Unimplemented {
+                name: "Dummy".to_string(),
+                description: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let gift_kind = matches!(purpose, CastOpponentChoicePurpose::Gift)
+            .then_some(crate::types::keywords::GiftKind::Card);
+        WaitingFor::ChooseGiftRecipient {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+            gift_kind,
+            purpose,
+            pending_cast: Box::new(PendingCast::new(
+                ObjectId(1),
+                CardId(1),
+                ability,
+                ManaCost::NoCost,
+            )),
+        }
+    }
+
+    /// W1 — CR 702.174a: a Gift prompt serializes exactly as before the `purpose`
+    /// field existed (no `purpose` key), so no protocol bump is needed.
+    #[test]
+    fn choose_gift_recipient_gift_purpose_wire_shape_unchanged() {
+        let json = serde_json::to_value(cast_opponent_prompt(CastOpponentChoicePurpose::Gift))
+            .expect("serialize gift prompt");
+        assert_eq!(json["type"], "ChooseGiftRecipient");
+        let keys: BTreeSet<&str> = json["data"]
+            .as_object()
+            .expect("adjacently tagged data object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["player", "candidates", "gift_kind", "pending_cast"])
+        );
+    }
+
+    /// W2 — a legacy Gift frame (no `purpose` key) reads back as `Gift`.
+    #[test]
+    fn choose_gift_recipient_legacy_frame_defaults_to_gift_purpose() {
+        let json = serde_json::to_value(cast_opponent_prompt(CastOpponentChoicePurpose::Gift))
+            .expect("serialize gift prompt");
+        assert!(json["data"].get("purpose").is_none(), "legacy shape");
+        let back: WaitingFor = serde_json::from_value(json).expect("legacy frame deserializes");
+        let WaitingFor::ChooseGiftRecipient { purpose, .. } = back else {
+            panic!("round-trip changed the variant: {back:?}");
+        };
+        assert_eq!(purpose, CastOpponentChoicePurpose::Gift);
+    }
+
+    /// W3 — CR 601.2h + CR 118.3: the effect-cost purpose round-trips, carrying the
+    /// cost being paid under an internal `type` tag that doesn't collide with the
+    /// cost's own tag.
+    #[test]
+    fn choose_gift_recipient_effect_cost_purpose_round_trips() {
+        let cost = crate::parser::oracle_cost::parse_oracle_cost("have an opponent gain 3 life");
+        assert!(
+            cost.player_recipient_cost().is_some(),
+            "fixture is a recipient effect-cost: {cost:?}"
+        );
+        let prompt = cast_opponent_prompt(CastOpponentChoicePurpose::EffectCost {
+            cost: Box::new(cost),
+        });
+        let json = serde_json::to_value(&prompt).expect("serialize effect-cost prompt");
+        assert_eq!(json["data"]["purpose"]["type"], "EffectCost");
+        assert_eq!(json["data"]["purpose"]["cost"]["type"], "EffectCost");
+        assert!(json["data"].get("gift_kind").is_none());
+        let back: WaitingFor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, prompt);
     }
 
     #[test]

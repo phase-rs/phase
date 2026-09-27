@@ -2210,6 +2210,15 @@ export type AdditionalCost =
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
 export type SerializedAbilityCost = { type: string; [key: string]: unknown };
 
+/**
+ * CR 601.2 + CR 115.10a: why the caster is choosing an opponent in
+ * `ChooseGiftRecipient` — engine-provided purpose; absent = Gift (serde default).
+ * `EffectCost` carries the spell cost being paid for the chosen opponent.
+ */
+export type CastOpponentChoicePurpose =
+  | { type: "Gift" }
+  | { type: "EffectCost"; cost: SerializedAbilityCost };
+
 export type ResolutionOptionalPaymentChoice =
   | { type: "Decline" }
   | { type: "Pay"; data: { index: number } };
@@ -2585,7 +2594,7 @@ export type WaitingFor =
   // picks WHICH opponent makes the choice before the zone choice is presented.
   | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
-  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
+  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; purpose?: CastOpponentChoicePurpose; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
   | { type: "VoteChoice"; data: {
       player: PlayerId;

@@ -6,22 +6,23 @@ use crate::types::ability::{
     AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
     BeholdCostAction, CastTimingPermission, Comparator, CostMoveOutcome, CostPaidObjectRecord,
     CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, KickerVariant,
-    NotedManaPayment, ObjectProperty, QuantityExpr, QuantityRef, ReplacementDefinition,
-    ResolutionCastCleanup, ResolvedAbility, SacrificeCost, SacrificeRequirement,
-    SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
-    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
-    EXILE_COST_X,
+    NotedManaPayment, ObjectProperty, PlayerRecipientCost, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ResolutionCastCleanup, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement,
+    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
+    TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::casting_costs::{CostReductionElection, CostReductionEntry, ReductionProvenance};
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
-    CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
-    CounterRemoveChoice, DeferredSacrificeSelection, DistributionUnit, GameState,
-    ManaAbilityCostParent, ManaAbilityResume, PayCostKind, PendingCast, PendingCostMoveCompletion,
-    PendingCostMoveResume, PendingDiscardForCostResume, PendingSacrificeCostCompletion,
-    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence,
+    CastOpponentChoicePurpose, CastPaymentMode, CastingPermissionIndex, CastingVariant,
+    ConvokeMode, CostResume, CounterCostChoice, CounterRemoveChoice, DeferredSacrificeSelection,
+    DistributionUnit, GameState, ManaAbilityCostParent, ManaAbilityResume, PayCostKind,
+    PendingCast, PendingCostMoveCompletion, PendingCostMoveResume, PendingDiscardForCostResume,
+    PendingSacrificeCostCompletion, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -50,7 +51,7 @@ use super::ability_utils::{
     build_target_slots, build_target_slots_labelled, flatten_targets_in_chain,
     modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
 };
-use super::life_costs::PayLifeCostResult;
+use super::life_costs::{GiveLifeCostResult, PayLifeCostResult};
 
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
 pub(crate) const ABANDONED_CAST_FINALIZATION_ERROR: &str = "__abandoned_cast_finalization__";
@@ -847,29 +848,83 @@ fn continue_after_gift_promised(
             player,
             candidates: opponents,
             gift_kind,
+            purpose: CastOpponentChoicePurpose::Gift,
             pending_cast: Box::new(pending),
         })
     }
 }
 
-/// CR 702.174a: Apply the chosen Gift recipient and resume deferred casting.
+/// CR 601.2 + CR 115.10a: Apply the caster's chosen opponent for the prompt's
+/// `purpose` and resume deferred casting: CR 702.174a latches the Gift recipient;
+/// CR 601.2h + CR 118.3 pays the effect-as-cost for the chosen player.
 pub(crate) fn handle_choose_gift_recipient(
     state: &mut GameState,
     player: PlayerId,
     pending: PendingCast,
     opponent: PlayerId,
     candidates: &[PlayerId],
+    purpose: &CastOpponentChoicePurpose,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if !candidates.contains(&opponent) {
         return Err(EngineError::InvalidAction(
-            "Gift recipient must be one of the offered opponents".to_string(),
+            "Recipient must be one of the offered opponents".to_string(),
         ));
     }
-    let mut pending = pending;
-    pending.ability.context.gift_recipient = Some(opponent);
-    stamp_pending_ability_context_recursive(&mut pending);
-    finish_pending_cost_or_cast(state, player, pending, events)
+    match purpose {
+        CastOpponentChoicePurpose::Gift => {
+            let mut pending = pending;
+            pending.ability.context.gift_recipient = Some(opponent);
+            stamp_pending_ability_context_recursive(&mut pending);
+            finish_pending_cost_or_cast(state, player, pending, events)
+        }
+        CastOpponentChoicePurpose::EffectCost { cost } => {
+            pay_recipient_effect_cost(state, player, cost, opponent, pending, events)
+        }
+    }
+}
+
+/// CR 601.2h + CR 118.3 + CR 119.3: Pay a recipient effect-as-cost for the chosen
+/// `recipient` (Invigorate: "have an opponent gain 3 life"), then continue the cast.
+/// Shared by the single-recipient auto-bind and the `ChooseGiftRecipient`
+/// (`CastOpponentChoicePurpose::EffectCost`) answer so both pay identically.
+fn pay_recipient_effect_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &AbilityCost,
+    recipient: PlayerId,
+    pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match cost.player_recipient_cost() {
+        Some(PlayerRecipientCost::GainLife { amount, .. }) => {
+            let amount =
+                super::quantity::resolve_quantity_with_targets(state, amount, &pending.ability)
+                    .max(0) as u32;
+            let resume_at_resolution_depth = state.resolution_stack.len();
+            match super::life_costs::give_life_as_cost(state, recipient, amount, events) {
+                GiveLifeCostResult::Paid { .. } => {
+                    finish_pending_cost_or_cast(state, player, pending, events)
+                }
+                GiveLifeCostResult::Deferred => {
+                    // CR 616.1: the recipient (not the payer) may own the pending
+                    // prompt; the carrier resumes the payer's cast afterwards (see
+                    // `DeferredLifeCostResume` docs).
+                    state.pending_deferred_life_cost_resume =
+                        Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+                            player,
+                            pending: Some(Box::new(pending)),
+                            remaining_life_payments: Vec::new(),
+                            resume_at_resolution_depth,
+                        });
+                    Ok(state.waiting_for.clone())
+                }
+            }
+        }
+        None => Err(EngineError::InvalidAction(
+            "Recipient choice carried a cost with no chosen-player instruction".to_string(),
+        )),
+    }
 }
 
 pub(crate) fn payable_spell_alternative_cost(
@@ -8496,6 +8551,41 @@ fn pay_additional_cost_with_source(
         });
     }
 
+    // CR 118.9 + CR 601.2h + CR 118.3: an effect-as-cost acting on a player the payer
+    // chooses (Invigorate: "have an opponent gain 3 life"; CR 115.10a: a choice, not a
+    // target). One candidate binds automatically; two or more ask the payer
+    // (`CastOpponentChoicePurpose::EffectCost`).
+    if let Some(view) = cost.player_recipient_cost() {
+        let recipients = match view {
+            PlayerRecipientCost::GainLife { recipient, .. } => {
+                super::life_costs::life_gain_cost_recipients(
+                    state,
+                    player,
+                    pending.object_id,
+                    recipient,
+                )
+            }
+        };
+        return match recipients.as_slice() {
+            // Same contract as the PayLife arm's unpayable branch: plain Err, no
+            // cancel. The offer gate (`is_payable`, `!is_empty()`) makes this an
+            // invariant re-check, not a UI path.
+            [] => Err(EngineError::ActionNotAllowed(
+                "Recipient effect-cost has no choosable recipient".to_string(),
+            )),
+            &[to] => pay_recipient_effect_cost(state, player, &cost, to, pending, events),
+            _ => Ok(WaitingFor::ChooseGiftRecipient {
+                player,
+                candidates: recipients,
+                gift_kind: None,
+                purpose: CastOpponentChoicePurpose::EffectCost {
+                    cost: Box::new(cost),
+                },
+                pending_cast: Box::new(pending),
+            }),
+        };
+    }
+
     match cost {
         AbilityCost::PayLife { amount } => {
             // CR 118.3 + CR 119.4 + CR 119.8: Pay life as an additional cost via
@@ -9157,7 +9247,9 @@ fn pay_additional_cost_with_source(
             )));
         }
         _ => {
-            // Other cost types (Exile, etc.) — not yet interactive
+            // Other cost types (Exile, etc.) — not yet interactive. The remaining
+            // `EffectCost` shapes (Land Grant's `RevealHand`) also reach this arm as
+            // a known no-op; recipient effect-costs are paid by the pre-dispatch above.
         }
     }
 

@@ -5,6 +5,7 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { formatAbilityCost } from "../../viewmodel/costLabel.ts";
 import { ChoiceModal } from "./ChoiceModal.tsx";
 
 type GiftRecipientWaitingFor = Extract<WaitingFor, { type: "ChooseGiftRecipient" }>;
@@ -15,8 +16,10 @@ interface GiftRecipientModalContentProps {
 }
 
 /**
- * CR 702.174a: After promising a Gift with ≥2 opponents, the caster chooses
- * which opponent receives the gift.
+ * CR 601.2 + CR 115.10a: The caster chooses one opponent while casting. The
+ * engine-provided `purpose` says why: the recipient of a promised Gift
+ * (CR 702.174a; absent `purpose` = Gift) or the opponent an effect-as-cost acts
+ * on (CR 601.2h, e.g. "have an opponent gain 3 life"), whose cost is shown.
  *
  * Candidate order is engine-owned (`players::opponents` seat order) — render as
  * received; do not re-sort on the client.
@@ -27,11 +30,17 @@ export function GiftRecipientModalContent({
 }: GiftRecipientModalContentProps) {
   const { t } = useTranslation("game");
   const candidates = waitingFor.data.candidates;
+  const purpose = waitingFor.data.purpose;
+  const effectCost = purpose?.type === "EffectCost" ? purpose.cost : null;
+  const title = effectCost ? t("costRecipient.title") : t("giftRecipient.title");
+  const subtitle = effectCost
+    ? t("costRecipient.subtitle", { cost: formatAbilityCost(effectCost) })
+    : t("giftRecipient.subtitle");
 
   return (
     <ChoiceModal
-      title={t("giftRecipient.title")}
-      subtitle={t("giftRecipient.subtitle")}
+      title={title}
+      subtitle={subtitle}
       options={candidates.map((opponent) => ({
         id: String(opponent),
         label: getOpponentDisplayName(opponent),

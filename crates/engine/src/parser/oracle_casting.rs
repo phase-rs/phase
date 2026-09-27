@@ -401,7 +401,9 @@ fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
 /// Parses both forms. The `"you may [verb-cost] rather than pay this spell's mana cost"`
 /// form is verb-agnostic: the cost text (with verb intact) is delegated to `parse_oracle_cost`,
 /// the single authority for cost parsing. This composes `pay {N}{C}`, `tap [filter]`,
-/// `sacrifice [filter]`, and any future cost verb uniformly without per-verb arms.
+/// `sacrifice [filter]`, and any future cost verb uniformly without per-verb arms. The
+/// swapped clause order "rather than pay this spell's mana cost, you may [verb-cost]"
+/// (Invigorate) is recognized by the same extractor.
 fn parse_self_alternative_cost_option(
     body: &str,
     body_lower: &str,
@@ -443,8 +445,19 @@ fn parse_self_alternative_cost_option(
     None
 }
 
+/// CR 118.9: the alternative-cost anchor phrase, shared by both clause orders.
+const RATHER_THAN_PAY: &str = "rather than pay this spell's mana cost";
+/// `RATHER_THAN_PAY` with its leading word separator (canonical "you may [cost] rather than
+/// pay …" order). Rust `const` can't `concat!` a `const`; a unit test pins the equality.
+const RATHER_THAN_PAY_SUFFIX: &str = " rather than pay this spell's mana cost";
+
 /// Extract the cost-text and optional trailing-`if` condition from a
-/// `"you may [verb-cost] rather than pay this spell's mana cost[ if [condition]]"` line.
+/// `"you may [verb-cost] rather than pay this spell's mana cost[ if [condition]]"` line, or
+/// from the swapped clause order `"rather than pay this spell's mana cost, you may [verb-cost]"`.
+///
+/// CR 118.9: alternative costs are usually phrased "You may [action] rather than pay [this
+/// object's] mana cost"; Oracle also prints "rather than pay this spell's mana cost, you may
+/// [action]" (Invigorate).
 ///
 /// Composed via nom `tag()` + `take_until()`: prefix is verb-agnostic so a single combinator
 /// handles `pay`, `tap`, `sacrifice`, and any future cost verb that `parse_oracle_cost`
@@ -456,20 +469,32 @@ fn extract_rather_than_pay_alt_cost<'a>(
     body_lower: &str,
 ) -> Option<(&'a str, Option<&'a str>)> {
     const PREFIX: &str = "you may ";
-    const SUFFIX: &str = " rather than pay this spell's mana cost";
+
+    // CR 118.9: swapped clause order — "rather than pay this spell's mana cost, you may [cost]".
+    // A leading "If …," was already split and gated by the caller. No trailing-`if` slot: in
+    // this order a trailing condition would sit inside the cost text.
+    if let Ok((cost_lower, _)) = preceded(
+        tag::<_, _, OracleError<'_>>(RATHER_THAN_PAY),
+        (opt(tag(",")), tag(" you may ")),
+    )
+    .parse(body_lower)
+    {
+        let cost_text = body[body.len() - cost_lower.len()..].trim();
+        return (!cost_text.is_empty()).then_some((cost_text, None));
+    }
 
     let (after_prefix_lower, _) = tag::<_, _, OracleError<'_>>(PREFIX)
         .parse(body_lower)
         .ok()?;
     let prefix_len = body_lower.len() - after_prefix_lower.len();
 
-    let (after_suffix_lower, _) = take_until::<_, _, OracleError<'_>>(SUFFIX)
+    let (after_suffix_lower, _) = take_until::<_, _, OracleError<'_>>(RATHER_THAN_PAY_SUFFIX)
         .parse(after_prefix_lower)
         .ok()?;
     let cost_end = body_lower.len() - after_suffix_lower.len();
 
     let cost_text = body[prefix_len..cost_end].trim();
-    let after_suffix_pos = cost_end + SUFFIX.len();
+    let after_suffix_pos = cost_end + RATHER_THAN_PAY_SUFFIX.len();
     let remainder_lower = &body_lower[after_suffix_pos..];
     let trailing_if =
         if let Ok((cond_lower, _)) = tag::<_, _, OracleError<'_>>(" if ").parse(remainder_lower) {
@@ -1987,6 +2012,106 @@ Trample";
                     .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Plains")) => {}
             other => panic!("expected TapCreatures + Plains-control condition, got {other:?}"),
         }
+    }
+
+    /// CR 118.9: the swapped clause order "rather than pay this spell's mana cost,
+    /// you may [cost]" (Invigorate, verbatim Oracle line 1) is an alternative cost,
+    /// gated by the leading "If you control a Forest," and costing
+    /// "have an opponent gain 3 life".
+    #[test]
+    fn alt_cost_swapped_clause_order_with_leading_if_invigorate() {
+        let option = parse_spell_casting_option_line(
+            "If you control a Forest, rather than pay this spell's mana cost, you may have an opponent gain 3 life.",
+            "Invigorate",
+        )
+        .expect("swapped-order alt-cost should parse");
+        assert_eq!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+        );
+        assert_eq!(
+            option.condition,
+            Some(
+                parse_restriction_condition("you control a Forest")
+                    .expect("Forest-control condition parses")
+            )
+        );
+        assert_eq!(
+            option.cost,
+            Some(AbilityCost::EffectCost {
+                effect: Box::new(crate::types::ability::Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::default()
+                            .controller(ControllerRef::Opponent)
+                    ),
+                }),
+            })
+        );
+    }
+
+    /// CR 118.9: the swapped order composes with any cost verb, unconditioned.
+    #[test]
+    fn alt_cost_swapped_clause_order_unconditioned_mana() {
+        let option = parse_spell_casting_option_line(
+            "Rather than pay this spell's mana cost, you may pay {0}.",
+            "Test Spell",
+        )
+        .expect("swapped-order alt-cost should parse");
+        assert_eq!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+        );
+        assert_eq!(option.condition, None);
+        assert!(
+            matches!(
+                option.cost,
+                Some(AbilityCost::Mana {
+                    cost: ManaCost::Cost { generic: 0, ref shards },
+                }) if shards.is_empty()
+            ),
+            "expected Mana {{0}}, got {:?}",
+            option.cost
+        );
+    }
+
+    /// CR 118.9 + CR 601.3d: an unrecognized leading-if predicate refuses the
+    /// swapped-order option (reach-guard: the unconditioned sibling above parses).
+    #[test]
+    fn alt_cost_swapped_clause_order_unrecognized_leading_if_refused() {
+        assert!(parse_spell_casting_option_line(
+            "Rather than pay this spell's mana cost, you may pay {0}.",
+            "Test Spell",
+        )
+        .is_some());
+        assert_eq!(
+            parse_spell_casting_option_line(
+                "If the sky is green, rather than pay this spell's mana cost, you may pay {0}.",
+                "Test Spell",
+            ),
+            None
+        );
+    }
+
+    /// The swapped order needs a cost after "you may"; the bare anchor phrase is not a cost.
+    #[test]
+    fn alt_cost_swapped_clause_order_without_cost_refused() {
+        assert_eq!(
+            parse_spell_casting_option_line(
+                "rather than pay this spell's mana cost, you may.",
+                "Test Spell",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_spell_casting_option_line("rather than pay this spell's mana cost", "Test Spell"),
+            None
+        );
+    }
+
+    #[test]
+    fn rather_than_pay_suffix_is_space_plus_anchor() {
+        assert_eq!(RATHER_THAN_PAY_SUFFIX, [" ", RATHER_THAN_PAY].concat());
     }
 
     #[test]

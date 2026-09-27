@@ -1963,6 +1963,10 @@
     "title": "Escolher destinatário do presente",
     "subtitle": "Escolha qual oponente recebe o presente prometido."
   },
+  "costRecipient": {
+    "title": "Escolha um oponente",
+    "subtitle": "Escolha o oponente para este custo: {{cost}}."
+  },
   "entryController": {
     "title": "Escolher controlador ao entrar",
     "subtitle": "Escolha qual oponente controla esta permanente ao entrar."
@@ -2264,7 +2268,8 @@
       "zoneExile": "o exílio",
       "zoneHand": "sua mão",
       "discard": "Descarte {{count}} {{cards}}",
-      "exile": "Exile {{count}} {{cards}} de {{zone}}"
+      "exile": "Exile {{count}} {{cards}} de {{zone}}",
+      "haveOpponentGainLife": "Faça um oponente ganhar {{amount}} pontos de vida"
     }
   },
   "topOrBottom": {

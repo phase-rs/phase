@@ -1963,6 +1963,10 @@
     "title": "Choisir le destinataire du cadeau",
     "subtitle": "Choisissez quel adversaire reçoit le cadeau promis."
   },
+  "costRecipient": {
+    "title": "Choisir un adversaire",
+    "subtitle": "Choisissez l'adversaire pour ce coût : {{cost}}."
+  },
   "entryController": {
     "title": "Choisir le contrôleur à l'arrivée",
     "subtitle": "Choisissez quel adversaire contrôle ce permanent à son arrivée."
@@ -2264,7 +2268,8 @@
       "zoneExile": "l’exil",
       "zoneHand": "votre main",
       "discard": "Défaussez-vous de {{count}} {{cards}}",
-      "exile": "Exilez {{count}} {{cards}} depuis {{zone}}"
+      "exile": "Exilez {{count}} {{cards}} depuis {{zone}}",
+      "haveOpponentGainLife": "Faites gagner {{amount}} points de vie à un adversaire"
     }
   },
   "topOrBottom": {

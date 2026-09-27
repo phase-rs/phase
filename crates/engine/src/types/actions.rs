@@ -237,9 +237,10 @@ pub enum GameAction {
     ChooseAnnouncingOpponent {
         opponent: PlayerId,
     },
-    /// CR 702.174a: The spell controller's answer to
-    /// `WaitingFor::ChooseGiftRecipient` — which opponent receives the promised
-    /// gift. `opponent` must be one of that prompt's `candidates`.
+    /// CR 601.2 + CR 115.10a: the caster's answer to `WaitingFor::ChooseGiftRecipient`
+    /// — which opponent is chosen for the prompt's `purpose` (Gift recipient,
+    /// CR 702.174a, or an effect-as-cost's player, CR 601.2h). `opponent` must be
+    /// one of the prompt's `candidates`.
     ChooseGiftRecipient {
         opponent: PlayerId,
     },

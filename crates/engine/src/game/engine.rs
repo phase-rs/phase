@@ -13024,12 +13024,13 @@ fn apply_non_priority_pass_action(
             }
             casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
         }
-        // CR 702.174a: Caster chose which opponent receives the promised Gift.
+        // CR 601.2 + CR 115.10a: caster chose the opponent for the prompt's purpose.
         (
             WaitingFor::ChooseGiftRecipient {
                 player,
                 candidates,
                 pending_cast,
+                purpose,
                 ..
             },
             GameAction::ChooseGiftRecipient { opponent },
@@ -13041,6 +13042,7 @@ fn apply_non_priority_pass_action(
                 (**pending_cast).clone(),
                 opponent,
                 candidates,
+                purpose,
                 &mut events,
             )?
         }

@@ -579,3 +579,52 @@ describe("spellCostDisplay", () => {
     expect(isReduced).toBe(false);
   });
 });
+
+// CR 118.9 + CR 118.3: Invigorate's alternative cost "have an opponent gain 3 life"
+// is an engine `EffectCost { GainLife { player: Typed(Opponent) } }`. The label is
+// display-only formatting of those engine fields.
+describe("formatAbilityCost — recipient effect-cost", () => {
+  const opponentGainsThree = {
+    type: "EffectCost",
+    effect: {
+      type: "GainLife",
+      amount: { type: "Fixed", value: 3 },
+      player: { type: "Typed", type_filters: [], controller: "Opponent", properties: [] },
+    },
+  };
+
+  it("labels the opponent life-gain cost", () => {
+    expect(formatAbilityCost(opponentGainsThree)).toBe("Have an opponent gain 3 life");
+  });
+
+  it("labels both sides of the alternative-cost choice", () => {
+    const choice: AdditionalCost = {
+      type: "Choice",
+      data: [
+        opponentGainsThree,
+        { type: "Mana", cost: { type: "Cost", generic: 2, shards: ["Green"] } },
+      ],
+    } as unknown as AdditionalCost;
+    const { options } = additionalCostChoices(choice);
+    expect(options.map((o) => o.label)).toEqual(["Have an opponent gain 3 life", "{2}{G}"]);
+  });
+
+  it("keeps the generic label for effect-costs it does not describe", () => {
+    expect(
+      formatAbilityCost({
+        type: "EffectCost",
+        effect: { type: "RevealHand", target: { type: "SelfRef" } },
+      }),
+    ).toBe("Activate");
+    expect(
+      formatAbilityCost({
+        type: "EffectCost",
+        effect: {
+          type: "GainLife",
+          amount: { type: "Fixed", value: 3 },
+          player: { type: "Controller" },
+        },
+      }),
+    ).toBe("Activate");
+  });
+});
