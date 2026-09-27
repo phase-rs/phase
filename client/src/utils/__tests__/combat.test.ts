@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { AttackTarget, GameObject, ObjectId } from "../../adapter/types";
+import type { AttackerInfo, AttackTarget, GameObject, ObjectId } from "../../adapter/types";
 import {
   buildGameObjectWithCoreTypes,
   buildObjectMap,
@@ -8,10 +8,13 @@ import {
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   attackTargetsForAttacker,
+  blockTargetSelection,
+  type BlockTargetStack,
   buildAttacks,
   commonAttackTargets,
   evenSplit,
   groupAttackers,
+  partitionBlockTargets,
 } from "../combat";
 
 const P1: AttackTarget = { type: "Player", data: 1 };
@@ -218,5 +221,188 @@ describe("buildAttacks", () => {
       [101, P1],
       [102, P1],
     ]);
+  });
+});
+
+function attacker(objectId: ObjectId, attackTarget: AttackTarget): AttackerInfo {
+  return { object_id: objectId, defending_player: 0, attack_target: attackTarget };
+}
+
+describe("partitionBlockTargets", () => {
+  const noAssignments = new Map<ObjectId, Set<ObjectId>>();
+
+  it("splits by attack target (player vs planeswalker)", () => {
+    const stacks = partitionBlockTargets([11, 12, 13, 14], 100, {
+      attackers: [attacker(11, P1), attacker(12, P1), attacker(13, PW), attacker(14, PW)],
+      blockerAssignments: noAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks[0]).toMatchObject({ ids: [11, 12], attackTarget: P1 });
+    expect(stacks[1]).toMatchObject({ ids: [13, 14], attackTarget: PW });
+  });
+
+  it("splits by other UI-assigned blockers, excluding the pending blocker itself", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([
+      [200, new Set([11])],
+      [100, new Set([11, 12, 13])],
+    ]);
+    const stacks = partitionBlockTargets([11, 12, 13], 100, {
+      attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1)],
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks.find((s) => s.ids.includes(11))).toMatchObject({ ids: [11], otherBlockerIds: [200] });
+    expect(stacks.find((s) => s.ids.includes(12))).toMatchObject({ ids: [12, 13], otherBlockerIds: [] });
+  });
+
+  it("splits by minimum-blocker count", () => {
+    const stacks = partitionBlockTargets([11, 12], 100, {
+      attackers: [attacker(11, P1), attacker(12, P1)],
+      blockerAssignments: noAssignments,
+      blockRequirements: { 12: { count: 2 } },
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks.find((s) => s.ids.includes(11))).toMatchObject({ minBlockers: 0 });
+    expect(stacks.find((s) => s.ids.includes(12))).toMatchObject({ minBlockers: 2 });
+  });
+
+  it("splits out the pending blocker's own must-block attackers", () => {
+    const blockerConstraints = { 100: { kind: "MustBlock" as const, attackers: [12] } };
+    const stacks = partitionBlockTargets([11, 12], 100, {
+      attackers: [attacker(11, P1), attacker(12, P1)],
+      blockerAssignments: noAssignments,
+      blockRequirements: undefined,
+      blockerConstraints,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks.find((s) => s.ids.includes(11))).toMatchObject({ mustBlock: false });
+    expect(stacks.find((s) => s.ids.includes(12))).toMatchObject({ mustBlock: true });
+  });
+
+  it("does not apply a must-block constraint named for a DIFFERENT blocker", () => {
+    const blockerConstraints = { 100: { kind: "MustBlock" as const, attackers: [12] } };
+    const stacks = partitionBlockTargets([11, 12], 200, {
+      attackers: [attacker(11, P1), attacker(12, P1)],
+      blockerAssignments: noAssignments,
+      blockRequirements: undefined,
+      blockerConstraints,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]).toMatchObject({ ids: [11, 12], mustBlock: false });
+  });
+
+  it("splits out members listed under the pending blocker in mustBeBlockedTargets, and does not split them for a different pending blocker whose entry omits them", () => {
+    const mustBeBlockedTargets = { 100: [12] };
+    const forPending = partitionBlockTargets([11, 12], 100, {
+      attackers: [attacker(11, P1), attacker(12, P1)],
+      blockerAssignments: noAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets,
+    });
+    expect(forPending).toHaveLength(2);
+    expect(forPending.find((s) => s.ids.includes(11))).toMatchObject({ mustBeBlocked: false });
+    expect(forPending.find((s) => s.ids.includes(12))).toMatchObject({ mustBeBlocked: true });
+
+    const forOtherBlocker = partitionBlockTargets([11, 12], 200, {
+      attackers: [attacker(11, P1), attacker(12, P1)],
+      blockerAssignments: noAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets,
+    });
+    expect(forOtherBlocker).toHaveLength(1);
+    expect(forOtherBlocker[0]).toMatchObject({ ids: [11, 12], mustBeBlocked: false });
+  });
+
+  it("keeps members already assigned to the pending blocker in their stack and reports them", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([11])]]);
+    const stacks = partitionBlockTargets([11, 12, 13], 100, {
+      attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1)],
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]).toMatchObject({ ids: [11, 12, 13], assignedIds: [11] });
+  });
+
+  it("sorts stacks and members ascending, keying each stack by its lowest member id", () => {
+    const stacks = partitionBlockTargets([13, 11, 12], 100, {
+      attackers: [attacker(11, P1), attacker(12, P1), attacker(13, P1)],
+      blockerAssignments: noAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]).toMatchObject({ key: "11", ids: [11, 12, 13] });
+  });
+
+  it("drops a candidate with no attacker record instead of guessing its target", () => {
+    const stacks = partitionBlockTargets([11, 99], 100, {
+      attackers: [attacker(11, P1)],
+      blockerAssignments: noAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0].ids).toEqual([11]);
+  });
+});
+
+describe("blockTargetSelection", () => {
+  function makeStack(overrides: Partial<BlockTargetStack> = {}): BlockTargetStack {
+    return {
+      key: "11",
+      ids: [11, 12, 13, 14],
+      count: 4,
+      attackTarget: P1,
+      otherBlockerIds: [],
+      minBlockers: 0,
+      mustBlock: false,
+      mustBeBlocked: false,
+      assignedIds: [11, 12],
+      ...overrides,
+    };
+  }
+
+  it("grows by adding the lowest-id unassigned members", () => {
+    expect(blockTargetSelection(makeStack(), 3)).toEqual([11, 12, 13]);
+    expect(blockTargetSelection(makeStack(), 4)).toEqual([11, 12, 13, 14]);
+  });
+
+  it("shrinks by dropping the highest-id already-assigned members", () => {
+    expect(blockTargetSelection(makeStack(), 1)).toEqual([11]);
+    expect(blockTargetSelection(makeStack(), 0)).toEqual([]);
+  });
+
+  it("clamps below 0 and above the stack size", () => {
+    expect(blockTargetSelection(makeStack(), -5)).toEqual([]);
+    expect(blockTargetSelection(makeStack(), 99)).toEqual([11, 12, 13, 14]);
+  });
+
+  it("is the identity at the current assigned count", () => {
+    expect(blockTargetSelection(makeStack(), 2)).toEqual([11, 12]);
   });
 });

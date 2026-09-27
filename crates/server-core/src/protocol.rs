@@ -3318,18 +3318,19 @@ mod tests {
         }
     }
 
-    /// `Effect::AdditionalPhase.after` is now an `ExtraPhaseAnchor`,
-    /// `DelayedTriggerCondition` gained `AtBeginningOfAddedPhase`, and scheduled
-    /// extra phases carry a `TurnSegment`; a v81 peer cannot parse any of
-    /// these, so it must be refused before it receives v82 state.
+    /// `WaitingFor::DeclareBlockers` gains `must_be_blocked_targets`
+    /// (CR 509.1c): the client renders it directly to reach a specific member
+    /// of a collapsed token pile, so a v82 peer must be refused before it
+    /// silently merges that member back into its siblings — a capability
+    /// bump like 60, not a parse bump.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_82_for_added_phase_anchoring() {
-        assert_eq!(PROTOCOL_VERSION, 82);
+    fn protocol_version_is_83_for_must_be_blocked_targets() {
+        assert_eq!(PROTOCOL_VERSION, 83);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3341,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_82_for_added_phase_anchoring` stays
+    /// `protocol_version_is_83_for_must_be_blocked_targets` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

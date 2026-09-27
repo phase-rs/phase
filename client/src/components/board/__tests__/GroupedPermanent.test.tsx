@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
@@ -10,15 +10,19 @@ import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObj
 import {
   buildGameState,
   buildPendingCast,
+  buildPlayers,
   buildTargetSelectionProgress,
   buildTargetSelectionSlot,
   buildTargetSelectionWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
 import { toCardProps } from "../../../viewmodel/cardProps.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../../viewmodel/battlefieldProps.ts";
+import { ActionButton } from "../ActionButton.tsx";
 import { BattlefieldRow } from "../BattlefieldRow.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
+import { getGroupRenderMode } from "../groupRenderMode.ts";
 import { GroupedPermanentDisplay } from "../GroupedPermanent.tsx";
+import { PermanentCard } from "../PermanentCard.tsx";
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
@@ -74,10 +78,12 @@ function renderGroup(options: {
   committedAttackerIds?: Set<number>;
   group?: GroupedPermanentType;
 } = {}) {
+  const group = options.group ?? makeGroup();
   return render(
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: new Set(),
+        blockableAttackerIds: new Set(),
         boardChoiceObjectIds: options.boardChoiceObjectIds ?? new Set(),
         committedAttackerIds: options.committedAttackerIds ?? new Set(),
         incomingAttackerCounts: new Map(),
@@ -90,9 +96,12 @@ function renderGroup(options: {
       }}
     >
       <GroupedPermanentDisplay
-        group={options.group ?? makeGroup()}
+        group={group}
         rowType="creatures"
-        manualExpanded={false}
+        renderMode={getGroupRenderMode(group, {
+          manualExpanded: false,
+          containsBlockableAttackerDuringBlockers: false,
+        })}
         onExpand={vi.fn()}
       />
     </BoardInteractionContext.Provider>,
@@ -104,6 +113,7 @@ function renderCreatureRow() {
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: new Set(),
+        blockableAttackerIds: new Set(),
         boardChoiceObjectIds: new Set(),
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
@@ -140,6 +150,7 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
       inspectedObjectId: null,
       combatMode: null,
       selectedAttackers: [],
+      pendingBlocker: null,
       blockerAssignments: new Map(),
       combatClickHandler: null,
       selectedCardIds: [],
@@ -395,22 +406,368 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     });
   });
 
-  it("auto-expands committed attackers during blocker declaration", () => {
-    const waitingFor: WaitingFor = {
+});
+
+// Through BattlefieldRow, not GroupedPermanentDisplay directly: BattlefieldRow
+// is the single computation of renderMode (D2), and its `blockableAttackerIds`
+// conjunct is what replaced the defect this suite used to encode — a group
+// containing the defender's OWN valid blockers could never legitimately share
+// a groupKey with a committed attacker (a group is per-controller), so that
+// fixture is gone rather than fixed.
+describe("BattlefieldRow render mode during blocker declaration", () => {
+  function renderRowWithContext(
+    group: GroupedPermanentType,
+    context: { blockableAttackerIds?: Set<number>; committedAttackerIds?: Set<number> } = {},
+  ) {
+    return render(
+      <BoardInteractionContext.Provider
+        value={{
+          activatableObjectIds: new Set(),
+          blockableAttackerIds: context.blockableAttackerIds ?? new Set(),
+          boardChoiceObjectIds: new Set(),
+          committedAttackerIds: context.committedAttackerIds ?? new Set(),
+          incomingAttackerCounts: new Map(),
+          manaTappableObjectIds: new Set(),
+          selectableSacrificeObjectIds: new Set(),
+          selectableManaCostCreatureIds: new Set(),
+          undoableTapObjectIds: new Set(),
+          validAttackerIds: new Set(),
+          validTargetObjectIds: new Set(),
+        }}
+      >
+        <BattlefieldRow groups={[group]} rowType="creatures" />
+      </BoardInteractionContext.Provider>,
+    );
+  }
+
+  beforeEach(() => {
+    useUiStore.setState({ combatMode: "blockers" });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("keeps a large blockable attacker pile collapsed during blocker declaration", () => {
+    const ids = [1, 2, 3, 4, 5, 6];
+    const { container } = renderRowWithContext(makeGroup(ids), {
+      blockableAttackerIds: new Set(ids),
+    });
+
+    const cards = container.querySelectorAll("[data-object-id]");
+    expect(cards).toHaveLength(1);
+    expect(cards[0].getAttribute("data-grouped-ids")).toBe(ids.join(" "));
+  });
+
+  it("expands a small blockable attacker group during blocker declaration", () => {
+    const ids = [1, 2, 3];
+    const { container } = renderRowWithContext(makeGroup(ids), {
+      blockableAttackerIds: new Set(ids),
+    });
+
+    expect(container.querySelectorAll("[data-object-id]")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Collapse Saproling group" })).toBeInTheDocument();
+  });
+
+  it("does not expand a small group whose attackers this player cannot block", () => {
+    const ids = [1, 2, 3];
+    const { container } = renderRowWithContext(makeGroup(ids), {
+      committedAttackerIds: new Set(ids),
+    });
+
+    // Staggered mode still mounts every member (like expanded — see the
+    // building-block comment on `getGroupRenderMode`), so member count alone
+    // does not distinguish the two; the badge does.
+    expect(container.querySelectorAll("[data-object-id]")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Expand Saproling group" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Collapse Saproling group" })).not.toBeInTheDocument();
+  });
+});
+
+// Real component path: <ActionButton/> (blocker click + Confirm), the pile
+// through <BattlefieldRow>, and the two blockers through <PermanentCard/>, all
+// under one BoardInteractionContext.Provider. The suite mocks only
+// game/dispatch.ts and card/CardImage.tsx (top of file); dispatchAction is the
+// observed seam. Fixture, verbatim as CR anchors:
+//   pile 11..15, controller 1 ("Scute Swarm"); attackers 11,12,13 -> Player 0
+//   (the local defender); 14,15 -> Planeswalker 50. Blockers 100 ("Grizzly
+//   Bears") and 101 ("Runeclaw Bear"), controller 0.
+//   valid_block_targets: {100: [12,13,14,15], 101: [11,12,13,14,15]}
+//   block_requirements: {15: {count: 2}} (CR 509.1b/702.111b)
+//   must_be_blocked_targets: {100: [13], 101: [13]} (CR 509.1c)
+// For blocker 100 this gives four singleton stacks — {12} You; {13} You +
+// must-be-blocked; {14} Planeswalker; {15} Planeswalker + Needs 2 — so 13 is
+// the non-lowest legal Player-target member for 100.
+describe("collapsed attacker pile blocker-assignment picker (integration)", () => {
+  const PILE_IDS = [11, 12, 13, 14, 15];
+
+  function attackerObject(id: number): GameObject {
+    return buildGameObject({
+      id,
+      card_id: 900,
+      name: "Scute Swarm",
+      owner: 1,
+      controller: 1,
+      power: 1,
+      toughness: 1,
+      card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Insect"] },
+      color: ["Green"],
+      base_power: 1,
+      base_toughness: 1,
+      base_color: ["Green"],
+      timestamp: id,
+    });
+  }
+
+  function blockerObject(id: number, name: string): GameObject {
+    return buildGameObject({
+      id,
+      card_id: 901 + id,
+      name,
+      owner: 0,
+      controller: 0,
+      power: 2,
+      toughness: 2,
+      card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Bear"] },
+      color: ["Green"],
+      base_power: 2,
+      base_toughness: 2,
+      base_color: ["Green"],
+      timestamp: id,
+    });
+  }
+
+  function pileGroup(): GroupedPermanentType {
+    return {
+      name: "Scute Swarm",
+      ids: PILE_IDS,
+      count: PILE_IDS.length,
+      representative: toCardProps(attackerObject(PILE_IDS[0])),
+      isUnboundedPile: false,
+    };
+  }
+
+  function blockersPrompt(
+    overrides: Partial<Extract<WaitingFor, { type: "DeclareBlockers" }>["data"]> = {},
+  ): WaitingFor {
+    return {
       type: "DeclareBlockers",
       data: {
         player: 0,
-        valid_blocker_ids: [1, 2, 3, 4, 5],
-        valid_block_targets: { 1: [99], 2: [99], 3: [99], 4: [99], 5: [99] },
+        valid_blocker_ids: [100, 101],
+        valid_block_targets: { 100: [12, 13, 14, 15], 101: [11, 12, 13, 14, 15] },
+        block_requirements: { 15: { count: 2 } },
+        must_be_blocked_targets: { 100: [13], 101: [13] },
+        ...overrides,
       },
     };
-    useGameStore.setState({
-      gameState: makeState(waitingFor),
-      waitingFor,
-    });
-    useUiStore.setState({ combatMode: "blockers" });
-    const { container } = renderGroup({ committedAttackerIds: new Set([2]) });
+  }
 
-    expect(container.querySelectorAll("[data-object-id]")).toHaveLength(5);
+  function renderBoard(waitingFor: WaitingFor) {
+    const objects = buildObjectMap(
+      ...PILE_IDS.map(attackerObject),
+      blockerObject(100, "Grizzly Bears"),
+      blockerObject(101, "Runeclaw Bear"),
+    );
+    const gameState = buildGameState({
+      objects,
+      battlefield: [...PILE_IDS, 100, 101],
+      players: buildPlayers([{ id: 0 }, { id: 1 }]),
+      waiting_for: waitingFor,
+      combat: {
+        attackers: [
+          { object_id: 11, defending_player: 0, attack_target: { type: "Player", data: 0 } },
+          { object_id: 12, defending_player: 0, attack_target: { type: "Player", data: 0 } },
+          { object_id: 13, defending_player: 0, attack_target: { type: "Player", data: 0 } },
+          { object_id: 14, defending_player: 0, attack_target: { type: "Planeswalker", data: 50 } },
+          { object_id: 15, defending_player: 0, attack_target: { type: "Planeswalker", data: 50 } },
+        ],
+        blocker_assignments: {},
+        blocker_to_attacker: {},
+        blockers_declared_by: [],
+        pending_blocker_declaration_events: [],
+        damage_assignments: {},
+        first_strike_done: false,
+        damage_step_index: null,
+        pending_damage: [],
+        regular_damage_done: false,
+      },
+    });
+    useGameStore.setState({ gameState, waitingFor, legalActions: [] });
+
+    return render(
+      <BoardInteractionContext.Provider
+        value={{
+          activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set([11, 12, 13, 14, 15]),
+          boardChoiceObjectIds: new Set(),
+          committedAttackerIds: new Set(PILE_IDS),
+          incomingAttackerCounts: new Map(),
+          manaTappableObjectIds: new Set(),
+          selectableSacrificeObjectIds: new Set(),
+          selectableManaCostCreatureIds: new Set(),
+          undoableTapObjectIds: new Set(),
+          validAttackerIds: new Set(),
+          validTargetObjectIds: new Set(),
+        }}
+      >
+        <ActionButton />
+        <BattlefieldRow groups={[pileGroup()]} rowType="creatures" />
+        <PermanentCard objectId={100} />
+        <PermanentCard objectId={101} />
+      </BoardInteractionContext.Provider>,
+    );
+  }
+
+  function clickPermanent(container: HTMLElement, id: number) {
+    fireEvent.click(container.querySelector(`[data-object-id="${id}"]`) as HTMLElement);
+  }
+
+  beforeEach(() => {
+    useUiStore.setState({
+      combatMode: null,
+      selectedAttackers: [],
+      pendingBlocker: null,
+      blockerAssignments: new Map(),
+      combatClickHandler: null,
+    });
+    vi.mocked(dispatchAction).mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("offers no picker on the pile before a blocker is pending", () => {
+    renderBoard(blockersPrompt());
+
+    expect(screen.queryByRole("button", { name: "Choose Scute Swarm token" })).not.toBeInTheDocument();
+  });
+
+  it("assigns the must-be-blocked stack member, not the lowest legal id", () => {
+    const { container } = renderBoard(blockersPrompt());
+
+    clickPermanent(container, 100);
+    fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
+
+    const groups = screen.getAllByRole("group");
+    const mustBeBlockedGroup = groups.find((g) => /Must be blocked/.test(g.getAttribute("aria-label") ?? ""));
+    expect(mustBeBlockedGroup).toBeDefined();
+
+    fireEvent.click(within(mustBeBlockedGroup!).getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (1)" }));
+
+    expect(dispatchAction).toHaveBeenLastCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: [[100, 13]] },
+    });
+  });
+
+  it("distinguishes stacks by attack target and by minimum-blocker count", () => {
+    const { container } = renderBoard(blockersPrompt());
+    clickPermanent(container, 100);
+    fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
+
+    const groupWhere = (predicate: (label: string) => boolean) =>
+      screen.getAllByRole("group").find((g) => predicate(g.getAttribute("aria-label") ?? ""))!;
+    const needsTwo = () => groupWhere((label) => label.includes("Needs 2"));
+    const plainPlaneswalker = () =>
+      groupWhere((label) => label.includes("(Planeswalker)") && !label.includes("Needs"));
+    const plainYou = () =>
+      groupWhere((label) => label.startsWith("You") && !label.includes("Must be blocked"));
+
+    fireEvent.click(within(needsTwo()).getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirm Blockers/ }));
+    expect(dispatchAction).toHaveBeenLastCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: [[100, 15]] },
+    });
+
+    fireEvent.click(within(needsTwo()).getByRole("button", { name: "-1" }));
+    fireEvent.click(within(plainPlaneswalker()).getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirm Blockers/ }));
+    expect(dispatchAction).toHaveBeenLastCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: [[100, 14]] },
+    });
+
+    fireEvent.click(within(plainPlaneswalker()).getByRole("button", { name: "-1" }));
+    fireEvent.click(within(plainYou()).getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirm Blockers/ }));
+    expect(dispatchAction).toHaveBeenLastCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: [[100, 12]] },
+    });
+  });
+
+  it("keeps a prior assignment when switching the pending blocker, and splits by other-assigned blockers", () => {
+    const { container } = renderBoard(blockersPrompt());
+    clickPermanent(container, 100);
+    fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
+    const groupWhere = (predicate: (label: string) => boolean) =>
+      screen.getAllByRole("group").find((g) => predicate(g.getAttribute("aria-label") ?? ""))!;
+    const plainYou = groupWhere((label) => label.startsWith("You") && !label.includes("Must be blocked"));
+    fireEvent.click(within(plainYou).getByRole("button", { name: "+1" }));
+
+    // Switch the pending blocker without confirming — 100 keeps its pick (12).
+    clickPermanent(container, 101);
+    const blockedByGroup = groupWhere((label) => label.includes("Blocked by Grizzly Bears"));
+    const unblockedGroup = groupWhere(
+      (label) => label.startsWith("You") && label.includes("Unblocked") && !label.includes("Must be blocked"),
+    );
+    expect(blockedByGroup).toBeDefined();
+    expect(unblockedGroup).toBeDefined();
+    expect(within(blockedByGroup).getByText("0 / 1")).toBeInTheDocument();
+    expect(within(unblockedGroup).getByText("0 / 1")).toBeInTheDocument();
+
+    fireEvent.click(within(unblockedGroup!).getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirm Blockers/ }));
+
+    expect(dispatchAction).toHaveBeenLastCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: expect.arrayContaining([[100, 12], [101, 11]]) },
+    });
+    const calls = vi.mocked(dispatchAction).mock.calls;
+    const call = calls[calls.length - 1][0] as {
+      data: { assignments: [number, number][] };
+    };
+    expect(call.data.assignments).toHaveLength(2);
+
+    // The blocked-count badge reflects both now-assigned pile members.
+    expect(screen.getByText("blk 2")).toBeInTheDocument();
+  });
+
+  it("assigns a blocker-side must-block requirement (no must-be-blocked axis)", () => {
+    const { container } = renderBoard(
+      blockersPrompt({
+        must_be_blocked_targets: {},
+        blocker_constraints: { 100: { kind: "MustBlock", attackers: [13] } },
+      }),
+    );
+    clickPermanent(container, 100);
+    fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
+
+    const mustBlockGroup = screen
+      .getAllByRole("group")
+      .find((g) => /Must block/.test(g.getAttribute("aria-label") ?? ""));
+    expect(mustBlockGroup).toBeDefined();
+
+    fireEvent.click(within(mustBlockGroup!).getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (1)" }));
+
+    expect(dispatchAction).toHaveBeenLastCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: [[100, 13]] },
+    });
+  });
+
+  it("offers no picker on the pile when the prompt belongs to another player", () => {
+    renderBoard(blockersPrompt({ player: 1 }));
+    // Isolate the waitingForPlayer gate from the (also-null, since ActionButton
+    // never enters "combat-blockers" mode for another player's prompt) combat
+    // mode: force combatMode as if a blocker were already pending.
+    useUiStore.setState({ pendingBlocker: 100, combatMode: "blockers" });
+
+    expect(screen.queryByRole("button", { name: "Choose Scute Swarm token" })).not.toBeInTheDocument();
   });
 });
