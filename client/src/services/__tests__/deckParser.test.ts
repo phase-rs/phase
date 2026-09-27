@@ -800,6 +800,42 @@ describe('sourcePrinting capture', () => {
     expect(result.main[0].count).toBe(3);
     expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
   });
+
+  it.each([
+    ['Hazmat Suit (Used)', 'UST', 'ust', '57'],
+    ['Imaginary Friends (Plane)', 'PSSC', 'pssc', '5'],
+    ['Math is for Blockers (Plane)', 'PSSC', 'pssc', '7'],
+  ])('keeps a parenthesized word that ends the card name: %s', (name, set, setCode, collectorNumber) => {
+    const result = detectAndParseDeck(`1 ${name} (${set}) ${collectorNumber}`);
+    expect(result.main).toEqual([{ count: 1, name, sourcePrinting: { setCode, collectorNumber } }]);
+  });
+
+  it('keeps a parenthesized word in the name when a finish or commander annotation trails the line', () => {
+    const foil = detectAndParseDeck('1 Hazmat Suit (Used) (UST) 57 *F*');
+    expect(foil.main).toEqual([
+      { count: 1, name: 'Hazmat Suit (Used)', sourcePrinting: { setCode: 'ust', collectorNumber: '57' } },
+    ]);
+
+    const commander = detectAndParseDeck(
+      '1 Imaginary Friends (Plane) (PSSC) 5 [Commander {top}]\n1 Sol Ring (SOC) 128',
+    );
+    expect(commander.commander).toEqual(['Imaginary Friends (Plane)']);
+  });
+
+  it('reads a parenthesized word with no set code after it as part of the name', () => {
+    const result = detectAndParseDeck('1 Hazmat Suit (Used)\n1 Sol Ring (SOC) 128');
+    expect(result.main).toEqual([
+      { count: 1, name: 'Hazmat Suit (Used)' },
+      { count: 1, name: 'Sol Ring', sourcePrinting: { setCode: 'soc', collectorNumber: '128' } },
+    ]);
+  });
+
+  it('takes the set parens before the collector number when a parenthesized annotation follows it', () => {
+    const result = detectAndParseDeck('1 Sol Ring (SOC) 128 (JP) [Ramp]');
+    expect(result.main).toEqual([
+      { count: 1, name: 'Sol Ring', sourcePrinting: { setCode: 'soc', collectorNumber: '128' } },
+    ]);
+  });
 });
 
 describe('deriveImportedDeckName', () => {
