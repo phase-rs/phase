@@ -64,6 +64,7 @@ import {
   DigModal,
   RevealModal,
   RippleBottomOrderModal,
+  RevealUntilBottomOrderModal,
   ScryModal,
   ArrangePlanarDeckTopModal,
   SurveilModal,
@@ -122,7 +123,7 @@ type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
 
-function effectZoneChoiceInteractionId(
+function selectionInteractionId(
   interaction: ViewerInteraction | null,
 ): InteractionId | null {
   for (const opportunity of interaction?.opportunities ?? []) {
@@ -157,8 +158,8 @@ export function CardChoiceModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const effectZoneInteractionId = useGameStore((s) =>
-    effectZoneChoiceInteractionId(s.viewerInteraction),
+  const activeSelectInteractionId = useGameStore((s) =>
+    selectionInteractionId(s.viewerInteraction),
   );
 
   if (!waitingFor) return null;
@@ -175,6 +176,17 @@ export function CardChoiceModal() {
       return (
         <RippleBottomOrderModal
           key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
+    case "RevealUntilBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RevealUntilBottomOrderModal
+          key={
+            activeSelectInteractionId ??
+            `${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`
+          }
           data={waitingFor.data}
         />
       );
@@ -245,7 +257,7 @@ export function CardChoiceModal() {
       if (getBoardChoiceView(waitingFor, objects)) return null;
       return (
         <EffectZoneModal
-          key={effectZoneInteractionId ?? effectZoneChoiceFallbackKey(waitingFor.data)}
+          key={activeSelectInteractionId ?? effectZoneChoiceFallbackKey(waitingFor.data)}
           data={waitingFor.data}
         />
       );

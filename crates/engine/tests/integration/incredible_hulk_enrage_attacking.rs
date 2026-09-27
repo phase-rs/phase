@@ -47,8 +47,8 @@ use engine::types::ability::{
 };
 use engine::types::counter::CounterType;
 use engine::types::game_state::ExtraPhase;
-use engine::types::identifiers::ObjectId;
-use engine::types::phase::Phase;
+use engine::types::identifiers::{ExtraPhaseId, ObjectId};
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 
 const HULK_ORACLE: &str = "Reach, trample\n\
 Enrage — Whenever The Incredible Hulk is dealt damage, put a +1/+1 counter on \
@@ -89,9 +89,14 @@ fn run_enrage(attacking: bool) -> EnrageOutcome {
     let source = scenario.add_creature(P1, "Damage Source", 2, 2).id();
     let mut runner = scenario.build();
 
-    // CR 500.10a: the additional-combat-phase guard only adds the phase to the
-    // controller's own turn — make Hulk's controller the active player.
+    // CR 508.1a: only the active player's creatures attack, so Hulk's controller
+    // is the active player.
     runner.state_mut().active_player = P0;
+    // CR 508.1k: a creature is attacking only during the combat phase, so Hulk is
+    // dealt damage in the combat damage step, and CR 500.8's "after this phase"
+    // is that combat phase (the added combat follows end of combat). Both cases
+    // share the step, so attacking-status stays the only variable.
+    runner.state_mut().phase = Phase::CombatDamage;
 
     // Pre-tap Hulk so the chained "untap him" rider has an observable to flip.
     // CR 508.1f: a declared attacker is normally tapped; for the not-attacking
@@ -139,9 +144,10 @@ fn run_enrage(attacking: bool) -> EnrageOutcome {
             .unwrap_or(0),
         extra_phase_scheduled: state.extra_phases.contains(&ExtraPhase {
             anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId(1),
         }),
         hulk_tapped: state.objects[&hulk].tapped,
     }

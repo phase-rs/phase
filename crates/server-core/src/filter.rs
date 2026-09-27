@@ -504,7 +504,7 @@ mod tests {
             enters_modified_if: None,
             duration: None,
         };
-        state.pending_mass_library_order_choice = Some(PendingMassLibraryOrderChoice {
+        state.pending_mass_library_order_choice = Some(Box::new(PendingMassLibraryOrderChoice {
             source_id: ObjectId(100),
             library_position: LibraryPosition::Bottom,
             track_exiled_by_source: false,
@@ -519,7 +519,7 @@ mod tests {
                     })
                     .collect(),
             }]),
-        });
+        }));
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
         match filtered.waiting_for {

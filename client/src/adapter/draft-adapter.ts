@@ -193,29 +193,9 @@ export type DraftStatus =
   | "Complete"
   | "Abandoned";
 
-/**
- * Every draft kind, as one runtime tuple the type is DERIVED from.
- *
- * The tuple exists because a type-guard body is not checked against its target
- * union: `function isDraftKind(v): v is DraftKind` compiles whether the body
- * enumerates six kinds or two, so a duplicated enumeration beside the union
- * goes silently narrow the moment a kind is added — and a persisted session of
- * the new kind is then discarded on resume with no error anywhere. Folding the
- * guard over this tuple makes the enumeration the type, so the class cannot
- * recur at the next widening. Never restate these members anywhere else;
- * derive from `DRAFT_KINDS`.
- */
-// @sync-with: crates/draft-core/src/types.rs `DraftKind::ALL`
-export const DRAFT_KINDS = [
-  "Quick",
-  "Premier",
-  "Traditional",
-  "Sealed",
-  "CommanderDraft",
-  "Winston",
-] as const;
-
-export type DraftKind = (typeof DRAFT_KINDS)[number];
+export { DRAFT_KINDS } from "./draftKinds";
+export type { DraftKind } from "./draftKinds";
+import type { DraftKind } from "./draftKinds";
 
 /**
  * View-safe source metadata from `draft_core::view::DraftSourceView`.

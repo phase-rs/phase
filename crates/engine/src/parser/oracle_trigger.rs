@@ -2,7 +2,9 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, one_of, space1};
-use nom::combinator::{all_consuming, consumed, eof, map, not, opt, peek, recognize, rest, value};
+use nom::combinator::{
+    all_consuming, consumed, eof, fail, map, not, opt, peek, recognize, rest, value,
+};
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -3078,6 +3080,7 @@ fn delayed_condition_contains_event_target(condition: &DelayedTriggerCondition) 
         }
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. } => false,
     }
 }
@@ -3390,7 +3393,11 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // in downstream ChangeZone sub-abilities.
     if matches!(
         effect,
-        Effect::RevealTop { .. } | Effect::Dig { .. } | Effect::RevealUntil { .. } | Effect::Clash
+        Effect::RevealTop { .. }
+            | Effect::Dig { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::Clash
+            | Effect::TurnFaceUp { .. }
     ) {
         return true;
     }
@@ -7156,6 +7163,7 @@ fn extract_if_condition_with_card_name(
         text,
         dying_subject,
         trigger_zone_change,
+        head_enters_battlefield,
     ) {
         return result;
     }
@@ -7518,10 +7526,19 @@ fn try_extract_zone_change_object_filter_condition(
     text: &str,
     dying_subject: Option<&TargetFilter>,
     trigger_zone_change: Option<(Zone, Zone)>,
+    head_enters_battlefield: bool,
 ) -> Option<(String, Option<TriggerCondition>)> {
     let (before, condition, rest) = scan_preceded(lower, |i| {
-        parse_zone_change_object_filter_condition(i, dying_subject, trigger_zone_change)
-    })?;
+        parse_zone_change_object_filter_condition(
+            i,
+            dying_subject,
+            trigger_zone_change,
+            head_enters_battlefield,
+        )
+    })
+    // CR 603.4: only an "if" immediately following the trigger condition
+    // is an intervening-if; trailing comparisons remain effect instructions.
+    .filter(|(before, _, _)| before.trim_start().is_empty())?;
     let next_char_is_boundary = rest
         .chars()
         .next()
@@ -7806,9 +7823,29 @@ fn entering_pt_vs_source_prop(stats: &[PtStat]) -> FilterProp {
 /// CR 603.10a look-back trigger, so `PtValueScope::Current` reads the post-layer
 /// P/T of both objects. Disjunction composes via `entering_pt_vs_source_prop`'s
 /// `FilterProp::AnyOf`; the single-stat form emits one `PtComparison`.
+///
+/// The subject may also be the demonstrative "that creature's" and the source
+/// side may elide the repeated stat ("if that creature's power is greater than
+/// ~'s", Pelt Collector) — the elided stat is the subject's own (CR 208.1).
+/// The condition shape follows the PROVEN trigger head, never a default:
+/// a dies head (`trigger_zone_change` is battlefield→graveyard, the split
+/// "or dies" half of Pelt Collector) has lost its event object, so the
+/// comparison is a CR 603.10a look-back on the dying creature's last
+/// battlefield P/T against the source's current P/T; an enters head
+/// (`head_enters_battlefield`) keeps the enters-the-battlefield shape above.
+/// Any other head ("becomes tapped", "attacks") is declined: an entry-only
+/// `ZoneChangeObjectMatchesFilter` can never match its event, so hoisting the
+/// clause there would silently kill the trigger (CR 603.4 checks the condition
+/// on the trigger's OWN event). The clause stays honestly unsupported instead.
 fn parse_entering_pt_vs_source_possessive_condition(
     input: &str,
+    trigger_zone_change: Option<(Zone, Zone)>,
+    head_enters_battlefield: bool,
 ) -> OracleResult<'_, TriggerCondition> {
+    let head_dies = trigger_zone_change == Some((Zone::Battlefield, Zone::Graveyard));
+    if !head_dies && !head_enters_battlefield {
+        return fail().parse(input);
+    }
     // Consume the leading "if " so the whole intervening-if clause (including the
     // keyword) is stripped from the effect text — the disjunct combinator below
     // starts at "its ".
@@ -7826,6 +7863,9 @@ fn parse_entering_pt_vs_source_possessive_condition(
         rest = next;
     }
     let prop = entering_pt_vs_source_prop(&stats);
+    if head_dies {
+        return Ok((rest, dies_lookback_condition(vec![prop], false)));
+    }
     Ok((
         rest,
         TriggerCondition::ZoneChangeObjectMatchesFilter {
@@ -7836,17 +7876,33 @@ fn parse_entering_pt_vs_source_possessive_condition(
     ))
 }
 
-/// CR 208.1: One possessive disjunct "its <stat> is greater than ~'s <stat>".
-/// Both apostrophe forms (`'s`, `\u{2019}s`) are accepted; the source-side stat
-/// word must equal the subject-side stat, rejecting cross-stat comparisons (which
-/// no card prints and which would otherwise read the wrong source stat).
+/// CR 208.1: One possessive disjunct "(its | that creature's) <stat> is greater
+/// than ~'s [<stat>]". Both apostrophe forms (`'s`, `\u{2019}s`) are accepted; a
+/// source-side stat word, when printed, must equal the subject-side stat,
+/// rejecting cross-stat comparisons (which no card prints and which would
+/// otherwise read the wrong source stat). An elided source stat ("greater than
+/// ~'s", Pelt Collector) is the subject's stat and must end at a word boundary.
 fn parse_entering_pt_vs_source_possessive_disjunct(input: &str) -> OracleResult<'_, PtStat> {
-    let (rest, _) = tag("its ").parse(input)?;
+    let (rest, _) = alt((
+        tag("its "),
+        tag("that creature's "),
+        tag("that creature\u{2019}s "),
+    ))
+    .parse(input)?;
     let (rest, stat) = parse_pt_stat_word(rest)?;
     let (rest, _) = tag(" is greater than ~").parse(rest)?;
-    let (rest, _) = alt((tag("'s "), tag("\u{2019}s "))).parse(rest)?;
-    let (rest, source_stat) = parse_pt_stat_word(rest)?;
-    if source_stat != stat {
+    let (rest, _) = alt((tag("'s"), tag("\u{2019}s"))).parse(rest)?;
+    if let Ok((after_stat, source_stat)) = preceded(tag(" "), parse_pt_stat_word).parse(rest) {
+        if source_stat != stat {
+            return Err(oracle_err(input));
+        }
+        return Ok((after_stat, stat));
+    }
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
         return Err(oracle_err(input));
     }
     Ok((rest, stat))
@@ -8029,12 +8085,17 @@ fn parse_zone_change_object_filter_condition<'a>(
     input: &'a str,
     dying_subject: Option<&TargetFilter>,
     trigger_zone_change: Option<(Zone, Zone)>,
+    head_enters_battlefield: bool,
 ) -> OracleResult<'a, TriggerCondition> {
     // CR 603.6a: possessive entering-object P/T-vs-source ("if its power is
     // greater than ~'s power ...", Sharp-Eyed Rookie). Both new "if its ..."
     // surfaces are disjoint from the existing "if it has greater"/"if it '..."
     // arms (the trailing "s" of "its" excludes the "if it " predicate arm).
-    if let Ok((rest, condition)) = parse_entering_pt_vs_source_possessive_condition(input) {
+    if let Ok((rest, condition)) = parse_entering_pt_vs_source_possessive_condition(
+        input,
+        trigger_zone_change,
+        head_enters_battlefield,
+    ) {
         return Ok((rest, condition));
     }
     // CR 603.10a: dying-object P/T-vs-fixed ("if its toughness was less than 1",
@@ -14025,9 +14086,14 @@ fn try_parse_event(
         /// stack (e.g. Huge Truck "becomes the target of a backup ability").
         BecomesTargetBackupAbility,
         /// CR 115.1a + CR 602.2b: the targeting source is an ability (not a spell)
-        /// on the stack — "becomes the target of an ability [you control]". Loki,
-        /// God of Mischief.
-        BecomesTargetAbility,
+        /// on the stack — "becomes the target of an ability [you control]" (Loki,
+        /// God of Mischief) or, narrowed by kind, "…of an activated ability"
+        /// (Professor Hojo) / "…of a triggered ability". `kind` is the CR 113.3b vs
+        /// CR 113.3c distinction the text names; `None` is the unqualified form,
+        /// which admits both kinds.
+        BecomesTargetAbility {
+            kind: Option<crate::types::ability::StackAbilityKind>,
+        },
         /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: Passive-voice
         /// damage-received event, decomposed into its independent grammatical axes
         /// instead of one variant per cell of their product. Replaces the former
@@ -14341,16 +14407,35 @@ fn try_parse_event(
             value(SimpleEvent::Saddles, tag("saddles a mount")),
         )))
         .or(alt((
-            // CR 115.1a + CR 602.2b: "becomes the target of an ability [you control]".
+            // CR 115.1a + CR 602.2b: "become(s) the target of an ability [you control]".
             // Ability-only source (excludes spells) — distinct from the spell-or-
             // ability arm. Placed in this THIRD `.or(alt(..))` block because the
             // second block is at nom 8.0's 21/21 `alt` tuple-arity ceiling. Loki,
             // God of Mischief. The trailing controller/source clause is validated by
             // the dispatch arm's remaining-empty guard (rejects source-restricted
             // siblings like Skophos Maze-Warden / Agrus Kos).
-            value(
-                SimpleEvent::BecomesTargetAbility,
-                tag("becomes the target of an ability"),
+            //
+            // Composed, not enumerated: the verb number (singular / plural subject)
+            // and the ability kind are independent axes, so each is one `alt`.
+            // CR 113.3b / CR 113.3c: "activated" and "triggered" narrow the source
+            // to that one kind (Professor Hojo reads "…of an activated ability");
+            // the bare "an ability" admits both.
+            map(
+                preceded(
+                    (alt((tag("becomes"), tag("become"))), tag(" the target of ")),
+                    alt((
+                        value(
+                            Some(crate::types::ability::StackAbilityKind::Activated),
+                            tag("an activated ability"),
+                        ),
+                        value(
+                            Some(crate::types::ability::StackAbilityKind::Triggered),
+                            tag("a triggered ability"),
+                        ),
+                        value(None, tag("an ability")),
+                    )),
+                ),
+                |kind| SimpleEvent::BecomesTargetAbility { kind },
             ),
             // CR 702.26c: "phases in" / "phase in" — phasing trigger.
             value(SimpleEvent::PhasesIn, tag("phases in")),
@@ -14449,7 +14534,7 @@ fn try_parse_event(
             // and Agrus Kos ("...of an ability that targets only it...") — instead of
             // silently dropping the restriction and over-firing. Scoped to THIS arm
             // only; the shared spell-or-ability arms are untouched.
-            SimpleEvent::BecomesTargetAbility => {
+            SimpleEvent::BecomesTargetAbility { kind } => {
                 let (controller, tail) = parse_target_source_controller_tail(remaining);
                 if !tail.trim().is_empty() {
                     return None;
@@ -14458,10 +14543,15 @@ fn try_parse_event(
                 // CR 110.1: scope the permanent leaf to the battlefield so a targeted
                 // graveyard/exile card (also a TargetRef::Object) does not fire.
                 set_trigger_subject(&mut def, &battlefield_scope_permanent(subject));
+                // CR 113.3b / CR 113.3c: carry the printed kind so "an activated
+                // ability" does not fire on a triggered ability that targets the
+                // subject. `StackEntryKind::matches_stack_ability_kind` enforces it at
+                // match time, including against the virtual stack projection of an
+                // in-flight activation (`install_virtual_targeting_source`).
                 def.valid_source = Some(TargetFilter::StackAbility {
                     controller,
                     tag: None,
-                    kind: None,
+                    kind,
                 });
             }
             // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10: the channel axis

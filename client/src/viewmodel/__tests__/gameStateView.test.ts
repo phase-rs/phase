@@ -1167,6 +1167,7 @@ const PARTITION_FIXTURES: Record<
   UnlessBounceChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseRingBearer: NO_TARGET_REF_LEGAL_SET,
   RevealUntilKeptChoice: NO_TARGET_REF_LEGAL_SET,
+  RevealUntilBottomOrder: NO_TARGET_REF_LEGAL_SET,
   RepeatDecision: NO_TARGET_REF_LEGAL_SET,
   TopOrBottomChoice: NO_TARGET_REF_LEGAL_SET,
   PopulateChoice: NO_TARGET_REF_LEGAL_SET,

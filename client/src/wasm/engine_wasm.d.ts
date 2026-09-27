@@ -38,6 +38,13 @@ export function buildLlmProbeRequest(endpoint_json: string): any;
 export function build_ai_card_subset(): string;
 
 /**
+ * The canonical printed name of each of `names`, index-aligned, `null` where
+ * `CardDatabase::canonical_name` has none. Errors if the card database is
+ * not loaded.
+ */
+export function canonicalCardNames(names: any): any;
+
+/**
  * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
  * `phase_ai::DeckProfile::analyze`. The engine is the single authority for archetype
  * classification — the frontend must not compute this from card lists itself.
@@ -704,6 +711,7 @@ export interface InitOutput {
     readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly buildLlmProbeRequest: (a: number, b: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
+    readonly canonicalCardNames: (a: any) => [number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];

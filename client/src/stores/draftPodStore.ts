@@ -18,6 +18,7 @@ import { create } from "zustand";
 import i18n from "i18next";
 
 import { DraftAdapter, distinctJoined, setPackSequence, type CubeDraftSettings, type DraftProcedure, type PackDistribution, type PoolInput, type SetLayoutKind, type SetPackSequence, type TournamentFormat, type PodPolicy } from "../adapter/draft-adapter";
+import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import type { DraftPackChoice } from "./draftStore";
 import type { DraftPodHostConfig, DraftPodListing } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
@@ -88,9 +89,6 @@ export function podListingEligible(podSize: number): boolean {
 export const LOBBY_HOST_NAME_MAX_CHARS = 20;
 export const LOBBY_LABEL_MAX_CHARS = 40;
 export const LOBBY_PASSWORD_MAX_BYTES = 128;
-
-/** Sentinel `draft_metadata.setCode` for a cube pod. */
-const CUSTOM_CUBE_SET_CODE = "custom-cube";
 
 /** A pool source that can carry a truthful lobby-listing label. The legacy
  * `{ set_pool_json }` Set spelling carries no set code to list. */

@@ -752,6 +752,20 @@ fn printed_in_any_set(db: &CardDatabase, name: &str, sets: &[SetCode]) -> bool {
     })
 }
 
+/// Every name in a Limited deck must resolve before game admission.
+/// A draft session applies its configured minimum at submission; this
+/// generic gate has no session provenance from which to recover that minimum.
+fn evaluate_limited(unknown_cards: &BTreeSet<String>) -> CompatibilityCheck {
+    let mut reasons = Vec::new();
+    if !unknown_cards.is_empty() {
+        reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
+    }
+    CompatibilityCheck {
+        compatible: reasons.is_empty(),
+        reasons,
+    }
+}
+
 /// Shared validation for constructed-shaped formats (Standard, Pioneer,
 /// Pauper, etc., and — since Phase 1d — a non-command-zone custom format):
 /// checks unknown cards, no commander slot, the format's own deck-size rule,
@@ -2653,8 +2667,14 @@ fn evaluate_selected_format_summary(
         GameFormat::Brawl | GameFormat::HistoricBrawl => {
             quick_brawl_check(db, request, &format.label(), &format_rules)
         }
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
-            QuickCheckResult::compatible()
+        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => QuickCheckResult::compatible(),
+        GameFormat::Limited => {
+            let unknown_cards = collect_unknown_cards(db, request);
+            let check = evaluate_limited(&unknown_cards);
+            QuickCheckResult {
+                reason: check.reasons.into_iter().next(),
+                unknown_cards,
+            }
         }
         // Phase 1d: reachable for a `Resolved` Custom config (the early guard
         // above only answers "no opinion" for an unresolvable bare
@@ -3175,7 +3195,14 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
-        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
+        GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => true,
+        GameFormat::Limited => {
+            let check = evaluate_limited(unknown_cards);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
         // Phase 1d: reachable for a `Resolved` Custom config (the early guard
         // above only fails closed for an unresolvable bare `Tag(Custom(_))`),
         // and delegates to the real evaluator.
@@ -5613,6 +5640,88 @@ mod tests {
         let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
         assert_eq!(counts.get("nazgûl"), Some(&10));
         assert!(!copy_limit_violations(&db, &counts, DeckCopyLimit::UpTo(1)).is_empty());
+    }
+
+    #[test]
+    fn slash_spellings_are_known_and_share_one_copy_count() {
+        let db_json = serde_json::json!({
+            "summon: choco/mog": {
+                "name": "Summon: Choco/Mog",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            "revival": {
+                "name": "Revival",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            "revenge": {
+                "name": "Revenge",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            // Supports the request's commander field so it does not itself
+            // register as unknown and pollute the assertion below.
+            "legal commander": {
+                "name": "Legal Commander",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            }
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+
+        let mut main = expand("Summon: Choco/Mog", 3);
+        main.extend(expand("Summon: Choco // Mog", 2));
+        main.extend(expand("Revival/Revenge", 3));
+        main.extend(expand("Revival // Revenge", 2));
+        main.extend(expand("Summon: Choco", 1));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: None,
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let unknown: Vec<String> = collect_unknown_cards(&db, &request).into_iter().collect();
+        assert_eq!(unknown, vec!["Summon: Choco".to_string()]);
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
+        assert_eq!(counts.get("summon: choco/mog"), Some(&5));
+        assert_eq!(counts.get("revival"), Some(&5));
+
+        let violations = copy_limit_violations(&db, &counts, DeckCopyLimit::UpTo(4));
+        assert!(violations.contains("Summon: Choco/Mog (5 copies)"));
+        assert!(violations.contains("Revival (5 copies)"));
+        assert_eq!(
+            violations.len(),
+            2,
+            "exactly these two names exceed the cap"
+        );
     }
 
     #[test]
