@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  66 — game_setup and state_update carry GameEvent[] and can now carry
+ *       DieRollIgnored { player_id, sides, result }. Older peers omit ignored
+ *       dice from the roll overlay; the exact-match first-contact gate rejects
+ *       the skew. Bumped in lockstep with full-game protocol 84.
  *  65 — game_setup and state_update carry GameState, whose reduce-ability-cost
  *       statics can now carry a target restriction and a once-per-turn
  *       frequency, whose per-turn activation journal records each turn's
@@ -436,7 +440,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 65 as const;
+export const WIRE_PROTOCOL_VERSION = 66 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

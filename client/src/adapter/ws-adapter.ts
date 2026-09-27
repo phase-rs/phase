@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 84 — GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
+ *      display event. StateUpdate carries GameEvent[]; older peers would
+ *      accept the connection but omit ignored dice from the roll overlay.
+ *      P2P moves in lockstep; lobby messages are unchanged.
  * 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
  *      Kopala): ReduceAbilityCost statics carry targets and frequency,
  *      GameState journals each turn's activations, and the activation cost
@@ -571,7 +575,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 83;
+export const PROTOCOL_VERSION = 84;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
