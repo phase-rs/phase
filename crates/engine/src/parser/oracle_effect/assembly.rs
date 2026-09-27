@@ -81,11 +81,12 @@ use super::{
     has_explicit_player_target, inject_chosen_color_choice_grant,
     inject_printed_color_choice_filter, mark_uses_tracked_set, nearest_publisher_is_self_move,
     parse_spell_graveyard_replacement_rider,
-    parse_spells_cast_this_way_graveyard_replacement_rider,
+    parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
     resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
+    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
+    rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
     rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
     singular_battlefield_recall, stamp_delayed_returns, try_fold_token_repeat_into_count,
     wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
@@ -3475,6 +3476,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     // and mass-publisher recalls keep the chain tracked set.
                     let singular_self_recall = singular_battlefield_recall(&source_text_lower)
                         && nearest_publisher_is_self_move(&defs);
+                    let plural_library_recall = plural_library_shuffle_recall(&source_text_lower);
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
                         // Per-def branch: only a battlefield-recall-shaped leg
@@ -3492,6 +3494,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         {
                             rewrite_singular_battlefield_recall_to_self(&mut current.effect);
                         } else {
+                            if plural_library_recall {
+                                rewrite_plural_library_recall_to_tracked_set(&mut current.effect);
+                            }
                             rewrite_parent_targets_to_tracked_set(
                                 &mut current.effect,
                                 cast_anaphor_is_exiled,

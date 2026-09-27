@@ -14,7 +14,7 @@ use crate::types::game_state::{ExtraPhase, GameState};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
-use crate::types::phase::Phase;
+use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit,
@@ -5024,7 +5024,8 @@ fn declaration_pending_at_current_phase(state: &GameState) -> bool {
 /// Conservative in one direction only. It answers from the current game state,
 /// so an additional combat no effect has scheduled yet reads as absent, and a
 /// scheduled entry whose anchor phase has already passed still reads as pending
-/// (the entry filter is `extra.phase == Phase::BeginCombat`, the same one
+/// (the entry filter is `extra.segment == TurnSegment::Phase(PhaseGroup::Combat)`,
+/// a whole added combat phase, the same one
 /// `analysis/resource.rs` counts queued extra combats with; anchor reachability
 /// is not modelled).
 pub fn attacker_declaration_pending_for(state: &GameState, obj_id: ObjectId) -> bool {
@@ -5044,7 +5045,7 @@ pub fn attacker_declaration_pending_for(state: &GameState, obj_id: ObjectId) -> 
         return true;
     }
     state.extra_phases.iter().any(|extra| {
-        extra.phase == Phase::BeginCombat
+        extra.segment == TurnSegment::Phase(PhaseGroup::Combat)
             && team_attacker_eligible(
                 state,
                 obj_id,
@@ -8343,7 +8344,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::format::FormatConfig;
-    use crate::types::identifiers::CardId;
+    use crate::types::identifiers::{CardId, ExtraPhaseId};
 
     /// CR 118.12a: pins the runtime combat-tax mode set against the parser-facing
     /// mode axis it is mirrored by.
@@ -15162,11 +15163,12 @@ mod tests {
 
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::PostCombatMain,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: Some(TargetFilter::Typed(
                 TypedFilter::land().with_type(TypeFilter::Creature),
             )),
             attacker_restriction_source: Some(source),
+            id: ExtraPhaseId::default(),
         });
         assert!(!attacker_declaration_pending_for(&state, plain));
         assert!(attacker_declaration_pending_for(&state, land_creature));
@@ -15175,9 +15177,10 @@ mod tests {
         state.extra_phases.clear();
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::PostCombatMain,
-            phase: Phase::Untap,
+            segment: TurnSegment::Phase(PhaseGroup::Beginning),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId::default(),
         });
         assert!(!attacker_declaration_pending_for(&state, plain));
         assert!(!attacker_declaration_pending_for(&state, land_creature));
@@ -15193,9 +15196,10 @@ mod tests {
         // queued combat reopens the window for both creatures.
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::PostCombatMain,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId::default(),
         });
         assert!(attacker_declaration_pending_for(&state, plain));
         assert!(attacker_declaration_pending_for(&state, land_creature));
@@ -15237,17 +15241,19 @@ mod tests {
 
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::PostCombatMain,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: Some(TargetFilter::Typed(
                 TypedFilter::land().with_type(TypeFilter::Creature),
             )),
             attacker_restriction_source: Some(source),
+            id: ExtraPhaseId::default(),
         });
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::PostCombatMain,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: Some(TargetFilter::SpecificObject { id: named }),
             attacker_restriction_source: Some(source),
+            id: ExtraPhaseId::default(),
         });
 
         assert!(!attacker_declaration_pending_for(&state, plain));
@@ -15282,9 +15288,10 @@ mod tests {
 
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::PostCombatMain,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId::default(),
         });
 
         assert!(attacker_declaration_pending_for(&state, plain));

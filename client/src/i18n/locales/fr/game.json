@@ -1797,6 +1797,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Mettez le reste en dessous",
+      "subtitle_one": "Mettez {{count}} carte révélée au-dessous de votre bibliothèque",
+      "subtitle_other": "Mettez {{count}} cartes révélées au-dessous de votre bibliothèque, dans l'ordre de votre choix",
+      "hint": "Faites glisser pour réorganiser · la position 1 se retrouve au-dessus de ce tas",
+      "moveLeft": "Déplacer vers la gauche",
+      "moveRight": "Déplacer vers la droite"
     }
   },
   "specializeColor": {
@@ -1908,6 +1916,10 @@
     "prowlNormalLabel": "Lancer normalement",
     "prowlAltLabel": "Lancer avec Prowl",
     "prowlSubtitle": "Lancez {{name}} normalement, ou payez son coût de Prowl (disponible parce qu'une créature correspondante a infligé des blessures de combat à un joueur ce tour-ci).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Lancer normalement",
+    "surgeAltLabel": "Lancer avec Surge",
+    "surgeSubtitle": "Lancez {{name}} normalement, ou payez son coût de Surge (disponible parce que vous ou un coéquipier avez lancé un autre sort ce tour-ci).",
     "overloadEyebrow": "Surcharge",
     "overloadNormalLabel": "Lancer normalement",
     "overloadAltLabel": "Lancer avec Surcharge",

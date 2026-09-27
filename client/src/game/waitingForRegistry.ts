@@ -115,6 +115,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ScryChoice",
     "RippleRevealChoice",
     "RippleBottomOrder",
+    "RevealUntilBottomOrder",
     "ArrangePlanarDeckTopChoice",
     "CoinFlipKeepChoice",
     "DieKeepChoice",

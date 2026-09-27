@@ -1753,12 +1753,12 @@ fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
 
 /// CR 702.137a: Spectacle's gate — whether any opponent of `caster` lost life
 /// this turn. Mirrors the existing `LifeLostThisTurn`/"an opponent lost life"
-/// predicate (see `game/quantity.rs`) so no new state tracking is introduced.
+/// predicate (see `game/quantity.rs`) so no new state tracking is introduced;
+/// like it, a Two-Headed Giant teammate is not an opponent (CR 102.3).
 fn an_opponent_lost_life_this_turn(state: &GameState, caster: PlayerId) -> bool {
-    state
-        .players
-        .iter()
-        .any(|p| p.id != caster && p.life_lost_this_turn > 0)
+    state.players.iter().any(|p| {
+        crate::game::players::is_opponent(state, caster, p.id) && p.life_lost_this_turn > 0
+    })
 }
 
 /// CR 702.76a: Prowl's gate — whether `player` controlled a creature that dealt
@@ -14129,6 +14129,45 @@ pub fn handle_prowl_cost_choice_with_payment_mode(
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
 }
 
+/// CR 702.117a + CR 601.2b: Resolve the player's Normal-vs-Surge choice.
+/// `Alternative` takes the variant and face from the same authority that
+/// offered them (`casting_variant_choice_set`) rather than from the prompt;
+/// the missing-option error is defensive only — nothing changes state
+/// between the prompt and this answer. `Normal` casts for the printed cost.
+pub fn handle_surge_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            let option = casting_variant_choice_set(state, player, object_id, None)
+                .options
+                .into_iter()
+                .find(|option| option.variant == CastingVariant::Surge)
+                .ok_or_else(|| {
+                    EngineError::ActionNotAllowed("Surge cost is not available".to_string())
+                })?;
+            continue_cast_with_variant(
+                state,
+                player,
+                object_id,
+                option.variant,
+                option.face,
+                payment_mode,
+                events,
+            )
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
 /// Shared continuation: call prepare_spell_cast and run the standard casting
 /// pipeline (modal → targeting → payment). Extracted so handle_warp_cost_choice
 /// and handle_cast_spell can share the same post-prepare logic.
@@ -15731,7 +15770,9 @@ pub fn handle_cast_spell_with_payment_mode(
     // cost-choice handler: ExilePermission and Freerunning. The fall-through below
     // routes single-candidate Warp/Evoke/Dash hand casts through their own
     // cost-choice `WaitingFor` handlers; electing those here would preempt those
-    // prompts. Widen only after auditing those handlers for pre-election.
+    // prompts. Widen only after auditing those handlers for pre-election. Surge
+    // is deliberately not pre-elected here: the block below offers normal vs.
+    // Surge itself.
     if let Some(option) = variant_choices.options.first().filter(|option| {
         matches!(
             option.variant,
@@ -15744,6 +15785,49 @@ pub fn handle_cast_spell_with_payment_mode(
             object_id,
             option.variant,
             option.face,
+            payment_mode,
+            events,
+        );
+    }
+
+    // CR 702.117a + CR 118.9 + CR 601.2b: Surge — the sole prepared option is the
+    // surge variant (the candidate gate already required a hand card with an
+    // effective Surge keyword and another spell cast this turn by the caster or a
+    // teammate; `can_cast_prepared_now` already proved the surge cost payable).
+    // Offer the printed cost alongside it when that is payable too; otherwise the
+    // surge cost is the only way to cast it, so elect it directly.
+    if let Some(option) = variant_choices
+        .options
+        .first()
+        .filter(|option| option.variant == CastingVariant::Surge)
+    {
+        let (variant, face, surge_cost) = (option.variant, option.face, option.mana_cost.clone());
+        let obj = state.objects.get(&object_id).ok_or_else(|| {
+            EngineError::InvalidAction(format!("Object {object_id:?} does not exist"))
+        })?;
+        // CR 601.2f + CR 118.9a: the shared normal-path authority (cost modifiers,
+        // free-cast permissions, unpayable NoCost).
+        let (normal_cost, normal_affordable) =
+            normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
+        if normal_affordable {
+            return Ok(WaitingFor::AlternativeCastChoice {
+                player,
+                object_id,
+                card_id,
+                payment_mode,
+                keyword: crate::types::game_state::AlternativeCastKeyword::Surge,
+                normal_cost,
+                alternative_cost: Some(surge_cost),
+                alternative_additional_cost: None,
+                alternative_additional_cost_description: None,
+            });
+        }
+        return continue_cast_with_variant(
+            state,
+            player,
+            object_id,
+            variant,
+            face,
             payment_mode,
             events,
         );
@@ -22458,7 +22542,13 @@ fn activation_cost_passes_early_affordability_gate(
     cost: &AbilityCost,
     ability_index: usize,
 ) -> bool {
-    if find_one_of_cost(cost).is_some() {
+    if let Some(locked) =
+        super::costs::lock_half_life_activation_cost(state, player, source_id, cost)
+    {
+        // CR 601.2f + CR 602.2b: Refuse an unaffordable locked cost before
+        // target prompts or mana abilities can mutate the activation state.
+        can_pay_ability_cost_now(state, player, source_id, &locked, Some(ability_index))
+    } else if find_one_of_cost(cost).is_some() {
         can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index))
     } else {
         // CR 106.6: the tag reaches the payability gate for the same reason it
@@ -22886,11 +22976,14 @@ pub fn find_eligible_sacrifice_targets(
             if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
                 return false;
             }
+            // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.
+            // CR 118.12a: An instructed player may pay a normalized "unless" cost.
+            // The selected cost's payer remains authoritative if its source leaves play.
             super::filter::matches_target_filter(
                 state,
                 id,
                 filter,
-                &super::filter::FilterContext::from_source(state, source_id),
+                &super::filter::FilterContext::from_source_with_controller(source_id, player),
             )
         })
         .collect()
@@ -22973,6 +23066,27 @@ enum ActivationStructuralEligibility {
     WrongZone(Zone),
 }
 
+/// CR 113.6b: True when an activation-restriction condition states `zone` as a
+/// zone the ability functions from — "Activate only if ~ is in your graveyard"
+/// (Carrionette), "… is on the battlefield or in the command zone" (M'Odo, the
+/// Gnarled Oracle), "… is suspended" (Greater Gargadon: exile plus a time
+/// counter). A disjunction states each of its zones; a conjunction states the
+/// zone its source-zone conjunct names. The remaining conjuncts are ordinary
+/// mutable restrictions, enforced later by the restriction gate.
+fn restriction_condition_states_activation_zone(
+    condition: &crate::types::ability::ParsedCondition,
+    zone: Zone,
+) -> bool {
+    use crate::types::ability::ParsedCondition;
+    match condition {
+        ParsedCondition::SourceInZone { zone: stated } => *stated == zone,
+        ParsedCondition::Or { conditions } | ParsedCondition::And { conditions } => conditions
+            .iter()
+            .any(|c| restriction_condition_states_activation_zone(c, zone)),
+        _ => false,
+    }
+}
+
 /// CR 113.6 + CR 113.6b + CR 602.2: Classifies the immutable source-zone and activator
 /// prerequisites shared by activation legality and pre-cast payoff discovery.
 /// This deliberately runs before mutable restrictions, targets, and costs: a
@@ -23003,9 +23117,18 @@ fn activation_structural_eligibility(
         return ActivationStructuralEligibility::NinjutsuFamily;
     }
     // CR 113.6 + CR 113.6b: activated abilities default to functioning only
-    // on the battlefield unless their definition names another activation zone.
+    // on the battlefield unless their definition names another activation zone
+    // or their printed restriction states the zone the source is in.
+    let restriction_states_source_zone = ability_def.activation_restrictions.iter().any(|r| {
+        matches!(
+            r,
+            crate::types::ability::ActivationRestriction::RequiresCondition {
+                condition: Some(condition),
+            } if restriction_condition_states_activation_zone(condition, obj.zone)
+        )
+    });
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
-    if obj.zone != required_zone {
+    if obj.zone != required_zone && !restriction_states_source_zone {
         return ActivationStructuralEligibility::WrongZone(required_zone);
     }
     ActivationStructuralEligibility::Eligible
@@ -24467,6 +24590,20 @@ fn activate_with_cost_carrier(
         // here — it must fall through to the general target-first path below
         // (CR 601.2c: targets are chosen before costs are paid), where the
         // mana-first `Composite` ordering keeps the post-target payment atomic.
+        // CR 601.2f + CR 602.2b: Announcement choices above are complete.
+        // Lock the no-target half-life cost before any mana or payment detour;
+        // the borrowed cost flows through those paths, while the local ability
+        // definition supplies the same fixed cost to final payment.
+        let locked_cost = if !has_effect_targets && find_one_of_cost(cost).is_none() {
+            super::costs::lock_half_life_activation_cost(state, player, source_id, cost)
+        } else {
+            None
+        };
+        let cost = locked_cost.as_ref().unwrap_or(cost);
+        if let Some(locked) = locked_cost.as_ref() {
+            ability_def.cost = Some(locked.clone());
+        }
+
         let loyalty_no_targets =
             crate::types::ability::is_loyalty_ability_cost(cost) && !has_effect_targets;
         if !has_effect_targets
@@ -27139,6 +27276,55 @@ fn is_blocked_by_per_turn_cast_limit_for(
 #[path = "casting_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+mod half_life_activation_verdict_tests {
+    use super::{activation_verdict, restrictions, ActivationQuery, ActivationVerdict};
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::phase::Phase;
+
+    #[test]
+    fn block_reason_requires_a_legal_target_before_reporting_unpayable_half_life() {
+        for has_target in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain).with_life(P0, 3);
+            let source = scenario
+                .add_enchantment_from_oracle(
+                    P0,
+                    "Murderous Betrayal",
+                    "{B}{B}, Pay half your life, rounded up: Destroy target nonblack creature. It can't be regenerated.",
+                )
+                .id();
+            for _ in 0..2 {
+                scenario.add_land_from_oracle(
+                    P0,
+                    "Mana Confluence",
+                    "{T}, Pay 1 life: Add one mana of any color.",
+                );
+            }
+            if has_target {
+                scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+            }
+            let runner = scenario.build();
+            let gates = restrictions::ActivationRestrictionStaticGates::compute(runner.state());
+            assert_eq!(
+                activation_verdict(
+                    runner.state(),
+                    P0,
+                    source,
+                    0,
+                    &gates,
+                    ActivationQuery::BlockReason,
+                ),
+                if has_target {
+                    ActivationVerdict::CostNotPayableNow
+                } else {
+                    ActivationVerdict::Illegal
+                }
+            );
+        }
+    }
+}
+
 /// CR 601.2a + CR 406.3b: the two admission predicates the visibility projection reads.
 ///
 /// These rows pin the DISJUNCTION's content, which is what a hoist can silently change:
@@ -28028,5 +28214,767 @@ mod candidate_plan_tests {
             "a bounded announcement still names every symbol"
         );
         assert!(super::hybrid_announcements(&positions, 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sacrifice_cost_context_identity_tests {
+    use super::find_eligible_sacrifice_targets;
+    use crate::game::casting_costs::push_activated_ability_to_stack;
+    use crate::game::combat::{AttackerInfo, CombatState};
+    use crate::game::effects::attach::{attach_to, attach_to_player};
+    use crate::game::effects::counters::apply_counter_addition;
+    use crate::game::filter::{matches_target_filter, FilterContext};
+    use crate::game::game_object::AttachTarget;
+    use crate::game::sba;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::zones::move_to_zone;
+    use crate::types::ability::{
+        AbilityCost, AttachmentKind, ChosenAttribute, Comparator, ControllerRef, CountScope,
+        Effect, FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        SacrificeCost, SourceExclusion, TargetFilter, TargetRef, TypedFilter,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{
+        ActivationResidual, ActivationTargetSelection, CostResume, StackEntryKind, WaitingFor,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::phase::Phase;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn direct_helper_binds_payer_after_stolen_source_exits() {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        let source = scenario
+            .add_creature(P1, "Stolen source", 1, 1)
+            .controlled_by(P0)
+            .id();
+        let owned = scenario.add_creature(P0, "Owned fodder", 1, 1).id();
+        let stolen = scenario
+            .add_creature(P1, "Stolen fodder", 1, 1)
+            .controlled_by(P0)
+            .id();
+        let foreign = scenario
+            .add_creature(P0, "Foreign controlled", 1, 1)
+            .controlled_by(P1)
+            .id();
+        let mut runner = scenario.build();
+        let you: TargetFilter = TypedFilter::permanent()
+            .controller(ControllerRef::You)
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &you),
+            vec![source, owned, stolen]
+        );
+        move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut vec![]);
+        assert_eq!(runner.state().objects[&source].controller, P1);
+        // CR 701.21a: P0 controls both eligible fodder even though only one is owned by P0.
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &you),
+            vec![owned, stolen]
+        );
+        assert!(
+            !find_eligible_sacrifice_targets(runner.state(), P0, source, &you).contains(&foreign)
+        );
+        let owned_by_payer: TargetFilter = TypedFilter::permanent()
+            .properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }])
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &owned_by_payer),
+            vec![owned]
+        );
+        let opponent: TargetFilter = TypedFilter::permanent()
+            .controller(ControllerRef::Opponent)
+            .into();
+        assert!(find_eligible_sacrifice_targets(runner.state(), P0, source, &opponent).is_empty());
+        for filter in [
+            TargetFilter::And {
+                filters: vec![you.clone(), TargetFilter::Any],
+            },
+            TargetFilter::Or {
+                filters: vec![you.clone(), TargetFilter::SelfRef],
+            },
+            TargetFilter::Not {
+                filter: Box::new(opponent.clone()),
+            },
+        ] {
+            assert_eq!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter),
+                vec![owned, stolen]
+            );
+        }
+        assert!(find_eligible_sacrifice_targets(
+            runner.state(),
+            P0,
+            source,
+            &TargetFilter::SelfRef
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn direct_mana_leg_and_none_entries_pay_both_selected_costs() {
+        // CR 109.5 + CR 113.8: The activator remains the ability controller after source exit.
+        for residual in [ActivationResidual::None, ActivationResidual::ManaLeg] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_enchantment_from_oracle(P1, "Direct stolen source", "")
+                .controlled_by(P0)
+                .id();
+            let other = scenario.add_creature(P0, "Direct fodder", 1, 1).id();
+            let mut runner = scenario.build();
+            let one = AbilityCost::Sacrifice(SacrificeCost::count(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .into(),
+                1,
+            ));
+            let suffix = AbilityCost::Composite {
+                costs: vec![one.clone(), one],
+            };
+            let resolved = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            );
+            let waiting = push_activated_ability_to_stack(
+                runner.state_mut(),
+                P0,
+                source,
+                7,
+                resolved,
+                Some(&suffix),
+                residual,
+                ActivationTargetSelection::Settled,
+                None,
+                None,
+                false,
+                None,
+                &mut vec![],
+            )
+            .unwrap();
+            runner.state_mut().waiting_for = waiting;
+            let WaitingFor::PayCost {
+                choices,
+                resume: CostResume::Spell { spell },
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("direct entry surfaced Count1")
+            };
+            assert!(choices.contains(&source) && choices.contains(&other));
+            assert_eq!(spell.activation_ability_index, Some(7));
+            assert!(matches!(
+                spell.activation_residual,
+                ActivationResidual::None
+            ));
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![source],
+                })
+                .unwrap();
+            let WaitingFor::PayCost { choices, .. } = &runner.state().waiting_for else {
+                panic!("second Count1")
+            };
+            assert_eq!(choices, &vec![other]);
+            runner
+                .act(GameAction::SelectCards { cards: vec![other] })
+                .unwrap();
+            let StackEntryKind::ActivatedAbility { ability, .. } = &runner.state().stack[0].kind
+            else {
+                panic!("direct stack entry")
+            };
+            assert_eq!(
+                (
+                    ability.controller,
+                    ability.ability_index,
+                    ability.cost_paid_objects.len()
+                ),
+                (P0, Some(7), 2)
+            );
+            runner.resolve_top();
+            assert_eq!(runner.state().players[0].life, 21);
+            assert!(runner.state().stack.is_empty());
+        }
+    }
+
+    #[test]
+    fn direct_helper_preserves_explicit_player_and_ability_references() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P1, "Other-controller source", 1, 1)
+            .id();
+        let fodder = scenario.add_creature(P0, "Payer fodder", 1, 1).id();
+        let mut runner = scenario.build();
+        for controller in [
+            ControllerRef::You,
+            ControllerRef::ScopedPlayer,
+            ControllerRef::ActivePlayer,
+            ControllerRef::SpecificPlayer { id: P0 },
+        ] {
+            let filter: TargetFilter = TypedFilter::creature().controller(controller).into();
+            assert_eq!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter),
+                vec![fodder]
+            );
+        }
+        for controller in [
+            ControllerRef::Opponent,
+            ControllerRef::SpecificPlayer { id: P1 },
+        ] {
+            let filter: TargetFilter = TypedFilter::creature().controller(controller).into();
+            assert!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter).is_empty()
+            );
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(P0)],
+            source,
+            P0,
+        );
+        ability.chosen_players = vec![P0];
+        for controller in [
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+            ControllerRef::ChosenPlayer { index: 0 },
+        ] {
+            let filter: TargetFilter = TypedFilter::creature().controller(controller).into();
+            assert!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter).is_empty()
+            );
+            assert!(matches_target_filter(
+                runner.state(),
+                fodder,
+                &filter,
+                &FilterContext::from_ability(&ability)
+            ));
+        }
+        ability.targets = vec![TargetRef::Object(fodder)];
+        for controller in [
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+        ] {
+            let filter: TargetFilter = TypedFilter::creature().controller(controller).into();
+            assert!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter).is_empty()
+            );
+            assert!(matches_target_filter(
+                runner.state(),
+                fodder,
+                &filter,
+                &FilterContext::from_ability(&ability)
+            ));
+        }
+        runner.state_mut().current_trigger_event = Some(GameEvent::Discarded {
+            player_id: P0,
+            object_id: fodder,
+            source_id: Some(source),
+        });
+        for controller in [
+            ControllerRef::TriggeringPlayer,
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+        ] {
+            let filter: TargetFilter = TypedFilter::creature().controller(controller).into();
+            assert_eq!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter),
+                vec![fodder]
+            );
+        }
+        runner.state_mut().current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(fodder),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        });
+        // CR 120.1 + CR 109.4: The damage recipient is a separate event referent.
+        let event_controller: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::EventTargetController)
+            .into();
+        assert!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &event_controller)
+                .is_empty()
+        );
+        assert!(matches_target_filter(
+            runner.state(),
+            fodder,
+            &event_controller,
+            &FilterContext::from_ability(&ability)
+        ));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(P0));
+        let chosen: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::SourceChosenPlayer)
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &chosen),
+            vec![fodder]
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .attached_to = Some(AttachTarget::Player(P0));
+        let enchanted: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::EnchantedPlayer)
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &enchanted),
+            vec![fodder]
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&fodder)
+            .unwrap()
+            .attached_to = Some(AttachTarget::Object(source));
+        let attached: TargetFilter = TypedFilter::creature()
+            .properties(vec![FilterProp::AttachedToSource, FilterProp::Another])
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &attached),
+            vec![fodder]
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&fodder)
+            .unwrap()
+            .attached_to = None;
+        assert!(find_eligible_sacrifice_targets(runner.state(), P0, source, &attached).is_empty());
+    }
+
+    #[test]
+    fn direct_attachment_name_and_library_properties_use_payer_context() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P1, "Stolen authority", 1, 1)
+            .controlled_by(P0)
+            .id();
+        let goblin = scenario
+            .add_creature(P0, "Unique goblin", 1, 1)
+            .with_subtypes(vec!["Goblin"])
+            .id();
+        let elf = scenario
+            .add_creature(P0, "Shared elf", 1, 1)
+            .with_subtypes(vec!["Elf"])
+            .id();
+        scenario.add_creature(P1, "Shared elf", 1, 1);
+        let your_aura = scenario
+            .add_enchantment_from_oracle(P0, "Your Aura", "")
+            .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TypedFilter::creature().into()))
+            .id();
+        let their_aura = scenario
+            .add_enchantment_from_oracle(P1, "Their Aura", "")
+            .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TypedFilter::creature().into()))
+            .id();
+        let on_you = scenario
+            .add_enchantment_from_oracle(P0, "Aura on payer", "")
+            .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TargetFilter::Player))
+            .id();
+        let on_other = scenario
+            .add_enchantment_from_oracle(P0, "Aura on other player", "")
+            .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TargetFilter::Player))
+            .id();
+        let p0_library: Vec<_> = (0..2)
+            .map(|_| scenario.add_card_to_library_top(P0, "Goblin card"))
+            .collect();
+        let p1_library: Vec<_> = (0..2)
+            .map(|_| scenario.add_card_to_library_top(P1, "Elf card"))
+            .collect();
+        let mut runner = scenario.build();
+        for (ids, subtype) in [(&p0_library, "Goblin"), (&p1_library, "Elf")] {
+            for id in ids {
+                let obj = runner.state_mut().objects.get_mut(id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.card_types.subtypes.push(subtype.to_string());
+            }
+        }
+        runner.state_mut().all_creature_types = vec!["Goblin".into(), "Elf".into()];
+        // A first attachment returns no *previous* host; inspect the new host directly.
+        attach_to(runner.state_mut(), your_aura, goblin);
+        attach_to(runner.state_mut(), their_aura, elf);
+        attach_to_player(runner.state_mut(), on_you, P0);
+        attach_to_player(runner.state_mut(), on_other, P1);
+        assert_eq!(
+            runner.state().objects[&your_aura].attached_to,
+            Some(AttachTarget::Object(goblin))
+        );
+        assert_eq!(
+            runner.state().objects[&their_aura].attached_to,
+            Some(AttachTarget::Object(elf))
+        );
+        assert_eq!(
+            runner.state().objects[&on_you].attached_to,
+            Some(AttachTarget::Player(P0))
+        );
+        assert_eq!(
+            runner.state().objects[&on_other].attached_to,
+            Some(AttachTarget::Player(P1))
+        );
+        move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut vec![]);
+        assert_eq!(runner.state().objects[&source].controller, P1);
+        let attachment = |controller: ControllerRef| -> TargetFilter {
+            TypedFilter::creature()
+                .properties(vec![FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: Some(controller),
+                    exclude_source: SourceExclusion::Include,
+                }])
+                .into()
+        };
+        let any_attachment = |controller: ControllerRef| -> TargetFilter {
+            TypedFilter::creature()
+                .properties(vec![FilterProp::HasAnyAttachmentOf {
+                    kinds: vec![AttachmentKind::Aura],
+                    controller: Some(controller),
+                }])
+                .into()
+        };
+        // CR 303.4e: Aura control is independent of the enchanted creature's control.
+        for filter in [
+            attachment(ControllerRef::You),
+            any_attachment(ControllerRef::You),
+        ] {
+            assert_eq!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter),
+                vec![goblin]
+            );
+        }
+        for filter in [
+            attachment(ControllerRef::Opponent),
+            any_attachment(ControllerRef::Opponent),
+        ] {
+            assert_eq!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter),
+                vec![elf]
+            );
+        }
+        let named = |controller: ControllerRef| -> TargetFilter {
+            TypedFilter::creature()
+                .properties(vec![FilterProp::NameMatchesAnyPermanent {
+                    controller: Some(controller),
+                }])
+                .into()
+        };
+        assert!(find_eligible_sacrifice_targets(
+            runner.state(),
+            P0,
+            source,
+            &named(ControllerRef::You)
+        )
+        .contains(&goblin));
+        assert_eq!(
+            find_eligible_sacrifice_targets(
+                runner.state(),
+                P0,
+                source,
+                &named(ControllerRef::Opponent)
+            ),
+            vec![elf]
+        );
+        let prevalent: TargetFilter = TypedFilter::creature()
+            .properties(vec![FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::You,
+            }])
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &prevalent),
+            vec![goblin]
+        );
+        let attached_to_payer: TargetFilter = TypedFilter::permanent()
+            .properties(vec![FilterProp::AttachedToPlayer {
+                player: ControllerRef::You,
+            }])
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &attached_to_payer),
+            vec![on_you]
+        );
+        let matching_controller: TargetFilter = TypedFilter::creature()
+            .properties(vec![FilterProp::ControllerMatches {
+                player: Box::new(PlayerFilter::Controller),
+            }])
+            .into();
+        assert!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &matching_controller)
+                .contains(&goblin)
+        );
+        let opponent_controller: TargetFilter = TypedFilter::creature()
+            .properties(vec![FilterProp::ControllerMatches {
+                player: Box::new(PlayerFilter::Opponent),
+            }])
+            .into();
+        assert!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &opponent_controller)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn direct_combat_and_battle_relative_properties_keep_the_opponent_axis() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P1, "Stolen combat source", 1, 1)
+            .controlled_by(P0)
+            .id();
+        let attacker = scenario.add_creature(P0, "Payer attacker", 2, 2).id();
+        let battle = scenario.add_creature(P0, "Payer battle", 0, 0).id();
+        let mut runner = scenario.build();
+        {
+            let obj = runner.state_mut().objects.get_mut(&battle).unwrap();
+            obj.card_types.core_types.clear();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.card_types.subtypes = vec!["Siege".to_string()];
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = None;
+            obj.toughness = None;
+            obj.base_power = None;
+            obj.base_toughness = None;
+            obj.defense = Some(3);
+            obj.base_defense = Some(3);
+            obj.counters.insert(CounterType::Defense, 3);
+            obj.chosen_attributes.push(ChosenAttribute::Player(P1));
+        }
+        assert_eq!(runner.state().objects[&battle].protector(), Some(P1));
+        move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut vec![]);
+        assert_eq!(runner.state().objects[&source].controller, P1);
+        // CR 508.1b + CR 508.6: P0's creature attacked P1, never its controller P0.
+        let mut combat = CombatState::default();
+        combat
+            .attackers
+            .push(AttackerInfo::attacking_player(attacker, P1));
+        runner.state_mut().combat = Some(combat);
+        runner
+            .state_mut()
+            .creatures_attacked_this_turn
+            .insert(attacker);
+        runner
+            .state_mut()
+            .creature_attacked_defenders_this_turn
+            .entry(attacker)
+            .or_default()
+            .insert(P1);
+        for prop in [
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::Opponent),
+            },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::Opponent),
+            },
+        ] {
+            let filter: TargetFilter = TypedFilter::creature().properties(vec![prop]).into();
+            assert_eq!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter),
+                vec![attacker]
+            );
+        }
+        for prop in [
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::You),
+            },
+            FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::You),
+            },
+        ] {
+            let filter: TargetFilter = TypedFilter::creature().properties(vec![prop]).into();
+            assert!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter).is_empty()
+            );
+        }
+        // CR 310.12a: A Siege's protector P1 is an opponent of its controller P0.
+        let protected: TargetFilter = TypedFilter::permanent()
+            .properties(vec![FilterProp::ProtectorMatches {
+                controller: ControllerRef::Opponent,
+            }])
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &protected),
+            vec![battle]
+        );
+        let self_protected: TargetFilter = TypedFilter::permanent()
+            .properties(vec![FilterProp::ProtectorMatches {
+                controller: ControllerRef::You,
+            }])
+            .into();
+        assert!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &self_protected).is_empty()
+        );
+    }
+
+    #[test]
+    fn direct_helper_keeps_payer_when_token_source_ceases_to_exist() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P1, "Token source", 1, 1)
+            .controlled_by(P0)
+            .id();
+        let fodder = scenario.add_creature(P0, "Payer fodder", 1, 1).id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .is_token = true;
+        let mut events = vec![];
+        move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut events);
+        // CR 704.5d: The source token ceases to exist after leaving the battlefield.
+        sba::check_state_based_actions(runner.state_mut(), &mut events);
+        assert!(!runner.state().objects.contains_key(&source));
+        let you: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &you),
+            vec![fodder]
+        );
+        let neutral: TargetFilter = TypedFilter::creature().into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &neutral),
+            vec![fodder]
+        );
+        assert!(find_eligible_sacrifice_targets(
+            runner.state(),
+            P0,
+            source,
+            &TargetFilter::SelfRef
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn direct_counter_history_and_dynamic_threshold_follow_cost_payer() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P1, "Stolen counter source", 1, 1)
+            .controlled_by(P0)
+            .id();
+        let payer_marked = scenario.add_creature(P0, "Payer marked", 1, 1).id();
+        let opponent_marked = scenario.add_creature(P0, "Opponent marked", 1, 1).id();
+        let mut runner = scenario.build();
+        let mut events = vec![];
+        apply_counter_addition(
+            runner.state_mut(),
+            P0,
+            payer_marked,
+            CounterType::Plus1Plus1,
+            15,
+            &mut events,
+        );
+        apply_counter_addition(
+            runner.state_mut(),
+            P1,
+            opponent_marked,
+            CounterType::Plus1Plus1,
+            1,
+            &mut events,
+        );
+        assert_eq!(runner.state().counter_added_this_turn.len(), 2);
+        runner.state_mut().players[1].life = 10;
+        move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut events);
+        assert_eq!(runner.state().objects[&source].controller, P1);
+
+        // CR 122.6 + CR 109.5: The counter-placement actor is relative to the payer.
+        for (scope, expected) in [
+            (CountScope::Controller, payer_marked),
+            (CountScope::Opponents, opponent_marked),
+        ] {
+            let filter: TargetFilter = TypedFilter::creature()
+                .properties(vec![FilterProp::CountersPutOnThisTurn {
+                    actor: scope,
+                    counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                    comparator: Comparator::GE,
+                    count: 1,
+                }])
+                .into();
+            assert_eq!(
+                find_eligible_sacrifice_targets(runner.state(), P0, source, &filter),
+                vec![expected]
+            );
+        }
+        let threshold: TargetFilter = TypedFilter::creature()
+            .properties(vec![FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::LT,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            }])
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &threshold),
+            vec![payer_marked, opponent_marked]
+        );
+        let high_marked: TargetFilter = TypedFilter::creature()
+            .properties(vec![FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 15 },
+            }])
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P0, source, &high_marked),
+            vec![payer_marked]
+        );
+    }
+
+    #[test]
+    fn direct_defending_player_reference_keeps_its_combat_authority() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P1, "Attacking source", 2, 2)
+            .controlled_by(P0)
+            .id();
+        let defender_fodder = scenario.add_creature(P1, "Defender fodder", 2, 2).id();
+        let mut runner = scenario.build();
+        let mut combat = CombatState::default();
+        combat
+            .attackers
+            .push(AttackerInfo::attacking_player(source, P1));
+        runner.state_mut().combat = Some(combat);
+        // CR 508.5: The attacking source designates P1 independently of cost payer.
+        let defender: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::DefendingPlayer)
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P1, source, &defender),
+            vec![defender_fodder]
+        );
+        let source_controller: TargetFilter = TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .into();
+        assert_eq!(
+            find_eligible_sacrifice_targets(runner.state(), P1, source, &source_controller),
+            vec![defender_fodder]
+        );
     }
 }
