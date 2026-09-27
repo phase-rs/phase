@@ -30574,7 +30574,7 @@ mod sacrifice_cost_context_identity_tests {
             let suffix = AbilityCost::Composite {
                 costs: vec![one.clone(), one],
             };
-            let resolved = ResolvedAbility::new(
+            let mut resolved = ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
                     player: TargetFilter::Controller,
@@ -30583,6 +30583,10 @@ mod sacrifice_cost_context_identity_tests {
                 source,
                 P0,
             );
+            // The pre-payment draft this direct push's announcement would carry.
+            resolved.activation_record =
+                super::capture_activation_record(runner.state(), P0, source, 7, &resolved)
+                    .map(Box::new);
             let waiting = push_activated_ability_to_stack(
                 runner.state_mut(),
                 P0,

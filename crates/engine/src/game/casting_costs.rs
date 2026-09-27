@@ -19171,6 +19171,7 @@ mod tests {
                     filter.clone(),
                     1,
                 )));
+                let pending = announced(runner.state(), pending);
                 let live = super::super::casting::find_eligible_sacrifice_targets(
                     runner.state(),
                     PlayerId(0),
@@ -19378,6 +19379,7 @@ mod tests {
                     source: SpellCostSource::Other,
                 });
                 let mut runner = scenario.build();
+                let pending = announced(runner.state(), pending);
                 if !eligible {
                     runner.state_mut().battlefield.retain(|id| *id != candidate);
                     runner.state_mut().objects.get_mut(&candidate).unwrap().zone = Zone::Graveyard;
