@@ -1,69 +1,70 @@
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 
+import type {
+  CardMotionTarget,
+  ReleasedCardMotion,
+} from "../../stores/animationStore.ts";
+import { TabletopStackCardSurface } from "../stack/TabletopStackCardSurface.tsx";
+import { cardFlightControl } from "./cardMotion.ts";
 import {
   ResolvedAnimationImage,
   type AnimationImageSnapshot,
 } from "./ResolvedAnimationImage.tsx";
 
 interface CastArcAnimationProps {
-  from: { x: number; y: number };
-  to: { x: number; y: number };
-  snapshot: AnimationImageSnapshot | null;
-  mode: "cast" | "resolve-permanent" | "resolve-spell";
+  objectId?: number;
+  from: CardMotionTarget | { x: number; y: number };
+  to: CardMotionTarget | { x: number; y: number };
+  release?: ReleasedCardMotion;
+  snapshot?: AnimationImageSnapshot | null;
+  mode:
+    | "cast"
+    | "play-permanent"
+    | "resolve-permanent"
+    | "resolve-spell";
+  duration?: number;
   onComplete: () => void;
 }
 
-const CARD_WIDTH = 80;
-const CARD_HEIGHT = 112;
-const ARC_HEIGHT = 100;
+const SNAPSHOT_CARD_WIDTH = 80;
+const SNAPSHOT_CARD_HEIGHT = 112;
+const SNAPSHOT_ARC_HEIGHT = 100;
 
-function CardTileFallback({ cardName }: { cardName: string | null }) {
-  return (
-    <div
-      style={{
-        width: "100%",
-        height: "100%",
-        backgroundColor: "rgba(0,0,0,0.7)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "white",
-        fontSize: "0.6rem",
-        textAlign: "center",
-        padding: 4,
-      }}
-    >
-      {cardName}
-    </div>
-  );
+function isCardMotionTarget(
+  target: CardMotionTarget | { x: number; y: number },
+): target is CardMotionTarget {
+  return "rect" in target;
 }
 
-function CastCardImage({ snapshot }: { snapshot: AnimationImageSnapshot | null }) {
-  if (!snapshot) return <CardTileFallback cardName={null} />;
+function SnapshotCard({ snapshot }: { snapshot: AnimationImageSnapshot | null }) {
+  if (!snapshot) {
+    return <div className="h-full w-full bg-black/70" />;
+  }
   return (
     <ResolvedAnimationImage
       snapshot={snapshot}
       size="normal"
       alt={snapshot.cardName}
-      fallback={<CardTileFallback cardName={snapshot.cardName} />}
+      fallback={<div className="h-full w-full bg-black/70" />}
       style={{ width: "100%", height: "100%", objectFit: "cover" }}
     />
   );
 }
 
-export function CastArcAnimation({
+function SnapshotCastArc({
   from,
   to,
   snapshot,
   mode,
   onComplete,
-}: CastArcAnimationProps) {
-  // `normal`, not `small`: this renders a bare image element with no ladder at
-  // CARD_WIDTH 80 (160 device px at DPR 2), so the real 146px asset would
-  // upscale. Requesting `normal` keeps this overlay byte-identical to before
-  // `small` became a distinct asset.
+}: {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  snapshot: AnimationImageSnapshot | null;
+  mode: CastArcAnimationProps["mode"];
+  onComplete: () => void;
+}) {
   if (mode === "resolve-spell") {
-    // Instant/sorcery: fade out with scale reduction at current position
     return (
       <motion.div
         initial={{ opacity: 1, scale: 1 }}
@@ -72,78 +73,146 @@ export function CastArcAnimation({
         onAnimationComplete={onComplete}
         style={{
           position: "fixed",
-          left: from.x - CARD_WIDTH / 2,
-          top: from.y - CARD_HEIGHT / 2,
-          width: CARD_WIDTH,
-          height: CARD_HEIGHT,
+          left: from.x - SNAPSHOT_CARD_WIDTH / 2,
+          top: from.y - SNAPSHOT_CARD_HEIGHT / 2,
+          width: SNAPSHOT_CARD_WIDTH,
+          height: SNAPSHOT_CARD_HEIGHT,
           pointerEvents: "none",
           zIndex: 45,
           borderRadius: 6,
           overflow: "hidden",
-          boxShadow: "0 0 12px rgba(59, 130, 246, 0.5)",
         }}
       >
-        <CastCardImage snapshot={snapshot} />
+        <SnapshotCard snapshot={snapshot} />
       </motion.div>
     );
   }
 
-  // Cast (hand->stack) or resolve-permanent (stack->battlefield): parabolic arc
   const midX = (from.x + to.x) / 2;
-  const midY = Math.min(from.y, to.y) - ARC_HEIGHT;
-  const duration = mode === "cast" ? 0.4 : 0.3;
-
+  const midY = Math.min(from.y, to.y) - SNAPSHOT_ARC_HEIGHT;
+  const transitDuration = mode === "cast" ? 0.4 : 0.3;
   return (
     <motion.div
-      initial={{
-        x: from.x - CARD_WIDTH / 2,
-        y: from.y - CARD_HEIGHT / 2,
-        scale: 1,
-        opacity: 1,
-      }}
+      initial={{ x: from.x, y: from.y, opacity: 1 }}
       animate={{
-        x: [from.x - CARD_WIDTH / 2, midX - CARD_WIDTH / 2, to.x - CARD_WIDTH / 2],
-        y: [from.y - CARD_HEIGHT / 2, midY - CARD_HEIGHT / 2, to.y - CARD_HEIGHT / 2],
-        scale: [1, 1.1, 1],
+        x: [from.x, midX, to.x],
+        y: [from.y, midY, to.y],
         opacity: 1,
       }}
-      transition={{
-        duration,
-        ease: "easeInOut",
-        times: [0, 0.5, 1],
-      }}
+      transition={{ duration: transitDuration, ease: "easeOut", times: [0, 0.5, 1] }}
       onAnimationComplete={onComplete}
       style={{
         position: "fixed",
-        left: 0,
-        top: 0,
-        width: CARD_WIDTH,
-        height: CARD_HEIGHT,
+        left: -SNAPSHOT_CARD_WIDTH / 2,
+        top: -SNAPSHOT_CARD_HEIGHT / 2,
+        width: SNAPSHOT_CARD_WIDTH,
+        height: SNAPSHOT_CARD_HEIGHT,
         pointerEvents: "none",
         zIndex: 45,
         borderRadius: 6,
         overflow: "hidden",
       }}
     >
-      <CastCardImage snapshot={snapshot} />
-      {/* Glow intensifies at destination */}
-      <motion.div
-        initial={{ boxShadow: "0 0 4px rgba(59, 130, 246, 0.2)" }}
-        animate={{
-          boxShadow: [
-            "0 0 4px rgba(59, 130, 246, 0.2)",
-            "0 0 16px rgba(59, 130, 246, 0.6)",
-            "0 0 24px rgba(59, 130, 246, 0.8)",
-          ],
-        }}
-        transition={{ duration, times: [0, 0.5, 1] }}
-        style={{
-          position: "absolute",
-          inset: 0,
-          borderRadius: 6,
-          pointerEvents: "none",
-        }}
+      <SnapshotCard snapshot={snapshot} />
+    </motion.div>
+  );
+}
+
+/**
+ * Carries the live, composed card face between zones. It intentionally does
+ * not substitute a printing image: crown, title, counters, and frame treatment
+ * remain the same visual game piece the player picked up in hand.
+ */
+export function CastArcAnimation({
+  objectId,
+  from,
+  to,
+  release,
+  snapshot = null,
+  mode,
+  duration = mode === "cast" ? 0.42 : 0.3,
+  onComplete,
+}: CastArcAnimationProps) {
+  const shouldReduceMotion = useReducedMotion();
+  if (!isCardMotionTarget(from) && !isCardMotionTarget(to)) {
+    return (
+      <SnapshotCastArc
+        from={from}
+        to={to}
+        snapshot={snapshot}
+        mode={mode}
+        onComplete={onComplete}
       />
+    );
+  }
+  if (!isCardMotionTarget(from) || !isCardMotionTarget(to)) return null;
+  if (objectId == null) return null;
+  const velocity = release?.velocity ?? { x: 0, y: 0 };
+  const control = cardFlightControl(from, to, velocity);
+  const transitDuration = shouldReduceMotion
+    ? Math.min(duration, 0.12)
+    : duration;
+  const midWidth = (from.rect.width + to.rect.width) / 2 * 1.04;
+  const midHeight = (from.rect.height + to.rect.height) / 2 * 1.04;
+
+  return (
+    <motion.div
+      initial={{
+        x: from.rect.x,
+        y: from.rect.y,
+        width: from.rect.width,
+        height: from.rect.height,
+        rotate: from.rotation,
+        scale: 1,
+        opacity: 1,
+      }}
+      animate={{
+        x: shouldReduceMotion
+          ? to.rect.x
+          : [from.rect.x, control.x, to.rect.x],
+        y: shouldReduceMotion
+          ? to.rect.y
+          : [from.rect.y, control.y, to.rect.y],
+        width: shouldReduceMotion
+          ? to.rect.width
+          : [from.rect.width, midWidth, to.rect.width],
+        height: shouldReduceMotion
+          ? to.rect.height
+          : [from.rect.height, midHeight, to.rect.height],
+        rotate: shouldReduceMotion
+          ? to.rotation
+          : [from.rotation, control.rotation, to.rotation],
+        scale: shouldReduceMotion ? 1 : [1, 1.035, 1],
+        opacity: 1,
+      }}
+      transition={{
+        duration: transitDuration,
+        ease: [0.2, 0.72, 0.18, 1],
+        times: shouldReduceMotion ? undefined : [0, 0.48, 1],
+      }}
+      onAnimationComplete={onComplete}
+      style={{
+        position: "fixed",
+        left: 0,
+        top: 0,
+        pointerEvents: "none",
+        zIndex: 45,
+        transformOrigin: "50% 50%",
+        transformPerspective: 900,
+        "--hand-card-w": "100%",
+        "--hand-card-h": "100%",
+      } as React.CSSProperties}
+      data-card-in-flight={objectId}
+      data-card-flight-mode={mode}
+    >
+      {snapshot ? (
+        <SnapshotCard snapshot={snapshot} />
+      ) : (
+        <TabletopStackCardSurface
+          objectId={objectId}
+          transitDuration={transitDuration}
+        />
+      )}
     </motion.div>
   );
 }

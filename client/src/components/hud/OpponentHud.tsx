@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { PlayerLatency } from "./PlayerLatency.tsx";
 
 import type { PlayerId } from "../../adapter/types.ts";
+import type { TabletopSeatAssignment } from "../tabletop3d/tabletopLayout.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
@@ -29,7 +30,7 @@ import {
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CityBlessingBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, familyOf, InitiativeBadge, MonarchBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { AurasHoverPreview } from "./AurasHoverPreview.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
@@ -38,6 +39,7 @@ import { HudPlate } from "./HudPlate.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
 import { NextUpBadge } from "./NextUpBadge.tsx";
+import { PriorityMarker } from "./TurnStatusLine.tsx";
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
 
 import type { ObjectId } from "../../adapter/types.ts";
@@ -47,6 +49,10 @@ const EMPTY_OBJECT_IDS: readonly ObjectId[] = [];
 interface OpponentHudProps {
   opponentName?: string | null;
   splitOverview?: boolean;
+  /** Spatial seat assignments supplied by the Tabletop board. When present,
+   * opponents render as compact portrait-and-life markers centered within
+   * their battlefield thirds instead of sharing one wide horizontal rail. */
+  tabletopSeats?: readonly TabletopSeatAssignment[];
   /**
    * P2P host-only callback to kick a player. When provided AND the game is
    * 3+ players, an inline kick button appears on each opponent tab. The
@@ -58,6 +64,7 @@ interface OpponentHudProps {
 export function OpponentHud({
   opponentName,
   splitOverview = false,
+  tabletopSeats,
   onKickPlayer,
 }: OpponentHudProps) {
   const { t } = useTranslation("game");
@@ -227,10 +234,6 @@ export function OpponentHud({
       setFollowActiveOpponent,
     ],
   );
-  const handleToggleFollowActiveOpponent = useCallback(() => {
-    setFollowActiveOpponent(!followActiveOpponent);
-  }, [followActiveOpponent, setFollowActiveOpponent]);
-
   const disconnectedPlayers = useMultiplayerStore((s) => s.disconnectedPlayers);
   const connectionStatus = useMultiplayerStore((s) => s.connectionStatus);
   const isOnline = connectionStatus !== "disconnected";
@@ -241,6 +244,94 @@ export function OpponentHud({
   );
   // Always-called hook (rules-of-hooks) — used only on the 1v1 branch below.
   const primaryOpponentDesignations = usePlayerDesignations(primaryOpponentId);
+
+  const renderOpponentTab = (
+    opId: PlayerId,
+    presentation: "rail" | "seat" = "rail",
+  ) => (
+    <OpponentTab
+      key={opId}
+      playerId={opId}
+      displayName={allOpponents.length === 1 ? opponentName : undefined}
+      isFocused={effectiveFocused === opId}
+      isEliminated={eliminated.includes(opId)}
+      isTeammate={teamBased && isTeammate(playerId, opId)}
+      isValidTarget={validPlayerTargetIds.includes(opId)}
+      isTargeting={isTargeting}
+      legalObjectTargetIds={
+        legalObjectTargetsByController.get(opId) ?? EMPTY_OBJECT_IDS
+      }
+      showMana={effectiveFocused === opId}
+      compact={
+        presentation === "seat"
+        || splitOverview
+        || forceCompactHud
+        || opponentHudDensity === "compact"
+      }
+      splitOverview={splitOverview}
+      presentation={presentation}
+      incomingAttackerIds={
+        incomingByOpponent.get(opId) ?? EMPTY_OBJECT_IDS
+      }
+      onSelectFocus={() => handleSelectFocus(opId)}
+      onTargetPlayer={() => handlePlayerTarget(opId)}
+      onKick={
+        onKickPlayer && !eliminated.includes(opId)
+          ? () => setKickTarget(opId)
+          : undefined
+      }
+    />
+  );
+
+  if (tabletopSeats && tabletopSeats.length > 0) {
+    const targetLabel =
+      kickTarget != null ? getOpponentDisplayName(kickTarget) : "";
+
+    return (
+      <div
+        data-opponent-hud-seats
+        className="pointer-events-none absolute inset-0"
+      >
+        <div
+          data-tabletop-opponent-row
+          className="absolute inset-x-0 grid grid-cols-3 items-start"
+          style={{
+            top: "var(--tabletop-opponent-row-top, calc(env(safe-area-inset-top) + clamp(0.5rem, 1.2dvh, 1rem)))",
+          }}
+        >
+          {tabletopSeats.map(({ playerId: opponentId, seat }) => (
+            <div
+              key={opponentId}
+              data-tabletop-opponent-seat={seat}
+              className={`pointer-events-auto row-start-1 justify-self-center ${
+                seat === "left"
+                  ? "col-start-1"
+                  : seat === "far"
+                    ? "col-start-2"
+                    : "col-start-3"
+              }`}
+            >
+              {renderOpponentTab(opponentId, "seat")}
+            </div>
+          ))}
+        </div>
+        {createPortal(
+          <KickConfirmDialog
+            isOpen={kickTarget !== null}
+            playerLabel={targetLabel}
+            onConfirm={() => {
+              if (kickTarget !== null && onKickPlayer) {
+                onKickPlayer(kickTarget);
+              }
+              setKickTarget(null);
+            }}
+            onCancel={() => setKickTarget(null)}
+          />,
+          document.body,
+        )}
+      </div>
+    );
+  }
 
   if (!isMultiplayer) {
     // 1v1: single opponent pill (existing design)
@@ -330,9 +421,7 @@ export function OpponentHud({
   }
 
   // Multiplayer: tabbed opponent selector
-  const focusedId = effectiveFocused;
   const targetLabel = kickTarget != null ? getOpponentDisplayName(kickTarget) : "";
-  const effectiveCompact = splitOverview || forceCompactHud || opponentHudDensity === "compact";
 
   return (
     // Single-row opponent rail. Tabs flex to share the available width — they
@@ -345,29 +434,12 @@ export function OpponentHud({
     // overlay portaled to document.body: this rail can sit inside a Flex Layout
     // DraggableWidget whose transform would otherwise become the containing
     // block for the dialog's `fixed` positioning and clip it to the rail box.
-    <div className={`flex w-full items-center justify-center ${splitOverview ? "gap-1 px-1 py-0.5" : "gap-1.5 px-2 py-1"}`}>
+    <div
+      data-opponent-hud-rail
+      className={`flex w-full items-center justify-center ${splitOverview ? "gap-1 px-1 py-0.5" : "gap-1.5 px-2 py-1"}`}
+    >
       {allOpponents.map((opId) => (
-        <OpponentTab
-          key={opId}
-          playerId={opId}
-          isFocused={focusedId === opId}
-          isEliminated={eliminated.includes(opId)}
-          isTeammate={teamBased && isTeammate(playerId, opId)}
-          isValidTarget={validPlayerTargetIds.includes(opId)}
-          isTargeting={isTargeting}
-          legalObjectTargetIds={legalObjectTargetsByController.get(opId) ?? EMPTY_OBJECT_IDS}
-          showMana={focusedId === opId}
-          compact={effectiveCompact}
-          splitOverview={splitOverview}
-          incomingAttackerIds={incomingByOpponent.get(opId) ?? EMPTY_OBJECT_IDS}
-          onSelectFocus={() => handleSelectFocus(opId)}
-          onTargetPlayer={() => handlePlayerTarget(opId)}
-          onKick={
-            onKickPlayer && !eliminated.includes(opId)
-              ? () => setKickTarget(opId)
-              : undefined
-          }
-        />
+        renderOpponentTab(opId)
       ))}
       {!forceCompactHud && !splitOverview && (
         <DensityToggle
@@ -377,11 +449,6 @@ export function OpponentHud({
           }
         />
       )}
-      <FollowActiveToggle
-        enabled={followActiveOpponent}
-        onToggle={handleToggleFollowActiveOpponent}
-        compact={splitOverview}
-      />
       {createPortal(
         <KickConfirmDialog
           isOpen={kickTarget !== null}
@@ -395,59 +462,6 @@ export function OpponentHud({
         document.body,
       )}
     </div>
-  );
-}
-
-function FollowActiveToggle({
-  enabled,
-  onToggle,
-  compact = false,
-}: {
-  enabled: boolean;
-  onToggle: () => void;
-  compact?: boolean;
-}) {
-  const { t } = useTranslation("game");
-  const tooltipId = useId();
-  const tooltip = enabled
-    ? t("opponentHud.followingActiveOpponent")
-    : t("opponentHud.followActiveOpponent");
-
-  return (
-    <button
-      type="button"
-      aria-label={tooltip}
-      aria-describedby={tooltipId}
-      aria-pressed={enabled}
-      onClick={onToggle}
-      className={`group relative flex shrink-0 items-center justify-center rounded-[8px] border transition-colors duration-150 ${compact ? "h-7 w-7" : "h-9 w-9"} ${
-        enabled
-          ? "border-amber-300/45 bg-amber-950/72 text-amber-100"
-          : "border-white/10 bg-slate-950/82 text-slate-300 hover:border-white/20 hover:bg-slate-900 hover:text-white"
-      }`}
-    >
-      <span
-        aria-hidden
-        className={`relative flex items-center justify-center rounded-full border ${compact ? "h-3.5 w-3.5" : "h-[18px] w-[18px]"} ${
-          enabled ? "border-amber-200" : "border-current"
-        }`}
-      >
-        <span className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-current opacity-75" />
-        <span className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-current opacity-75" />
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${
-            enabled ? "bg-amber-200" : "bg-current"
-          }`}
-        />
-      </span>
-      <span
-        id={tooltipId}
-        role="tooltip"
-        className="pointer-events-none absolute right-0 bottom-full z-[130] mb-2 hidden w-64 rounded-[8px] border border-white/10 bg-slate-950 px-3 py-2 text-left text-[11px] leading-snug font-medium text-slate-100 shadow-xl shadow-black/40 group-hover:block group-focus-visible:block"
-      >
-        {tooltip}
-      </span>
-    </button>
   );
 }
 
@@ -473,7 +487,7 @@ function DensityToggle({
       aria-describedby={tooltipId}
       aria-pressed={compact}
       onClick={onToggle}
-      className={`group relative flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] border transition-colors duration-150 ${
+      className={`tabletop-icon-control group relative flex h-10 w-10 shrink-0 items-center justify-center border transition-colors duration-150 ${
         compact
           ? "border-cyan-300/45 bg-cyan-950/72 text-cyan-100"
           : "border-white/10 bg-slate-950/82 text-slate-300 hover:border-white/20 hover:bg-slate-900 hover:text-white"
@@ -506,6 +520,7 @@ function isTeammate(a: PlayerId, b: PlayerId): boolean {
 
 interface OpponentTabProps {
   playerId: PlayerId;
+  displayName?: string | null;
   isFocused: boolean;
   isEliminated: boolean;
   isTeammate: boolean;
@@ -527,6 +542,7 @@ interface OpponentTabProps {
   showMana: boolean;
   compact: boolean;
   splitOverview: boolean;
+  presentation?: "rail" | "seat";
   /** Attacker object ids this opponent has declared against me / my stuff.
    *  When non-empty, the tab renders a red ⚔×N badge and a hover popover
    *  with mini card images so the defender can assess incoming threats
@@ -543,6 +559,7 @@ interface OpponentTabProps {
 
 function OpponentTab({
   playerId,
+  displayName,
   isFocused,
   isEliminated,
   isTeammate: ally,
@@ -552,6 +569,7 @@ function OpponentTab({
   showMana,
   compact,
   splitOverview,
+  presentation = "rail",
   incomingAttackerIds,
   onSelectFocus,
   onTargetPlayer,
@@ -681,7 +699,8 @@ function OpponentTab({
   const experienceCounters = player.player_counters?.Experience ?? 0;
   const isPhasedOut = player.status?.type === "PhasedOut";
 
-  const label = ally ? t("opponentHud.ally") : getOpponentDisplayName(playerId);
+  const label =
+    ally ? t("opponentHud.ally") : displayName ?? getOpponentDisplayName(playerId);
 
   // Two-step click for player-targeting (Option B at the tab level):
   //   - Unfocused tab click → focus this opponent (navigate).
@@ -746,7 +765,7 @@ function OpponentTab({
           {waitingReasonText}
         </span>
       )}
-      <span className={`flex items-center gap-0.5 text-xs font-semibold tabular-nums @min-[10rem]:text-sm ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-slate-100"}`}>
+      <span className={`flex items-center gap-0.5 text-sm font-bold tabular-nums @min-[10rem]:text-base ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-stone-100"}`}>
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="h-2.5 w-2.5 text-rose-400/90">
           <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
         </svg>
@@ -803,6 +822,234 @@ function OpponentTab({
     </div>
   );
 
+  if (presentation === "seat") {
+    return (
+      <button
+        ref={tabRef}
+        type="button"
+        onClick={onTabClick}
+        disabled={isEliminated}
+        aria-label={ariaLabel}
+        title={titleTooltip}
+        data-player-hud={String(playerId)}
+        data-tabletop-opponent-marker
+        data-player-life-shape="pill"
+        data-phased-out={isPhasedOut ? "true" : undefined}
+        onMouseEnter={hoverEnabled ? openPopover : undefined}
+        onMouseLeave={hoverEnabled ? scheduleClosePopover : undefined}
+        onFocus={hoverEnabled ? openPopover : undefined}
+        onBlur={hoverEnabled ? scheduleClosePopover : undefined}
+        className={`tabletop-opponent-seat-marker group relative flex flex-col items-center border-0 bg-transparent p-0 text-center transition-[filter,opacity] ${
+          commitReady ? "cursor-pointer" : ""
+        } ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      >
+        <NextUpBadge
+          playerId={playerId}
+          compact
+          className="absolute -left-1 -top-1 z-50"
+        />
+        <span
+          data-tabletop-opponent-portrait
+          className={`tabletop-opponent-seat-portrait relative flex overflow-visible border transition-[border-color,background-color,box-shadow,transform] duration-150 group-hover:-translate-y-0.5 ${borderClass}`}
+        >
+          {isUnderAttack && (
+            <>
+              <UnderAttackOverlay />
+              <span className="sr-only">
+                {t("opponentHud.underAttack", { name: label })}
+              </span>
+            </>
+          )}
+          <OpponentAvatar
+            label={label}
+            avatarIdentity={avatarIdentity}
+            seatColor={seatColor}
+            compact
+            seatMarker
+          />
+          <span
+            aria-hidden
+            data-tabletop-opponent-fill-shade
+            className="absolute inset-0 z-10 rounded-[inherit] bg-black/30"
+          />
+          {waitingReasonText ? (
+            <PriorityMarker
+              active
+              reasonKey={reason?.key}
+              seatColor={seatColor}
+              title={waitingReasonText}
+              className="absolute -right-1.5 -top-1.5 z-20"
+            />
+          ) : isOnline ? (
+            <span className="absolute right-0 top-0 z-20">
+              <ConnectionDotInline disconnected={isDisconnected} />
+            </span>
+          ) : null}
+          {hasIncoming && (
+            <span
+              aria-label={t("opponentHud.incomingAttackers", {
+                count: incomingAttackerIds.length,
+              })}
+              className="absolute -left-2 top-1/2 z-20 flex h-5 min-w-5 -translate-y-1/2 items-center justify-center rounded-full bg-red-600 px-1 text-[9px] font-bold text-white shadow ring-1 ring-red-300"
+            >
+              ⚔{incomingAttackerIds.length}
+            </span>
+          )}
+          {auraIds.length > 0 && (
+            <span
+              ref={auraBadgeRef}
+              role="button"
+              tabIndex={0}
+              data-testid={`opponent-aura-badge-${playerId}`}
+              aria-label={t("enchantmentsBadge.ariaLabel", {
+                count: auraIds.length,
+              })}
+              title={t("enchantmentsBadge.tooltip", {
+                count: auraIds.length,
+              })}
+              onClick={(event) => {
+                event.stopPropagation();
+                setEnchantmentsDialogPlayer(playerId);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.stopPropagation();
+                  event.preventDefault();
+                  setEnchantmentsDialogPlayer(playerId);
+                }
+              }}
+              onMouseEnter={isMobile ? undefined : onAuraEnter}
+              onMouseLeave={isMobile ? undefined : onAuraLeave}
+              onFocus={isMobile ? undefined : onAuraEnter}
+              onBlur={isMobile ? undefined : onAuraLeave}
+              className="absolute -bottom-1 -right-1 z-20 flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-700 px-1 text-[9px] font-bold text-violet-50 shadow ring-1 ring-violet-300"
+            >
+              ✧{auraIds.length > 1 ? auraIds.length : ""}
+            </span>
+          )}
+          {onKick && !isEliminated && (
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label={t("opponentHud.kickPlayer", {
+                seat: playerId + 1,
+              })}
+              title={t("opponentHud.kickPlayerTooltip")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onKick();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.stopPropagation();
+                  event.preventDefault();
+                  onKick();
+                }
+              }}
+              className="absolute -right-2 top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full bg-red-950/95 text-xs font-bold text-red-200 ring-1 ring-red-400/50"
+            >
+              ×
+            </span>
+          )}
+          <span
+            data-tabletop-opponent-copy
+            className="absolute inset-0 z-30 flex flex-col items-center justify-center"
+          >
+            <span
+              data-tabletop-opponent-life
+              className={`tabletop-opponent-seat-life font-black leading-[0.9] tabular-nums [text-shadow:0_1px_2px_rgba(0,0,0,0.98),0_0_8px_rgba(0,0,0,0.72)] ${
+                isTheirTurn
+                  ? "text-rose-100"
+                  : isFocused
+                    ? "text-amber-100"
+                    : "text-stone-100"
+              }`}
+            >
+              {player.life}
+            </span>
+            <span
+              data-tabletop-opponent-name
+              className="tabletop-opponent-seat-name block w-[76%] truncate font-bold leading-none uppercase tracking-[0.04em] [text-shadow:0_1px_3px_rgba(0,0,0,1)]"
+              style={{ color: seatColor }}
+            >
+              {label}
+            </span>
+          </span>
+        </span>
+
+        <span className="tabletop-opponent-seat-statuses mt-0.5 flex flex-wrap items-center justify-center gap-0.5">
+          {designations.isMonarch ? <MonarchBadge /> : null}
+          {designations.hasInitiative ? <InitiativeBadge /> : null}
+          {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
+          {designations.dungeonRoom ? (
+            <DungeonBadge room={designations.dungeonRoom} />
+          ) : null}
+          {designations.ringLevel > 0 ? (
+            <CounterBadge
+              kind="ring"
+              value={designations.ringLevel}
+              ringBearerName={designations.ringBearerName}
+            />
+          ) : null}
+          {designations.energy > 0 ? (
+            <CounterBadge kind="energy" value={designations.energy} />
+          ) : null}
+          {poisonCounters > 0 ? (
+            <CounterBadge kind="poison" value={poisonCounters} />
+          ) : null}
+          {radCounters > 0 ? (
+            <CounterBadge kind="rad" value={radCounters} />
+          ) : null}
+          {experienceCounters > 0 ? (
+            <CounterBadge kind="experience" value={experienceCounters} />
+          ) : null}
+          {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
+          {[
+            ...new Set(
+              designations.unboundedResources.map((resource) =>
+                familyOf(resource.axis),
+              ),
+            ),
+          ].map((family) => (
+            <UnboundedBadge key={family} family={family} />
+          ))}
+          {player.companion != null ? (
+            <StatusBadge
+              label={t("badges.companion")}
+              tone={player.companion.used ? "neutral" : "amber"}
+            />
+          ) : null}
+        </span>
+
+        {!isMobile && auraHoverOpen && auraBadgeRef.current && (
+          <AurasHoverPreview
+            anchorEl={auraBadgeRef.current}
+            attachmentIds={auraIds}
+          />
+        )}
+        {hoverPopover === "incoming" && tabRef.current && (
+          <PortaledPopover anchorEl={tabRef.current}>
+            <IncomingAttackersPopover
+              attackerIds={incomingAttackerIds}
+              opponentName={label}
+            />
+          </PortaledPopover>
+        )}
+        {hoverPopover === "peek" && tabRef.current && (
+          <PortaledPopover anchorEl={tabRef.current}>
+            <BattlefieldPeekPopover
+              playerId={playerId}
+              opponentName={label}
+              seatColor={seatColor}
+              isTargeting={isTargeting}
+              legalTargetIds={legalObjectTargetIds}
+            />
+          </PortaledPopover>
+        )}
+      </button>
+    );
+  }
+
   return (
     <button
       ref={tabRef}
@@ -830,7 +1077,8 @@ function OpponentTab({
       // ~14rem (~227px at the default 16px root, verified in-browser). Cap at
       // 16rem gives headroom; the reveal is gated at 15rem so a tab too narrow
       // to fit the breakdown collapses to the HAND-only tier (tap to focus).
-      className={`@container relative flex min-w-0 items-center rounded-[8px] border transition-[border-color,background-color,box-shadow] duration-150 ${splitOverview ? "gap-1 px-1 py-0" : "gap-1.5 px-1.5"} ${compact && !splitOverview ? "py-0.5" : !splitOverview ? "py-1" : ""} ${isEliminated ? "max-w-[3.25rem] flex-none shrink-0" : liveSizeClass} ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      data-opponent-tab
+      className={`@container tabletop-opponent-tab relative flex min-h-11 min-w-0 items-center border transition-[border-color,background-color,box-shadow] duration-150 ${splitOverview ? "gap-1 px-1.5 py-0.5" : "gap-1.5 px-2"} ${compact && !splitOverview ? "py-1" : !splitOverview ? "py-1.5" : ""} ${isEliminated ? "max-w-[3.25rem] flex-none shrink-0" : liveSizeClass} ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isUnderAttack && (
         <>
@@ -969,11 +1217,13 @@ function OpponentAvatar({
   avatarIdentity,
   seatColor,
   compact = false,
+  seatMarker = false,
 }: {
   label: string;
   avatarIdentity: PlayerAvatarIdentity | null;
   seatColor: string;
   compact?: boolean;
+  seatMarker?: boolean;
 }) {
   const avatar = usePlayerAvatarImage(avatarIdentity);
   const activeSrc = avatar.src;
@@ -992,7 +1242,11 @@ function OpponentAvatar({
   ) : avatarIdentity && avatar.isLoading ? null : (
     <>
       <div
-        className="flex h-full w-full items-center justify-center text-[11px] font-bold text-white/90 @min-[11rem]:text-sm"
+        className={`flex h-full w-full items-center justify-center font-bold text-white/90 ${
+          seatMarker
+            ? "text-sm"
+            : "text-[11px] @min-[11rem]:text-sm"
+        }`}
         style={{ backgroundColor: `${seatColor}55` }}
       >
         {label.charAt(0).toUpperCase()}
@@ -1006,13 +1260,17 @@ function OpponentAvatar({
   // is what keeps the rail short enough to clear the cards above it on mobile.
   // Compact-density mode pins it to a small fixed tile so the whole rail stays
   // a single thin row regardless of tab width.
-  const tileClassName = compact
-    ? "relative h-6 w-6 shrink-0 overflow-hidden rounded-md border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)]"
-    : "relative h-8 w-7 shrink-0 overflow-hidden rounded-md border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)] @min-[11rem]:h-10 @min-[11rem]:w-9 @min-[11rem]:rounded-lg";
-  const tileStyle: CSSProperties = {
-    borderColor: `${seatColor}cc`,
-    boxShadow: `0 0 0 1px ${seatColor}55, 0 8px 18px rgba(0,0,0,0.32), 0 0 14px ${seatColor}2e`,
-  };
+  const tileClassName = seatMarker
+    ? "tabletop-opponent-avatar tabletop-opponent-seat-avatar shrink-0 overflow-hidden bg-slate-950"
+    : compact
+    ? "tabletop-opponent-avatar relative h-6 w-6 shrink-0 overflow-hidden rounded-[4px] border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)]"
+    : "tabletop-opponent-avatar relative h-8 w-7 shrink-0 overflow-hidden rounded-[4px] border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)] @min-[11rem]:h-10 @min-[11rem]:w-9";
+  const tileStyle: CSSProperties = seatMarker
+    ? {}
+    : {
+        borderColor: `${seatColor}cc`,
+        boxShadow: `0 0 0 1px ${seatColor}55, 0 8px 18px rgba(0,0,0,0.32), 0 0 14px ${seatColor}2e`,
+      };
 
   if (!activeSrc) {
     return <div className={tileClassName} style={tileStyle} title={label}>{inner}</div>;

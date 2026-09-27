@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useCardHover } from "../useCardHover.ts";
+import { CARD_PREVIEW_LONG_PRESS_DELAY_MS } from "../useLongPress.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 
@@ -69,7 +70,10 @@ describe("useCardHover", () => {
       pointerId: 1,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(500));
+    act(() => vi.advanceTimersByTime(CARD_PREVIEW_LONG_PRESS_DELAY_MS - 1));
+    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+
+    act(() => vi.advanceTimersByTime(1));
 
     expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
     expect(useUiStore.getState().previewSticky).toBe(true);
@@ -91,7 +95,7 @@ describe("useCardHover", () => {
       pointerType: "touch",
     });
     fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "touch", relatedTarget: document.body });
-    act(() => vi.advanceTimersByTime(500));
+    act(() => vi.advanceTimersByTime(CARD_PREVIEW_LONG_PRESS_DELAY_MS));
 
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
     expect(useUiStore.getState().previewSticky).toBe(false);
@@ -112,7 +116,7 @@ describe("useCardHover", () => {
       pointerId: 1,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(500));
+    act(() => vi.advanceTimersByTime(CARD_PREVIEW_LONG_PRESS_DELAY_MS));
     expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
 
     fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "touch", relatedTarget: document.body });

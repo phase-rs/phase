@@ -32,6 +32,7 @@ vi.mock("../StackEntry.tsx", () => ({
       data-choice-object-id={choiceObjectId}
       data-grouped-ids={groupedObjectIds?.join(" ")}
       data-group-count={groupCount}
+      data-rotation={style?.rotate}
       style={style}
       onMouseEnter={() => onHoverChange?.(true)}
       onMouseLeave={() => onHoverChange?.(false)}
@@ -48,7 +49,19 @@ vi.mock("../StackTargetArcs.tsx", () => ({
 }));
 
 vi.mock("../../flexlayout/DraggableWidget.tsx", () => ({
-  DraggableWidget: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DraggableWidget: ({
+    children,
+    flexZone,
+    style,
+  }: {
+    children: ReactNode;
+    flexZone: string;
+    style?: CSSProperties;
+  }) => (
+    <div data-testid={`draggable-${flexZone}`} style={style}>
+      {children}
+    </div>
+  ),
 }));
 
 describe("StackDisplay", () => {
@@ -59,6 +72,7 @@ describe("StackDisplay", () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   it("raises the hovered entry above every other card in the pile", () => {
@@ -75,7 +89,14 @@ describe("StackDisplay", () => {
     const bottomCard = screen.getByTestId("stack-entry-10");
     const topCard = screen.getByTestId("stack-entry-20");
     expect(bottomCard).toHaveStyle({ zIndex: 1 });
-    expect(topCard).toHaveStyle({ zIndex: 2 });
+    expect(bottomCard).toHaveStyle({ top: "0px", left: "0px" });
+    expect(bottomCard).toHaveAttribute("data-rotation", "-2.25deg");
+    expect(topCard).toHaveStyle({
+      top: "4px",
+      left: "3px",
+      zIndex: 2,
+    });
+    expect(topCard).toHaveAttribute("data-rotation", "0deg");
 
     fireEvent.mouseEnter(bottomCard);
 
@@ -178,5 +199,23 @@ describe("StackDisplay", () => {
 
     expect(screen.getByTestId("stack-entry-10")).toHaveAttribute("data-group-count", "1");
     expect(screen.getByTestId("stack-entry-11")).toHaveAttribute("data-group-count", "1");
+  });
+
+  it("keeps a deep right-docked stack above compact landscape action controls", () => {
+    vi.stubGlobal("innerWidth", 915);
+    vi.stubGlobal("innerHeight", 412);
+    const stack = [10, 11, 12, 13, 14].map((id) => buildStackEntry({ id }));
+    const gameState = buildGameState({ stack });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+    render(<StackDisplay effectiveMultiplayerBoardLayout="focused" />);
+
+    const dock = screen.getByTestId("draggable-stackPanel");
+    const pile = dock.firstElementChild as HTMLElement;
+    const pileBottom = Number.parseFloat(dock.style.top) + Number.parseFloat(pile.style.height);
+
+    expect(pileBottom).toBeLessThanOrEqual(412 - 108);
   });
 });

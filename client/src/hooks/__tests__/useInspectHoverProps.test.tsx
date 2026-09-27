@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useInspectHoverProps } from "../useInspectHoverProps.ts";
+import { CARD_PREVIEW_LONG_PRESS_DELAY_MS } from "../useLongPress.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 
@@ -117,7 +118,7 @@ describe("useInspectHoverProps", () => {
       pointerId: 1,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(500));
+    act(() => vi.advanceTimersByTime(CARD_PREVIEW_LONG_PRESS_DELAY_MS));
 
     expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
     expect(useUiStore.getState().previewSticky).toBe(true);
@@ -125,7 +126,7 @@ describe("useInspectHoverProps", () => {
 
   it("does not arm the long press for a mouse", () => {
     // Long-press stands in for hover, so a mouse must never arm it. If it did,
-    // any 500ms hold would open a sticky preview and the onClickCapture guard
+    // any completed hold would open a sticky preview and the onClickCapture guard
     // would then swallow the click that ended it — on a choice modal that reads
     // as a card that cannot be picked.
     render(<HoverPropsHarness />);
@@ -138,7 +139,7 @@ describe("useInspectHoverProps", () => {
       pointerId: 1,
       pointerType: "mouse",
     });
-    act(() => vi.advanceTimersByTime(500));
+    act(() => vi.advanceTimersByTime(CARD_PREVIEW_LONG_PRESS_DELAY_MS));
 
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
     expect(useUiStore.getState().previewSticky).toBe(false);
@@ -163,7 +164,7 @@ describe("useInspectHoverProps", () => {
       pointerId: 2,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(500));
+    act(() => vi.advanceTimersByTime(CARD_PREVIEW_LONG_PRESS_DELAY_MS));
 
     expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
   });
@@ -183,7 +184,7 @@ describe("useInspectHoverProps", () => {
       pointerId: 1,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(500));
+    act(() => vi.advanceTimersByTime(CARD_PREVIEW_LONG_PRESS_DELAY_MS));
     expect(useUiStore.getState().inspectedObjectId).toBe(OBJECT_ID);
 
     fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "touch", relatedTarget: document.body });
@@ -209,7 +210,7 @@ describe("useInspectHoverProps", () => {
       pointerType: "touch",
     });
     fireEvent.pointerLeave(card, { pointerId: 1, pointerType: "touch", relatedTarget: document.body });
-    act(() => vi.advanceTimersByTime(500));
+    act(() => vi.advanceTimersByTime(CARD_PREVIEW_LONG_PRESS_DELAY_MS));
 
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
     expect(useUiStore.getState().previewSticky).toBe(false);

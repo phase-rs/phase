@@ -181,6 +181,9 @@
   },
   "multiplayer": {
     "title": "マルチプレイヤー",
+    "opponentView": "対戦相手ビュー",
+    "followActiveOpponent": "アクティブな対戦相手を追従",
+    "followActiveOpponentDescription": "ターン中の対戦相手に自動的にフォーカスします。",
     "displayName": "表示名",
     "displayNamePlaceholder": "名前を入力",
     "serverSelectionNote": "サーバー選択はロビーに移動しました — マルチプレイヤーを開き、サーバーチップ（またはP2Pモードの「サーバーを選択」）から地域の切り替え、自前ホストの設定、接続テストを行ってください。"

@@ -14,9 +14,8 @@ import { buildGameState, gameStateFactory } from "../../../test/factories/gameSt
 import { PlayerHand } from "../../hand/PlayerHand.tsx";
 import { GameCardPreview } from "../GameCardPreview.tsx";
 
-// CardPreview renders <img alt={cardName} …>; mocking the image hook lets us
-// assert the forwarded name without loading Scryfall assets. Mirrors the mocks
-// in CardPreview.test.tsx.
+// Static alternate faces still render an image, while the active in-game face
+// is the live Tabletop composition. Mocking the image hook keeps both paths local.
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardBackImage: () => ({ src: "card-back.png", isLoading: false }),
   useCardImage: () => ({
@@ -58,6 +57,8 @@ function inspect(object: GameObject, faceIndex = 0): void {
   useUiStore.setState({ inspectedObjectId: object.id, inspectedFaceIndex: faceIndex });
 }
 
+const originalInnerWidth = window.innerWidth;
+
 afterEach(() => {
   cleanup();
   useGameStore.setState({ gameState: null, spellCosts: {} });
@@ -69,21 +70,66 @@ afterEach(() => {
     previewSource: null,
     isDragging: false,
     mobileHandGesture: null,
+    previewSticky: false,
     shiftHeld: false,
     altHeld: false,
-    previewSticky: false,
   });
   // GameCardPreview adds a third store; reset it so "shift" mode doesn't leak.
   usePreferencesStore.setState({ cardPreviewMode: "follow" });
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: originalInnerWidth,
+  });
+  fireEvent(window, new Event("resize"));
 });
 
 describe("GameCardPreview", () => {
+  it("requires an explicit sticky hold before showing mobile inspection", () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 390,
+    });
+    inspect(battlefieldObject());
+
+    render(<GameCardPreview />);
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    act(() => useUiStore.setState({ previewSticky: true }));
+
+    expect(
+      screen.getByRole("dialog", { name: "Card details: Pithing Needle" }),
+    ).toBeInTheDocument();
+  });
+
   it("forwards the inspected object's name to the preview", () => {
     inspect(battlefieldObject());
 
     render(<GameCardPreview />);
 
-    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("article", { name: "Pithing Needle" }),
+    ).toHaveAttribute("data-tabletop-live-card-mode", "inspection");
+  });
+
+  it("shows the engine-current combat stats on the live inspection face", () => {
+    inspect(
+      battlefieldObject({
+        card_types: {
+          supertypes: [],
+          core_types: ["Creature"],
+          subtypes: ["Squirrel"],
+        },
+        power: 5,
+        toughness: 4,
+      }),
+    );
+
+    render(<GameCardPreview />);
+
+    const liveCard = screen.getByRole("article", { name: "Pithing Needle" });
+    expect(liveCard).toHaveAttribute("data-tabletop-power", "5");
+    expect(liveCard).toHaveAttribute("data-tabletop-toughness", "4");
   });
 
   it("previews a public historical log card after its live object is gone", () => {
@@ -168,7 +214,7 @@ describe("GameCardPreview", () => {
     expect(useUiStore.getState().inspectedObjectId).toBe(handCard.id);
     expect(useUiStore.getState().previewSource).toBeNull();
     expect(container.querySelector("[data-card-preview]")).not.toBeNull();
-    expect(screen.getAllByAltText("Hand Card").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("article", { name: "Hand Card" }).length).toBeGreaterThan(0);
   });
 
   it("keeps an explicit sticky preview visible in Hold Shift mode", () => {
@@ -178,7 +224,7 @@ describe("GameCardPreview", () => {
 
     render(<GameCardPreview />);
 
-    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("article", { name: "Pithing Needle" }).length).toBeGreaterThan(0);
   });
 
   it("anchors the preview to the hand card hovered through PlayerHand", async () => {
@@ -240,7 +286,9 @@ describe("GameCardPreview", () => {
       const preview = container.querySelector<HTMLElement>("[data-card-preview]");
       expect(preview).not.toBeNull();
       expect(preview).toHaveStyle({ bottom: "0px" });
-      expect(within(preview!).getByAltText("Hovered Card")).toBeInTheDocument();
+      expect(
+        within(preview!).getByRole("article", { name: "Hovered Card" }),
+      ).toHaveAttribute("data-tabletop-live-card-mode", "inspection");
     });
     expect(useUiStore.getState().previewSource).toBe("playerHand");
   });
@@ -262,6 +310,8 @@ describe("GameCardPreview", () => {
       `[data-hand-card][data-object-id="${card.id}"]`,
     );
     expect(source).not.toBeNull();
+    const fanSlot = source?.parentElement;
+    expect(fanSlot).not.toBeNull();
 
     const sourceOrigin = {
       bottom: 700,
@@ -284,7 +334,7 @@ describe("GameCardPreview", () => {
     });
 
     expect(source).not.toHaveAttribute("data-hand-held-source");
-    expect(source).not.toHaveClass("w-0", "opacity-0");
+    expect(fanSlot).not.toHaveClass("w-0", "opacity-0");
 
     act(() => {
       useUiStore.getState().setMobileHandGesture({
@@ -299,7 +349,7 @@ describe("GameCardPreview", () => {
     });
 
     expect(source).toHaveAttribute("data-hand-held-source", "true");
-    expect(source).toHaveClass("w-0", "opacity-0");
+    expect(fanSlot).toHaveClass("w-0", "opacity-0");
   });
 
   it("renders no preview while a card is being dragged", () => {
@@ -309,7 +359,9 @@ describe("GameCardPreview", () => {
     const { container } = render(<GameCardPreview />);
 
     expect(container.firstChild).toBeNull();
-    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
+    expect(
+      screen.queryByRole("article", { name: "Pithing Needle" }),
+    ).toBeNull();
   });
 
   it("suppresses the preview in shift mode when Shift is not held", () => {
@@ -325,7 +377,9 @@ describe("GameCardPreview", () => {
     cleanup();
     useUiStore.setState({ shiftHeld: true });
     render(<GameCardPreview />);
-    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("article", { name: "Pithing Needle" }),
+    ).toHaveAttribute("data-tabletop-live-card-mode", "inspection");
   });
 
   it("shows the back-face name when inspecting face index 1", () => {
@@ -357,8 +411,8 @@ describe("GameCardPreview", () => {
 
     render(<GameCardPreview />);
 
-    expect(screen.getAllByAltText("Card back").length).toBeGreaterThan(0);
-    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
+    expect(screen.getAllByLabelText("Face-down card").length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText("Pithing Needle")).toBeNull();
   });
 
   it("previews the Ixidron class (TurnedFaceDown) as the generic back (#7551 review)", () => {
@@ -374,8 +428,8 @@ describe("GameCardPreview", () => {
 
     render(<GameCardPreview />);
 
-    expect(screen.getAllByAltText("Card back").length).toBeGreaterThan(0);
-    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
+    expect(screen.getAllByLabelText("Face-down card").length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText("Pithing Needle")).toBeNull();
   });
 
   it("previews a face-down permanent when the engine projects its identity", () => {
@@ -383,7 +437,7 @@ describe("GameCardPreview", () => {
 
     render(<GameCardPreview />);
 
-    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText("Pithing Needle").length).toBeGreaterThan(0);
   });
 
   it("peeks the STORED face of the viewer's own face-down permanent (#7547)", () => {

@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   AnimatePresence,
   motion,
@@ -35,7 +42,14 @@ import { ReportCardButton, type CardReportContext } from "./ReportCardButton.tsx
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
-import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
+import { TabletopCardFace } from "../tabletop3d/TabletopCardFace.tsx";
+import {
+  computePTDisplay,
+  formatCounterType,
+  formatTypeLine,
+  publicName,
+  toRoman,
+} from "../../viewmodel/cardProps.ts";
 import {
   getKeywordDisplayText,
   getKeywordName,
@@ -112,7 +126,7 @@ interface CardPreviewProps {
   mobileLayout?: "modal" | "compact";
   /** Object id of the originating player-hand card. When its DOM marker is
    *  present, desktop follow-mode previews grow out of that card and stay
-   *  bottom-anchored like Arena instead of following the pointer. */
+   *  bottom-anchored like Tabletop instead of following the pointer. */
   handSourceObjectId?: number | null;
 }
 
@@ -768,7 +782,7 @@ function CardPreviewInner({
   ]);
 
   // Generic mobile inspections use the blocking modal. A held hand card is the
-  // exception: it uses the same bottom-anchored Arena animation as desktop so
+  // exception: it uses the same bottom-anchored Tabletop animation as desktop so
   // the player can keep their finger down and scrub the stable fan beneath it.
   if (isMobile && !handPreview) {
     return (
@@ -1140,12 +1154,26 @@ function CardImagePreview({
     showCastManaCost && obj ? spellCostDisplay(effectiveCost, obj.mana_cost) : null;
   const displayCost = showOtherFace ? otherFaceCost : (castCostDisplay?.displayCost ?? null);
   const displayCostReduced = castCostDisplay?.isReduced ?? false;
+  const showLiveTabletopFace =
+    obj != null
+    && !showOtherFace
+    && !isRotated
+    && cardName === publicName(obj);
   const displayBackFace = showOtherFace || castCostDisplay == null ? undefined : backFaceCost;
 
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${renderInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
-      <div className={`${frameClass} ${isRotated ? "" : "aspect-[488/680]"} relative rounded-[4%] overflow-hidden`}>
-        {art.kind === "back" ? (
+      <div className={`${frameClass} ${showLiveTabletopFace ? "aspect-[5/7]" : isRotated ? "" : "aspect-[488/680]"} relative rounded-[4%] overflow-hidden`}>
+        {showLiveTabletopFace ? (
+          <TabletopCardFace
+            objectId={obj.id}
+            displayCost={displayCost ?? obj.mana_cost}
+            isCostReduced={displayCostReduced}
+            mode="inspection"
+            className="!h-full !w-full"
+            style={{ height: "100%", width: "100%" }}
+          />
+        ) : art.kind === "back" ? (
           <CardBackFallback className={`${frameClass} rounded-[4%] border border-gray-600 shadow-2xl`} />
         ) : isLoading ? (
           <div
@@ -1175,7 +1203,7 @@ function CardImagePreview({
             onError={() => art.advanceFailedSource?.(src)}
           />
         )}
-        {displayCost && (
+        {displayCost && !showLiveTabletopFace && (
           // @container overlay sized to the frame so the pips scale with the
           // preview's own width, which varies from a 300px hand hover to a
           // 472px docked preview — a fixed px size can only be right at one end.
@@ -1315,7 +1343,7 @@ function SupportSummary({ items }: { items: ParsedItem[] }) {
   );
 }
 
-interface ParsedAbilitiesPanelProps {
+export interface ParsedAbilitiesPanelProps {
   name: string;
   cardTypes?: { supertypes: string[]; core_types: string[]; subtypes: string[] } | null;
   /** Live object keywords, used to collapse a Changeling's expanded subtype
@@ -1325,13 +1353,14 @@ interface ParsedAbilitiesPanelProps {
    *  `cardTypes` when present (non-English locale with a translated card). */
   localizedTypeLine?: string | null;
   parseDetails: ParsedItem[] | null;
-  maxHeight?: number;
+  maxHeight?: CSSProperties["maxHeight"];
   /** In-game report context for the displayed face; absent in the deck builder
    *  (no live game), where the report button is not shown. */
   report?: CardReportContext;
+  className?: string;
 }
 
-function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight, report }: ParsedAbilitiesPanelProps) {
+export function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight, report, className = "" }: ParsedAbilitiesPanelProps) {
   const { t } = useTranslation("game");
   const items = parseDetails ?? [];
   const rulings = useCardRulings(name);
@@ -1339,7 +1368,7 @@ function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, pa
 
   return (
     <div
-      className="w-[clamp(220px,26vw,472px)] overflow-y-auto pointer-events-auto rounded-[3.5%] border border-gray-600 bg-gray-950/95 shadow-2xl backdrop-blur-sm"
+      className={`w-[clamp(220px,26vw,472px)] overflow-y-auto pointer-events-auto rounded-[3.5%] border border-gray-600 bg-gray-950/95 shadow-2xl backdrop-blur-sm ${className}`}
       style={{ maxHeight: maxHeight ?? "80vh" }}
       data-card-hover
     >
@@ -1598,11 +1627,11 @@ function CardInfoPanel({
       {/* P/T breakdown */}
       {ptDisplay && (
         <div className="mt-1 text-gray-400">
-          <span className={ptDisplay.powerColor === "green" ? "text-green-400" : ptDisplay.powerColor === "red" ? "text-red-400" : "text-white"}>
+          <span className={ptDisplay.powerColor === "blue" ? "text-blue-400" : ptDisplay.powerColor === "red" ? "text-red-400" : "text-white"}>
             {ptDisplay.power}
           </span>
           <span className="text-gray-500">/</span>
-          <span className={ptDisplay.toughnessColor === "green" ? "text-green-400" : ptDisplay.toughnessColor === "red" ? "text-red-400" : "text-white"}>
+          <span className={ptDisplay.toughnessColor === "blue" ? "text-blue-400" : ptDisplay.toughnessColor === "red" ? "text-red-400" : "text-white"}>
             {ptDisplay.toughness}
           </span>
           {obj.base_power != null && obj.base_toughness != null && (

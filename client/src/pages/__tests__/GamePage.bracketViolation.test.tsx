@@ -245,7 +245,58 @@ vi.mock("../../components/board/BattlefieldBackground", () => ({
 }));
 
 vi.mock("../../components/stack/StackDisplay", () => ({
-  StackDisplay: () => null,
+  StackDisplay: ({
+    effectiveMultiplayerBoardLayout,
+  }: {
+    effectiveMultiplayerBoardLayout: string;
+  }) => (
+    <div
+      data-layout={effectiveMultiplayerBoardLayout}
+      data-testid="game-board-layout"
+    />
+  ),
+}));
+
+vi.mock("../../components/tabletop3d/TabletopGameBoard", () => ({
+  TabletopGameBoard: ({
+    onViewZone,
+  }: {
+    onViewZone?: (
+      zone: "graveyard" | "exile" | "library",
+      playerId: number,
+      launcher?: HTMLButtonElement,
+    ) => void;
+  }) => {
+    const gameState = storeOverrides.gameState as {
+      players?: Array<{ graveyard?: number[]; library?: number[] }>;
+      objects?: Record<number, { display_visible_to_viewer?: boolean }>;
+    } | null;
+    const graveyard = gameState?.players?.[0]?.graveyard ?? [];
+    const library = gameState?.players?.[0]?.library ?? [];
+    const visibleLibraryTop = library.length > 0
+      && gameState?.objects?.[library[library.length - 1]]?.display_visible_to_viewer === true;
+
+    return (
+      <div>
+        {graveyard.length > 0 ? (
+          <button
+            type="button"
+            data-graveyard-pile="0"
+            onClick={(event) => onViewZone?.("graveyard", 0, event.currentTarget)}
+          />
+        ) : null}
+        {library.length > 0 ? (
+          <div data-library-pile="0">
+            <button
+              type="button"
+              disabled={!visibleLibraryTop}
+              onClick={(event) => onViewZone?.("library", 0, event.currentTarget)}
+            />
+          </div>
+        ) : null}
+      </div>
+    );
+  },
 }));
 
 vi.mock("../../components/debug/DebugPanel", () => ({

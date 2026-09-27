@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { usePreviewDismiss } from "../../hooks/usePreviewDismiss.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -7,6 +8,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import { faceDownMarkerName } from "./faceDownMarker.ts";
+import { TabletopCardDetailOverlay } from "../tabletop3d/TabletopCardDetailOverlay.tsx";
 import { CardPreview } from "./CardPreview.tsx";
 
 /**
@@ -31,12 +33,15 @@ export function GameCardPreview() {
   const inspectedCardName = useUiStore((s) => s.inspectedCardName);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
   const previewPlacement = useUiStore((s) => s.previewPlacement);
+  const previewSticky = useUiStore((s) => s.previewSticky);
+  const dismissPreview = useUiStore((s) => s.dismissPreview);
+  const mobileHandGesture = useUiStore((s) => s.mobileHandGesture);
   const isDragging = useUiStore((s) => s.isDragging);
   const shiftHeld = useUiStore((s) => s.shiftHeld);
-  const previewSticky = useUiStore((s) => s.previewSticky);
   // Card-preview behavior preference. In "shift" mode the preview only renders
   // while Shift is held; in "side" mode it docks to the screen edge.
   const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
+  const isMobile = useIsMobile();
   const obj = useGameStore((s) =>
     inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
   );
@@ -89,6 +94,22 @@ export function GameCardPreview() {
   // A sticky preview is an explicit request (long-press or a log card link),
   // so it must remain visible even when the hover-only Shift mode is selected.
   const previewSuppressed = cardPreviewMode === "shift" && !shiftHeld && !previewSticky;
+
+  // Touch inspection is explicit: only a completed long press sets the sticky
+  // flag. Ordinary taps may still select, activate, or lift a card, but they do
+  // not produce a preview. Once held, use the same persistent Tabletop detail
+  // surface as the Three.js battlefield; lifting into drag-to-cast temporarily
+  // yields the screen back to the moving card.
+  if (isMobile) {
+    return previewSticky
+      && inspectedObj
+      && mobileHandGesture?.phase !== "drag" ? (
+        <TabletopCardDetailOverlay
+          objectId={inspectedObj.id}
+          onClose={dismissPreview}
+        />
+      ) : null;
+  }
 
   return (
     <CardPreview

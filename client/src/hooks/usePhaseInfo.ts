@@ -18,6 +18,7 @@ export interface PhaseInfo {
   phaseLabel: string;
   phases: readonly PhaseStripEntry[];
   advanceLabel: string;
+  compactAdvanceLabel: string;
   isCombatPhase: boolean;
   nextPhaseLabel: string | null;
 }
@@ -107,14 +108,23 @@ export function usePhaseInfo(): PhaseInfo {
 
   const nextPhase = NEXT_PHASE[phase];
   const nextPhaseLabel = nextPhase ? t(`phaseName.${nextPhase}`) : null;
+  const compactNextPhaseLabel = nextPhase
+    ? t(`phaseNameCompact.${nextPhase}`)
+    : null;
 
   let advanceLabel: string;
+  let compactAdvanceLabel: string;
   if (stackLength > 0) {
     advanceLabel = t("advance.resolve");
-  } else if (!isMyTurn || !nextPhaseLabel) {
+    compactAdvanceLabel = advanceLabel;
+  } else if (!isMyTurn || !nextPhaseLabel || !compactNextPhaseLabel) {
     advanceLabel = t("advance.passPriority");
+    compactAdvanceLabel = advanceLabel;
   } else {
     advanceLabel = t("advance.toPhase", { phase: nextPhaseLabel });
+    compactAdvanceLabel = t("advance.toPhase", {
+      phase: compactNextPhaseLabel,
+    });
   }
 
   return {
@@ -123,6 +133,7 @@ export function usePhaseInfo(): PhaseInfo {
     phaseLabel: PHASE_LABELS[phase],
     phases: PHASE_STRIP,
     advanceLabel,
+    compactAdvanceLabel,
     isCombatPhase,
     nextPhaseLabel,
   };

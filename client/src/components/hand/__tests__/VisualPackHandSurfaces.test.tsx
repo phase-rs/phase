@@ -151,6 +151,7 @@ describe("visual-pack owned hand surfaces", () => {
       <CompanionFanCard
         companion={{ card: { card: { name: "Lurrus" }, count: 1 }, used: false }}
         canActivate={false}
+        enableHover
         theme={ZONE_THEME.companion}
         rotation={0}
         arcOffset={0}

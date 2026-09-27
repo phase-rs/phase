@@ -3,7 +3,10 @@ import { useRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useUiStore } from "../../../stores/uiStore.ts";
-import { useHandScrubPreview } from "../useHandScrubPreview.ts";
+import {
+  HAND_PREVIEW_HOLD_DELAY_MS,
+  useHandScrubPreview,
+} from "../useHandScrubPreview.ts";
 
 function rect(left: number, right: number): DOMRect {
   return {
@@ -73,13 +76,13 @@ describe("useHandScrubPreview", () => {
       pointerId: 3,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(400));
+    act(() => vi.advanceTimersByTime(HAND_PREVIEW_HOLD_DELAY_MS));
 
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
     expect(useUiStore.getState().mobileHandGesture).toBeNull();
   });
 
-  it("holds to preview, scrubs adjacent cards, and suppresses the release click", () => {
+  it("holds to preview, scrubs adjacent cards, and keeps the release preview open", () => {
     vi.useFakeTimers();
     const onOpen = vi.fn();
     render(<ScrubHarness onOpen={onOpen} />);
@@ -97,7 +100,7 @@ describe("useHandScrubPreview", () => {
       pointerId: 7,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(400));
+    act(() => vi.advanceTimersByTime(HAND_PREVIEW_HOLD_DELAY_MS));
 
     expect(useUiStore.getState().inspectedObjectId).toBe(11);
     expect(useUiStore.getState().previewSticky).toBe(true);
@@ -126,7 +129,9 @@ describe("useHandScrubPreview", () => {
     act(() => vi.advanceTimersByTime(100));
     fireEvent.click(hand);
 
-    expect(useUiStore.getState().inspectedObjectId).toBeNull();
+    expect(useUiStore.getState().inspectedObjectId).toBe(12);
+    expect(useUiStore.getState().previewSticky).toBe(true);
+    expect(useUiStore.getState().mobileHandGesture).toBeNull();
     expect(second).not.toHaveAttribute("data-hand-touch-active");
     expect(onOpen).not.toHaveBeenCalled();
   });
@@ -147,7 +152,7 @@ describe("useHandScrubPreview", () => {
       pointerId: 10,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(400));
+    act(() => vi.advanceTimersByTime(HAND_PREVIEW_HOLD_DELAY_MS));
     fireEvent.pointerUp(hand, {
       button: 0,
       clientX: 40,
@@ -205,7 +210,7 @@ describe("useHandScrubPreview", () => {
       pointerId: 15,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(400));
+    act(() => vi.advanceTimersByTime(HAND_PREVIEW_HOLD_DELAY_MS));
 
     expect(useUiStore.getState().mobileHandGesture).toMatchObject({
       objectId: 11,
@@ -281,7 +286,22 @@ describe("useHandScrubPreview", () => {
     });
 
     expect(onReleaseToCast).toHaveBeenCalledOnce();
-    expect(onReleaseToCast).toHaveBeenCalledWith(11);
+    expect(onReleaseToCast).toHaveBeenCalledWith(
+      11,
+      expect.objectContaining({
+        rect: expect.any(DOMRect),
+        rotation: 0,
+        velocity: expect.objectContaining({
+          x: expect.any(Number),
+          y: expect.any(Number),
+        }),
+      }),
+    );
+    const releasedMotion = onReleaseToCast.mock.calls[0]?.[1];
+    expect(releasedMotion?.rect.x).toBe(12);
+    expect(releasedMotion?.rect.y).toBe(-50);
+    expect(releasedMotion?.rect.width).toBe(100);
+    expect(releasedMotion?.rect.height).toBe(140);
     expect(useUiStore.getState().mobileHandGesture).toBeNull();
     expect(onOpen).not.toHaveBeenCalled();
   });
@@ -310,7 +330,7 @@ describe("useHandScrubPreview", () => {
       pointerId: 16,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(400));
+    act(() => vi.advanceTimersByTime(HAND_PREVIEW_HOLD_DELAY_MS));
 
     fireEvent.pointerMove(hand, {
       clientX: 52,
@@ -437,7 +457,7 @@ describe("useHandScrubPreview", () => {
       pointerId: 9,
       pointerType: "touch",
     });
-    act(() => vi.advanceTimersByTime(400));
+    act(() => vi.advanceTimersByTime(HAND_PREVIEW_HOLD_DELAY_MS));
     fireEvent.pointerUp(hand, {
       button: 0,
       clientX: 240,

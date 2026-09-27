@@ -114,6 +114,114 @@ describe("OpponentHud", () => {
     expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
   });
 
+  it("renders portrait-filled life pills at Tabletop opponent seats", () => {
+    useGameStore.setState({
+      gameState: createGameState({
+        derived: {
+          turn_order: [
+            { player: 2, slot_index: 1, turns_from_now: 1, turn_number: 2 },
+          ],
+        },
+      }),
+    });
+
+    render(
+      <OpponentHud
+        tabletopSeats={[
+          { playerId: 1, seat: "left" },
+          { playerId: 2, seat: "far" },
+          { playerId: 3, seat: "right" },
+        ]}
+      />,
+    );
+
+    expect(document.querySelector("[data-opponent-hud-rail]")).toBeNull();
+    expect(
+      Array.from(
+        document.querySelectorAll("[data-tabletop-opponent-seat]"),
+      ).map((marker) => marker.getAttribute("data-tabletop-opponent-seat")),
+    ).toEqual(["left", "far", "right"]);
+    expect(
+      document.querySelector('[data-tabletop-opponent-seat="left"]'),
+    ).toHaveClass("col-start-1");
+    expect(
+      document.querySelector('[data-tabletop-opponent-seat="far"]'),
+    ).toHaveClass("col-start-2");
+    expect(
+      document.querySelector('[data-tabletop-opponent-seat="right"]'),
+    ).toHaveClass("col-start-3");
+
+    for (const playerId of [1, 2, 3]) {
+      const playerMarker = document.querySelector(
+        `[data-player-hud="${playerId}"][data-tabletop-opponent-marker]`,
+      );
+      const portrait = playerMarker?.querySelector<HTMLElement>(
+        "[data-tabletop-opponent-portrait]",
+      );
+      const life = playerMarker?.querySelector<HTMLElement>(
+        "[data-tabletop-opponent-life]",
+      );
+      const name = playerMarker?.querySelector<HTMLElement>(
+        "[data-tabletop-opponent-name]",
+      );
+      const copy = playerMarker?.querySelector<HTMLElement>(
+        "[data-tabletop-opponent-copy]",
+      );
+      const shade = playerMarker?.querySelector<HTMLElement>(
+        "[data-tabletop-opponent-fill-shade]",
+      );
+      expect(playerMarker).not.toBeNull();
+      expect(playerMarker).toHaveAttribute("data-player-life-shape", "pill");
+      expect(life).toHaveTextContent("40");
+      expect(portrait).toContainElement(life ?? null);
+      expect(portrait).toContainElement(name ?? null);
+      expect(copy).toContainElement(life ?? null);
+      expect(copy).toContainElement(name ?? null);
+      expect(portrait).toContainElement(shade ?? null);
+      expect(shade).toHaveClass("bg-black/30");
+      expect(
+        playerMarker?.querySelector("[data-tabletop-opponent-hand-count]"),
+      ).toBeNull();
+      expect(name).toHaveTextContent(`Opp ${playerId + 1}`);
+      expect(copy).toHaveClass("flex-col");
+      expect(name).not.toHaveClass("rounded-full");
+      expect(name).not.toHaveClass("bg-black/55");
+      expect(portrait).toHaveClass("tabletop-opponent-seat-portrait");
+      expect(portrait).toHaveClass("overflow-visible");
+      expect(shade).toHaveClass("rounded-[inherit]");
+      expect(
+        playerMarker?.querySelector(".tabletop-opponent-avatar"),
+      ).toHaveClass("tabletop-opponent-seat-avatar");
+      expect(life?.querySelector("svg")).toBeNull();
+      expect(playerMarker).toHaveClass("tabletop-opponent-seat-marker");
+    }
+
+    const nextUpBadge = screen.getByTitle("This player's turn is next.");
+    const nextUpMarker = document.querySelector('[data-player-hud="2"]');
+    const nextUpPortrait = nextUpMarker?.querySelector(
+      "[data-tabletop-opponent-portrait]",
+    );
+    expect(nextUpMarker).toContainElement(nextUpBadge);
+    expect(nextUpPortrait).not.toContainElement(nextUpBadge);
+    expect(nextUpBadge).toHaveClass("absolute", "-top-1", "z-50");
+  });
+
+  it("keeps Tabletop seat markers wired to opponent focus", () => {
+    render(
+      <OpponentHud
+        tabletopSeats={[
+          { playerId: 1, seat: "left" },
+          { playerId: 2, seat: "far" },
+          { playerId: 3, seat: "right" },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /view Opp 4's board/i }));
+
+    expect(useUiStore.getState().focusedOpponent).toBe(3);
+  });
+
   it("shows a tooltip and hover preview for opponent avatars with art", async () => {
     useMultiplayerStore.setState({
       playerAvatars: new Map([
@@ -139,9 +247,8 @@ describe("OpponentHud", () => {
   });
 
   it("auto-selects the active opponent when Follow is enabled", async () => {
+    usePreferencesStore.setState({ followActiveOpponent: true });
     render(<OpponentHud />);
-
-    fireEvent.click(screen.getByRole("button", { name: /follow active opponent/i }));
 
     await waitFor(() => {
       expect(useUiStore.getState().focusedOpponent).toBe(2);
@@ -214,7 +321,7 @@ describe("OpponentHud", () => {
     });
   });
 
-  it("keeps the Follow toggle usable after selecting the last opponent", async () => {
+  it("keeps the persistent Follow preference out of the opponent HUD", async () => {
     usePreferencesStore.setState({ followActiveOpponent: true });
     render(<OpponentHud />);
 
@@ -228,9 +335,9 @@ describe("OpponentHud", () => {
       expect(usePreferencesStore.getState().followActiveOpponent).toBe(false);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /follow active opponent/i }));
-
-    expect(usePreferencesStore.getState().followActiveOpponent).toBe(true);
+    expect(
+      screen.queryByRole("button", { name: /follow active opponent/i }),
+    ).toBeNull();
   });
 
   it("keeps Follow enabled when selecting the active opponent", async () => {

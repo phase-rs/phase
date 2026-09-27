@@ -90,6 +90,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
       {!hideLabel && <span className="text-xs text-slate-400">{t("lifeTotal.playerLabel", { seat: playerId + 1 })}</span>}
       <motion.span
         key={life}
+        data-life-total-value=""
         initial={{ scale: 1.3 }}
         animate={{ scale: 1 }}
         transition={{ duration: 0.2 }}

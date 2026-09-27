@@ -535,6 +535,18 @@ export default defineConfig(({ mode }) => {
         target: process.env.VITE_IMPORT_DECK_PROXY ?? "http://localhost:8787",
         changeOrigin: true,
       },
+      // Canvas/WebGL uploads require CORS-clean image responses. These fixed
+      // routes proxy only Phase's two Scryfall image hosts.
+      "/card-image-art": {
+        target: "https://cards.scryfall.io",
+        changeOrigin: true,
+        rewrite: (requestPath) => requestPath.replace(/^\/card-image-art/, ""),
+      },
+      "/card-image-back": {
+        target: "https://backs.scryfall.io",
+        changeOrigin: true,
+        rewrite: (requestPath) => requestPath.replace(/^\/card-image-back/, ""),
+      },
     },
   },
   build: {

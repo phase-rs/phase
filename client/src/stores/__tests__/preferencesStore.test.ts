@@ -13,7 +13,7 @@ describe("preferencesStore", () => {
         followActiveOpponent: false,
         logPanelLastChoice: "closed",
         logDockSide: "right",
-        boardBackground: "auto-wubrg",
+        boardBackground: "plain_slate",
         vfxQuality: "full",
         animationSpeedMultiplier: 1.0,
         showCardPreviewFooter: true,
@@ -44,7 +44,7 @@ describe("preferencesStore", () => {
     expect(state.followActiveOpponent).toBe(false);
     expect(usePreferencesStore.getInitialState().logPanelLastChoice).toBe("open");
     expect(usePreferencesStore.getInitialState().logDockSide).toBe("right");
-    expect(state.boardBackground).toBe("auto-wubrg");
+    expect(state.boardBackground).toBe("plain_slate");
     // Read the store's real initialization snapshot (the getInitialState idiom
     // used below): the shared beforeEach writes its own defaults snapshot, so a
     // getState() read here would assert that snapshot, not buildDefaultPreferences().
@@ -300,7 +300,7 @@ describe("preferencesStore", () => {
     expect(state.cardSize).toBe("medium");
     expect(state.hudLayout).toBe("inline");
     expect(state.logPanelLastChoice).toBe("closed");
-    expect(state.boardBackground).toBe("auto-wubrg");
+    expect(state.boardBackground).toBe("plain_slate");
   });
 
   it("persists to localStorage with phase-preferences key", () => {
@@ -639,6 +639,22 @@ describe("preferencesStore", () => {
     // the seed said and would measure nothing. The real default is asserted via
     // getInitialState() above, and the migration itself has its own test.
     expect(state.boardBackground).toBe("green");
+  });
+
+  it("migrates the previous automatic background default to Slate", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { boardBackground: "auto-wubrg" },
+        version: 28,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().boardBackground).toBe("plain_slate");
   });
 
   it("aiBracketFilter defaults to empty (filter off)", () => {

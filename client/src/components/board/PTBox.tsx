@@ -20,7 +20,7 @@ interface PTBoxProps {
 }
 
 const COLOR_CLASSES: Record<PTColor, string> = {
-  green: "text-green-400",
+  blue: "text-blue-400",
   red: "text-red-400",
   white: "text-white",
 };

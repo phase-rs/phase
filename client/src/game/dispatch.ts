@@ -56,6 +56,21 @@ function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
 }
 
 /**
+ * A released hand card remains owned by the motion layer while the engine walks
+ * through target/mode/payment prompts. Once no pending cast references it, the
+ * completed flight (or a cancelled cast) must relinquish the visual identity.
+ */
+function reconcileReleasedCardMotions(state: GameState): void {
+  const animation = useAnimationStore.getState();
+  const pendingObjectId = state.pending_cast?.object_id;
+  for (const objectId of animation.releasedCardMotions.keys()) {
+    if (objectId !== pendingObjectId) {
+      animation.clearObjectMotion(objectId);
+    }
+  }
+}
+
+/**
  * Module-level position snapshot for AnimationOverlay position lookups.
  */
 export let currentSnapshot = useAnimationStore.getState().captureSnapshot();
@@ -589,6 +604,7 @@ async function processAction(
   // (a `gameStore.dispatch` from a modal, a remote update, an AI-loop advance),
   // THIS older pair is dropped rather than clobbering it.
   if (!isDispatchContextCurrent(generation, session)) return;
+  reconcileReleasedCardMotions(newState);
   const store = useGameStore.getState();
   const stateHistory = shouldSaveHistory
     ? [...store.stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
@@ -932,6 +948,7 @@ async function processRemoteUpdateInner(
   //    update that was superseded while its animation played is dropped rather
   //    than clobbering the newer state.
   if (!isCurrentDispatchGeneration(generation)) return;
+  reconcileReleasedCardMotions(state);
   useGameStore.getState().commitEngineSnapshot(snapshot, {
     events,
     logEntries,

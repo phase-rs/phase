@@ -148,7 +148,7 @@ describe("OpponentHand", () => {
     const firstCard = container.querySelector<HTMLElement>("[data-opponent-hand-card]");
 
     expect(Number(firstCard?.dataset.handArc)).toBeCloseTo(
-      16 * OPPONENT_HAND_VERTICAL_SCALE,
+      28.8 * OPPONENT_HAND_VERTICAL_SCALE,
     );
   });
 

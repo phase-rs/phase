@@ -123,7 +123,7 @@ describe("castable graveyard/exile wing hover", () => {
     // would make a revert fail at this lookup rather than at the dismissal
     // assertion below, which is the behaviour this test exists to pin.
     const art = within(container).getByAltText("Encore Card");
-    const wing = art.closest<HTMLElement>(".cursor-grab");
+    const wing = art.closest<HTMLElement>("[data-zone-fan-card]");
     expect(wing).not.toBeNull();
     simulatePointerOver(wing!);
 
@@ -134,7 +134,7 @@ describe("castable graveyard/exile wing hover", () => {
 
     const preview = () => container.querySelector<HTMLElement>("[data-card-preview]");
     expect(preview()).not.toBeNull();
-    expect(within(preview()!).getByAltText("Encore Card")).toBeInTheDocument();
+    expect(within(preview()!).getByLabelText("Encore Card")).toBeInTheDocument();
 
     // usePreviewDismiss polls every 300ms and skips its first tick, so the old
     // behaviour dropped the preview by ~600ms. Run well past that with the
@@ -143,7 +143,7 @@ describe("castable graveyard/exile wing hover", () => {
 
     expect(useUiStore.getState().inspectedObjectId).not.toBeNull();
     expect(preview()).not.toBeNull();
-    expect(within(preview()!).getByAltText("Encore Card")).toBeInTheDocument();
+    expect(within(preview()!).getByLabelText("Encore Card")).toBeInTheDocument();
   });
 
   it("marks wing cards inspectable but not reorderable", () => {
@@ -173,7 +173,7 @@ describe("castable graveyard/exile wing hover", () => {
     const { container: graveyardContainer } = render(<PlayerHand />);
     const graveyardWing = within(graveyardContainer)
       .getByAltText("Encore Card")
-      .closest<HTMLElement>(".cursor-grab");
+      .closest<HTMLElement>("[data-zone-fan-card]");
     expect(graveyardWing).not.toBeNull();
     expect(graveyardWing).toHaveStyle({ zIndex: "1" });
 
@@ -182,7 +182,7 @@ describe("castable graveyard/exile wing hover", () => {
     const { container: exileContainer } = render(<PlayerHand />);
     const exileWing = within(exileContainer)
       .getByAltText("Plot Card")
-      .closest<HTMLElement>(".cursor-grab");
+      .closest<HTMLElement>("[data-zone-fan-card]");
     expect(exileWing).not.toBeNull();
     expect(exileWing).toHaveStyle({ zIndex: "0" });
   });

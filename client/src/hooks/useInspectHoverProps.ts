@@ -69,7 +69,7 @@ export function useInspectHoverProps() {
       ...longPressHandlers,
       // Long-press exists to stand in for hover, so arm it only for the pointer
       // that cannot hover. Arming it for a mouse would open a sticky preview on
-      // any 500ms hold and then — via `onClickCapture` below — swallow the click
+      // any completed hold and then — via `onClickCapture` below — swallow the click
       // that ended it, which on a choice modal reads as a dead card. This is an
       // allowlist where the hover gates are denylists, and the two are
       // complementary: an unrecognized pointerType still hovers, and only a

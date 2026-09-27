@@ -181,6 +181,9 @@
   },
   "multiplayer": {
     "title": "Mehrspieler",
+    "opponentView": "Gegneransicht",
+    "followActiveOpponent": "Aktivem Gegner folgen",
+    "followActiveOpponentDescription": "Fokussiert automatisch den Gegner, der gerade am Zug ist.",
     "displayName": "Anzeigename",
     "displayNamePlaceholder": "Gib deinen Namen ein",
     "serverSelectionNote": "Die Serverauswahl ist in die Lobby verschoben — öffne den Mehrspielermodus und verwende den Server-Chip (oder „Server wählen“ im P2P-Modus), um Regionen zu wechseln, eine selbst gehostete Instanz zu konfigurieren oder die Verbindung zu testen."

@@ -1,7 +1,6 @@
 import type { Phase, PhaseStop, PhaseStopScope } from "../../adapter/types";
 import { useId, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
@@ -99,6 +98,18 @@ const COMBAT_PHASES: Phase[] = [
   "CombatDamage",
   "EndCombat",
 ];
+
+const MAJOR_PHASES: Phase[] = [
+  "Upkeep",
+  "PreCombatMain",
+  "BeginCombat",
+  "PostCombatMain",
+  "End",
+];
+const MAJOR_PHASES_BY_SIDE: Record<"left" | "right", Phase[]> = {
+  left: MAJOR_PHASES.slice(0, 2),
+  right: MAJOR_PHASES.slice(2),
+};
 
 // i18n key suffix per phase, used to look up the localized label/description
 // from the `phaseStop` group in game.json (e.g. `phaseStop.untapLabel`).
@@ -207,17 +218,16 @@ function PhaseDot({ phase }: { phase: Phase }) {
       aria-label={tooltip}
       aria-describedby={tooltipId}
       aria-pressed={hasStop}
+      data-phase-stop-dot={phase}
+      data-active-phase={isActive ? "true" : undefined}
       className={`group relative flex h-6 w-6 items-center justify-center rounded-[7px] border transition-colors duration-150 lg:h-8 lg:w-8 lg:p-1 ${
         isActive
-          ? "border-cyan-300/45 bg-cyan-950/82 text-white"
+          ? "border-transparent bg-transparent text-cyan-200 drop-shadow-[0_0_6px_rgba(103,232,249,0.85)]"
           : hasStop
             ? "border-white/12 bg-white/8 text-slate-200 hover:border-white/20 hover:text-white"
             : "border-transparent bg-transparent text-slate-500 hover:border-white/10 hover:bg-white/5 hover:text-slate-200"
       }`}
     >
-      {isActive && (
-        <span className="absolute -top-1 left-1/2 h-1 w-3 -translate-x-1/2 rounded-[2px] bg-amber-300" />
-      )}
       {PHASE_ICONS[phase]}
       {stop && (
         <span
@@ -231,11 +241,35 @@ function PhaseDot({ phase }: { phase: Phase }) {
   );
 }
 
+/** One continuous major-phase rail for the shared Tabletop HUD. The empty center
+ *  lane sits beneath the independently centered local life badge; equal-width
+ *  phase groups keep the rail itself centered despite the 2/3 phase split. */
+export function MajorPhaseStopRail() {
+  return (
+    <div
+      className="tabletop-liquid-glass-rail hidden items-center"
+      data-major-phase-stop-rail="all"
+    >
+      <div data-phase-stop-rail-section="left">
+        {MAJOR_PHASES_BY_SIDE.left.map((phase) => (
+          <PhaseDot key={phase} phase={phase} />
+        ))}
+      </div>
+      <span aria-hidden data-phase-stop-rail-center-gap="" />
+      <div data-phase-stop-rail-section="right">
+        {MAJOR_PHASES_BY_SIDE.right.map((phase) => (
+          <PhaseDot key={phase} phase={phase} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** Upkeep, Draw, Main1 — placed to the left of the player avatar.
  *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorLeft() {
   return (
-    <div className="hidden items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:flex lg:px-1.5">
+    <div className="tabletop-phase-plaque hidden items-center gap-0.5 border border-white/10 px-1 py-1 lg:flex lg:px-1.5">
       {LEFT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -247,7 +281,7 @@ export function PhaseIndicatorLeft() {
  *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorRight() {
   return (
-    <div className="hidden items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:flex lg:px-1.5">
+    <div className="tabletop-phase-plaque hidden items-center gap-0.5 border border-white/10 px-1 py-1 lg:flex lg:px-1.5">
       {RIGHT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -257,14 +291,10 @@ export function PhaseIndicatorRight() {
 
 /** BeginCombat through EndCombat — placed near ActionButton on the right side */
 export function CombatPhaseIndicator() {
-  const isCompactHeight = useIsCompactHeight();
-  // Hide on landscape phones — non-essential and eats horizontal real estate
-  // next to the ActionButton. MobilePhaseChip conveys the current phase there.
-  if (isCompactHeight) return null;
   return (
     <div
       data-combat-phase-indicator
-      className="flex items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:px-1.5"
+      className="tabletop-phase-plaque flex items-center gap-0.5 border border-white/10 px-1 py-1 lg:px-1.5"
     >
       {COMBAT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />

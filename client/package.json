@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "pnpm run protocol:check && tsc -b && vite build",
     "build:bootstrap": "vite build --config bootstrap/vite.config.ts",
+    "tabletop3d:assets": "node scripts/fetch-tabletop-assets.mjs",
     "lint": "eslint .",
     "protocol:check": "node ../scripts/check-protocol-version.mjs",
     "type-check": "pnpm run protocol:check && tsc -b --noEmit",
@@ -23,6 +24,7 @@
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@fontsource-variable/newsreader": "^5.2.10",
+    "@react-three/fiber": "^9.1.2",
     "@supabase/supabase-js": "^2.106.2",
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/api": "^2",
@@ -92,6 +94,7 @@
     "happy-dom": "^20.8.9",
     "i18next-parser": "^9.4.0",
     "jsdom": "^26.0.0",
+    "sharp": "0.35.3",
     "storybook": "10.6.0",
     "typescript": "~5.7.0",
     "typescript-eslint": "^8.24.1",
