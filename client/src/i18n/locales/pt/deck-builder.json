@@ -290,6 +290,26 @@
     "ariaLabel": "Bracket do deck",
     "unrated": "Sem classificação"
   },
+  "signals": {
+    "title": "Sinais do deck",
+    "disclaimer": "Estatísticas descritivas do texto analisado das cartas do deck. Não são critérios de bracket e nunca alteram a estimativa.",
+    "avgManaValue": "Valor de mana médio (não terrenos): {{value}}",
+    "notMeasurable": "não mensurável",
+    "noCommander": "Adicione um comandante para ver os sinais do deck.",
+    "unavailable": "Os sinais do deck precisam de dados de cartas, que ainda não foram carregados.",
+    "unresolved": "{{n}} nomes de cartas não foram encontrados nos dados de cartas.",
+    "kind": {
+      "counterspells": "Contramágicas",
+      "spot_removal": "Remoção pontual",
+      "sweepers": "Limpadores de mesa",
+      "card_advantage": "Vantagem de cartas",
+      "free_interaction": "Interação gratuita",
+      "mana_producers": "Produtores de mana",
+      "land_fetch": "Busca de terrenos",
+      "rituals": "Rituais",
+      "extra_land_drops": "Terrenos adicionais por turno"
+    }
+  },
   "comboBarometer": {
     "ariaLabel": "Combo infinito de duas cartas",
     "question": "Combo infinito intencional de duas cartas?",

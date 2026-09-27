@@ -34,6 +34,7 @@ import {
 } from "../../types/bracket";
 import { getPreconBracket } from "../../data/preconBrackets";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
+import { useDeckSignals } from "../../hooks/useDeckSignals";
 import { projectSignatureSpellForFormat } from "../../services/savedDeckProjection";
 import {
   commanderPartnerCandidates,
@@ -248,6 +249,11 @@ export function useDeckBuilder({
     declaredTier: bracket === null ? null : BRACKET_TIER_BY_NUMERIC[bracket],
     comboDeclaration,
   });
+  const { signals, outcome: signalsOutcome } = useDeckSignals({
+    deck,
+    commanders,
+    format,
+  });
 
   const auditEmptyReason:
     | "not-commander"
@@ -259,6 +265,18 @@ export function useDeckBuilder({
       : commanders.length === 0
         ? "no-commander"
         : bracketOutcome?.kind === "card-data-unavailable"
+          ? "card-data-unavailable"
+          : undefined;
+  const signalsEmptyReason:
+    | "not-commander"
+    | "no-commander"
+    | "card-data-unavailable"
+    | undefined =
+    !isCommander
+      ? "not-commander"
+      : commanders.length === 0
+        ? "no-commander"
+        : signalsOutcome?.kind === "card-data-unavailable"
           ? "card-data-unavailable"
           : undefined;
 
@@ -879,6 +897,8 @@ export function useDeckBuilder({
     deckSizeRule,
     estimate,
     auditEmptyReason,
+    signals,
+    signalsEmptyReason,
     cmcValues,
     colorDistribution,
     cardCounts,

@@ -290,6 +290,26 @@
     "ariaLabel": "Palier du deck",
     "unrated": "Non classé"
   },
+  "signals": {
+    "title": "Indicateurs du deck",
+    "disclaimer": "Statistiques descriptives tirées du texte de carte analysé du deck. Elles ne constituent pas des critères de palier et ne modifient jamais l’estimation.",
+    "avgManaValue": "Valeur de mana moyenne (hors terrains) : {{value}}",
+    "notMeasurable": "non mesurable",
+    "noCommander": "Ajoutez un commandant pour voir les indicateurs du deck.",
+    "unavailable": "Les indicateurs du deck nécessitent des données de cartes, qui ne sont pas encore chargées.",
+    "unresolved": "{{n}} noms de carte sont introuvables dans les données de cartes.",
+    "kind": {
+      "counterspells": "Contresorts",
+      "spot_removal": "Gestion ciblée",
+      "sweepers": "Nettoyeurs de table",
+      "card_advantage": "Avantage de cartes",
+      "free_interaction": "Interaction gratuite",
+      "mana_producers": "Producteurs de mana",
+      "land_fetch": "Recherche de terrains",
+      "rituals": "Rituels",
+      "extra_land_drops": "Terrains supplémentaires par tour"
+    }
+  },
   "comboBarometer": {
     "ariaLabel": "Combo infinie à deux cartes",
     "question": "Combo infinie intentionnelle à deux cartes ?",

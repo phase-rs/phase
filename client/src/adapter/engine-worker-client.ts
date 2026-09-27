@@ -29,7 +29,12 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketEstimate, BracketEstimateRequest } from "../types/bracketEstimate";
+import type {
+  BracketDeckRequest,
+  BracketEstimate,
+  BracketEstimateRequest,
+} from "../types/bracketEstimate";
+import type { DeckSignals } from "../types/deckSignals";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
@@ -542,6 +547,10 @@ export class EngineWorkerClient {
 
   async estimateBracketForDeck(request: BracketEstimateRequest): Promise<BracketEstimate | null> {
     return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", request });
+  }
+
+  async deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null> {
+    return this.request<DeckSignals | null>({ type: "deckSignalsForDeck", deck });
   }
 
   // ── Replay system ──────────────────────────────────────────────────────

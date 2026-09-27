@@ -15,6 +15,7 @@ describe("StatsPanel", () => {
         ]}
         isCommander={false}
         estimate={null}
+        signals={null}
         manualBracket={null}
         onBracketChange={vi.fn()}
         comboDeclaration={{ kind: "undeclared" }}
