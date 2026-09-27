@@ -7900,19 +7900,17 @@ fn casting_variant_candidates(
                 candidates.push(CastingVariant::Warp);
             }
             // CR 702.103a + CR 303.4a: Bestow — offered only when the bestow keyword
-            // is present AND a legal creature target exists (parity with the Bestow
-            // offer block's `has_legal_creature_target` gate).
+            // is present AND the bestowed Aura has a legal target, judged on the
+            // bestowed form by the bestow offer's own authority
+            // (`bestowed_aura_targets`, CR 702.103b).
             if effective_keywords
                 .iter()
                 .any(|k| matches!(k, crate::types::keywords::Keyword::Bestow(_)))
+                && bestowed_form(state, object_id).is_some_and(|bestowed| {
+                    !bestowed_aura_targets(&bestowed, player, object_id).is_empty()
+                })
             {
-                let creature_filter =
-                    TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
-                if !targeting::find_legal_targets(state, &creature_filter, player, object_id)
-                    .is_empty()
-                {
-                    candidates.push(CastingVariant::Bestow);
-                }
+                candidates.push(CastingVariant::Bestow);
             }
             // CR 702.140a: Mutate — keyword present AND a legal "non-Human creature
             // you own" merge target exists (parity with the Mutate offer block).
@@ -23346,6 +23344,30 @@ fn bestowed_form(state: &GameState, object_id: ObjectId) -> Option<GameState> {
     Some(bestowed)
 }
 
+/// CR 702.103b + CR 303.4a: the legal targets for a bestowed Aura's enchant
+/// ability, read from `bestowed` (see `bestowed_form`) exactly as the cast
+/// enumerates them (the Aura branch of `continue_with_prepared`). The single
+/// authority for bestow's target existence, shared by the bestow offer and the
+/// N-way casting menu. A bestowed spell is an Aura, not a creature, so
+/// protection from creatures doesn't stop it (CR 702.16b).
+fn bestowed_aura_targets(
+    bestowed: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<TargetRef> {
+    bestowed
+        .objects
+        .get(&object_id)
+        .and_then(|obj| {
+            obj.keywords.iter().find_map(|keyword| match keyword {
+                Keyword::Enchant(filter) => Some(filter.clone()),
+                _ => None,
+            })
+        })
+        .map(|filter| targeting::find_legal_targets(bestowed, &filter, player, object_id))
+        .unwrap_or_default()
+}
+
 /// A Blitz cast on offer for this object: its effective mana sub-cost, its
 /// non-mana residual, and whether both are payable now.
 struct BlitzOffer {
@@ -23443,20 +23465,9 @@ fn bestow_offer(
     // spells" cost modifier doesn't apply to it.
     let bestowed = bestowed_form(state, object_id)?;
     // CR 702.103a + CR 303.4a: the bestowed Aura requires a legal target for
-    // its enchant ability, enumerated as the cast enumerates it (the Aura
-    // branch of `continue_with_prepared`). If none exists, bestow can't be
-    // chosen.
-    let legal_aura_targets = bestowed
-        .objects
-        .get(&object_id)?
-        .keywords
-        .iter()
-        .find_map(|keyword| match keyword {
-            Keyword::Enchant(filter) => Some(filter.clone()),
-            _ => None,
-        })
-        .map(|filter| targeting::find_legal_targets(&bestowed, &filter, player, object_id))
-        .unwrap_or_default();
+    // its enchant ability (see `bestowed_aura_targets`). If none exists, bestow
+    // can't be chosen.
+    let legal_aura_targets = bestowed_aura_targets(&bestowed, player, object_id);
     // CR 601.2f-h + CR 118.9d: split the (possibly compound) bestow cost into its
     // mana sub-cost and Collect-evidence residual, then apply active cost
     // modifiers to the mana sub-cost.

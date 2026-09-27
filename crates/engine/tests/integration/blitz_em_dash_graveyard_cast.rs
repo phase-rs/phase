@@ -3480,3 +3480,99 @@ fn bestow_onto_terror_with_a_card_for_its_discard_tax_completes() {
         "the tax's card is discarded"
     );
 }
+
+const OMNISCIENCE: &str = "You may cast spells from your hand without paying their mana costs.";
+
+/// The casting-menu variants offered when P0 casts `eidolon` from hand under
+/// Omniscience (the N-way `CastingVariantChoice` menu).
+fn omniscience_menu_variants(runner: &mut GameRunner, eidolon: ObjectId) -> Vec<String> {
+    let card_id = runner.state().objects[&eidolon].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: eidolon,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the cast starts");
+    let WaitingFor::CastingVariantChoice { options, .. } = &runner.state().waiting_for else {
+        panic!(
+            "reach: Omniscience offers the casting menu, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    options.iter().map(|o| format!("{:?}", o.variant)).collect()
+}
+
+/// Everflame Eidolon beside `protection`'s creature (see
+/// `eidolon_beside_a_protected_creature`), with P0 controlling Omniscience.
+fn eidolon_under_omniscience(protection: &str) -> (GameRunner, ObjectId, ObjectId) {
+    let (mut runner, eidolon, guardian) = eidolon_beside_a_protected_creature(protection);
+    let parsed = parse_oracle_text(
+        OMNISCIENCE,
+        "Omniscience",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    let card_id = engine::types::identifiers::CardId(runner.state().next_object_id);
+    let omniscience = engine::game::zones::create_object(
+        runner.state_mut(),
+        card_id,
+        P0,
+        "Omniscience".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&omniscience).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        for s in parsed.statics {
+            obj.static_definitions.push(s.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(s);
+        }
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    (runner, eidolon, guardian)
+}
+
+/// CR 702.103b + CR 702.16b: under Omniscience the N-way casting menu offers
+/// Bestow with Commander Eesha (protection from creatures) as the only creature
+/// to enchant, because the bestowed spell is an Aura, not a creature. Choosing
+/// it enchants Eesha.
+#[test]
+fn omniscience_menu_offers_bestow_onto_a_creature_with_protection_from_creatures() {
+    let (mut runner, eidolon, eesha) = eidolon_under_omniscience("Protection from creatures");
+    let variants = omniscience_menu_variants(&mut runner, eidolon);
+    let bestow = variants
+        .iter()
+        .position(|variant| variant == "Bestow")
+        .unwrap_or_else(|| panic!("the menu offers Bestow, got {variants:?}"));
+    runner
+        .act(GameAction::ChooseCastingVariant { index: bestow })
+        .expect("choosing bestow is legal");
+    if let WaitingFor::TargetSelection { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(eesha)),
+            })
+            .expect("Eesha is a legal creature to enchant");
+    }
+    assert_eq!(runner.state().objects[&eidolon].zone, Zone::Stack);
+    assert!(
+        runner.state().objects[&eidolon].bestow_form.is_some(),
+        "cast bestowed"
+    );
+}
+
+/// Control: protection from enchantments does stop the bestowed Aura, so the
+/// menu offers no Bestow.
+#[test]
+fn omniscience_menu_offers_no_bestow_onto_a_creature_with_protection_from_enchantments() {
+    let (mut runner, eidolon, _) = eidolon_under_omniscience("Protection from enchantments");
+    let variants = omniscience_menu_variants(&mut runner, eidolon);
+    assert!(
+        !variants.iter().any(|variant| variant == "Bestow"),
+        "{variants:?}"
+    );
+}
