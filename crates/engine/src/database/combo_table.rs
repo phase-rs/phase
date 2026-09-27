@@ -38,6 +38,8 @@ pub struct ComboFilterCounts {
     pub irrelevant: u32,
     pub kept: u32,
     pub multi_zone_pieces: u32,
+    #[serde(default)]
+    pub duplicate_pair: u32,
 }
 
 /// Source fields and result classes deliberately omitted from the artifact.
