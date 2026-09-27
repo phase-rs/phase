@@ -98,6 +98,7 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::HideawayConceal {
             target: TargetFilter::ParentTarget,
+            grantee: None,
         },
     ));
 

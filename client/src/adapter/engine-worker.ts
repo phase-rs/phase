@@ -27,6 +27,7 @@ import init, {
   get_legal_actions_js,
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
+  get_viewer_transition_snapshot_js,
   restore_game_state,
   resume_restored_game_state,
   resume_multiplayer_host_state,
@@ -56,7 +57,13 @@ import init, {
   get_card_rulings,
 } from "@wasm/engine";
 
-import { isActionOutcome, type ActionRejection, type AiActionProposal, type GameAction } from "./types";
+import {
+  isActionOutcome,
+  type ActionRejection,
+  type AiActionProposal,
+  type GameAction,
+  type GameEvent,
+} from "./types";
 import type {
   InteractionPreviewRequest,
   InteractionSubmission,
@@ -99,6 +106,7 @@ type EngineRequest =
   | { type: "getSnapshot"; id: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
+  | { type: "getViewerTransitionSnapshot"; id: number; viewerId: number; events: GameEvent[] }
   | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
   | { type: "getAiActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
   | { type: "getAiTacticalActionProposal"; id: number; difficulty: string; playerId: number }
@@ -524,6 +532,20 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         const r = get_viewer_snapshot_js(msg.viewerId);
         if (r === null) {
           error(msg.id, "NOT_INITIALIZED: get_viewer_snapshot_js returned null");
+          break;
+        }
+        result(msg.id, r);
+        break;
+      }
+
+      case "getViewerTransitionSnapshot": {
+        const r = get_viewer_transition_snapshot_js(msg.viewerId, msg.events);
+        if (typeof r === "string") {
+          error(msg.id, r);
+          break;
+        }
+        if (r === null) {
+          error(msg.id, "NOT_INITIALIZED: get_viewer_transition_snapshot_js returned null");
           break;
         }
         result(msg.id, r);

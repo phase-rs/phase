@@ -73,6 +73,7 @@ pub struct JoinTargetInfo {
     pub is_p2p: bool,
     pub reservation_token: Option<String>,
     pub reservation_expires_at_ms: Option<u64>,
+    pub draft_metadata: Option<DraftLobbyMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,8 +134,29 @@ pub enum ExpiryConsumption {
     Superseded,
 }
 
+/// Whether a registered room's host (seat 0) holds its seat. Only the Full
+/// shell marks a room away; an away room is not listed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum HostPresence {
+    #[default]
+    Present,
+    Away,
+}
+
+/// How one mutation moved a code's listing, from [`LobbyManager::listing_delta`].
+#[derive(Debug)]
+pub enum ListingDelta {
+    Added(LobbyGame),
+    Updated(LobbyGame),
+    Removed,
+    Unlisted,
+}
+
 #[derive(Serialize, Deserialize)]
 struct LobbyGameMeta {
+    /// `default` loads a snapshot written before the field as host-present.
+    #[serde(default)]
+    host_presence: HostPresence,
     host_name: String,
     created_at: u64,
     /// When the listing last showed liveness (seconds, same clock as
@@ -283,6 +305,7 @@ impl LobbyManager {
                 draft_metadata: req.draft_metadata,
                 ranked: req.ranked,
                 reservations: HashMap::new(),
+                host_presence: HostPresence::Present,
             },
         );
         LobbyRegistration {
@@ -435,10 +458,10 @@ impl LobbyManager {
     }
 
     /// Returns the public-lobby view of a single game by code, or `None` if
-    /// the game isn't tracked or isn't public.
+    /// the game isn't tracked or isn't listed (public with its host present).
     pub fn public_game(&self, game_code: &str) -> Option<LobbyGame> {
         let meta = self.games.get(game_code)?;
-        if !meta.public {
+        if !Self::listed(meta) {
             return None;
         }
         Some(Self::meta_to_lobby_game(game_code, meta))
@@ -447,7 +470,7 @@ impl LobbyManager {
     pub fn public_games(&self) -> Vec<LobbyGame> {
         self.games
             .iter()
-            .filter(|(_, meta)| meta.public)
+            .filter(|(_, meta)| Self::listed(meta))
             .map(|(code, meta)| Self::meta_to_lobby_game(code, meta))
             .collect()
     }
@@ -474,6 +497,50 @@ impl LobbyManager {
                 .is_some_and(|fc| fc.allow_debug_actions),
             is_ranked: meta.ranked,
             draft_metadata: meta.draft_metadata.clone(),
+        }
+    }
+
+    /// The listing predicate `public_game` and `public_games` share.
+    fn listed(meta: &LobbyGameMeta) -> bool {
+        meta.public && meta.host_presence == HostPresence::Present
+    }
+
+    /// Runs `mutate` and reports how it moved `game_code`'s listing, comparing
+    /// [`Self::public_game`] before and after.
+    pub fn listing_delta(
+        &mut self,
+        game_code: &str,
+        mutate: impl FnOnce(&mut Self),
+    ) -> ListingDelta {
+        let before = self.public_game(game_code).is_some();
+        mutate(self);
+        match (before, self.public_game(game_code)) {
+            (true, None) => ListingDelta::Removed,
+            (false, Some(g)) => ListingDelta::Added(g),
+            (true, Some(g)) => ListingDelta::Updated(g),
+            (false, None) => ListingDelta::Unlisted,
+        }
+    }
+
+    /// No-op on an absent code.
+    pub fn mark_host_away(&mut self, game_code: &str) {
+        if let Some(meta) = self.games.get_mut(game_code) {
+            meta.host_presence = HostPresence::Away;
+        }
+    }
+
+    /// Marks the host present and re-stamps the build the join gate reads.
+    /// No-op on an absent code, so a return after a delist lists nothing.
+    pub fn mark_host_returned(
+        &mut self,
+        game_code: &str,
+        host_version: String,
+        host_build_commit: String,
+    ) {
+        if let Some(meta) = self.games.get_mut(game_code) {
+            meta.host_presence = HostPresence::Present;
+            meta.host_version = host_version;
+            meta.host_build_commit = host_build_commit;
         }
     }
 
@@ -507,6 +574,7 @@ impl LobbyManager {
             is_p2p,
             reservation_token: None,
             reservation_expires_at_ms: None,
+            draft_metadata: meta.draft_metadata.clone(),
         })
     }
 
@@ -745,6 +813,94 @@ mod tests {
             },
             env,
         )
+    }
+
+    fn listed_codes(lobby: &LobbyManager) -> Vec<String> {
+        lobby
+            .public_games()
+            .into_iter()
+            .map(|g| g.game_code)
+            .collect()
+    }
+
+    #[test]
+    fn a_room_is_listed_only_while_public_with_its_host_present() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        register_basic(&mut lobby, "PUBLIC", "Alice", true, None, None, &env);
+        register_basic(&mut lobby, "PRIVAT", "Bob", false, None, None, &env);
+        assert!(lobby.public_game("PUBLIC").is_some());
+        assert!(lobby.public_game("PRIVAT").is_none());
+        assert_eq!(listed_codes(&lobby), vec!["PUBLIC".to_string()]);
+
+        lobby.mark_host_away("PUBLIC");
+        assert!(lobby.public_game("PUBLIC").is_none());
+        assert!(listed_codes(&lobby).is_empty());
+        assert!(lobby.has_game("PUBLIC"), "an away room stays registered");
+    }
+
+    #[test]
+    fn listing_delta_compares_the_listing_before_and_after_the_mutation() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        register_basic(&mut lobby, "PUBLIC", "Alice", true, None, None, &env);
+        register_basic(&mut lobby, "PRIVAT", "Bob", false, None, None, &env);
+
+        assert!(matches!(
+            lobby.listing_delta("PUBLIC", |l| l.mark_host_away("PUBLIC")),
+            ListingDelta::Removed
+        ));
+        let added = lobby.listing_delta("PUBLIC", |l| {
+            l.mark_host_returned("PUBLIC", "v-b".to_string(), "bbb".to_string())
+        });
+        assert!(matches!(&added, ListingDelta::Added(g) if g.host_build_commit == "bbb"));
+        let updated = lobby.listing_delta("PUBLIC", |l| {
+            l.mark_host_returned("PUBLIC", "v-c".to_string(), "ccc".to_string())
+        });
+        assert!(matches!(
+            &updated,
+            ListingDelta::Updated(g) if g.host_build_commit == "ccc" && g.host_version == "v-c"
+        ));
+
+        lobby.mark_host_away("PRIVAT");
+        assert!(matches!(
+            lobby.listing_delta("PRIVAT", |l| {
+                l.mark_host_returned("PRIVAT", "v-b".to_string(), "bbb".to_string())
+            }),
+            ListingDelta::Unlisted
+        ));
+    }
+
+    #[test]
+    fn a_host_return_after_unregistration_lists_nothing() {
+        let env = FakeEnv::new();
+        let mut lobby = LobbyManager::new();
+        register_basic(&mut lobby, "PUBLIC", "Alice", true, None, None, &env);
+        lobby.mark_host_away("PUBLIC");
+        lobby.unregister_game("PUBLIC");
+        assert!(matches!(
+            lobby.listing_delta("PUBLIC", |l| {
+                l.mark_host_returned("PUBLIC", "v-b".to_string(), "bbb".to_string())
+            }),
+            ListingDelta::Unlisted
+        ));
+        assert!(!lobby.has_game("PUBLIC"));
+    }
+
+    #[test]
+    fn a_snapshot_without_host_presence_loads_host_present() {
+        let env = FakeEnv::new();
+        let mut seed = LobbyManager::new();
+        register_basic(&mut seed, "PUBLIC", "Alice", true, None, None, &env);
+        seed.mark_host_away("PUBLIC");
+        let mut raw: serde_json::Value = serde_json::to_value(&seed).expect("manager serializes");
+        for entry in raw["games"].as_object_mut().unwrap().values_mut() {
+            let removed = entry.as_object_mut().unwrap().remove("host_presence");
+            assert!(removed.is_some(), "reach guard: the field was serialized");
+        }
+        let restored: LobbyManager =
+            serde_json::from_value(raw).expect("an older snapshot still loads");
+        assert!(restored.public_game("PUBLIC").is_some());
     }
 
     /// A registration held across its own removal and a re-registration of the
@@ -1452,6 +1608,7 @@ mod tests {
                 is_p2p: true,
                 reservation_token: None,
                 reservation_expires_at_ms: None,
+                draft_metadata: None,
             })
         );
     }
@@ -1487,6 +1644,7 @@ mod tests {
                 is_p2p: false,
                 reservation_token: None,
                 reservation_expires_at_ms: None,
+                draft_metadata: None,
             })
         );
         assert!(lobby.has_game("GAME01"));

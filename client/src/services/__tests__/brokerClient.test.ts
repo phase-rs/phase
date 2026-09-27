@@ -281,6 +281,47 @@ describe("lookupJoinTargetOver", () => {
     );
     await promise;
   });
+
+  it.each([
+    {
+      label: "no format_config",
+      frame: {
+        game_code: "ABC123",
+        is_p2p: true,
+        player_count: 4,
+        filled_seats: 1,
+        match_config: { match_type: "Bo1" },
+        draft_metadata: { setCode: "MKM", draftKind: "Premier" },
+      },
+    },
+    {
+      label: "a malformed format_config",
+      frame: {
+        game_code: "ABC123",
+        is_p2p: true,
+        player_count: 4,
+        filled_seats: 1,
+        match_config: { match_type: "Bo1" },
+        format_config: { format: 42 },
+        draft_metadata: { setCode: "MKM", draftKind: "Premier" },
+      },
+    },
+  ])("carries draft_metadata through ($label)", async ({ frame }) => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "ABC123");
+    ws.deliver(JSON.stringify({ type: "JoinTargetInfo", data: frame }));
+
+    const result = await promise;
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable: reach guard above");
+    expect(result.info.draft_metadata).toEqual(frame.draft_metadata);
+    // Reach guard for `withValidatedFormatConfig`'s rebuild branch: a
+    // malformed `format_config` is dropped to `null` rather than passed
+    // through, so this only discriminates when the frame supplied one.
+    if ("format_config" in frame) {
+      expect(result.info.format_config).toBeNull();
+    }
+  });
 });
 
 describe("subscribeLobbyOver", () => {

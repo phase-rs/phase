@@ -12,9 +12,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{ExtraPhase, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ExtraPhaseId, ObjectId};
 use engine::types::mana::{ManaType, ManaUnit};
-use engine::types::phase::Phase;
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 
 const TANGLE_ANGLER_ABILITY: &str = "{G}: Target creature blocks this creature this turn if able.";
 
@@ -322,9 +322,10 @@ fn tangle_angler_requirement_persists_into_a_second_combat_phase() {
     // into the next turn instead).
     runner.state_mut().extra_phases.push(ExtraPhase {
         anchor: Phase::EndCombat,
-        phase: Phase::BeginCombat,
+        segment: TurnSegment::Phase(PhaseGroup::Combat),
         attacker_restriction: None,
         attacker_restriction_source: None,
+        id: ExtraPhaseId::default(),
     });
 
     for _ in 0..60 {

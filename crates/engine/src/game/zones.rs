@@ -675,6 +675,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         // source self-exiles mid-activation and returns with the same ObjectId,
         // so the material links must survive its battlefield exit for the
         // returned permanent to still read what it was crafted with.
+        // CR 406.3: `HideawayLookable` links are preserved because a look outlives
+        // its source; their live rule stops admitting once the source is gone.
         // CR 607.2a + CR 400.7: `TrackedBySource` links are preserved when the
         // source leaves the battlefield TO EXILE. A source that self-exiles
         // (typically as its own activation cost — Mechtitan Core: "Exile this
@@ -695,6 +697,7 @@ pub(crate) fn apply_zone_exit_cleanup(
                         | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch { .. }
                         | crate::types::game_state::ExileLinkKind::Haunt
                         | crate::types::game_state::ExileLinkKind::CraftMaterial
+                        | crate::types::game_state::ExileLinkKind::HideawayLookable { .. }
                 )
                 || (source_exits_to_exile
                     && matches!(
@@ -1878,6 +1881,61 @@ pub fn mark_simultaneous_departure_records(
     }
 }
 
+/// Marks a settled SearchLibrary move into Exile as face down at event time.
+///
+/// The move's physical destination is already authoritative when this helper
+/// runs. Updating the object, emitted record, and per-turn ledger together
+/// keeps state and event projections on the same event-time privacy fact.
+pub(crate) fn mark_face_down_in_exile(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    object_id: ObjectId,
+) {
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Exile)
+    {
+        if let Some(object) = state.objects.get_mut(&object_id) {
+            object.face_down = true;
+        }
+    }
+
+    let exact_ledger_entry = events.iter_mut().rev().find_map(|event| {
+        let GameEvent::ZoneChanged {
+            object_id: event_object_id,
+            to: Zone::Exile,
+            record,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if *event_object_id != object_id || record.object_id != object_id {
+            return None;
+        }
+        if let Some(context) = record.trigger_source_context.as_mut() {
+            context.face_down = true;
+        }
+        Some((record.turn_zone_change_index, record.recorded_turn_number))
+    });
+
+    // The event record carries the exact occurrence assigned by
+    // `record_zone_change`. Never search the ledger by object/destination:
+    // repeated Exile entries for one object are distinct incarnations.
+    if let Some((index, recorded_turn)) = exact_ledger_entry {
+        if recorded_turn == state.turn_number {
+            if let Some(record) = state.zone_changes_this_turn.get_mut(index) {
+                if record.object_id == object_id && record.to_zone == Zone::Exile {
+                    if let Some(context) = record.trigger_source_context.as_mut() {
+                        context.face_down = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// CR 603.10a + CR 704.5d/e: where an object stands relative to the battlefield,
 /// for producers and observers that must decide whether it *left*.
 ///
@@ -1985,7 +2043,8 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
 /// is_some()` branch). Every `ExileLinkKind` is kind-agnostically readable via
 /// `ExiledBySource` (`HideawayLookable`'s and `CraftMaterial`'s own doc
 /// comments say so explicitly) and the LIVE lookup
-/// (`players::linked_exile_cards_for_source`) does not filter by kind either —
+/// (`players::linked_exile_cards_for_source`) reads the same
+/// `exile_links::live_links_for_source` accessor —
 /// this snapshot must match that surface exactly, or a card whose "play the
 /// exiled card" clause resolves via a TRIGGERED ability (Fight Rigging's
 /// begin-of-combat trigger, as opposed to Windbrisk Heights' activated
@@ -2000,10 +2059,7 @@ pub(crate) fn capture_linked_exile_snapshot(
         return Vec::new();
     }
 
-    state
-        .exile_links
-        .iter()
-        .filter(|link| link.source_id == source_id)
+    crate::game::exile_links::live_links_for_source(state, source_id)
         .filter_map(|link| {
             state.objects.get(&link.exiled_id).and_then(|obj| {
                 (obj.zone == Zone::Exile).then(|| crate::types::game_state::LinkedExileSnapshot {
@@ -3391,6 +3447,39 @@ mod tests {
         assert!(!state.players[0].library.contains(&id));
         assert!(state.players[0].hand.contains(&id));
         assert_eq!(state.objects[&id].zone, Zone::Hand);
+    }
+
+    #[test]
+    fn face_down_exile_marks_the_exact_ledger_occurrence() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Repeated Exile".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        move_to_zone(&mut state, id, Zone::Hand, &mut events);
+        let second_exile_start = events.len();
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        mark_face_down_in_exile(&mut state, &mut events[second_exile_start..], id);
+
+        assert_eq!(state.zone_changes_this_turn.len(), 3);
+        assert!(
+            !state.zone_changes_this_turn[0]
+                .trigger_source_context()
+                .expect("first Exile record carries source context")
+                .face_down
+        );
+        assert!(
+            state.zone_changes_this_turn[2]
+                .trigger_source_context()
+                .expect("second Exile record carries source context")
+                .face_down
+        );
     }
 
     /// CR 122.2 + CR 400.7: Counters cease to exist when an object changes

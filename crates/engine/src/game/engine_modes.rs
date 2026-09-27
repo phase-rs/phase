@@ -1,14 +1,13 @@
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, WaitingFor};
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::game_state::{ActivationResidual, GameState, PendingCast, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 
 use super::ability_utils::{
-    ability_target_legality_needs_chosen_x, assign_targets_in_chain,
-    auto_select_targets_for_ability, begin_target_selection_for_ability, build_chained_resolved,
-    build_target_slots_labelled, cap_distribution_target_slots, random_select_targets_for_ability,
-    record_modal_mode_choices, selected_mode_labels, target_constraints_from_modal,
-    validate_modal_indices,
+    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
+    build_chained_resolved, build_target_slots_labelled, cap_distribution_target_slots,
+    random_select_targets_for_ability, record_modal_mode_choices, selected_mode_labels,
+    target_constraints_from_modal, validate_modal_indices,
 };
 use super::engine::EngineError;
 use super::engine_stack;
@@ -29,6 +28,7 @@ pub(super) fn handle_ability_mode_choice(
         is_activated,
         ability_index,
         ability_cost,
+        activation_cost_snapshot,
         unavailable_modes,
     } = waiting_for
     else {
@@ -38,6 +38,17 @@ pub(super) fn handle_ability_mode_choice(
     };
 
     validate_modal_indices(&modal, &indices, &unavailable_modes)?;
+    // CR 602.2b: an activated ability's mode prompt always names the printed
+    // ability it is activating.
+    let activated_ability_index = match (is_activated, ability_index) {
+        (true, Some(index)) => Some(index),
+        (true, None) => {
+            return Err(EngineError::InvalidAction(
+                "an activated mode choice must name its ability index".to_string(),
+            ));
+        }
+        (false, _) => None,
+    };
 
     record_modal_mode_choices(state, source_id, &modal, &indices);
 
@@ -45,7 +56,7 @@ pub(super) fn handle_ability_mode_choice(
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
 
-    let waiting_for = if is_activated {
+    let waiting_for = if let Some(ability_index) = activated_ability_index {
         handle_activated_mode_choice(
             state,
             ActivatedModeChoice {
@@ -54,6 +65,7 @@ pub(super) fn handle_ability_mode_choice(
                 resolved,
                 ability_index,
                 ability_cost,
+                activation_cost_snapshot,
                 modal,
                 mode_abilities,
                 indices,
@@ -90,8 +102,10 @@ struct ActivatedModeChoice {
     player: crate::types::player::PlayerId,
     source_id: ObjectId,
     resolved: crate::types::ability::ResolvedAbility,
-    ability_index: Option<usize>,
+    ability_index: usize,
     ability_cost: Option<crate::types::ability::AbilityCost>,
+    /// CR 601.2f + CR 602.2b: the activation's cost-modifier carrier.
+    activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
     modal: crate::types::ability::ModalChoice,
     /// CR 700.2: the card's mode definitions and the chosen indices, carried so
     /// per-slot mode labels can be built at the SAME post-flush point as slots
@@ -112,6 +126,7 @@ fn handle_activated_mode_choice(
         resolved,
         ability_index,
         ability_cost,
+        activation_cost_snapshot,
         modal,
         mode_abilities,
         indices,
@@ -120,29 +135,37 @@ fn handle_activated_mode_choice(
     let target_constraints = target_constraints_from_modal(&modal);
 
     // CR 602.2b + CR 601.2b/c: Activating an ability follows the spell
-    // announcement steps. If an activated modal ability's target legality depends
-    // on an {X} activation cost, choose X after modes and before targets, then
-    // resume through the same deferred target-selection path modal spells use so
-    // per-mode labels and X-dependent legality stay in sync. CR 601.2d: a chosen
-    // mode that divides an X-dependent pool is likewise X-bounded (issue #2856).
+    // announcement steps, and CR 601.2b announces a mana `{X}` together with the
+    // modes — before targets are chosen (CR 601.2c) and before any cost is paid
+    // (CR 601.2h). So once modes are chosen, a mana-`{X}` activation announces X
+    // next, then resumes through the same deferred target-selection path modal
+    // spells use, so per-mode labels and X-dependent legality stay in sync (an
+    // empty slot set continues straight to payment). CR 601.2d: a chosen mode
+    // that divides an X-dependent pool is likewise X-bounded (issue #2856). This
+    // mirrors the non-modal X detour in `activate_with_cost_carrier`, including
+    // its outstanding-residual marker.
     let mode_distribute = indices
         .iter()
         .find_map(|&i| mode_abilities.get(i).and_then(|m| m.distribute.clone()));
-    if ability_target_legality_needs_chosen_x(&resolved, mode_distribute.as_ref()) {
-        if let Some(cost) = ability_cost.as_ref() {
-            if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
-                let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
-                pending_x.activation_cost = remaining;
-                pending_x.activation_ability_index = ability_index;
-                pending_x.target_constraints = target_constraints;
-                pending_x.distribute = mode_distribute.clone();
-                pending_x.deferred_target_selection = true;
-                let mut chosen_modes = indices.clone();
-                chosen_modes.sort_unstable();
-                pending_x.chosen_modes = chosen_modes;
-                state.pending_cast = Some(Box::new(pending_x));
-                return casting_costs::enter_payment_step(state, player, None, events);
-            }
+    if let Some(cost) = ability_cost.as_ref() {
+        if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
+            let mut pending_x = PendingCast::for_activation(
+                source_id,
+                resolved,
+                mana_cost,
+                ability_index,
+                activation_cost_snapshot.clone(),
+            );
+            pending_x.activation_cost = remaining;
+            pending_x.target_constraints = target_constraints;
+            pending_x.distribute = mode_distribute.clone();
+            pending_x.deferred_target_selection = true;
+            pending_x.activation_residual = ActivationResidual::XMana;
+            let mut chosen_modes = indices.clone();
+            chosen_modes.sort_unstable();
+            pending_x.chosen_modes = chosen_modes;
+            state.pending_cast = Some(Box::new(pending_x));
+            return casting_costs::enter_payment_step(state, player, None, events);
         }
     }
 
@@ -153,14 +176,14 @@ fn handle_activated_mode_choice(
             // X announcement path as non-modal activated abilities, then resumes
             // through deferred target selection with the chosen modes preserved.
             let (mana_cost, remaining) = casting::split_alt_cost_components(cost);
-            let mut pending_x = PendingCast::new(
+            let mut pending_x = PendingCast::for_activation(
                 source_id,
-                CardId(0),
                 resolved,
                 mana_cost.unwrap_or(ManaCost::NoCost),
+                ability_index,
+                activation_cost_snapshot.clone(),
             );
             pending_x.activation_cost = remaining;
-            pending_x.activation_ability_index = ability_index;
             pending_x.target_constraints = target_constraints;
             pending_x.distribute = mode_distribute.clone();
             pending_x.deferred_target_selection = true;
@@ -224,9 +247,14 @@ fn handle_activated_mode_choice(
                 player,
                 events,
             );
-            let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            let mut pending = PendingCast::for_activation(
+                source_id,
+                resolved,
+                ManaCost::NoCost,
+                ability_index,
+                activation_cost_snapshot.clone(),
+            );
             pending.activation_cost = ability_cost.clone();
-            pending.activation_ability_index = ability_index;
             pending.target_constraints = target_constraints;
             pending.distribute = mode_distribute;
             pending.begin_activation_trigger_collection();
@@ -234,9 +262,14 @@ fn handle_activated_mode_choice(
                 state, player, pending, events,
             )
         } else {
-            let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            let mut pending = PendingCast::for_activation(
+                source_id,
+                resolved,
+                ManaCost::NoCost,
+                ability_index,
+                activation_cost_snapshot.clone(),
+            );
             pending.activation_cost = ability_cost;
-            pending.activation_ability_index = ability_index;
             pending.target_constraints = target_constraints;
             pending.distribute = mode_distribute;
             super::casting_targets::begin_activated_target_selection(
@@ -248,9 +281,14 @@ fn handle_activated_mode_choice(
             )
         }
     } else {
-        let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+        let mut pending = PendingCast::for_activation(
+            source_id,
+            resolved,
+            ManaCost::NoCost,
+            ability_index,
+            activation_cost_snapshot.clone(),
+        );
         pending.activation_cost = ability_cost;
-        pending.activation_ability_index = ability_index;
         pending.target_constraints = target_constraints;
         pending.distribute = mode_distribute;
         casting_costs::finish_activated_ability_at_payment_boundary(state, player, pending, events)

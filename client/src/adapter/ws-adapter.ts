@@ -210,6 +210,22 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 82 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
+ *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
+ *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a
+ *      minted id, and steps_started_this_turn replaces the two per-turn step
+ *      counters — see PROTOCOL_VERSION's own `/// 82` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
+ *      JSON.parse, so a v81 client would take the new shapes with no decode
+ *      error; the exact-match version check at connect refuses the pairing
+ *      instead.
+ * 81 — AlternativeCastChoice.keyword gains { type: "Surge" } in serialized
+ *      GameState (CR 702.117a); an older client's modal cannot render it. The
+ *      exact-match version check at connect refuses the pairing.
+ * 80 — ExileLinkKind.HideawayLookable carries { grant, lookers,
+ *      source_incarnation } in serialized GameState, and
+ *      DerivedViews.linked_exile_ids is new and rendered directly. The
+ *      exact-match version check at connect refuses the pairing.
  * 78 — Duration::UntilEvent (the event-deadline duration) and
  *      TransientContinuousEffect's duration_event_source are new in serialized
  *      GameState. This client hands server frames to JSON.parse, so a v77
@@ -541,8 +557,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * 13 — WaitingFor::MulliganBottomCards removed; mulligan bottoming folded
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
+ *
+ * 79 — CR 601.2f + CR 602.2b activated-ability cost-reduction election:
+ *      ReductionProvenance gains AbilityCostRider and TransientEffect, which a
+ *      v78 peer cannot parse. The new CostReductionEntry.minimum_mana,
+ *      PendingCast.activation_cost_snapshot and AbilityModeChoice
+ *      activation_cost_snapshot fields are additive and skipped when empty, so
+ *      every spell frame is byte-identical to v78.
  */
-export const PROTOCOL_VERSION = 78;
+export const PROTOCOL_VERSION = 82;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -573,6 +596,11 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 12 — JoinTargetInfo gains an optional `draft_metadata`, the shape LobbyGame
+ *      already carries — the "a lobby field is added" trigger.
+ *      MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL stays at 2 and no capability floor is
+ *      added: against a pre-12 broker the field is absent and this client
+ *      classifies a typed code from its lobby snapshot alone.
  * 11 — Prospective: no lobby variant or field changes shape in this bump.
  *      Moved ahead of new GameFormat variants — see LOBBY_PROTOCOL_VERSION's
  *      own `/// 11` entry in
@@ -686,7 +714,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 11;
+export const LOBBY_PROTOCOL_VERSION = 12;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.

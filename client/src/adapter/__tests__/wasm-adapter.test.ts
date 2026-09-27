@@ -18,6 +18,7 @@ import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
   EngineAdapter,
+  GameEvent,
   SubmitResult,
 } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
@@ -32,6 +33,7 @@ const initializeMultiplayerHostGameJs = vi.hoisted(() =>
 );
 const getGameStateJs = vi.hoisted(() => vi.fn());
 const getLegalActionsJs = vi.hoisted(() => vi.fn());
+const getViewerTransitionSnapshotJs = vi.hoisted(() => vi.fn());
 const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 
@@ -47,6 +49,7 @@ vi.mock("@wasm/engine", () => ({
   initialize_multiplayer_host_game: initializeMultiplayerHostGameJs,
   get_game_state: getGameStateJs,
   get_legal_actions_js: getLegalActionsJs,
+  get_viewer_transition_snapshot_js: getViewerTransitionSnapshotJs,
   set_multiplayer_mode: setMultiplayerModeJs,
   clear_game_state: clearGameStateJs,
 }));
@@ -92,6 +95,7 @@ const mockWorkerClient = {
     phase: "Untap",
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+  getViewerTransitionSnapshot: vi.fn(),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
   resumeRestoredGameState: vi.fn(),
@@ -1203,6 +1207,60 @@ const answer = {
     allocation: [{ choiceId: "int-1.k0", amount: 3 }, { choiceId: "int-1.k1", amount: 1 }],
   },
 } as unknown as InteractionPreview;
+
+const viewerTransitionEvents: GameEvent[] = [{ type: "GameStarted" }];
+
+describe("WasmAdapter.getViewerTransitionSnapshot", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("forwards the engine-owned snapshot through the worker boundary", async () => {
+    const rawState = buildGameState({ turn_number: 4, phase: "PreCombatMain" });
+    const snapshot = {
+      state: { state: rawState, derived: {} },
+      actions: [],
+      autoPassRecommended: false,
+      events: viewerTransitionEvents,
+    };
+    mockWorkerClient.getViewerTransitionSnapshot.mockResolvedValue(snapshot);
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const result = await adapter.getViewerTransitionSnapshot(1, viewerTransitionEvents);
+
+    expect(mockWorkerClient.getViewerTransitionSnapshot).toHaveBeenCalledExactlyOnceWith(
+      1,
+      viewerTransitionEvents,
+    );
+    expect(result.events).toEqual(viewerTransitionEvents);
+    expect(result.state).toMatchObject(rawState);
+    expect(result.state.derived).toEqual({});
+  });
+
+  it("uses the same typed boundary on the main-thread fallback", async () => {
+    const rawState = buildGameState({ turn_number: 5, phase: "PostCombatMain" });
+    getViewerTransitionSnapshotJs.mockReturnValue({
+      state: { state: rawState, derived: {} },
+      actions: [],
+      autoPassRecommended: false,
+      events: viewerTransitionEvents,
+    });
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const result = await adapter.getViewerTransitionSnapshot(1, viewerTransitionEvents);
+
+    expect(getViewerTransitionSnapshotJs).toHaveBeenCalledExactlyOnceWith(
+      1,
+      viewerTransitionEvents,
+    );
+    expect(mockWorkerClient.getViewerTransitionSnapshot).not.toHaveBeenCalled();
+    expect(result.events).toEqual(viewerTransitionEvents);
+    expect(result.state).toMatchObject(rawState);
+  });
+});
 
 describe("WasmAdapter.previewInteraction", () => {
   beforeEach(() => {

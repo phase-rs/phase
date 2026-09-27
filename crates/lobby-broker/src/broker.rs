@@ -1201,6 +1201,7 @@ impl Broker {
             filled_seats,
             reservation_token,
             reservation_expires_at_ms,
+            draft_metadata: info.draft_metadata,
         }));
         info!(game = %game_code, is_p2p = info.is_p2p, "sent JoinTargetInfo");
         out
@@ -1799,7 +1800,7 @@ fn push_conn_tournament<T>(list: &mut Vec<T>, entry: T) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{LobbyClientMessage, PROTOCOL_VERSION};
+    use crate::protocol::{DraftLobbyMetadata, LobbyClientMessage, PROTOCOL_VERSION};
     use std::cell::Cell;
 
     /// Deterministic env: monotonic codes/tokens so sequence assertions are
@@ -2362,6 +2363,73 @@ mod tests {
             Some("wrong"),
         ));
         assert_eq!(wrong_password_code, None);
+    }
+
+    #[test]
+    fn lookup_reports_the_listing_draft_metadata() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        let mut guest = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        hello(&mut guest, &mut broker, &env);
+
+        let code = game_code_of(&broker.handle(
+            &mut host,
+            LobbyClientMessage::CreateGameWithSettings {
+                deck: test_deck(),
+                display_name: "Host".into(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 4,
+                match_config: Default::default(),
+                format_config: None,
+                room_name: None,
+                host_peer_id: Some("peer-1".into()),
+                draft_metadata: Some(DraftLobbyMetadata {
+                    set_code: "MKM".into(),
+                    draft_kind: "Premier".into(),
+                    cube_name: None,
+                }),
+                start_when_full: true,
+                ranked: false,
+                requested_code: None,
+            },
+            &env,
+        ));
+
+        let out = lookup(&mut guest, &mut broker, &env, &code, None);
+        let [Outbound::ToSelf(msg)] = out.as_slice() else {
+            panic!("expected exactly one ToSelf reply, got {out:?}");
+        };
+        let value = serde_json::to_value(msg).expect("message serializes");
+        assert_eq!(value["type"], "JoinTargetInfo", "reach guard");
+        assert_eq!(value["data"]["is_p2p"], true);
+        assert_eq!(value["data"]["draft_metadata"]["setCode"], "MKM");
+        assert_eq!(value["data"]["draft_metadata"]["draftKind"], "Premier");
+    }
+
+    #[test]
+    fn lookup_omits_draft_metadata_for_a_constructed_game() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut host = ConnState::default();
+        let mut guest = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        hello(&mut guest, &mut broker, &env);
+        let code = game_code_of(&create(&mut host, &mut broker, &env));
+
+        let out = lookup(&mut guest, &mut broker, &env, &code, None);
+        let [Outbound::ToSelf(msg)] = out.as_slice() else {
+            panic!("expected exactly one ToSelf reply, got {out:?}");
+        };
+        let value = serde_json::to_value(msg).expect("message serializes");
+        assert_eq!(value["type"], "JoinTargetInfo", "reach guard");
+        assert!(
+            value["data"].get("draft_metadata").is_none(),
+            "skip_serializing_if omits the key for a constructed game: {value}"
+        );
     }
 
     #[test]

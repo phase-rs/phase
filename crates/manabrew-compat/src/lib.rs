@@ -4513,11 +4513,16 @@ fn cost_reduction_outcome_label(
     hybrid_symbols: &[ManaCostShard],
 ) -> String {
     let total = mana_cost_string(&outcome.locked_cost);
-    let applied: Vec<&str> = outcome
+    let applied: Vec<String> = outcome
         .order
         .iter()
         .filter_map(|index| reductions.get(*index))
-        .map(|entry| entry.display_name.as_str())
+        .map(|entry| match entry.minimum_mana {
+            // CR 601.2f: a floored reduction names its floor, which is what
+            // makes the order matter for an activation.
+            0 => entry.display_name.clone(),
+            floor => format!("{} (can't go below {floor} mana)", entry.display_name),
+        })
         .collect();
     let mut label = if total.is_empty() {
         "Pay nothing".to_string()
@@ -9091,6 +9096,111 @@ mod tests {
             runner.state().waiting_for
         );
         runner.state().clone()
+    }
+
+    /// CR 601.2f + CR 602.2b: an ACTIVATION's election projects through the same
+    /// `ChooseFromSelection` as a spell's, its labels name the floor that makes
+    /// the order matter, and each index answers with that outcome's own order.
+    #[test]
+    fn an_activation_cost_election_round_trips_through_choose_from_selection() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr,
+            StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        let reducer = |amount: u32, minimum_mana: Option<u32>| {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Training Grounds", 1, 1)
+            .with_static_definition(reducer(2, Some(1)));
+        scenario
+            .add_creature(P0, "Unfloored reducer", 1, 1)
+            .with_static_definition(reducer(2, None));
+        let source = scenario
+            .add_creature(P0, "Activator", 2, 2)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(3),
+                }),
+            )
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("the activation reaches its election");
+        let state = runner.state().clone();
+        let WaitingFor::OrderCostReductions { outcomes, .. } = &state.waiting_for else {
+            panic!("expected the election, got {:?}", state.waiting_for);
+        };
+        let outcomes = outcomes.clone();
+        assert_eq!(outcomes.len(), 2);
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 7).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup).expect("a real prompt");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("an activation election is ChooseFromSelection, got {prompt:?}");
+        };
+        assert!(
+            input.options[..outcomes.len()]
+                .iter()
+                .all(|option| option.label.contains("(can't go below 1 mana)")),
+            "each outcome's label must name the floor, got {:?}",
+            input.options
+        );
+
+        let context = prepared.prompt_context();
+        for (index, outcome) in outcomes.iter().enumerate() {
+            assert_eq!(
+                translate_response(
+                    7,
+                    PromptOutput::ChooseFromSelection(
+                        ChooseFromSelectionOutput::SelectionDecision {
+                            chosen_indices: vec![index],
+                        }
+                    ),
+                    &context,
+                    &state,
+                )
+                .expect("an offered index translates"),
+                GameAction::OrderCostReductions {
+                    order: outcome.order.clone(),
+                    hybrid_announcement: Vec::new(),
+                }
+            );
+        }
     }
 
     /// CR 601.2b + CR 601.2f: the cost-determination election round-trips.

@@ -95,11 +95,7 @@ fn restored_automation_action_result(
     events: Vec<GameEvent>,
     log_entries: Vec<GameLogEntry>,
 ) -> ActionResult {
-    ActionResult {
-        events,
-        waiting_for: WaitingFor::Priority { player: P0 },
-        log_entries,
-    }
+    ActionResult::applied(events, WaitingFor::Priority { player: P0 }).with_log_entries(log_entries)
 }
 
 #[test]
@@ -514,11 +510,7 @@ fn terminal_reconcile_does_not_run_sbas_for_cant_lose_player() {
         discard_frame: None,
     };
     let original_waiting_for = state.waiting_for.clone();
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: original_waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), original_waiting_for.clone());
 
     reconcile_terminal_result(&mut state, &mut result);
 
@@ -542,11 +534,7 @@ fn terminal_reconcile_runs_player_loss_sba_for_unprotected_player() {
         unless_filter: None,
         discard_frame: None,
     };
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
 
     reconcile_terminal_result(&mut state, &mut result);
 
@@ -9287,6 +9275,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         declared_mana_additions: Vec::new(),
         accepted_cost_reductions: Vec::new(),
         cost_reduction_election: None,
+        activation_cost_snapshot: None,
         activation_cost: None,
         deferred_random_discard_cost: None,
         activation_ability_index: None,
@@ -9727,6 +9716,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         declared_mana_additions: Vec::new(),
         accepted_cost_reductions: Vec::new(),
         cost_reduction_election: None,
+        activation_cost_snapshot: None,
         activation_cost: None,
         deferred_random_discard_cost: None,
         activation_ability_index: None,
@@ -12873,4 +12863,112 @@ fn academy_loremaster_may_slot_is_withheld_when_the_announcer_is_not_the_propose
              may slot must be withheld"
         );
     }
+}
+
+/// CR 602.2b + CR 601.2h: a reversed activation commits none of its attempt's
+/// lifecycle facts. An ordinary (`Applied`) outermost boundary hands its frame to
+/// the prospective consumer — `Some`, even when empty — while a reversal
+/// DISCARDS the frame, so the consumer sees `None`.
+#[test]
+fn a_reversed_activation_discards_its_lifecycle_frame() {
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, StaticDefinition,
+        TargetFilter, TypedFilter,
+    };
+    use crate::types::game_state::ActionDisposition;
+    use crate::types::statics::{ActivationExemption, CostModifyMode};
+
+    fn board() -> (GameState, ObjectId) {
+        let reducer = |amount: u32, minimum_mana: Option<u32>| {
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Floored reducer", 1, 1)
+            .with_static_definition(reducer(2, Some(2)));
+        scenario
+            .add_creature(P0, "Unfloored reducer", 1, 1)
+            .with_static_definition(reducer(3, None));
+        let source = scenario
+            .add_creature(P0, "Activator", 2, 2)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(5),
+                }),
+            )
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let mut state = scenario.build().state().clone();
+        apply(
+            &mut state,
+            P0,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect("the activation reaches its election");
+        (state, source)
+    }
+    fn answer(state: &mut GameState, outcome: usize) -> ProspectiveSimulationOutcome {
+        let order = match &state.waiting_for {
+            WaitingFor::OrderCostReductions { outcomes, .. } => outcomes[outcome].order.clone(),
+            other => panic!("expected the cost election, got {other:?}"),
+        };
+        apply_interaction_for_prospective_simulation(
+            state,
+            P0,
+            P0,
+            GameAction::OrderCostReductions {
+                order,
+                hybrid_announcement: Vec::new(),
+            },
+        )
+        .expect("a legal election")
+    }
+
+    // −2 (floor two) then −3 on {5} is {0}; the reverse is {2}, and one mana
+    // cannot pay it.
+    let (mut state, _) = board();
+    let applied = answer(&mut state, 0);
+    assert_eq!(applied.action.disposition, ActionDisposition::Applied);
+    assert!(
+        applied.has_outer_lifecycle_facts(),
+        "control: an applied boundary hands its frame on"
+    );
+
+    let (mut state, _) = board();
+    let reversed = answer(&mut state, 1);
+    assert_eq!(reversed.action.disposition, ActionDisposition::Reversed);
+    assert!(
+        !reversed.has_outer_lifecycle_facts(),
+        "a reversal must discard its lifecycle frame"
+    );
 }

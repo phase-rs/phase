@@ -105,9 +105,13 @@ import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
   OFFICIAL_MULTIPLAYER_SERVER_URL,
 } from "../../../config/multiplayerServer";
+import { refuseRealWebSockets } from "../../../test/helpers/refusingWebSocket";
 
 describe("HostSetup", () => {
+  let socketUrls: string[] = [];
+
   beforeEach(() => {
+    socketUrls = refuseRealWebSockets();
     vi.spyOn(serverDirectory, "refreshServerDirectory").mockResolvedValue(undefined);
     vi.spyOn(useMultiplayerStore.getState(), "ensureSubscriptionSocket").mockResolvedValue(null);
     localStorageItems.clear();
@@ -481,9 +485,12 @@ describe("HostSetup", () => {
   });
 
   afterEach(async () => {
+    const opened = [...socketUrls];
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     await i18n.changeLanguage("en");
+    expect(opened).toEqual([]);
   });
 
   it("keeps P2P usable through discovery, disconnect and recovery without switching back automatically", async () => {
@@ -607,6 +614,16 @@ describe("HostSetup", () => {
           expect(control).not.toHaveAccessibleDescription();
         }
       }
+    });
+
+    it("gives the password field an accessible name", async () => {
+      const user = userEvent.setup();
+      render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
+
+      await user.click(screen.getByRole("switch", { name: "Set password" }));
+
+      const passwordInput = screen.getByLabelText("Game password");
+      expect(passwordInput).toHaveAttribute("type", "password");
     });
 
     it("keeps the compact track inside a non-shrinking touch target", async () => {

@@ -5632,6 +5632,7 @@ mod tests {
                 conditional_enter_with_counters: Vec::new(),
                 duration: None,
                 track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: None,

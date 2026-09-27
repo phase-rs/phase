@@ -1247,6 +1247,7 @@ export function HostSetup({
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder={t("hostSetup.passwordPlaceholder")}
+                  aria-label={t("hostSetup.passwordPlaceholder")}
                   maxLength={32}
                   className={inp}
                 />

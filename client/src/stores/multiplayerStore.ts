@@ -108,6 +108,7 @@ import type { DirectorySource } from "../services/serverDirectory";
 import { reportConnectOutcome } from "../services/serverMetrics";
 import {
   DEFAULT_MULTIPLAYER_SERVER_URL,
+  OFFICIAL_MULTIPLAYER_SERVER_URL,
   isOfficialMultiplayerServerUrl,
 } from "../config/multiplayerServer";
 import { saveActiveGame, useGameStore } from "./gameStore";
@@ -158,6 +159,8 @@ let activeBrokerGameCode: string | null = null;
 let activeP2PHostAdapter: P2PHostAdapter | null = null;
 let activeP2PHostGameId: string | null = null;
 let p2pHostingAttempt = 0;
+// A server-host dial acts after its socket opens only while it is the latest.
+let serverHostAttempt = 0;
 
 function asDeckPayload(deck: HostingDeck): {
   main_deck: string[];
@@ -1607,6 +1610,9 @@ interface MultiplayerState {
   /** Last host-setup form choices, persisted across sessions. `null` until the
    *  player has hosted at least once. See {@link RememberedHostConfig}. */
   lastHostConfig: RememberedHostConfig | null;
+  /** The last "List in lobby" choice submitted from pod setup; `null` until
+   *  one is made. */
+  lastPodListingPublic: boolean | null;
   /**
    * Tournament code → bearer credentials this browser holds. Persisted:
    * `organizer_token` and `player_token` are minted once in a point reply and
@@ -1691,6 +1697,7 @@ interface MultiplayerActions {
   setCompatibilityPlayerCount: (count: number | null) => void;
   rememberHostConfig: (config: RememberedHostConfig) => void;
   clearRememberedHostConfig: () => void;
+  rememberPodListingPublic: (isPublic: boolean) => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   setSpectators: (names: string[]) => void;
   setIsSpectator: (value: boolean) => void;
@@ -1736,6 +1743,12 @@ interface MultiplayerActions {
    * crash.
    */
   ensureSubscriptionSocket: (url: string) => Promise<PhaseSocket | null>;
+  /**
+   * Choose and probe the broker a P2P registration uses. Preserve a custom
+   * broker anchor; the official broker is the fallback. Unknown custom
+   * endpoints are probed before deciding.
+   */
+  resolveP2PBroker: (anchor: string | null) => Promise<{ url: string; socket: PhaseSocket | null }>;
   /** Close and discard every source's subscription socket. Called on store
    * teardown. */
   closeSubscriptionSocket: () => void;
@@ -1877,6 +1890,7 @@ function disposeActiveP2PHost(): void {
 }
 
 function closeHostWebSocket(): void {
+  serverHostAttempt += 1;
   if (hostReconnectTimer) {
     clearTimeout(hostReconnectTimer);
     hostReconnectTimer = null;
@@ -1889,6 +1903,23 @@ function closeHostWebSocket(): void {
     hostWs.close();
     hostWs = null;
   }
+}
+
+const ABANDON_CLOSE_TIMEOUT_MS = 5_000;
+
+// Closing a LAN bridge drops frames it has not yet written, so wait for the server's reply.
+function abandonThenClose(ws: PhaseSocketTransport): void {
+  const close = () => {
+    clearTimeout(timer);
+    ws.close();
+  };
+  const timer = setTimeout(close, ABANDON_CLOSE_TIMEOUT_MS);
+  ws.onerror = null;
+  ws.onclose = null;
+  ws.onmessage = (event) => {
+    if ((JSON.parse(event.data) as { type: string }).type === "GameAbandoned") close();
+  };
+  ws.send(JSON.stringify({ type: "AbandonGame" }));
 }
 
 function activeServerHostingSocket(get: () => MultiplayerState): PhaseSocketTransport | null {
@@ -2718,10 +2749,12 @@ async function openServerHostSocket(
     return;
   }
 
+  const attempt = ++serverHostAttempt;
   let socket;
   try {
     socket = await openPhaseSocket(url);
   } catch (err) {
+    if (attempt !== serverHostAttempt) return;
     if (
       err instanceof HandshakeError &&
       err.kind === "protocol_mismatch"
@@ -2734,6 +2767,10 @@ async function openServerHostSocket(
       hostWs = null;
       onReopen();
     }
+    return;
+  }
+  if (attempt !== serverHostAttempt) {
+    socket.ws.close();
     return;
   }
 
@@ -2883,6 +2920,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       toasts: new Map(),
       formatConfig: null,
       lastHostConfig: null,
+      lastPodListingPublic: null as boolean | null,
       tournamentCredentials: {},
       playerSlots: [],
       spectators: [],
@@ -3048,6 +3086,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         lastHostConfig: normalizeRememberedHostConfig(config),
       }),
       clearRememberedHostConfig: () => set({ lastHostConfig: null }),
+      rememberPodListingPublic: (isPublic) => set({ lastPodListingPublic: isPublic }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),
       setIsSpectator: (value) => set({ isSpectator: value }),
@@ -3170,6 +3209,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       cancelHosting: () => {
         p2pHostingAttempt += 1;
+        // A closed host socket leaves the room alive for the reconnect grace.
+        if (hostWs?.readyState === WebSocket.OPEN) {
+          abandonThenClose(hostWs);
+          hostWs = null;
+        }
         closeHostWebSocket();
         disposeActiveP2PHost();
         if (activeBroker) {
@@ -3738,6 +3782,18 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         return channel.firstOpen;
       },
 
+      resolveP2PBroker: async (anchor) => {
+        let url = anchor !== null && get().sourceStatus.get(anchor)?.serverInfo?.mode !== "Full"
+          ? anchor
+          : OFFICIAL_MULTIPLAYER_SERVER_URL;
+        let socket = await get().ensureSubscriptionSocket(url);
+        if (socket?.serverInfo.mode === "Full") {
+          url = OFFICIAL_MULTIPLAYER_SERVER_URL;
+          socket = await get().ensureSubscriptionSocket(url);
+        }
+        return { url, socket };
+      },
+
       closeSubscriptionSocket: () => {
         lobbySubscribers.clear();
         ambientSubscribers.clear();
@@ -4086,6 +4142,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             saved.connectionMode === "server" || saved.connectionMode === "p2p"
               ? saved.connectionMode
               : null,
+          lastPodListingPublic:
+            typeof saved.lastPodListingPublic === "boolean"
+              ? saved.lastPodListingPublic
+              : null,
         };
       },
       partialize: (state) => ({
@@ -4102,6 +4162,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         // projection is rebuilt each session, never persisted.
         disabledDirectorySources: state.disabledDirectorySources,
         lastHostConfig: state.lastHostConfig,
+        lastPodListingPublic: state.lastPodListingPublic,
         // `tournamentCredentials` is deliberately ABSENT: these are bearer
         // secrets and must not be written to localStorage. They persist to
         // sessionStorage instead — see `hydrateSessionTournamentCredentials`

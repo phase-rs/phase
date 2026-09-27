@@ -1,0 +1,39 @@
+---
+source: crates/engine/src/parser/oracle_static/snapshot_tests.rs
+expression: "&def"
+---
+{
+  "mode": "Continuous",
+  "affected": {
+    "type": "SelfRef"
+  },
+  "modifications": [
+    {
+      "type": "AddPower",
+      "value": 5
+    },
+    {
+      "type": "AddToughness",
+      "value": 5
+    }
+  ],
+  "condition": {
+    "type": "QuantityComparison",
+    "lhs": {
+      "type": "Ref",
+      "qty": {
+        "type": "LifeAboveStarting"
+      }
+    },
+    "comparator": "GE",
+    "rhs": {
+      "type": "Fixed",
+      "value": 10
+    }
+  },
+  "affected_zone": null,
+  "effect_zone": null,
+  "active_zones": [],
+  "characteristic_defining": false,
+  "description": "Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total."
+}

@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { refuseRealWebSockets } from "../../test/helpers/refusingWebSocket";
+
 /**
  * Discord bot-link arrival on the real page and store, through a DATA router
  * so the strip and every later navigation are real history entries. The
@@ -212,9 +214,11 @@ const joinTargetNotFound = {
 
 describe("MultiplayerPage Discord bot links", () => {
   let reload: ReturnType<typeof vi.fn>;
+  let socketUrls: string[] = [];
 
   beforeEach(() => {
     vi.clearAllMocks();
+    socketUrls = refuseRealWebSockets();
     harness.hostSetup = null;
     harness.lobby = null;
     harness.myDecks = null;
@@ -250,8 +254,10 @@ describe("MultiplayerPage Discord bot links", () => {
   });
 
   afterEach(() => {
+    const opened = [...socketUrls];
     cleanup();
     vi.unstubAllGlobals();
+    expect(opened).toEqual([]);
   });
 
   describe("host arrival", () => {

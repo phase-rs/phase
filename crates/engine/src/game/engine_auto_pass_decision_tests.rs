@@ -463,11 +463,7 @@ fn no_legal_blockers_auto_submit_without_a_turn_boundary_preference() {
         blocker_constraints: Default::default(),
     };
     let waiting_for = state.waiting_for.clone();
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for,
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), waiting_for);
 
     assert!(run_auto_pass_loop(&mut state, &mut result));
     assert!(result.events.iter().any(|event| matches!(
@@ -501,11 +497,7 @@ fn blockers_auto_submit_when_all_attackers_left_play() {
     };
     state.objects.get_mut(&attacker).unwrap().zone = Zone::Graveyard;
     let waiting_for = state.waiting_for.clone();
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for,
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), waiting_for);
 
     assert!(run_auto_pass_loop(&mut state, &mut result));
     assert!(result.events.iter().any(|event| matches!(
@@ -724,11 +716,7 @@ fn turn_boundary_session_resumes_after_opponent_stack_entry_resolves() {
         },
     );
 
-    let mut paused = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut paused = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     let advanced_before_response = run_auto_pass_loop(&mut state, &mut paused);
 
     assert!(
@@ -1057,11 +1045,7 @@ fn declare_blockers_opponents_turns_stop_pauses_empty_blocker_submit() {
         },
     );
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for,
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), waiting_for);
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(
@@ -1132,11 +1116,7 @@ fn declare_blockers_own_turn_stop_does_not_pause_on_opponents_turn() {
         vec![stop(Phase::DeclareBlockers, PhaseStopScope::OwnTurn)],
     );
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for,
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), waiting_for);
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(
@@ -1180,11 +1160,7 @@ fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
         vec![stop(Phase::DeclareAttackers, PhaseStopScope::OwnTurn)],
     );
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for,
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), waiting_for);
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(
@@ -1241,11 +1217,7 @@ fn declare_attackers_opponents_turns_stop_does_not_pause_on_own_turn() {
         )],
     );
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for,
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), waiting_for);
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(
@@ -1347,11 +1319,7 @@ fn fenced_session_stops_before_passing_when_the_top_entry_changes() {
     state.objects.remove(&priority_action);
     state.stack.back_mut().unwrap().source_id = ObjectId(19_902);
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(
@@ -1399,11 +1367,7 @@ fn fenced_session_with_an_empty_stack_preserves_the_current_priority_window() {
     state.objects.remove(&priority_action);
     state.stack.clear();
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(state.stack_resolution_session.is_none());
@@ -1438,11 +1402,7 @@ fn fenced_session_with_a_new_top_entry_preserves_the_current_priority_window() {
     state.objects.remove(&priority_action);
     push_simple_stack_entry(&mut state, 19_904, PlayerId(1));
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(state.stack_resolution_session.is_none());
@@ -1479,11 +1439,7 @@ fn fenced_session_budget_caps_the_resolver_before_a_natural_batch_can_escape() {
         crate::types::game_state::StackResolutionBudget::from_legacy_max_resolutions(1);
     state.objects.remove(&priority_action);
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert_eq!(state.stack.len(), 1, "the one-entry budget is exact");
@@ -1532,11 +1488,7 @@ fn fenced_session_caps_a_natural_token_batch_at_its_matching_prefix() {
         *source_name = "Changed captured provenance".to_string();
     }
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert_eq!(
@@ -1585,11 +1537,7 @@ fn fenced_session_stops_after_the_matching_top_when_a_lower_entry_changes() {
     state.objects.remove(&priority_action);
     state.stack.get_mut(1).unwrap().source_id = ObjectId(29_906);
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert_eq!(
@@ -1709,11 +1657,7 @@ fn nonrepresentative_cancel_does_not_resurrect_at_session_teardown() {
     // A fresh top invalidates P0's frozen cohort and exercises the ordinary
     // session teardown path after P1's out-of-turn preference cancellation.
     push_simple_stack_entry(&mut state, 19_909, PlayerId(2));
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(state.stack_resolution_session.is_none());
@@ -1969,11 +1913,7 @@ fn fenced_session_uses_the_captured_entry_when_its_source_id_is_reused() {
     reused_source.name = "Reused source id".to_string();
     state.objects.insert(source_id, reused_source);
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(state.stack.is_empty());
@@ -2074,11 +2014,7 @@ fn two_hg_session_uses_team_representatives_in_the_live_runner() {
     ));
 
     state.objects.remove(&priority_action);
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert!(state.stack.is_empty());
@@ -2428,11 +2364,7 @@ fn until_stack_empty_non_requester_own_stack_shortcut_does_not_hide_action() {
         },
     );
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result);
 
     assert_eq!(state.stack.len(), 1);
@@ -2518,11 +2450,7 @@ fn emit_resolution_halt_settles_priority_and_emits_event() {
         });
     }
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for: state.waiting_for.clone(),
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     emit_resolution_halt(&mut state, &mut result);
 
     // Settled to the active player's priority, pass-tracking reset.
@@ -2722,11 +2650,7 @@ fn empty_attacker_set_auto_submits_without_any_auto_pass_mode() {
         "fixture must exercise the no-auto-pass case that stalled"
     );
 
-    let mut result = ActionResult {
-        events: Vec::new(),
-        waiting_for,
-        log_entries: Vec::new(),
-    };
+    let mut result = ActionResult::applied(Vec::new(), waiting_for);
     let advanced = run_auto_pass_loop(&mut state, &mut result);
 
     assert!(

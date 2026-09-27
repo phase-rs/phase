@@ -335,6 +335,12 @@ export function get_stack_pressure(): any;
 export function get_viewer_snapshot_js(player_id: number): any;
 
 /**
+ * Get the viewer-filtered state, legal actions, interaction projection, and
+ * event slice associated with one engine transition.
+ */
+export function get_viewer_transition_snapshot_js(player_id: number, events: any): any;
+
+/**
  * Whether the current game has an in-progress replay recording. `false`
  * before any game has started, or after the recording was invalidated by
  * undo/restore (see `restore_game_state`).
@@ -724,6 +730,7 @@ export interface InitOutput {
     readonly get_filtered_game_state: (a: number) => any;
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
+    readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;

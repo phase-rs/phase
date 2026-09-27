@@ -1884,6 +1884,7 @@ fn discard_applier(
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_as_copy: None,
             discard_frame,
@@ -12845,6 +12846,7 @@ mod tests {
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -15553,6 +15555,7 @@ mod tests {
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
 
@@ -16775,6 +16778,7 @@ mod tests {
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
 
@@ -19977,6 +19981,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
             performed_by: None,
@@ -20026,6 +20031,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
             performed_by: None,

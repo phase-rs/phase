@@ -5095,6 +5095,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let mut events = Vec::new();
@@ -7426,6 +7427,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -7634,6 +7636,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -7758,6 +7761,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -8217,6 +8221,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);

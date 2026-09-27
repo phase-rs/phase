@@ -386,12 +386,23 @@ fn xanathar_leading_duration_reaches_governed_chain_links() {
          at BASE_SHA it is None and the permission is never pruned"
     );
 
+    // CR 609.4b: the trailing "you may spend mana as though it were mana of
+    // any color to cast spells this way" is a payment concession on the play
+    // permission, folded onto it as `mana_spend_permission` — so the
+    // permission IS the chain leaf, and the duration reaching it is the
+    // duration reaching the last governed link.
     let trailing = links
         .last()
-        .expect("the trailing mana-spend GenericEffect is the chain leaf");
+        .expect("the play permission carrying the mana concession is the chain leaf");
     assert!(
-        matches!(&*trailing.effect, Effect::GenericEffect { .. }),
-        "chain leaf is the mana-spend GenericEffect, got {:?}",
+        matches!(
+            &*trailing.effect,
+            Effect::CastFromZone {
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                ..
+            }
+        ),
+        "chain leaf is the play permission carrying the any-color concession, got {:?}",
         trailing.effect
     );
     assert_eq!(
@@ -773,10 +784,11 @@ fn you_find_some_prisoners_recovers_mana_rider() {
                 },
                 "the grant keeps its printed `Until the end of your next turn`"
             );
-            // THE REVERT-FAILING ASSERTION.
+            // THE REVERT-FAILING ASSERTION. CR 609.4b: "any color" is
+            // `AnyColor` — the rider is folded by the printed word.
             assert_eq!(
                 *mana_spend_permission,
-                Some(ManaSpendPermission::AnyTypeOrColor),
+                Some(ManaSpendPermission::AnyColor),
                 "CR 611.2a + CR 608.2c: the `spend mana as though …` conjunct must be \
                  recovered onto the grant; at BASE_SHA it is silently dropped"
             );
@@ -1357,10 +1369,12 @@ fn leading_duration_merge_cards_unchanged() {
         &["Legendary".to_string(), "Creature".to_string()],
         &["Beholder".to_string()],
     );
+    // Four links: the trailing mana rider is folded onto the play permission
+    // (CR 609.4b), not emitted as a fifth link.
     assert_eq!(
         chain(trigger_body(&xan.triggers[0])).len(),
-        5,
-        "Xanathar's chain is the recognizer's own five links — the predicate must not \
+        4,
+        "Xanathar's chain is the recognizer's own four links — the predicate must not \
          re-chunk it"
     );
     let abey = parse_oracle_text(ABEYANCE, "Abeyance", &[], &["Instant".to_string()], &[]);

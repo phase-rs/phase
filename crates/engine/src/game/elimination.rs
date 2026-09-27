@@ -1995,6 +1995,7 @@ mod tests {
             conditional_enter_with_counters: Vec::new(),
             duration: None,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
@@ -2067,7 +2068,7 @@ mod tests {
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
-                    face_down_in_exile: false,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 },
                 crate::types::game_state::PendingBatchZoneMoveRequest {
                     object_id: surviving,
@@ -2087,7 +2088,7 @@ mod tests {
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
-                    face_down_in_exile: false,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 },
             ],
             attempted: vec![leaving, surviving],
@@ -4649,6 +4650,7 @@ mod tests {
             is_activated: false,
             ability_index: None,
             ability_cost: None,
+            activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
         };
         entry
