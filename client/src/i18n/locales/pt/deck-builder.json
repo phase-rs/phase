@@ -259,6 +259,7 @@
     "estimated": "Estimado: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
     "belowFloor": " ⚠ abaixo do mínimo B{{tier}}",
+    "belowFloorCombo": "elevado por um combo de duas cartas",
     "hideBreakdown": "Ocultar detalhamento",
     "showBreakdown": "Mostrar detalhamento",
     "hideBreakdownButton": "▲ Ocultar detalhamento",
@@ -274,6 +275,47 @@
       "clear": "{{observed}} de {{threshold}} — faltam {{remaining}} para passar a B{{tier}}",
       "clearMax": "{{observed}} — não é possível alcançar B{{tier}} adicionando cartas",
       "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Combos de duas cartas",
+      "unmeasured": "O barômetro de combos de duas cartas não foi medido nesta compilação",
+      "noneFound": "Nenhum combo infinito de duas cartas encontrado neste deck",
+      "attribution": "Dados de combos: {{attribution}}, captura de {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Mínimo por combo autônomo de duas cartas",
+        "earlyTwoCard": "Mínimo por combo rápido de duas cartas (custo de montagem de {{ceiling}} ou menos)"
+      },
+      "check": {
+        "fired": "Força B{{tier}} {{label}}",
+        "clear": "Adicionar mais {{remaining}} carta(s) pode permitir alcançar B{{tier}}",
+        "clearMax": "Não é possível alcançar B{{tier}} com correspondências adicionais"
+      },
+      "outcome": {
+        "wins": "Vence o jogo",
+        "unbounded": "{{resource}} sem limite"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "dano",
+        "lifeLoss": "perda de vida",
+        "lifegain": "ganho de vida",
+        "mill": "moagem",
+        "draw": "compra de cartas",
+        "tokens": "fichas",
+        "combat": "fases de combate",
+        "turns": "turnos"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Definitivamente duas cartas",
+        "arguablyTwoCard": "Possivelmente duas cartas",
+        "more": "Mais de duas cartas"
+      },
+      "relevance": {
+        "standalone": "Autônomo",
+        "contextual": "Contextual",
+        "helper": "Auxiliar"
+      },
+      "pairSourced": "{{first}} + {{second}} (da tabela de combos)"
     },
     "uncounted": "Contado como evidência — nenhuma regra de bracket se aplica a este eixo.",
     "uncalibrated": "A WotC não publica um número para «quantidades baixas»; esta contagem não está calibrada.",

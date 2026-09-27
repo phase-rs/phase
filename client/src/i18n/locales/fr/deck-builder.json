@@ -259,6 +259,7 @@
     "estimated": "Estimé : B{{tier}} {{label}}",
     "manual": "Manuel : B{{tier}} {{label}}",
     "belowFloor": " ⚠ sous le minimum B{{tier}}",
+    "belowFloorCombo": "relevé par un combo de deux cartes",
     "hideBreakdown": "Masquer le détail",
     "showBreakdown": "Afficher le détail",
     "hideBreakdownButton": "▲ Masquer le détail",
@@ -274,6 +275,47 @@
       "clear": "{{observed}} sur {{threshold}} — encore {{remaining}} pour passer à B{{tier}}",
       "clearMax": "{{observed}} — impossible d’atteindre B{{tier}} en ajoutant des cartes",
       "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Combos de deux cartes",
+      "unmeasured": "Le baromètre des combos de deux cartes n’est pas mesuré dans cette version",
+      "noneFound": "Aucun combo infini de deux cartes trouvé dans ce deck",
+      "attribution": "Données de combos : {{attribution}}, instantané du {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Minimum pour un combo autonome de deux cartes",
+        "earlyTwoCard": "Minimum pour un combo précoce de deux cartes (coût d’assemblage de {{ceiling}} ou moins)"
+      },
+      "check": {
+        "fired": "Impose B{{tier}} {{label}}",
+        "clear": "Ajouter {{remaining}} carte(s) de plus pourrait permettre d’atteindre B{{tier}}",
+        "clearMax": "Impossible d’atteindre B{{tier}} avec des correspondances supplémentaires"
+      },
+      "outcome": {
+        "wins": "Gagne la partie",
+        "unbounded": "{{resource}} sans limite"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "blessures",
+        "lifeLoss": "perte de points de vie",
+        "lifegain": "gain de points de vie",
+        "mill": "meule",
+        "draw": "pioche de cartes",
+        "tokens": "jetons",
+        "combat": "phases de combat",
+        "turns": "tours"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Certainement deux cartes",
+        "arguablyTwoCard": "Possiblement deux cartes",
+        "more": "Plus de deux cartes"
+      },
+      "relevance": {
+        "standalone": "Autonome",
+        "contextual": "Contextuel",
+        "helper": "Auxiliaire"
+      },
+      "pairSourced": "{{first}} + {{second}} (depuis la table des combos)"
     },
     "uncounted": "Compté comme indice — aucune règle de palier ne s’applique à cet axe.",
     "uncalibrated": "WotC ne publie aucun chiffre pour les « faibles quantités » ; ce décompte n’est pas étalonné.",

@@ -259,6 +259,7 @@
     "estimated": "Estimated: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
     "belowFloor": " ⚠ below B{{tier}} floor",
+    "belowFloorCombo": "raised by a two-card combo",
     "hideBreakdown": "Hide breakdown",
     "showBreakdown": "Show breakdown",
     "hideBreakdownButton": "▲ Hide breakdown",
@@ -274,6 +275,47 @@
       "clear": "{{observed}} of {{threshold}} — {{remaining}} more crosses to B{{tier}}",
       "clearMax": "{{observed}} — cannot reach B{{tier}} by adding cards",
       "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Two-card combos",
+      "unmeasured": "Two-card combo barometer not measured in this build",
+      "noneFound": "No two-card infinite combos found in this deck",
+      "attribution": "Combo data: {{attribution}}, snapshot {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Standalone two-card combo floor",
+        "earlyTwoCard": "Early two-card combo floor (assemble cost {{ceiling}} or less)"
+      },
+      "check": {
+        "fired": "Forces B{{tier}} {{label}}",
+        "clear": "Adding {{remaining}} more card(s) could reach B{{tier}}",
+        "clearMax": "Cannot reach B{{tier}} with additional matches"
+      },
+      "outcome": {
+        "wins": "Wins the game",
+        "unbounded": "Unbounded {{resource}}"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "damage",
+        "lifeLoss": "life loss",
+        "lifegain": "life gain",
+        "mill": "mill",
+        "draw": "card draw",
+        "tokens": "tokens",
+        "combat": "combat phases",
+        "turns": "turns"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Definitely two-card",
+        "arguablyTwoCard": "Arguably two-card",
+        "more": "More than two cards"
+      },
+      "relevance": {
+        "standalone": "Standalone",
+        "contextual": "Contextual",
+        "helper": "Helper"
+      },
+      "pairSourced": "{{first}} + {{second}} (from the combo table)"
     },
     "uncounted": "Counted as evidence — no bracket rule applies to this axis.",
     "uncalibrated": "WotC publishes no number for \"low quantities\"; this count is uncalibrated.",

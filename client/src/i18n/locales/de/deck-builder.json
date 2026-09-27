@@ -259,6 +259,7 @@
     "estimated": "Geschätzt: B{{tier}} {{label}}",
     "manual": "Manuell: B{{tier}} {{label}}",
     "belowFloor": " ⚠ unter dem B{{tier}}-Minimum",
+    "belowFloorCombo": "durch eine Zwei-Karten-Kombo angehoben",
     "hideBreakdown": "Aufschlüsselung ausblenden",
     "showBreakdown": "Aufschlüsselung anzeigen",
     "hideBreakdownButton": "▲ Aufschlüsselung ausblenden",
@@ -274,6 +275,47 @@
       "clear": "{{observed}} von {{threshold}} — noch {{remaining}} bis B{{tier}}",
       "clearMax": "{{observed}} — B{{tier}} kann durch Hinzufügen von Karten nicht erreicht werden",
       "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Zwei-Karten-Kombos",
+      "unmeasured": "Der Barometer für Zwei-Karten-Kombos wurde in diesem Build nicht gemessen",
+      "noneFound": "Keine unendlichen Zwei-Karten-Kombos in diesem Deck gefunden",
+      "attribution": "Kombo-Daten: {{attribution}}, Stand {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Untergrenze für eigenständige Zwei-Karten-Kombos",
+        "earlyTwoCard": "Untergrenze für frühe Zwei-Karten-Kombos (Aufbaukosten höchstens {{ceiling}})"
+      },
+      "check": {
+        "fired": "Erzwingt B{{tier}} {{label}}",
+        "clear": "Mit {{remaining}} weiteren Karte(n) wäre B{{tier}} erreichbar",
+        "clearMax": "B{{tier}} kann durch zusätzliche Treffer nicht erreicht werden"
+      },
+      "outcome": {
+        "wins": "Gewinnt das Spiel",
+        "unbounded": "Unbegrenzt: {{resource}}"
+      },
+      "resource": {
+        "mana": "Mana",
+        "damage": "Schaden",
+        "lifeLoss": "Lebenspunkteverlust",
+        "lifegain": "Lebenspunktegewinn",
+        "mill": "Mühlen",
+        "draw": "Kartenziehen",
+        "tokens": "Spielsteine",
+        "combat": "Kampfphasen",
+        "turns": "Züge"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Definitiv zwei Karten",
+        "arguablyTwoCard": "Vertretbar zwei Karten",
+        "more": "Mehr als zwei Karten"
+      },
+      "relevance": {
+        "standalone": "Eigenständig",
+        "contextual": "Kontextabhängig",
+        "helper": "Hilfskombo"
+      },
+      "pairSourced": "{{first}} + {{second}} (aus der Kombo-Tabelle)"
     },
     "uncounted": "Als Nachweis gezählt — für diese Achse gilt keine Bracket-Regel.",
     "uncalibrated": "WotC veröffentlicht keine Zahl für „geringe Mengen“; diese Anzahl ist nicht kalibriert.",

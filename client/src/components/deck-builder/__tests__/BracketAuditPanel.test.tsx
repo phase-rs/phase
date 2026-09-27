@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { BracketAuditPanel } from "../BracketAuditPanel";
-import type { BracketEstimate } from "../../../types/bracket";
+import type { BracketEstimate, ComboMatch } from "../../../types/bracket";
 
 afterEach(cleanup);
 
@@ -94,6 +94,196 @@ const estimate: BracketEstimate = {
 };
 
 describe("BracketAuditPanel", () => {
+  it("renders the not-measured line when combo coverage is unmeasured", () => {
+    render(
+      <BracketAuditPanel
+        estimate={{ ...estimate, combo_coverage: "unmeasured" }}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(
+      screen.getByText("Two-card combo barometer not measured in this build"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("No two-card infinite combos found in this deck"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Combo data:/)).not.toBeInTheDocument();
+  });
+
+  it("renders none-found plus attribution when measured with no matches", () => {
+    render(
+      <BracketAuditPanel
+        estimate={{
+          ...estimate,
+          combos: [],
+          combo_checks: [],
+          combo_coverage: "measured",
+          combo_provenance: {
+            snapshot_date: "2026-09-01",
+            table_version: "combo-1",
+            attribution: "Commander Spellbook",
+            card_pool_version: "pool-1",
+            filtered: {
+              not_commander_legal: 0,
+              not_ok: 0,
+              template: 0,
+              one_card: 0,
+              three_or_more: 0,
+              unknown_card: 0,
+              irrelevant: 0,
+              kept: 0,
+              multi_zone_pieces: 0,
+              duplicate_pair: 0,
+            },
+            omitted: [],
+          },
+        }}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(screen.getByText("No two-card infinite combos found in this deck")).toBeInTheDocument();
+    expect(
+      screen.getByText("Combo data: Commander Spellbook, snapshot 2026-09-01"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a fired combo check with both card names, outcomes and attribution", () => {
+    const onCardClick = vi.fn();
+    const combo: ComboMatch = {
+      pieces: [
+        { key: "heliod-sun-crowned", display: "Heliod, Sun-Crowned", zone: "library" },
+        { key: "walking-ballista", display: "Walking Ballista", zone: "library" },
+      ],
+      relevance: "standalone",
+      cardinality: "definitely_two_card",
+      assemble_cost: 6,
+      popularity: 100,
+      outcomes: [{ kind: "wins" }, { kind: "unbounded", resource: "damage" }],
+      axes: [],
+      source: "combo_pair",
+    };
+    render(
+      <BracketAuditPanel
+        estimate={{
+          ...estimate,
+          combos: [combo],
+          combo_coverage: "measured",
+          combo_checks: [
+            {
+              trigger: { kind: "standalone_two_card" },
+              floor: "upgraded",
+              outcome: { kind: "fired" },
+              official_line: "No intentional two-card infinite combos.",
+              source_document: "Introducing Commander Brackets Beta",
+              source_published: "2025-02-11",
+              source_url: "https://example.com/brackets",
+              evidence: [combo],
+            },
+          ],
+          combo_provenance: {
+            snapshot_date: "2026-09-01",
+            table_version: "combo-1",
+            attribution: "Commander Spellbook",
+            card_pool_version: "pool-1",
+            filtered: {
+              not_commander_legal: 0,
+              not_ok: 0,
+              template: 0,
+              one_card: 0,
+              three_or_more: 0,
+              unknown_card: 0,
+              irrelevant: 0,
+              kept: 1,
+              multi_zone_pieces: 0,
+              duplicate_pair: 0,
+            },
+            omitted: ["prerequisite_text"],
+          },
+        }}
+        manualBracket={null}
+        onCardClick={onCardClick}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(screen.getByText("Heliod, Sun-Crowned")).toBeInTheDocument();
+    expect(screen.getByText("Walking Ballista")).toBeInTheDocument();
+    expect(screen.getByText(/Wins the game/)).toBeInTheDocument();
+    expect(screen.getByText("Unbounded damage")).toBeInTheDocument();
+    expect(
+      screen.getByText("Combo data: Commander Spellbook, snapshot 2026-09-01"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Heliod, Sun-Crowned" }));
+    expect(onCardClick).toHaveBeenCalledWith("Heliod, Sun-Crowned");
+  });
+
+  it("unmeasured and none-found produce different text", () => {
+    const { rerender } = render(
+      <BracketAuditPanel
+        estimate={{ ...estimate, combo_coverage: "unmeasured" }}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(screen.getByText(/not measured in this build/i)).toBeInTheDocument();
+
+    rerender(
+      <BracketAuditPanel
+        estimate={{ ...estimate, combos: [], combo_coverage: "measured" }}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    expect(screen.getByText(/No two-card infinite combos found/i)).toBeInTheDocument();
+    expect(screen.queryByText(/not measured in this build/i)).not.toBeInTheDocument();
+  });
+
+  it("appends the combo-floor note to the below-floor warning", () => {
+    render(
+      <BracketAuditPanel
+        estimate={{
+          ...estimate,
+          declaration: {
+            kind: "below_floor",
+            floor: "optimized",
+            raised_by: [],
+            raised_by_combo_floor: { kind: "standalone_two_card" },
+          },
+        }}
+        manualBracket={2}
+        onCardClick={() => {}}
+      />,
+    );
+    expect(screen.getByText(/below B4 floor.*raised by a two-card combo/i)).toBeInTheDocument();
+  });
+
+  it("renders pair-sourced mass land denial under the axis", () => {
+    render(
+      <BracketAuditPanel
+        estimate={{
+          ...estimate,
+          axes: {
+            ...estimate.axes,
+            mass_land_denial: {
+              ...estimate.axes.mass_land_denial,
+              combo_pairs: [["Kormus Bell", "Urborg, Tomb of Yawgmoth"]],
+            },
+          },
+        }}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(
+      screen.getByText("Kormus Bell + Urborg, Tomb of Yawgmoth (from the combo table)"),
+    ).toBeInTheDocument();
+  });
+
   it("renders the estimated tier chip", () => {
     render(<BracketAuditPanel estimate={estimate} manualBracket={null} onCardClick={() => {}} />);
     expect(screen.getByText(/Estimated:/i)).toHaveTextContent("B3");

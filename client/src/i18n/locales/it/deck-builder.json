@@ -259,6 +259,7 @@
     "estimated": "Stimato: B{{tier}} {{label}}",
     "manual": "Manuale: B{{tier}} {{label}}",
     "belowFloor": " ⚠ sotto il minimo B{{tier}}",
+    "belowFloorCombo": "alzato da una combo di due carte",
     "hideBreakdown": "Nascondi dettagli",
     "showBreakdown": "Mostra dettagli",
     "hideBreakdownButton": "▲ Nascondi dettagli",
@@ -274,6 +275,47 @@
       "clear": "{{observed}} di {{threshold}} — ne mancano {{remaining}} per passare a B{{tier}}",
       "clearMax": "{{observed}} — B{{tier}} non può essere raggiunto aggiungendo carte",
       "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Combo di due carte",
+      "unmeasured": "Il barometro delle combo di due carte non è stato misurato in questa build",
+      "noneFound": "Nessuna combo infinita di due carte trovata in questo mazzo",
+      "attribution": "Dati combo: {{attribution}}, istantanea del {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Minimo per combo autonoma di due carte",
+        "earlyTwoCard": "Minimo per combo rapida di due carte (costo di assemblaggio {{ceiling}} o meno)"
+      },
+      "check": {
+        "fired": "Impone B{{tier}} {{label}}",
+        "clear": "Aggiungere altre {{remaining}} carte potrebbe permettere di raggiungere B{{tier}}",
+        "clearMax": "B{{tier}} non è raggiungibile con corrispondenze aggiuntive"
+      },
+      "outcome": {
+        "wins": "Vince la partita",
+        "unbounded": "{{resource}} senza limiti"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "danni",
+        "lifeLoss": "perdita di punti vita",
+        "lifegain": "guadagno di punti vita",
+        "mill": "macina",
+        "draw": "pesca di carte",
+        "tokens": "pedine",
+        "combat": "fasi di combattimento",
+        "turns": "turni"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Sicuramente due carte",
+        "arguablyTwoCard": "Probabilmente due carte",
+        "more": "Più di due carte"
+      },
+      "relevance": {
+        "standalone": "Autonoma",
+        "contextual": "Contestuale",
+        "helper": "Ausiliaria"
+      },
+      "pairSourced": "{{first}} + {{second}} (dalla tabella delle combo)"
     },
     "uncounted": "Conteggiato come prova — a questo asse non si applica alcuna regola del bracket.",
     "uncalibrated": "WotC non pubblica un numero per le «quantità ridotte»; questo conteggio non è calibrato.",

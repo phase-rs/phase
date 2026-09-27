@@ -40,6 +40,105 @@ function estimate() {
 }
 
 describe("isBracketEstimate", () => {
+  it("accepts an estimate without the 61-08 combo fields", () => {
+    expect(isBracketEstimate(estimate())).toBe(true);
+  });
+
+  it("accepts a full combo estimate", () => {
+    const combo = {
+      pieces: [
+        { key: "heliod-sun-crowned", display: "Heliod, Sun-Crowned", zone: "library" },
+        { key: "walking-ballista", display: "Walking Ballista", zone: "command_zone" },
+      ],
+      relevance: "standalone",
+      cardinality: "arguably_two_card",
+      assemble_cost: 6,
+      popularity: 42,
+      outcomes: [{ kind: "wins" }, { kind: "unbounded", resource: "damage" }],
+      axes: ["mass_land_denial"],
+      source: "combo_pair",
+    };
+    expect(
+      isBracketEstimate({
+        ...estimate(),
+        axes: {
+          ...estimate().axes,
+          mass_land_denial: {
+            count: 1,
+            contributing: ["Heliod, Sun-Crowned", "Walking Ballista"],
+            combo_pairs: [["Heliod, Sun-Crowned", "Walking Ballista"]],
+          },
+        },
+        combos: [combo],
+        combo_checks: [
+          {
+            trigger: {
+              kind: "early_two_card",
+              reading: "including_arguable",
+              assemble_ceiling: 6,
+            },
+            floor: "optimized",
+            outcome: { kind: "fired" },
+            official_line: "No intentional early-game two-card infinite combos.",
+            source_document: "Introducing Commander Brackets Beta",
+            source_published: "2025-02-11",
+            source_url: "https://example.com/brackets",
+            evidence: [combo],
+          },
+        ],
+        combo_coverage: "measured",
+        combo_provenance: {
+          snapshot_date: "2026-09-01",
+          table_version: "combo-1",
+          attribution: "Commander Spellbook",
+          card_pool_version: "pool-1",
+          filtered: {
+            not_commander_legal: 1,
+            not_ok: 2,
+            template: 3,
+            one_card: 4,
+            three_or_more: 5,
+            unknown_card: 6,
+            irrelevant: 7,
+            kept: 8,
+            multi_zone_pieces: 9,
+            duplicate_pair: 10,
+          },
+          omitted: ["prerequisite_text", "result_text", "unmodeled_result_classes"],
+        },
+        declaration: {
+          kind: "below_floor",
+          floor: "optimized",
+          raised_by: [],
+          raised_by_combo_floor: { kind: "standalone_two_card" },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a combo match with an unknown outcome kind", () => {
+    expect(
+      isBracketEstimate({
+        ...estimate(),
+        combos: [
+          {
+            pieces: [
+              { key: "a", display: "A", zone: "library" },
+              { key: "b", display: "B", zone: "anywhere" },
+            ],
+            relevance: "contextual",
+            cardinality: "definitely_two_card",
+            assemble_cost: 2,
+            popularity: 1,
+            outcomes: [{ kind: "loops" }],
+            axes: [],
+            source: "combo_pair",
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
   it("accepts the new shape and rejects the old", () => {
     const current = estimate();
     expect(isBracketEstimate(current)).toBe(true);

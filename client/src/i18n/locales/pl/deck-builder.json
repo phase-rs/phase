@@ -259,6 +259,7 @@
     "estimated": "Szacowany: B{{tier}} {{label}}",
     "manual": "Ręczny: B{{tier}} {{label}}",
     "belowFloor": " ⚠ poniżej minimum B{{tier}}",
+    "belowFloorCombo": "podniesiony przez kombinację dwóch kart",
     "hideBreakdown": "Ukryj szczegóły",
     "showBreakdown": "Pokaż szczegóły",
     "hideBreakdownButton": "▲ Ukryj szczegóły",
@@ -274,6 +275,47 @@
       "clear": "{{observed}} z {{threshold}} — jeszcze {{remaining}}, aby przejść do B{{tier}}",
       "clearMax": "{{observed}} — nie można osiągnąć B{{tier}} przez dodawanie kart",
       "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Kombinacje dwóch kart",
+      "unmeasured": "W tej wersji nie zmierzono wskaźnika kombinacji dwóch kart",
+      "noneFound": "W tej talii nie znaleziono nieskończonych kombinacji dwóch kart",
+      "attribution": "Dane kombinacji: {{attribution}}, migawka z {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Minimum dla samodzielnej kombinacji dwóch kart",
+        "earlyTwoCard": "Minimum dla wczesnej kombinacji dwóch kart (koszt złożenia najwyżej {{ceiling}})"
+      },
+      "check": {
+        "fired": "Wymusza B{{tier}} {{label}}",
+        "clear": "Dodanie jeszcze {{remaining}} kart może pozwolić osiągnąć B{{tier}}",
+        "clearMax": "Nie można osiągnąć B{{tier}} dodatkowymi dopasowaniami"
+      },
+      "outcome": {
+        "wins": "Wygrywa grę",
+        "unbounded": "Nieograniczone: {{resource}}"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "obrażenia",
+        "lifeLoss": "utrata życia",
+        "lifegain": "zyskiwanie życia",
+        "mill": "mielenie",
+        "draw": "dobieranie kart",
+        "tokens": "żetony",
+        "combat": "fazy walki",
+        "turns": "tury"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Zdecydowanie dwie karty",
+        "arguablyTwoCard": "Prawdopodobnie dwie karty",
+        "more": "Więcej niż dwie karty"
+      },
+      "relevance": {
+        "standalone": "Samodzielna",
+        "contextual": "Kontekstowa",
+        "helper": "Pomocnicza"
+      },
+      "pairSourced": "{{first}} + {{second}} (z tabeli kombinacji)"
     },
     "uncounted": "Uwzględniono jako przesłankę — dla tej osi nie obowiązuje żadna reguła poziomu.",
     "uncalibrated": "WotC nie publikuje liczby dla „małych ilości”; ta wartość nie jest skalibrowana.",

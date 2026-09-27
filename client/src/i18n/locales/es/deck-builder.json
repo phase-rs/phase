@@ -259,6 +259,7 @@
     "estimated": "Estimado: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
     "belowFloor": " ⚠ por debajo del mínimo de B{{tier}}",
+    "belowFloorCombo": "elevado por un combo de dos cartas",
     "hideBreakdown": "Ocultar desglose",
     "showBreakdown": "Mostrar desglose",
     "hideBreakdownButton": "▲ Ocultar desglose",
@@ -274,6 +275,47 @@
       "clear": "{{observed}} de {{threshold}} — faltan {{remaining}} para pasar a B{{tier}}",
       "clearMax": "{{observed}} — no se puede alcanzar B{{tier}} añadiendo cartas",
       "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Combos de dos cartas",
+      "unmeasured": "El barómetro de combos de dos cartas no se midió en esta compilación",
+      "noneFound": "No se encontraron combos infinitos de dos cartas en este mazo",
+      "attribution": "Datos de combos: {{attribution}}, captura del {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Mínimo por combo autónomo de dos cartas",
+        "earlyTwoCard": "Mínimo por combo temprano de dos cartas (coste de montaje de {{ceiling}} o menos)"
+      },
+      "check": {
+        "fired": "Fuerza B{{tier}} {{label}}",
+        "clear": "Añadir {{remaining}} carta(s) más podría alcanzar B{{tier}}",
+        "clearMax": "No se puede alcanzar B{{tier}} con coincidencias adicionales"
+      },
+      "outcome": {
+        "wins": "Gana la partida",
+        "unbounded": "{{resource}} sin límite"
+      },
+      "resource": {
+        "mana": "maná",
+        "damage": "daño",
+        "lifeLoss": "pérdida de vidas",
+        "lifegain": "ganancia de vidas",
+        "mill": "milleo",
+        "draw": "robo de cartas",
+        "tokens": "fichas",
+        "combat": "fases de combate",
+        "turns": "turnos"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Definitivamente de dos cartas",
+        "arguablyTwoCard": "Posiblemente de dos cartas",
+        "more": "Más de dos cartas"
+      },
+      "relevance": {
+        "standalone": "Autónomo",
+        "contextual": "Contextual",
+        "helper": "Auxiliar"
+      },
+      "pairSourced": "{{first}} + {{second}} (de la tabla de combos)"
     },
     "uncounted": "Contado como evidencia — ninguna regla de nivel se aplica a este eje.",
     "uncalibrated": "WotC no publica una cifra para «cantidades bajas»; este recuento no está calibrado.",
