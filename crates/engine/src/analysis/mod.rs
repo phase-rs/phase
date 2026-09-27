@@ -49,7 +49,11 @@ pub mod corpus;
 #[cfg(test)]
 mod corpus_tests;
 
-pub use ability_graph::{candidate_cycles, AbilityGraph, CandidateCycle};
+pub use ability_graph::{
+    candidate_cycles, candidate_pairs, AbilityGraph, CandidateCycle, PairCandidate,
+};
+#[cfg(feature = "combo-verify")]
+pub use ability_graph::{pair_audit_report, PairAuditReport, COMBO_AUDIT_BLIND_SPOT};
 #[cfg(any(test, feature = "combo-verify"))]
 pub use corpus::{
     corpus_len, drive_row, row, ComboRow, DeferralBucket, ResourceFamily, RowReport, RowStatus,
