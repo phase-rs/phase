@@ -7,12 +7,13 @@ use engine::ai_support::legal_actions_full;
 use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect,
+    AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, CounterCostSelection, Effect,
     ManaContribution, ManaProduction, ModalChoice, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, TapCreaturesRequirement, TargetFilter, TargetRef, TypedFilter,
+    SacrificeRequirement, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_X,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::{
     ActivationResidual, CastPaymentMode, CostResume, PersistedGameState, WaitingFor,
 };
@@ -1710,4 +1711,275 @@ fn x_mana_targeted_tap_creatures_sibling_refuses_before_payment() {
     assert_eq!(runner.state().objects[&fodder].zone, Zone::Battlefield);
     assert!(!runner.state().objects[&fodder].tapped);
     assert_eq!(runner.state().objects[&target].damage_marked, 0);
+}
+
+#[test]
+fn x_mana_modal_symbolic_counter_target_x0_refuses() {
+    run_modal_symbolic_counter_sibling(true, 0);
+}
+
+#[test]
+fn x_mana_modal_symbolic_counter_target_x1_refuses() {
+    run_modal_symbolic_counter_sibling(true, 1);
+}
+
+#[test]
+fn x_mana_modal_symbolic_counter_no_target_x0_refuses() {
+    run_modal_symbolic_counter_sibling(false, 0);
+}
+
+#[test]
+fn x_mana_modal_symbolic_counter_no_target_x1_refuses() {
+    run_modal_symbolic_counter_sibling(false, 1);
+}
+
+fn run_modal_symbolic_counter_sibling(targeted: bool, x: u32) {
+            let charge = CounterType::Generic("charge".into());
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let cost = AbilityCost::Composite {
+                costs: vec![
+                    x_mana(),
+                    count_creatures(1),
+                    AbilityCost::RemoveCounter {
+                        count: REMOVE_COUNTER_COST_X,
+                        counter_type: CounterMatch::OfType(charge.clone()),
+                        target: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact))),
+                        selection: CounterCostSelection::SingleObject,
+                    },
+                ],
+            };
+            let mode = if targeted {
+                damage_x(cost.clone())
+            } else {
+                draw_x(cost.clone())
+            };
+            let source = scenario
+                .add_enchantment_from_oracle(P0, "Modal symbolic cost", "")
+                .with_ability_definition(
+                    mode.clone().with_modal(
+                        ModalChoice {
+                            min_choices: 1,
+                            max_choices: 1,
+                            mode_count: 2,
+                            mode_descriptions: vec!["Other mode".into(), "Chosen mode".into()],
+                            ..ModalChoice::default()
+                        },
+                        vec![
+                            AbilityDefinition::new(
+                                AbilityKind::Activated,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                    player: TargetFilter::Controller,
+                                },
+                            ),
+                            mode,
+                        ],
+                    ),
+                )
+                .id();
+            let fodder = scenario.add_creature(P0, "Cost fodder", 1, 1).id();
+            let battery = scenario
+                .add_creature(P0, "Counter battery", 1, 1)
+                .as_artifact()
+                .id();
+            let victim = scenario.add_creature(P1, "Chosen victim", 5, 5).id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
+            );
+            let mut runner = scenario.build();
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&battery)
+                .unwrap()
+                .counters
+                .insert(charge.clone(), 2);
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::AbilityModeChoice { .. }
+            ));
+            runner
+                .act(GameAction::SelectModes { indices: vec![1] })
+                .unwrap();
+            let WaitingFor::ChooseXValue { pending_cast, .. } = &runner.state().waiting_for else {
+                panic!("modal X must be announced: {:?}", runner.state().waiting_for);
+            };
+            assert!(matches!(
+                pending_cast.activation_residual,
+                ActivationResidual::XMana
+            ));
+            assert_eq!(pending_cast.object_id, source);
+            assert_eq!(pending_cast.chosen_modes, vec![1]);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                runner.act(GameAction::ChooseX { value: x })
+            }));
+            if targeted {
+                let Ok(Ok(_)) = result else {
+                    panic!("targeted modal X must reach target selection: {result:?}");
+                };
+                let WaitingFor::TargetSelection { pending_cast, .. } = &runner.state().waiting_for else {
+                    panic!("targeted modal X must declare target: {:?}", runner.state().waiting_for);
+                };
+                assert_eq!(pending_cast.ability.chosen_x, Some(x));
+                assert!(matches!(pending_cast.activation_residual, ActivationResidual::XMana));
+                assert_eq!(pending_cast.chosen_modes, vec![1]);
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    runner.act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(victim)],
+                    })
+                }));
+                assert_modal_sibling_refusal(result, targeted, x);
+            } else {
+                assert_modal_sibling_refusal(result, targeted, x);
+            }
+            assert_eq!(runner.state().objects[&fodder].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&battery].counters.get(&charge), Some(&2));
+            assert!(runner.state().stack.is_empty());
+            assert_eq!(runner.state().objects[&victim].damage_marked, 0);
+}
+
+fn assert_modal_sibling_refusal(
+    result: Result<Result<engine::types::game_state::ActionResult, EngineError>, Box<dyn std::any::Any + Send>>,
+    targeted: bool,
+    x: u32,
+) {
+    match result {
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied());
+            assert_eq!(message, Some("non-self sacrifice/exile cost unhandled"), "targeted={targeted} x={x}");
+        }
+        Ok(Err(EngineError::ActionNotAllowed(message))) => {
+            assert_eq!(message, "non-self sacrifice/exile cost unhandled", "targeted={targeted} x={x}");
+        }
+        Ok(other) => panic!("modal symbolic sibling reached payment before validation targeted={targeted} x={x}: {other:?}"),
+    }
+}
+
+#[test]
+fn x_mana_modal_count_only_pays_after_mode_x_and_optional_target() {
+    for targeted in [false, true] {
+        for x in [0, 1] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let cost = AbilityCost::Composite {
+                costs: vec![x_mana(), count_creatures(1)],
+            };
+            let chosen_mode = if targeted {
+                damage_x(cost.clone())
+            } else {
+                draw_x(cost.clone())
+            };
+            let source = scenario
+                .add_enchantment_from_oracle(P0, "Modal Count only", "")
+                .with_ability_definition(
+                    chosen_mode.clone().with_modal(
+                        ModalChoice {
+                            min_choices: 1,
+                            max_choices: 1,
+                            mode_count: 2,
+                            mode_descriptions: vec!["Other mode".into(), "Chosen mode".into()],
+                            ..ModalChoice::default()
+                        },
+                        vec![
+                            AbilityDefinition::new(
+                                AbilityKind::Activated,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                    player: TargetFilter::Controller,
+                                },
+                            ),
+                            chosen_mode,
+                        ],
+                    ),
+                )
+                .id();
+            let fodder = scenario.add_creature(P0, "Modal Count fodder", 1, 1).id();
+            let victim = scenario.add_creature(P1, "Modal Count victim", 5, 5).id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Green, ObjectId(9000), false, vec![]); 4],
+            );
+            if !targeted {
+                scenario.with_library_top(P0, &["Draw A", "Draw B"]);
+            }
+            let mut runner = scenario.build();
+            let hand_before = runner.state().players[0].hand.len();
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                })
+                .unwrap();
+            assert!(matches!(runner.state().waiting_for, WaitingFor::AbilityModeChoice { .. }));
+            runner
+                .act(GameAction::SelectModes { indices: vec![1] })
+                .unwrap();
+            let WaitingFor::ChooseXValue { pending_cast, .. } = &runner.state().waiting_for else {
+                panic!("modal Count-only X announcement: {:?}", runner.state().waiting_for);
+            };
+            assert!(matches!(pending_cast.activation_residual, ActivationResidual::XMana));
+            assert_eq!(pending_cast.chosen_modes, vec![1]);
+            runner.act(GameAction::ChooseX { value: x }).unwrap();
+            if targeted {
+                let WaitingFor::TargetSelection { pending_cast, .. } = &runner.state().waiting_for else {
+                    panic!("modal Count-only target declaration: {:?}", runner.state().waiting_for);
+                };
+                assert_eq!(pending_cast.ability.chosen_x, Some(x));
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(victim)],
+                    })
+                    .unwrap();
+            }
+            if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            let WaitingFor::PayCost {
+                player,
+                choices,
+                min_count,
+                count,
+                resume: CostResume::Spell { spell },
+                ..
+            } = &runner.state().waiting_for else {
+                panic!("modal Count-only payment: {:?}", runner.state().waiting_for);
+            };
+            assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+            assert_eq!(choices, &vec![fodder]);
+            assert_eq!(spell.object_id, source);
+            assert_eq!(spell.activation_ability_index, Some(0));
+            assert!(matches!(spell.activation_residual, ActivationResidual::XMana));
+            assert_eq!(spell.ability.chosen_x, Some(x));
+            assert_eq!(spell.chosen_modes, vec![1]);
+            assert_eq!(spell.ability.selected_mode_labels, vec!["Chosen mode"]);
+            runner.act(GameAction::SelectCards { cards: vec![fodder] }).unwrap();
+            assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+            assert_eq!(runner.state().stack.len(), 1);
+            let ability = runner.state().stack.back().unwrap().ability().unwrap();
+            assert_eq!(ability.chosen_x, Some(x));
+            assert_eq!(ability.selected_mode_labels, vec!["Chosen mode"]);
+            assert_eq!(ability.cost_paid_objects[0].snapshot().unwrap().object_id, fodder);
+            if targeted {
+                assert_eq!(ability.targets, vec![TargetRef::Object(victim)]);
+            }
+            runner.resolve_top();
+            if targeted {
+                assert_eq!(runner.state().objects[&victim].damage_marked, x);
+                assert_eq!(runner.state().players[0].crimes_committed_this_turn, 1);
+            } else {
+                assert_eq!(runner.state().players[0].hand.len(), hand_before + x as usize);
+            }
+        }
+    }
 }
