@@ -1951,6 +1951,16 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     let whitespace_len = remainder.len() - trimmed.len();
     let trimmed_lower = trimmed.to_ascii_lowercase();
 
+    // CR 118.14 + CR 609.4b: ", and mana of any type can be spent to cast that
+    // spell" / ", and you may spend mana as though it were mana of any color to
+    // cast those spells" modifies the cast grant it follows and is no part of
+    // that grant's own grammar. Cut it off here — also after a prefix clause,
+    // whose comma latch would otherwise glue it into a leading duration's or
+    // condition's body — so the chunk loop folds it onto the grant.
+    if super::starts_mana_spend_rider_conjunct(&trimmed_lower) {
+        return Some((ClauseBoundary::Comma, whitespace_len));
+    }
+
     if starts_prefix_clause(&current_lower) {
         return None;
     }

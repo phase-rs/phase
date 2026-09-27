@@ -13,6 +13,7 @@ import {
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
+import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import {
   cancelLlmDraftRun,
   collectLlmDraftResponses,
@@ -40,6 +41,7 @@ import {
   addVirtualBasic,
   projectDeckNames,
   projectWorkspaceMainDeck,
+  projectWorkspacePartition,
   removeVirtualBasic,
 } from "../components/draft/workspace/workspaceProjection";
 import type {
@@ -48,6 +50,7 @@ import type {
   DraftZone,
 } from "../components/draft/workspace/types";
 import { BASIC_LAND_NAMES } from "../constants/game";
+import { autosaveDraftDeck } from "../services/draftDeckAutosave";
 import {
   cleanupQuickDraftLifecycle,
   drainQuickDraftPersistence,
@@ -1241,7 +1244,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
   },
 
   startCubeDraft: (cubeListText, cubeName, settings, difficulty) => startLocalDraft({
-    setCode: "custom-cube",
+    setCode: CUSTOM_CUBE_SET_CODE,
     setName: cubeName,
     difficulty,
     kind: "Quick",
@@ -1570,14 +1573,14 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     }
     const lifecycle = lifecycleGeneration;
     const revision = workspaceRevision;
-    const playerDeck = projectDeckNames(state.workspaceState, state.view.pool);
+    const partition = projectWorkspacePartition(state.workspaceState, state.view.pool);
     const fresh = () => isExclusive(token, "submit")
       && lifecycle === lifecycleGeneration && revision === workspaceRevision
       && get().adapter === state.adapter && get().draftId === state.draftId
       && get().view === state.view && get().workspaceState === state.workspaceState;
     try {
       const verdict = await evaluateLimitedDeck(
-        { main_deck: playerDeck, sideboard: [], commander: [] },
+        { main_deck: partition.mainDeck, sideboard: [], commander: [] },
         draftSetCodes(state.runState, state.view),
         "Bo1",
       );
@@ -1586,7 +1589,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       if (!fresh()) throw new Error("Stale draft deck submission");
       const view = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft deck submission");
-        return lease.submitDeck(playerDeck, []);
+        return lease.submitDeck(partition.mainDeck, []);
       });
       if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration) return;
       retireExclusive(token);
@@ -1599,6 +1602,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         },
         persistence: "schedule",
       });
+      void autosaveDraftDeck({ view: state.view, setCode: state.selectedSet, partition, commanders: [] });
     } catch (error) {
       retireExclusive(token);
       throw error;

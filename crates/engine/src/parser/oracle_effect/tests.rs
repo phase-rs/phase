@@ -26721,6 +26721,8 @@ fn mill_then_draw_equal_to_milled_card_mana_value() {
     }
 }
 
+/// With the conjunct cut off, the grant lowers like its rider-less form:
+/// "that card" names the tracked set.
 #[test]
 fn parse_play_from_exile_while_exiled_with_any_mana_permission() {
     let def = parse_effect_chain(
@@ -26735,7 +26737,9 @@ fn parse_play_from_exile_while_exiled_with_any_mana_permission() {
                 mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                 ..
             },
-            target: TargetFilter::Any,
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
             ..
         }
     ));
@@ -50519,19 +50523,19 @@ fn unrelated_remains_exiled_text_cannot_extend_permission_duration() {
 }
 
 /// Discriminating: the "for as long as it remains exiled, and mana of any
-/// type..." form (Blightwing Bandit class) must keep dispatching to
-/// `try_parse_exile_play_grant_with_any_mana` (duration `Permanent`), NOT be
-/// captured by the extended `try_parse_play_the_exiled_card_grant`. The
-/// extended combinator's `tag("the exiled ")` referent never matches the
-/// "that card"/"it" anaphor here, so no shadowing occurs.
+/// type..." form (Blightwing Bandit class) keeps its `Permanent` grant — NOT
+/// captured by the extended `try_parse_play_the_exiled_card_grant`, whose
+/// `tag("the exiled ")` referent never matches the "that card"/"it" anaphor —
+/// and the conjunct, cut off by the clause splitter, rides it.
 #[test]
 fn for_as_long_as_remains_exiled_any_mana_not_shadowed() {
-    let e = parse_effect(
+    let def = parse_effect_chain(
         "you may cast that card for as long as it remains exiled, \
              and mana of any type can be spent to cast that spell",
+        AbilityKind::Spell,
     );
-    let Effect::GrantCastingPermission { permission, .. } = e else {
-        panic!("expected GrantCastingPermission, got {e:?}");
+    let Effect::GrantCastingPermission { permission, .. } = &*def.effect else {
+        panic!("expected GrantCastingPermission, got {:?}", def.effect);
     };
     let CastingPermission::PlayFromExile {
         duration,
@@ -50541,9 +50545,9 @@ fn for_as_long_as_remains_exiled_any_mana_not_shadowed() {
     else {
         panic!("expected PlayFromExile permission");
     };
-    assert_ne!(duration, Duration::UntilEndOfTurn);
+    assert_ne!(*duration, Duration::UntilEndOfTurn);
     assert_eq!(
-        mana_spend_permission,
+        *mana_spend_permission,
         Some(ManaSpendPermission::AnyTypeOrColor)
     );
 }
@@ -50559,15 +50563,16 @@ fn for_as_long_as_remains_exiled_any_mana_not_shadowed() {
 /// correctly.
 #[test]
 fn duration_scoped_cast_from_tracked_exile_grant_with_any_color_conjunct() {
-    let e = parse_effect(
+    let def = parse_effect_chain(
         "Until end of turn, you may cast spells from among those exiled cards, \
              and you may spend mana as though it were mana of any color to cast those spells.",
+        AbilityKind::Spell,
     );
     let Effect::GrantCastingPermission {
         permission, target, ..
-    } = e
+    } = &*def.effect
     else {
-        panic!("expected GrantCastingPermission, got {e:?}");
+        panic!("expected GrantCastingPermission, got {:?}", def.effect);
     };
     let CastingPermission::PlayFromExile {
         duration,
@@ -50577,15 +50582,16 @@ fn duration_scoped_cast_from_tracked_exile_grant_with_any_color_conjunct() {
     else {
         panic!("expected PlayFromExile permission");
     };
-    assert_eq!(duration, Duration::UntilEndOfTurn);
+    assert_eq!(*duration, Duration::UntilEndOfTurn);
     // CR 609.4b + CR 106.1a: "any color" is `AnyColor`.
-    assert_eq!(mana_spend_permission, Some(ManaSpendPermission::AnyColor));
+    assert_eq!(*mana_spend_permission, Some(ManaSpendPermission::AnyColor));
     assert_eq!(
-        target,
+        *target,
         TargetFilter::TrackedSet {
             id: TrackedSetId(0)
         }
     );
+    assert!(def.sub_ability.is_none(), "the conjunct emits no sibling");
 }
 
 /// CR 400.7i: The "from among the exiled cards" determiner variant must
@@ -72781,6 +72787,240 @@ fn mana_spend_rider_folds_onto_the_preceding_cast_grant() {
     );
 }
 
+/// CR 607.2a + CR 608.2g: "you may cast an instant or sorcery card exiled
+/// with ~" (Summon: Esper Valigarmanda) casts one card of the source's linked
+/// exile as the ability resolves. The type-list reader would drop the link,
+/// so the head stays an honest gap and the rider after it is the standalone
+/// concession gap — never a permission over every exiled card of the types.
+/// The single-type form keeps its link (Raphael, Most Attitude).
+#[test]
+fn cast_a_type_list_card_exiled_with_self_is_a_gap() {
+    let chain = parse_effect_chain(
+        "You may cast an instant or sorcery card exiled with ~, and mana of any type can be \
+         spent to cast that spell.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::Unimplemented { name, .. }) if name == LINKED_EXILE_RESOLUTION_CAST_GAP
+        ),
+        "{effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CastFromZone { .. })),
+        "no cast grant: {effects:?}"
+    );
+
+    let raphael = parse_effect_chain(
+        "Until end of turn, you may play a card exiled with ~.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*raphael.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::And { filters },
+                ..
+            } if filters.contains(&TargetFilter::ExiledBySource)
+        ),
+        "{:?}",
+        raphael.effect
+    );
+}
+
+/// CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from that
+/// player's graveyard" (Wrexial, the Risen Deep) chooses its card in the
+/// graveyard of the player the trigger's event names, so the cast target
+/// carries `Owned { TriggeringPlayer }`. A spell's untargeted "cast … spell
+/// from that player's graveyard" (Sorcerous Squall, where "that player" is the
+/// spell's target opponent) is not bound this way, nor is the targeted
+/// sentence outside a trigger, nor a "from a graveyard" origin whose clause
+/// mentions that player's graveyard only later.
+#[test]
+fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
+    fn cast_target(parsed: &crate::parser::oracle::ParsedAbilities) -> TypedFilter {
+        let mut found = None;
+        let defs = parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .chain(parsed.abilities.iter());
+        for def in defs {
+            for effect in collect_chain_effects(def) {
+                if let Effect::CastFromZone {
+                    target: TargetFilter::Typed(typed),
+                    ..
+                } = effect
+                {
+                    found = Some(typed.clone());
+                }
+            }
+        }
+        found.expect("a typed CastFromZone")
+    }
+    let owned_by_triggering_player = FilterProp::Owned {
+        controller: ControllerRef::TriggeringPlayer,
+    };
+    let wrexial = cast_target(&parse_oracle_text(
+        "Islandwalk, swampwalk (This creature can't be blocked as long as defending player \
+         controls an Island or a Swamp.)\nWhenever Wrexial deals combat damage to a player, you \
+         may cast target instant or sorcery card from that player's graveyard without paying \
+         its mana cost. If that spell would be put into a graveyard, exile it instead.",
+        "Wrexial, the Risen Deep",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    ));
+    assert!(
+        wrexial.properties.contains(&owned_by_triggering_player),
+        "{wrexial:?}"
+    );
+    // The owner is read off the origin phrase itself: a triggered "from a
+    // graveyard" stays unbound even when a later part of the same clause
+    // mentions that player's graveyard; the same clause with "from that
+    // player's graveyard" as its origin is bound.
+    let triggered_cast_target = |origin: &str| {
+        cast_target(&parse_oracle_text(
+            &format!(
+                "Whenever this creature deals combat damage to a player, you may cast target \
+                 instant card from {origin} with mana value less than or equal to the number \
+                 of cards in that player's graveyard without paying its mana cost."
+            ),
+            "Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        ))
+    };
+    let any_graveyard = triggered_cast_target("a graveyard");
+    assert!(
+        any_graveyard.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }) && !any_graveyard
+            .properties
+            .contains(&owned_by_triggering_player),
+        "{any_graveyard:?}"
+    );
+    let that_players_graveyard = triggered_cast_target("that player's graveyard");
+    assert!(
+        that_players_graveyard
+            .properties
+            .contains(&owned_by_triggering_player),
+        "{that_players_graveyard:?}"
+    );
+    let squall = cast_target(&parse_oracle_text(
+        "Delve (Each card you exile from your graveyard while casting this spell pays for \
+         {1}.)\nTarget opponent mills nine cards, then you may cast an instant or sorcery \
+         spell from that player's graveyard without paying its mana cost. If that spell would \
+         be put into a graveyard, exile it instead.",
+        "Sorcerous Squall",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    ));
+    assert!(
+        !squall.properties.contains(&owned_by_triggering_player),
+        "{squall:?}"
+    );
+    let outside_a_trigger = parse_effect_chain(
+        "You may cast target instant or sorcery card from that player's graveyard without \
+         paying its mana cost.",
+        AbilityKind::Spell,
+    );
+    let Effect::CastFromZone {
+        target: TargetFilter::Typed(typed),
+        ..
+    } = &*outside_a_trigger.effect
+    else {
+        panic!(
+            "expected a typed CastFromZone: {:?}",
+            outside_a_trigger.effect
+        );
+    };
+    assert!(
+        !typed.properties.contains(&owned_by_triggering_player),
+        "{typed:?}"
+    );
+}
+
+/// CR 609.4b: the rider as a ", and …" conjunct of the grant's own sentence is
+/// cut off the grant by the clause splitter and folds onto it — whatever reads
+/// the grant, and also behind a leading duration or condition, whose comma
+/// latch used to glue the conjunct into the body (#9213). Nothing is left over:
+/// no gap, no sibling static, and no rider text inside a duration condition.
+#[test]
+fn mana_spend_rider_conjunct_folds_onto_the_grant_of_its_sentence() {
+    for (text, expected) in [
+        // Leading duration; no grant grammar claimed the whole sentence.
+        (
+            "Until end of turn, you may cast spells from among those cards, and mana of any \
+             type can be spent to cast those spells.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+        // Leading duration, the "you may spend … any color" spelling.
+        (
+            "Until end of turn, you may cast spells from among cards exiled with this Saga, \
+             and you may spend mana as though it were mana of any color to cast those spells.",
+            ManaSpendPermission::AnyColor,
+        ),
+        // Trailing "for as long as": its condition used to read the conjunct.
+        (
+            "You may play those cards for as long as they remain exiled, and mana of any type \
+             can be spent to cast them.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+        // Leading condition.
+        (
+            "If an instant or sorcery card is exiled this way, you may cast it for as long as \
+             you control this creature, and mana of any type can be spent to cast that spell.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+        // A grant whose grammar never read past its head.
+        (
+            "You may cast it this turn, and mana of any type can be spent to cast that spell.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = collect_chain_effects(&chain);
+        let stamped: Vec<Option<ManaSpendPermission>> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::CastFromZone {
+                    mana_spend_permission,
+                    ..
+                }
+                | Effect::GrantCastingPermission {
+                    permission:
+                        CastingPermission::PlayFromExile {
+                            mana_spend_permission,
+                            ..
+                        },
+                    ..
+                } => Some(*mana_spend_permission),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stamped, vec![Some(expected)], "{text:?} -> {effects:?}");
+        assert!(
+            !effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented { .. } | Effect::GenericEffect { .. }
+            )),
+            "nothing left over: {text:?} -> {effects:?}"
+        );
+        let debug = format!("{chain:?}");
+        assert!(
+            !debug.contains("can be spent") && !debug.contains("as though"),
+            "no rider text survives anywhere in the chain: {debug}"
+        );
+    }
+}
+
 /// CR 609.4b: a mana-spend concession with no cast grant to fold onto is an
 /// honest gap, never a `SpendManaAsAnyColor` static — an effect-granted one has
 /// no payment-time carrier, and none could carry a scope or a one-use limit
@@ -72797,8 +73037,6 @@ fn standalone_mana_spend_concession_is_a_gap() {
         "You may spend mana as though it were mana of any color to cast Case spells.",
         "You may spend mana as though it were mana of any color the next time you cast that \
          card.",
-        "Until end of turn, you may cast spells from among those cards, and mana of any type can \
-         be spent to cast those spells.",
     ] {
         let chain = parse_effect_chain(text, AbilityKind::Spell);
         let effects = collect_chain_effects(&chain);

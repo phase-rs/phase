@@ -27,6 +27,7 @@ import type { DraftCommanderLaunch, DraftMatchDeckPayload, DraftMatchLaunch, Dra
 import { MAX_MATERIALIZED_VIRTUAL_BASICS } from "../components/draft/workspace/types";
 import type { DraftCardPlacement, DraftWorkspaceState } from "../components/draft/workspace/types";
 import { BASIC_LAND_NAMES } from "../constants/game";
+import { autosaveDraftDeck } from "../services/draftDeckAutosave";
 import {
   appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
@@ -1250,6 +1251,20 @@ function sameNameMultiset(left: readonly string[], right: readonly string[]): bo
     && [...leftCounts].every(([name, count]) => rightCounts.get(name) === count);
 }
 
+/**
+ * The local workspace's partition when it projects the replay-accepted main deck, else null: a name-only
+ * main deck cannot tell a drafted card from a virtual one of the same name.
+ */
+function recoveredSubmissionPartition(
+  mainDeck: readonly string[],
+  pool: DraftPlayerView["pool"],
+): DraftWorkspacePartition | null {
+  const { workspaceState } = useMultiplayerDraftStore.getState();
+  if (!workspaceState) return null;
+  const partition = projectWorkspacePartition(reconcileWorkspaceState(workspaceState, pool), pool);
+  return sameNameMultiset(partition.mainDeck, mainDeck) ? partition : null;
+}
+
 function disposeMatchController(): void {
   activeMatchController?.dispose();
   activeMatchController = null;
@@ -2011,6 +2026,7 @@ export const useMultiplayerDraftStore = create<
           submittedPartition: partition,
         },
       });
+      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
     } else if (role === "guest" && activeGuestAdapter) {
       await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
       set({
@@ -2018,6 +2034,7 @@ export const useMultiplayerDraftStore = create<
         submittedWorkspaceState: cloneWorkspace(workspace),
         submittedPartition: partition,
       });
+      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
     }
   },
 
@@ -3448,5 +3465,10 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
     case "bo3ScoreUpdate":
       // Informational — standings update comes via viewUpdated
       break;
+    case "recoveredDeckSubmissionAccepted": {
+      const partition = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
+      if (partition) void autosaveDraftDeck({ view: event.view, setCode: null, partition, commanders: event.commanders });
+      break;
+    }
   }
 }

@@ -210,10 +210,19 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 82 — CR 118.9b graveyard permissions that require a casting method (Sabin,
+ * 83 — CR 118.9b graveyard permissions that require a casting method (Sabin,
  *      Master Monk: "using its blitz ability"): GraveyardCastPermission gains
  *      required_cast_keyword and casting-menu options gain additional_cost. A
- *      v81 peer would drop the method silently and admit a printed-cost cast.
+ *      v82 peer would drop the method silently and admit a printed-cost cast.
+ * 82 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
+ *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
+ *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a
+ *      minted id, and steps_started_this_turn replaces the two per-turn step
+ *      counters — see PROTOCOL_VERSION's own `/// 82` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
+ *      JSON.parse, so a v81 client would take the new shapes with no decode
+ *      error; the exact-match version check at connect refuses the pairing
+ *      instead.
  * 81 — AlternativeCastChoice.keyword gains { type: "Surge" } in serialized
  *      GameState (CR 702.117a); an older client's modal cannot render it. The
  *      exact-match version check at connect refuses the pairing.
@@ -560,7 +569,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      activation_cost_snapshot fields are additive and skipped when empty, so
  *      every spell frame is byte-identical to v78.
  */
-export const PROTOCOL_VERSION = 82;
+export const PROTOCOL_VERSION = 83;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

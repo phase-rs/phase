@@ -14428,10 +14428,10 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
 /// attached and are correctly excluded from `has_exile_cast_permission`'s
 /// surfacing. No new variant needed — the existing primitives compose.
 ///
-/// The optional ", and you may spend mana as though it were mana of any
-/// color|type to cast those spells" conjunct folds into the same permission
-/// via `mana_spend_permission` (`parse_any_mana_word` decides the variant),
-/// matching the wire-up used by `try_parse_exile_play_grant_with_any_mana`.
+/// A ", and you may spend mana as though it were mana of any color to cast
+/// those spells" conjunct never reaches this grammar: the clause splitter cuts
+/// it off (`starts_mana_spend_rider_conjunct`) and the chunk loop folds it onto
+/// this grant's `mana_spend_permission`.
 fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (permission_text, explicit_duration) = strip_trailing_duration(tp.original);
     let permission_lower = permission_text.to_lowercase();
@@ -14499,25 +14499,10 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     if !explicit_permission && !owns_exile_lifetime {
         return None;
     }
-    let rest_lower = &permission_tp.lower[permission_tp.lower.len() - rest_orig.len()..];
-
-    // Optional any-color mana conjunct: ", and you may spend mana as though
-    // it were mana of any color to cast those spells" (or "...any type...").
-    let mana_spend_permission = if rest_lower.is_empty() {
-        None
-    } else {
-        // Trailing text that is not the recognized conjunct — reject so the
-        // mana-spend catch-all does not consume an unrelated suffix together
-        // with the cast-permission half.
-        let (permission, _) = nom_on_lower(rest_orig, rest_lower, |i| {
-            let (i, _) = tag(", and you may spend mana as though it were mana of any ").parse(i)?;
-            let (i, permission) = parse_any_mana_word(i)?;
-            let (i, _) = tag(" to cast those spells").parse(i)?;
-            let (i, _) = eof.parse(i)?;
-            Ok((i, permission))
-        })?;
-        Some(permission)
-    };
+    // Trailing text is not this grant's — reject rather than drop it.
+    if !rest_orig.is_empty() {
+        return None;
+    }
 
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
@@ -14534,7 +14519,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             frequency: CastFrequency::Unlimited,
             source_id: None,
             exiled_by_ability_controller: None,
-            mana_spend_permission,
+            mana_spend_permission: None,
             card_filter,
             single_use_group: None,
             single_use,
@@ -14561,118 +14546,10 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     })
 }
 
-fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    // Third-person "they may play/cast that card ... cast a spell this way" (Gonti,
-    // Night Minister) binds to the parent player target via `ParentTargetController`
-    // and the tracked exile set. First-person forms keep the legacy `Any` target
-    // (rebound to TrackedSet by the chain parser when chained after an exile).
-    let (rest, mode, grantee, target) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("they may play ").parse(tp.lower)
-    {
-        (
-            rest,
-            CardPlayMode::Play,
-            crate::types::ability::PermissionGrantee::ParentTargetController,
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            },
-        )
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they may cast ").parse(tp.lower) {
-        (
-            rest,
-            CardPlayMode::Cast,
-            crate::types::ability::PermissionGrantee::ParentTargetController,
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            },
-        )
-    } else {
-        let (rest, mode) = alt((
-            value(
-                CardPlayMode::Play,
-                alt((
-                    tag::<_, _, OracleError<'_>>("you may look at and play "),
-                    tag("you may play "),
-                    tag("look at and play "),
-                    tag("play "),
-                )),
-            ),
-            value(
-                CardPlayMode::Cast,
-                alt((tag("you may cast "), tag("cast "))),
-            ),
-        ))
-        .parse(tp.lower)
-        .ok()?;
-        (rest, mode, Default::default(), TargetFilter::Any)
-    };
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that card"),
-        tag("that spell"),
-        tag("those cards"),
-        tag("it"),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" for as long as ")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("it remains exiled"),
-        tag("that card remains exiled"),
-        tag("those cards remain exiled"),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(", and mana of any ")
-        .parse(rest)
-        .ok()?;
-    let (rest, mana_spend_permission) = parse_any_mana_word(rest).ok()?;
-    // "… to cast that spell" (Hostage Taker), "… to cast it" (Court of
-    // Locthwain, Blightwing Bandit), "… to cast a spell this way".
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>(" can be spent to cast that spell"),
-        tag(" can be spent to cast it"),
-        tag(" can be spent to cast a spell this way"),
-    ))
-    .parse(rest)
-    .ok()?;
-    eof::<_, OracleError<'_>>(rest).ok()?;
-
-    Some(parsed_clause(Effect::GrantCastingPermission {
-        permission: CastingPermission::PlayFromExile {
-            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
-            mode,
-            duration: Duration::Permanent,
-            granted_to: crate::types::player::PlayerId(0),
-            frequency: CastFrequency::Unlimited,
-            source_id: None,
-            exiled_by_ability_controller: None,
-            mana_spend_permission: Some(mana_spend_permission),
-            card_filter: None,
-            single_use_group: None,
-            single_use: false,
-            cast_cost_modifier: None,
-            alt_ability_cost: None,
-            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-            invalidation: None,
-        },
-        target,
-        grantee,
-    }))
-}
-
 /// CR 400.7i: Parse "you may play/cast that card [this turn]" — impulse draw permission.
 fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    // CR 118.14 + CR 609.4b: The any-mana conjunct must win over the bare
-    // per-grantee branch so "you may cast that card for as long as it remains
-    // exiled, and mana of any type can be spent to cast that spell" (Hostage
-    // Taker, Thief of Sanity) keeps `mana_spend_permission: AnyTypeOrColor`.
-    if let Some(clause) = try_parse_exile_play_grant_with_any_mana(tp) {
-        return Some(clause);
-    }
     // CR 611.2a + CR 108.3: Per-object grant clauses from compound-exile chains.
     // These bind the grant to a player OTHER than the ability's controller via
     // Theme D's `granted_to` field, resolved per-iteration by
@@ -14722,8 +14599,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // grant that the permission already implies (the controller can always see
     // a card they may play). Folded in as a verb-prefix variant so the no-mana-
     // conjunct form reaches the same grant as the bare "you may play those
-    // cards" path (the with-mana form is handled earlier by
-    // `try_parse_exile_play_grant_with_any_mana`).
+    // cards" path.
     let full_rest = nom_on_lower(tp.original, tp.lower, |input| {
         alt((
             value(
@@ -14950,12 +14826,14 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
                 value(Duration::UntilEndOfTurn, tag(" until the end of turn")),
             ))
             .parse(input)?;
-            // CR 118.14 + CR 609.4b: optional trailing "[,] and mana of any
-            // type can be spent to cast that spell|it" scopes the mana
-            // concession to the granted cast (Black Widow, Super Spy; Reno and
-            // Rude with the comma and "it").
+            // CR 118.14 + CR 609.4b: optional trailing " and mana of any type
+            // can be spent to cast that spell|it" scopes the mana concession
+            // to the granted cast (Black Widow, Super Spy). The comma form
+            // (Reno and Rude) never reaches here: the clause splitter cuts it
+            // off (`starts_mana_spend_rider_conjunct`) and the chunk loop folds
+            // it onto this grant.
             let (input, mana_spend_permission) = opt(preceded(
-                (opt(tag(",")), tag(" and mana of any ")),
+                tag(" and mana of any "),
                 terminated(
                     parse_any_mana_word,
                     (
@@ -18740,16 +18618,6 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // CR 608.2c: Compound damage actions: "~ deals 3 damage to any target and you gain 3 life"
     if let Some(clause) = try_split_damage_compound(text, ctx) {
         return clause;
-    }
-
-    // CR 601.2 + CR 609.4b: "cast target [type] card from [a | that player's]
-    // graveyard, and mana of any type can be spent to cast that spell" (Quistis
-    // Trepe, Tinybones the Pickpocket) is an in-place graveyard cast-from-zone
-    // grant carrying the any-type concession on the grant. The catch-all below
-    // would report the whole sentence as the standalone concession gap,
-    // dropping the cast. Must run before that catch-all.
-    if let Some(effect) = try_parse_cast_target_from_graveyard_any_mana(text, ctx) {
-        return parsed_clause(effect);
     }
 
     // CR 609.4b: "spend mana as though it were mana of any [color|type]" /
@@ -27946,8 +27814,14 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
     else {
         return false;
     };
+    parse_exile_link_host(after_anchor).is_ok()
+}
+
+/// The object that holds the exile link in "… exiled with ~ / this creature /
+/// …" (CR 607.2a).
+fn parse_exile_link_host(input: &str) -> OracleResult<'_, &str> {
     alt((
-        tag::<_, _, E>("~"),
+        tag("~"),
         tag("this creature"),
         tag("this artifact"),
         tag("this permanent"),
@@ -27955,8 +27829,24 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
         tag("this spell"),
         tag("it"),
     ))
-    .parse(after_anchor)
-    .is_ok()
+    .parse(input)
+}
+
+/// CR 607.2a: the whole cast object is "a[n] <type phrase> card exiled with
+/// ~" (Summon: Esper Valigarmanda: "cast an instant or sorcery card exiled
+/// with this Saga"; Raphael, Most Attitude: "play a card exiled with
+/// Raphael").
+fn names_a_card_exiled_with_self(rest: &str) -> bool {
+    (
+        opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
+        super::oracle_nom::target::parse_type_phrase,
+        opt(tag(" card")),
+        tag(" exiled with "),
+        parse_exile_link_host,
+        eof,
+    )
+        .parse(rest)
+        .is_ok()
 }
 
 /// CR 601.3b + CR 702.8a: "you may cast [type] spells as though they had flash"
@@ -28875,6 +28765,20 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         });
     }
 
+    // CR 607.2a + CR 608.2g: "you may cast an instant or sorcery card exiled
+    // with ~" (Summon: Esper Valigarmanda) names one card of the source's
+    // linked exile, cast as the ability resolves. Branch 2 reads a type LIST
+    // through `parse_cast_type_list`, which drops the singular "exiled with ~"
+    // link the single-type reader binds ("a card exiled with ~", Raphael, Most
+    // Attitude), so the grant would cover every exiled card of those types;
+    // and it would linger past the resolution. An honest gap instead.
+    if names_a_card_exiled_with_self(rest) && parse_cast_type_list(rest).is_some() {
+        return Some(Effect::unimplemented(
+            LINKED_EXILE_RESOLUTION_CAST_GAP,
+            rest,
+        ));
+    }
+
     // Branch 1.9: the owned-linked + lesser-mana-value compound exile grant
     // (Triple Triad: "play the card you own exiled this way and each other card
     // exiled this way with lesser mana value than it"). Runs BEFORE Branch 2's
@@ -28951,6 +28855,28 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(cast_target_rest).0);
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
+        // CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from
+        // that player's graveyard" (Tinybones, the Pickpocket; Wrexial, the
+        // Risen Deep) chooses the card as the trigger goes on the stack, in the
+        // graveyard of the player its event names — and a graveyard holds only
+        // its owner's cards. `scan_zone_phrase` reads the possessive as a bare
+        // `InZone { Graveyard }`, so the owner is bound here, read off the same
+        // origin phrase the zone came from; without it any graveyard's card is a
+        // legal target. (`relative_player_scope` does not name that player here:
+        // `relative_player_scope_for_condition` reads a "~ deals combat damage
+        // to a player" head as `TargetPlayer`.)
+        if ctx.in_trigger
+            && cast_target_is_chosen_graveyard_card(rest, &filter)
+            && cast_origin_is_that_players_graveyard(rest)
+        {
+            add_cast_target_props(
+                &mut filter,
+                &[FilterProp::Owned {
+                    controller: ControllerRef::TriggeringPlayer,
+                }],
+                None,
+            );
+        }
         let alt_ability_cost = parse_alt_ability_cost_rider(lower);
         // CR 608.2g vs CR 611.2: shared filter-form driver authority. `mode` and
         // `alt_is_some` are no-ops for every current Branch-2 card (all hand-origin
@@ -29094,6 +29020,10 @@ fn during_resolution_for_filter_cast_clause(
 /// through a static permission and never reaches the cast-clause producer).
 const UNREPRESENTABLE_ADDITIONAL_COST_GAP: &str = "unrepresentable_additional_cost";
 
+/// The parser gap name for a cast of one card of a type list from the
+/// source's linked exile (`names_a_card_exiled_with_self`).
+const LINKED_EXILE_RESOLUTION_CAST_GAP: &str = "linked_exile_resolution_cast";
+
 /// The printed additional-cost wording is present on the clause, whatever
 /// follows "by paying".
 fn names_an_additional_cost(rest: &str) -> bool {
@@ -29130,6 +29060,22 @@ fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::Ma
     Some(cost)
 }
 
+/// The origin phrase `apply_cast_target_suffixes` took the cast target's zone
+/// from (the first zone phrase of the clause) is exactly "from that player's
+/// graveyard" — not a later mention of that graveyard elsewhere in the clause.
+fn cast_origin_is_that_players_graveyard(rest: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    super::oracle_target::scan_zone_phrase_span(rest).is_some_and(|(span, ..)| {
+        (
+            opt(alt((tag::<_, _, E>("cards "), tag("card ")))),
+            tag("from that player's graveyard"),
+            eof,
+        )
+            .parse(span)
+            .is_ok()
+    })
+}
+
 /// CR 601.2c + CR 115.1: A "cast TARGET <card> from [a|your|…] graveyard"
 /// clause names one chosen card in a graveyard — the printed word "target"
 /// on the head and an `InZone { Graveyard }` property on every leaf of the
@@ -29156,86 +29102,6 @@ fn cast_target_is_chosen_graveyard_card(rest: &str, target: &TargetFilter) -> bo
     }
     let names_a_target = strip_cast_target_prefix(rest).len() != rest.len();
     names_a_target && every_leaf_in_a_graveyard(target)
-}
-
-/// CR 601.2 + CR 609.4b + CR 608.2g: "[you may ]cast target [type] card from
-/// [a graveyard | that player's graveyard], and mana of any type can be spent to
-/// cast that spell" — the in-place graveyard cast-from-zone grant with the
-/// any-type-mana concession (Quistis Trepe: instant/sorcery from a graveyard;
-/// Tinybones the Pickpocket: nonland permanent from the triggering player's
-/// graveyard).
-///
-/// Without this, the whole clause is captured by the mana-spend catch-all in
-/// `lower_imperative_clause` and reported as the standalone concession gap,
-/// which DROPS the cast entirely. This routes the head through
-/// the established `CastFromZone`-building combinator (the path Harness the Storm
-/// uses for "cast target ... card from your graveyard") and forwards the any-type
-/// concession into `mana_spend_permission` so it is scoped to this specific cast
-/// rather than a global player permission.
-///
-/// CR 611.2a + CR 108.3 (multiplayer correctness): "that player's graveyard"
-/// binds to the triggering (combat-damaged) player via
-/// `Owned{ControllerRef::TriggeringPlayer}` so in a 3+ player game the cast is
-/// restricted to THAT player's graveyard — never any opponent's. "a graveyard"
-/// (Quistis) carries no owner constraint (own graveyard in practice).
-fn try_parse_cast_target_from_graveyard_any_mana(text: &str, ctx: &ParseContext) -> Option<Effect> {
-    type E<'a> = OracleError<'a>;
-    let lower = text.to_lowercase();
-    let trimmed = lower.trim().trim_end_matches('.');
-    // `clause_shell` usually strips a leading "you may "; strip defensively so
-    // the head reaches `try_parse_cast_effect` either way.
-    let (body, _) = opt(tag::<_, _, E>("you may ")).parse(trimmed).ok()?;
-
-    // Split the cast-from-graveyard head from the trailing any-type-mana
-    // conjunct, then require the full conjunct (no `contains` dispatch — a
-    // `take_until` anchor plus an exhaustive tail combinator).
-    let (rest, head) = take_until::<_, _, E>(", and mana of any ")
-        .parse(body)
-        .ok()?;
-    let (rest, _) = tag::<_, _, E>(", and mana of any ").parse(rest).ok()?;
-    let (rest, concession) = parse_any_mana_word(rest).ok()?;
-    let (rest, _) = tag::<_, _, E>(" can be spent to cast ").parse(rest).ok()?;
-    let (rest, _) = alt((tag::<_, _, E>("that spell"), tag("a spell this way")))
-        .parse(rest)
-        .ok()?;
-    eof::<_, E>(rest).ok()?;
-
-    // Scope to the graveyard cast-from-zone class (not impulse-exile anaphors,
-    // which are handled earlier by `try_parse_play_from_exile`).
-    if !scan_contains_phrase(head, "graveyard") {
-        return None;
-    }
-
-    let mut effect = try_parse_cast_effect(head, ctx)?;
-    let Effect::CastFromZone {
-        mana_spend_permission,
-        target,
-        driver,
-        ..
-    } = &mut effect
-    else {
-        return None;
-    };
-    // CR 609.4b (+ CR 118.14 for "any type"): scope the concession to this
-    // specific granted cast.
-    *mana_spend_permission = Some(concession);
-    // CR 608.2g: "cast target ... from a graveyard" with no duration is a
-    // during-resolution paid cast, not a lingering permission.
-    *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
-    // CR 611.2a + CR 108.3: "that player's graveyard" = the triggering player's
-    // graveyard (`scan_zone_phrase` maps it to a bare `InZone{Graveyard}` with no
-    // owner). Add the owner constraint so the candidate set is the damaged
-    // player's graveyard alone.
-    if scan_contains_phrase(head, "that player's graveyard") {
-        add_cast_target_props(
-            target,
-            &[FilterProp::Owned {
-                controller: ControllerRef::TriggeringPlayer,
-            }],
-            None,
-        );
-    }
-    Some(effect)
 }
 
 fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstraint> {
@@ -29539,43 +29405,62 @@ fn parse_any_mana_can_be_spent(input: &str) -> OracleResult<'_, ManaSpendRider> 
 /// (`parse_any_mana_word`); a rider that relaxes only one kind of mana is
 /// reported as `ManaSpendRider::SingleKind`.
 pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
-    type Vbe<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
     let trimmed = lower.trim().trim_end_matches('.');
-    let cast_object = || {
-        alt((
-            tag::<_, _, Vbe>("that spell"),
-            tag("those spells"),
-            tag("spells this way"),
-            tag("spells cast this way"),
-            tag("a spell this way"),
-            tag("them"),
-            tag("it"),
-        ))
-    };
+    let (_, rider) = terminated(parse_mana_spend_rider, eof)
+        .parse(trimmed)
+        .ok()?;
+    Some(rider)
+}
+
+/// CR 118.14 + CR 609.4b: the rider grammar `try_parse_mana_spend_rider` reads,
+/// up to and including the object it names — without requiring the text to end
+/// there, so the clause splitter can recognize the same rider as a conjunct
+/// (`starts_mana_spend_rider_conjunct`).
+fn parse_mana_spend_rider(input: &str) -> OracleResult<'_, ManaSpendRider> {
     // "If you cast a spell this way, mana of any type can be spent to cast it"
     // (Bloodsoaked Insight): the gate restates what the rider already means —
     // it applies only to a cast made through the grant — so it is dropped, as
     // `try_parse_alt_cost_rider` drops the same prefix.
-    let (trimmed, _) = opt(alt((
-        tag::<_, _, Vbe>("if you cast a spell this way, "),
+    let (input, _) = opt(alt((
+        tag("if you cast a spell this way, "),
         tag("if you cast it this way, "),
     )))
-    .parse(trimmed)
-    .ok()?;
-    let (rest, rider) = alt((
-        preceded(
-            opt(tag::<_, _, Vbe>("you may ")),
-            parse_spend_as_though_any_mana,
-        ),
+    .parse(input)?;
+    let (input, rider) = alt((
+        preceded(opt(tag("you may ")), parse_spend_as_though_any_mana),
         parse_any_mana_can_be_spent,
     ))
-    .parse(trimmed)
-    .ok()?;
-    let (rest, _) = tag::<_, _, Vbe>(" to cast ").parse(rest).ok()?;
-    let (rest, _) = cast_object().parse(rest).ok()?;
-    eof::<_, Vbe>(rest).ok()?;
-    Some(rider)
+    .parse(input)?;
+    let (input, _) = tag(" to cast ").parse(input)?;
+    let (input, _) = alt((
+        tag("that spell"),
+        tag("those spells"),
+        tag("spells this way"),
+        tag("spells cast this way"),
+        tag("a spell this way"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    Ok((input, rider))
+}
+
+/// CR 118.14 + CR 609.4b: Does the lowercase text after a comma open a
+/// ", and <mana rider>" conjunct that runs to the end of its sentence — "…,
+/// and mana of any type can be spent to cast that spell" (Hostage Taker),
+/// "…, and you may spend mana as though it were mana of any color to cast
+/// those spells" (King Narfi's Betrayal)? Such a conjunct is its own
+/// instruction: the clause splitter cuts it off the grant it follows so the
+/// chunk loop folds it onto that grant, whatever grammar reads the grant.
+pub(crate) fn starts_mana_spend_rider_conjunct(remainder_lower: &str) -> bool {
+    (
+        tag::<_, _, OracleError<'_>>("and "),
+        parse_mana_spend_rider,
+        alt((eof, tag("."))),
+    )
+        .parse(remainder_lower)
+        .is_ok()
 }
 
 /// CR 609.4b: Is `effect` a cast grant the mana rider can attach to — a
