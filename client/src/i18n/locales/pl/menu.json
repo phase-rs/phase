@@ -120,6 +120,7 @@
     "opponentLabel": "Przeciwnik {{number}}",
     "deck": "Talia",
     "difficulty": "Poziom trudności",
+    "difficultyDefault": "Domyślny ({{difficulty}})",
     "deckRandom": "Losowa",
     "deckRandomCount": "Losowa ({{count}})",
     "cedhToggle": {

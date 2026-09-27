@@ -34,7 +34,7 @@ import {
 } from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
 import { BRACKET_LABEL } from "../types/bracket";
-import { effectiveAiDifficulty, isDeckCedhLegal } from "../services/cedhLock";
+import { isDeckCedhLegal, resolveSeatDifficulty } from "../services/cedhLock";
 import { canAttemptNativeEngine } from "../services/nativeEngine";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
@@ -196,11 +196,12 @@ export function GameSetupPage() {
     // every seat's engine difficulty resolves to "CEDH" (the per-seat value is
     // preserved in prefs for when cEDH is turned off).
     const cedhMode = prefs.cedhMode;
+    const enforcement = cedhMode ? "hard_gate" : "advisory";
     const aiSeats = prefSeats.map((s) => ({
-      difficulty: effectiveAiDifficulty(s.difficulty, cedhMode),
+      difficulty: resolveSeatDifficulty(s.difficulty, null, enforcement),
       deckId: s.deckId === "Random" ? null : s.deckId,
     }));
-    const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
+    const headDifficulty = resolveSeatDifficulty(aiSeats[0]?.difficulty, null, enforcement);
     // The native server owns a fresh AI session and v1 deliberately has no
     // resume contract. Preserve the existing pointer only for the WASM route.
     if (!canAttemptNativeEngine(prefs.nativeEngineEnabled) || firstPlayer !== "random") {

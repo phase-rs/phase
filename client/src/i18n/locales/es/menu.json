@@ -120,6 +120,7 @@
     "opponentLabel": "Oponente {{number}}",
     "deck": "Mazo",
     "difficulty": "Dificultad",
+    "difficultyDefault": "Predeterminado ({{difficulty}})",
     "deckRandom": "Aleatorio",
     "deckRandomCount": "Aleatorio ({{count}})",
     "cedhToggle": {

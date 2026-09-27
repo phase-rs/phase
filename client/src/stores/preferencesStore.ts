@@ -37,7 +37,7 @@ export const DEFAULT_AI_COVERAGE_FLOOR = 90;
  *  the player count slider. Archetype and coverage filters remain global: they
  *  filter the *pool* of Random picks, a concept that doesn't vary per seat. */
 export interface AiSeatPref {
-  difficulty: AIDifficulty;
+  difficulty: AIDifficulty | null;
   deckId: AiDeckSelection;
 }
 
@@ -242,7 +242,7 @@ function cloneFlexLayout(config: FlexLayoutConfig): FlexLayoutConfig {
 }
 
 function defaultAiSeat(): AiSeatPref {
-  return { difficulty: DEFAULT_AI_DIFFICULTY, deckId: AI_DECK_RANDOM };
+  return { difficulty: null, deckId: AI_DECK_RANDOM };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -503,7 +503,7 @@ interface PreferencesActions {
   setDraftDoubleClickConfirmPick: (enabled: boolean) => void;
   setCardPreviewHoverDelayMs: (ms: number) => void;
   setShowCardPreviewFooter: (show: boolean) => void;
-  setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
+  setAiSeatDifficulty: (index: number, difficulty: AIDifficulty | null) => void;
   setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
    *  shrinking truncates trailing slots. Called whenever the player count
@@ -825,7 +825,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 35,
+      version: 36,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -911,6 +911,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v34 → v35: Add experimentalTournamentsEnabled. Existing users retain
       //          the hidden-by-default navigation because the shallow merge
       //          supplies false.
+      // v35 → v36: AiSeatPref.difficulty becomes nullable (null = follow the table bracket's engine default); every existing seat is pinned to its stored value.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -1108,6 +1109,17 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           const { logDefaultState: _legacyLogDefault, ...rest } = migrated;
           void _legacyLogDefault;
           migrated = { ...rest, logPanelLastChoice: "open" };
+        }
+
+        if (version < 36) {
+          const seats = Array.isArray(migrated.aiSeats) ? migrated.aiSeats : [];
+          migrated = {
+            ...migrated,
+            aiSeats: seats.map((s) => ({
+              ...(s as AiSeatPref),
+              difficulty: (s as { difficulty?: unknown }).difficulty ?? DEFAULT_AI_DIFFICULTY,
+            })),
+          };
         }
 
         return {

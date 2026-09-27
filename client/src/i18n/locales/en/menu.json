@@ -120,6 +120,7 @@
     "opponentLabel": "Opponent {{number}}",
     "deck": "Deck",
     "difficulty": "Difficulty",
+    "difficultyDefault": "Default ({{difficulty}})",
     "deckRandom": "Random",
     "deckRandomCount": "Random ({{count}})",
     "cedhToggle": {
