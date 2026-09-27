@@ -73,7 +73,7 @@ pub struct TournamentRequestId(pub u64);
 ///      degrading. Saved games still load: the choice-preview migration
 ///      rebuilds older options from their `dungeon` key. P2P moves in
 ///      lockstep; lobby messages are unchanged.
-
+///
 /// 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
 ///      Kopala): `StaticMode::ReduceAbilityCost` gains `targets` and
 ///      `frequency`, `GameState` gains the per-turn activation journal
