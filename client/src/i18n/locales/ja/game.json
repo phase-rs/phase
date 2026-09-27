@@ -811,6 +811,7 @@
     "mustBlockBadge": "ブロックしなければならない",
     "mustBlockExactBadge": "{{attacker}}をブロックしなければならない",
     "mustBeBlockedBadge": "ブロックされなければならない",
+    "bandBadge": "バンド {{n}}",
     "mustBlockSatisfiedBadge": "ブロック中 ✓",
     "cantAttackBadge": "攻撃できない",
     "cantBlockBadge": "ブロックできない",

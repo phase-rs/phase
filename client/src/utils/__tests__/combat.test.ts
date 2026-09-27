@@ -224,8 +224,12 @@ describe("buildAttacks", () => {
   });
 });
 
-function attacker(objectId: ObjectId, attackTarget: AttackTarget): AttackerInfo {
-  return { object_id: objectId, defending_player: 0, attack_target: attackTarget };
+function attacker(
+  objectId: ObjectId,
+  attackTarget: AttackTarget,
+  bandId?: number | null,
+): AttackerInfo {
+  return { object_id: objectId, defending_player: 0, attack_target: attackTarget, band_id: bandId };
 }
 
 describe("partitionBlockTargets", () => {
@@ -330,6 +334,26 @@ describe("partitionBlockTargets", () => {
     expect(forOtherBlocker[0]).toMatchObject({ ids: [11, 12], mustBeBlocked: false });
   });
 
+  it("splits by band membership (CR 702.22h), and does not split a bandless member from another bandless one", () => {
+    const stacks = partitionBlockTargets([11, 12, 13, 14], 100, {
+      attackers: [
+        attacker(11, P1, 1),
+        attacker(12, P1, 2),
+        attacker(13, P1, null),
+        attacker(14, P1),
+      ],
+      blockerAssignments: noAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(3);
+    expect(stacks.find((s) => s.ids.includes(11))).toMatchObject({ ids: [11], bandId: 1 });
+    expect(stacks.find((s) => s.ids.includes(12))).toMatchObject({ ids: [12], bandId: 2 });
+    expect(stacks.find((s) => s.ids.includes(13))).toMatchObject({ ids: [13, 14], bandId: null });
+  });
+
   it("keeps members already assigned to the pending blocker in their stack and reports them", () => {
     const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([11])]]);
     const stacks = partitionBlockTargets([11, 12, 13], 100, {
@@ -382,6 +406,7 @@ describe("blockTargetSelection", () => {
       minBlockers: 0,
       mustBlock: false,
       mustBeBlocked: false,
+      bandId: null,
       assignedIds: [11, 12],
       ...overrides,
     };

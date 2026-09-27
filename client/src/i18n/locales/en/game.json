@@ -806,6 +806,7 @@
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Must block {{attacker}}",
     "mustBeBlockedBadge": "Must be blocked",
+    "bandBadge": "Band {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",

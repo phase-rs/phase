@@ -214,9 +214,8 @@ export class NativeEngineVersionMismatchError extends Error {
  *      the attackers whose "must be blocked" static a given blocker's block
  *      would obey — see PROTOCOL_VERSION's own `/// 83` entry in
  *      crates/lobby-broker/src/protocol.rs. This client renders the map
- *      directly to reach one member of a collapsed token pile, so a v82
- *      client would silently merge that member back into its siblings; the
- *      exact-match version check at connect refuses the pairing instead.
+ *      directly to reach one member of a collapsed token pile; the
+ *      exact-match version check at connect refuses a mismatched pairing.
  * 82 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
  *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
  *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a

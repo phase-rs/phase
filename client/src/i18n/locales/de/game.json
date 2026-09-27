@@ -773,6 +773,7 @@
     "mustBlockBadge": "Must block",
     "mustBlockExactBadge": "Muss {{attacker}} blocken",
     "mustBeBlockedBadge": "Muss blockiert werden",
+    "bandBadge": "Bande {{n}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",

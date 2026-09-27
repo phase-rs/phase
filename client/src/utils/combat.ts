@@ -290,10 +290,14 @@ export function evenSplit(count: number, buckets: number): number[] {
  * CR 509.1a (the attack target — blocking the one on a planeswalker is a
  * different choice than blocking the one on the defending player);
  * CR 509.1b/CR 702.111b (the minimum-blocker count another static or Menace
- * imposes on the attacker); and CR 509.1c (a requirement carried by either
+ * imposes on the attacker); CR 509.1c (a requirement carried by either
  * combatant — the pending blocker's own "block X if able", or the attacker's
- * "must be blocked" static). Legality itself is not an axis: the caller
- * already filters to `valid_block_targets[pendingBlocker]` before stacking.
+ * "must be blocked" static); and CR 702.22h (a block assigned to one attacker
+ * in a band also blocks every other attacker in that band, so a banded
+ * member is not interchangeable with a bandless one or a member of a
+ * different band — CR 702.22c allows a pile to mix all three). Legality
+ * itself is not an axis: the caller already filters to
+ * `valid_block_targets[pendingBlocker]` before stacking.
  */
 export interface BlockTargetStack {
   /** Stable key for the stack (the lowest member id, stringified). */
@@ -318,6 +322,9 @@ export interface BlockTargetStack {
   /** CR 509.1c: every member of this stack carries a "must be blocked"
    *  static that the pending blocker's block would obey. */
   mustBeBlocked: boolean;
+  /** CR 702.22h: the band every member of this stack shares, or `null` when
+   *  none of them is banded. */
+  bandId: number | null;
   /** Members of this stack already assigned to the pending blocker,
    *  ascending — kept in their stack rather than split out, so growing or
    *  shrinking the count can find them. */
@@ -348,8 +355,10 @@ export function partitionBlockTargets(
   },
 ): BlockTargetStack[] {
   const attackTargetById = new Map<ObjectId, AttackTarget>();
+  const bandIdById = new Map<ObjectId, number | null>();
   for (const attacker of attackers ?? []) {
     attackTargetById.set(attacker.object_id, attacker.attack_target);
+    bandIdById.set(attacker.object_id, attacker.band_id ?? null);
   }
   const pendingConstraint = blockerConstraints?.[pendingBlocker];
   const mustBlockIds = new Set(
@@ -365,6 +374,7 @@ export function partitionBlockTargets(
     minBlockers: number;
     mustBlock: boolean;
     mustBeBlocked: boolean;
+    bandId: number | null;
     assignedIds: ObjectId[];
   }
   const buckets = new Map<string, Bucket>();
@@ -384,12 +394,14 @@ export function partitionBlockTargets(
     const minBlockers = blockRequirements?.[id]?.count ?? 0;
     const mustBlock = mustBlockIds.has(id);
     const mustBeBlocked = mustBeBlockedIds.has(id);
+    const bandId = bandIdById.get(id) ?? null;
     const signature = [
       attackTargetKey(attackTarget),
       otherBlockerIds.join(","),
       minBlockers,
       mustBlock,
       mustBeBlocked,
+      bandId,
     ].join("|");
 
     const isAssigned = pendingAssignments?.has(id) ?? false;
@@ -405,6 +417,7 @@ export function partitionBlockTargets(
         minBlockers,
         mustBlock,
         mustBeBlocked,
+        bandId,
         assignedIds: isAssigned ? [id] : [],
       });
     }
@@ -420,6 +433,7 @@ export function partitionBlockTargets(
       minBlockers: bucket.minBlockers,
       mustBlock: bucket.mustBlock,
       mustBeBlocked: bucket.mustBeBlocked,
+      bandId: bucket.bandId,
       assignedIds: bucket.assignedIds,
     }))
     .sort((a, b) => a.ids[0] - b.ids[0]);

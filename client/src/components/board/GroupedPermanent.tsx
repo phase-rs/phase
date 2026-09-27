@@ -755,7 +755,7 @@ interface BlockTargetGroupControlsProps {
 }
 
 /**
- * One `role="group"` per {@link BlockTargetStack} (CR 509.1a/b/c axes — see
+ * One `role="group"` per {@link BlockTargetStack} (see the axis citations on
  * `utils/combat.ts::partitionBlockTargets`), each with a count stepper that
  * assigns the pending blocker to that many of the stack's members. Not
  * `ObjectChoiceList`: every member of a stack is interchangeable by
@@ -785,6 +785,16 @@ function BlockTargetGroupControls({
     [eligibleIds, blockerId, combatAttackers, blockerAssignments, waitingFor],
   );
 
+  // CR 702.22h: label bands by a stable 1-based ordinal over the distinct
+  // band ids present here (ascending), so two stacks differing only by band
+  // read as "Band 1" / "Band 2" rather than the engine's internal id.
+  const bandOrdinals = useMemo(() => {
+    const distinctBandIds = Array.from(
+      new Set(stacks.map((stack) => stack.bandId).filter((id): id is number => id !== null)),
+    ).sort((a, b) => a - b);
+    return new Map(distinctBandIds.map((id, index) => [id, index + 1]));
+  }, [stacks]);
+
   const blockerName = objects?.[blockerId]?.name ?? t("attackTargetPicker.objectFallback", { id: blockerId });
 
   return (
@@ -796,10 +806,10 @@ function BlockTargetGroupControls({
         const targetName =
           objects?.[stack.attackTarget.data]?.name
           ?? t("attackTargetPicker.objectFallback", { id: stack.attackTarget.data });
-        // D20: every candidate comes from `valid_block_targets[pendingBlocker]`,
+        // Every candidate comes from `valid_block_targets[pendingBlocker]`,
         // which the picker only opens for the local player's own prompt
-        // (waitingForPlayer gate above) — so a Player target here is always
-        // this defender. No other-player name fallback.
+        // (`GroupedPermanentDisplay`'s `pickerContext` gate) — so a Player
+        // target here is always this defender. No other-player name fallback.
         const targetLabel =
           stack.attackTarget.type === "Player"
             ? t("attackTargetPicker.you")
@@ -808,6 +818,9 @@ function BlockTargetGroupControls({
               : t("attackTargetPicker.battleTarget", { name: targetName });
 
         const labelParts = [targetLabel];
+        if (stack.bandId !== null) {
+          labelParts.push(t("combat.bandBadge", { n: bandOrdinals.get(stack.bandId) }));
+        }
         if (stack.mustBlock) labelParts.push(t("combat.mustBlockBadge"));
         if (stack.mustBeBlocked) labelParts.push(t("combat.mustBeBlockedBadge"));
         if (stack.minBlockers > 0) {

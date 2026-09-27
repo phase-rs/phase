@@ -487,10 +487,6 @@ describe("ActionButton", () => {
     expect(useUiStore.getState().pendingBlocker).toBeNull();
   });
 
-  // D19: Reset Blocks calls clearCombatSelection, which now also nulls
-  // pendingBlocker (lifted into the store) — at HEAD before this change the
-  // pending blocker lived in ActionButton's local useState, which
-  // clearCombatSelection never touched, so the hint below would survive.
   it("Reset Blocks also drops a pending blocker", () => {
     render(<ActionButton />);
 
