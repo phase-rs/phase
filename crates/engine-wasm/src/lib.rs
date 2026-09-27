@@ -12,6 +12,7 @@ use engine::ai_support::{
     end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
     AiProposalApplication,
 };
+use engine::analysis::deck_signals::{deck_signals, DeckSignals};
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 #[cfg(test)]
@@ -1410,6 +1411,26 @@ fn estimate_bracket_inner(request: &BracketEstimateRequest) -> Option<BracketEst
         let db = cell.borrow();
         let db = db.as_ref()?;
         estimate_bracket_for_request(request, db)
+    })
+}
+
+/// Structural deck signals. Pure and stateless; reads `CARD_DB` without
+/// touching `GAME_STATE`. Returns `null` (via serde) when the deck has no
+/// commander or the card database is not loaded.
+#[wasm_bindgen]
+pub fn deck_signals_for_deck(deck_js: JsValue) -> Result<JsValue, JsError> {
+    let deck: PlayerDeckList = serde_wasm_bindgen::from_value(deck_js)
+        .map_err(|e| JsError::new(&format!("invalid deck: {e}")))?;
+    let result = deck_signals_inner(&deck);
+    Ok(to_js(&result))
+}
+
+/// Pure helper for native-side tests. Reads the `CARD_DB` thread-local.
+fn deck_signals_inner(deck: &PlayerDeckList) -> Option<DeckSignals> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref()?;
+        deck_signals(deck, db)
     })
 }
 
@@ -3667,6 +3688,81 @@ pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
     let state: SeatState = serde_json::from_str(state_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid SeatState: {e}")))?;
     Ok(to_js(&state.to_view()))
+}
+
+#[cfg(test)]
+mod deck_signals_tests {
+    use super::*;
+    use engine::analysis::deck_signals::DeckSignalKind;
+
+    fn db_with_counterspell() -> CardDatabase {
+        CardDatabase::from_json_str(
+            r#"{
+                "counterspell": {
+                    "name": "Counterspell",
+                    "mana_cost": { "type": "Cost", "shards": ["Blue", "Blue"], "generic": 0 },
+                    "card_type": { "supertypes": [], "core_types": ["Instant"], "subtypes": [] },
+                    "power": null,
+                    "toughness": null,
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": "Counter target spell.",
+                    "abilities": [{
+                        "kind": "Spell",
+                        "effect": {
+                            "type": "Counter",
+                            "target": { "type": "StackSpell" }
+                        },
+                        "cost": null,
+                        "sub_ability": null,
+                        "duration": null,
+                        "description": "Counter target spell.",
+                        "target_prompt": null,
+                        "condition": null,
+                        "optional_targeting": false,
+                        "optional": false,
+                        "forward_result": false
+                    }],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .expect("counterspell database parses")
+    }
+
+    #[test]
+    fn deck_signals_inner_returns_none_with_no_db() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let deck = PlayerDeckList {
+            commander: vec!["Counterspell".into()],
+            ..Default::default()
+        };
+
+        assert!(deck_signals_inner(&deck).is_none());
+    }
+
+    #[test]
+    fn deck_signals_inner_counts_a_counterspell() {
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_counterspell()));
+        });
+        let deck = PlayerDeckList {
+            commander: vec!["Counterspell".into()],
+            ..Default::default()
+        };
+
+        let signals = deck_signals_inner(&deck).expect("signals present");
+
+        assert_eq!(signals.readings[&DeckSignalKind::Counterspells].count, 1);
+        assert_eq!(
+            signals.readings[&DeckSignalKind::Counterspells].contributing,
+            ["Counterspell"]
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
 }
 
 #[cfg(test)]

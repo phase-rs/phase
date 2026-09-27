@@ -104,11 +104,19 @@ export function customFormatFromLobbyConfig(name: string, format_config: any): a
 export function deckCopyLimit(name: string): any;
 
 /**
- * Estimates a Commander deck's bracket without touching `GAME_STATE`.
- * Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
- * deck has no commander or the card database is not loaded.
+ * Structural deck signals. Pure and stateless; reads `CARD_DB` without
+ * touching `GAME_STATE`. Returns `null` (via serde) when the deck has no
+ * commander or the card database is not loaded.
  */
-export function estimate_bracket_for_deck(deck_js: any): any;
+export function deck_signals_for_deck(deck_js: any): any;
+
+/**
+ * Estimates a Commander deck's bracket and reconciles an optional declared
+ * tier without touching `GAME_STATE`. Reads `CARD_DB` for bracket signals.
+ * Returns `null` (via serde) when the deck has no commander or the card
+ * database is not loaded.
+ */
+export function estimate_bracket_for_deck(request_js: any): any;
 
 /**
  * Always-definite deck/format gate for callers that ENFORCE rather than hint.
@@ -122,8 +130,12 @@ export function estimate_bracket_for_deck(deck_js: any): any;
  * (`validateGuestDeck` in `client/src/adapter/p2p-adapter.ts`), which kicks a
  * guest whose deck is illegal for the room's format. UI-hint callers must keep
  * using `evaluate_deck_compatibility_js`: that one deliberately answers "no
- * opinion" (`selected_format_compatible: null`) for a Custom format, which is
- * the honest answer for a legality chip and an unacceptable one for a kick.
+ * opinion" (`selected_format_compatible: null`) for a Custom format — every
+ * request crossing this WASM boundary carries only a bare `GameFormat` tag
+ * (Wire-Inertness Invariant, `types::format::SelectedFormat`), which can never
+ * resolve real rules even though Phase 1d wired a real evaluator
+ * (`evaluate_custom_format`) for a trusted, already-`Resolved` config — which
+ * is the honest answer for a legality chip and an unacceptable one for a kick.
  */
 export function evaluateDeckFormatGate(request: any): any;
 
@@ -642,19 +654,17 @@ export interface InitOutput {
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
-    readonly clear_replay_playback: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
-    readonly create_initial_state: () => any;
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
+    readonly deck_signals_for_deck: (a: any) => [number, number, number];
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
-    readonly getFormatRegistry: () => any;
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -666,13 +676,9 @@ export interface InitOutput {
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
     readonly get_filtered_game_state: (a: number) => any;
-    readonly get_game_state: () => any;
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
-    readonly get_legal_actions_js: () => any;
-    readonly get_stack_pressure: () => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly has_replay_recording: () => number;
-    readonly init_panic_hook: () => void;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
@@ -680,7 +686,6 @@ export interface InitOutput {
     readonly is_multiplayer_mode: () => number;
     readonly legal_targets_for_castable_js: (a: number) => any;
     readonly legal_targets_for_castables_js: (a: any) => any;
-    readonly list_token_presets_js: () => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
@@ -689,8 +694,6 @@ export interface InitOutput {
     readonly preview_interaction_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
-    readonly replay_header_js: () => any;
-    readonly replay_length_js: () => number;
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
@@ -703,6 +706,16 @@ export interface InitOutput {
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
+    readonly get_game_state: () => any;
+    readonly get_legal_actions_js: () => any;
+    readonly get_stack_pressure: () => any;
+    readonly init_panic_hook: () => void;
+    readonly replay_header_js: () => any;
+    readonly list_token_presets_js: () => any;
+    readonly create_initial_state: () => any;
+    readonly getFormatRegistry: () => any;
+    readonly clear_replay_playback: () => void;
+    readonly replay_length_js: () => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

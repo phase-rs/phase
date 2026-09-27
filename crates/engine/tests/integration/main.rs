@@ -210,6 +210,7 @@ mod dark_depths_thespian_stage;
 mod darkness_crystal_exiled_with_activation_8164;
 mod dawnbreak_reclaimer;
 mod death_priest_myrkul_oxford_anthem;
+mod deck_signals;
 mod deck_signals_no_name_matching;
 mod declare_attackers_end_combat_pairing;
 mod delayed_parent_target_incarnation;

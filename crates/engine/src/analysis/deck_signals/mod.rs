@@ -21,7 +21,10 @@
 //! off-stack value would be a separate behavior change with its own baseline
 //! review.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+use strum::IntoEnumIterator;
 
 use crate::database::CardDatabase;
 use crate::game::deck_loading::{DeckEntry, PlayerDeckList};
@@ -30,7 +33,60 @@ use crate::types::card_type::CoreType;
 
 pub mod ability_chain;
 pub mod control;
+pub mod free_interaction;
 pub mod mana_ramp;
+
+/// Which uncapped structural reading this is.
+///
+/// This taxonomy is disjoint from capped bracket criteria by construction. It
+/// has no cap table and cannot produce a bracket violation. Commander brackets
+/// are format guidance rather than Comprehensive Rules, so no rules annotation
+/// applies to these variants.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::EnumIter,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeckSignalKind {
+    Counterspells,
+    SpotRemoval,
+    Sweepers,
+    CardAdvantage,
+    FreeInteraction,
+    ManaProducers,
+    LandFetch,
+    Rituals,
+    ExtraLandDrops,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeckSignalReading {
+    pub count: u16,
+    /// Distinct card names in first-seen order. Copy quantity is carried by
+    /// [`Self::count`], so each resolved face appears at most once here.
+    pub contributing: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeckSignals {
+    /// Every [`DeckSignalKind`] is always present, including zero readings.
+    /// Declaration order is wire order because the key is an ordered enum.
+    pub readings: BTreeMap<DeckSignalKind, DeckSignalReading>,
+    pub nonland_cards: u16,
+    /// Integer hundredths. `None` means the deck has no resolved nonland card.
+    pub average_mana_value_centi: Option<u16>,
+    pub resolved_cards: u16,
+    pub unresolved_cards: u16,
+}
 
 /// One deck slot: a borrowed face, its copy count, and its rules-correct
 /// off-stack mana value.
@@ -142,11 +198,133 @@ pub fn nonland_card_count(cards: &[DeckCard<'_>]) -> u32 {
         .fold(0_u32, |total, card| total.saturating_add(card.count))
 }
 
+/// Quantity-weighted mean mana value of nonland cards, in integer hundredths.
+/// Returns `None` when the deck has no nonland card.
+///
+/// Uses [`DeckCard::mana_value`], the combined off-stack value for split cards:
+/// CR 202.3d defines that combined mana value off the stack, and CR 709.4b
+/// defines a split card's combined mana cost. The calculation is integer-only
+/// and rounds half up. `crates/phase-ai/src/deck_profile.rs` retains the known
+/// `avg_mana_value` duplicate pending a separately baselined convergence.
+pub fn average_mana_value_centi(cards: &[DeckCard<'_>]) -> Option<u16> {
+    let (total_mana_value, nonland_cards) = cards
+        .iter()
+        .filter(|card| !card.face.card_type.core_types.contains(&CoreType::Land))
+        .fold((0_u64, 0_u64), |(total, count), card| {
+            let copies = u64::from(card.count);
+            (
+                total.saturating_add(u64::from(card.mana_value).saturating_mul(copies)),
+                count.saturating_add(copies),
+            )
+        });
+    if nonland_cards == 0 {
+        return None;
+    }
+    let centi = total_mana_value
+        .saturating_mul(100)
+        .saturating_add(nonland_cards / 2)
+        / nonland_cards;
+    Some(u16::try_from(centi).unwrap_or(u16::MAX))
+}
+
+/// Resolves and classifies the deck sections used by bracket estimation.
+/// Returns `None` when the deck has no commander, matching the estimator gate.
+pub fn deck_signals(deck: &PlayerDeckList, db: &CardDatabase) -> Option<DeckSignals> {
+    if deck.commander.is_empty() {
+        return None;
+    }
+
+    let resolved = resolve_bracket_sections(deck, db);
+    let control = control::detect(&resolved.cards);
+    let ramp = mana_ramp::detect(&resolved.cards);
+    let (free_interaction_count, free_interaction_names) =
+        free_interaction::free_interaction(&resolved.cards);
+
+    let readings = DeckSignalKind::iter()
+        .map(|kind| {
+            let count = match kind {
+                DeckSignalKind::Counterspells => control.counterspell_count,
+                DeckSignalKind::SpotRemoval => control.spot_removal_count,
+                DeckSignalKind::Sweepers => control.sweeper_count,
+                DeckSignalKind::CardAdvantage => control.card_draw_count,
+                DeckSignalKind::FreeInteraction => free_interaction_count,
+                DeckSignalKind::ManaProducers => ramp.dork_count,
+                DeckSignalKind::LandFetch => ramp.land_fetch_count,
+                DeckSignalKind::Rituals => ramp.ritual_count,
+                DeckSignalKind::ExtraLandDrops => ramp.extra_landdrop_count,
+            };
+            let contributing = if kind == DeckSignalKind::FreeInteraction {
+                free_interaction_names.clone()
+            } else {
+                resolved
+                    .cards
+                    .iter()
+                    .filter(|card| card_matches_kind(card, kind))
+                    .map(|card| card.face.name.clone())
+                    .collect()
+            };
+            (
+                kind,
+                DeckSignalReading {
+                    count: u16::try_from(count).unwrap_or(u16::MAX),
+                    contributing,
+                },
+            )
+        })
+        .collect();
+
+    let resolved_cards = resolved
+        .cards
+        .iter()
+        .fold(0_u32, |total, card| total.saturating_add(card.count));
+
+    Some(DeckSignals {
+        readings,
+        nonland_cards: u16::try_from(nonland_card_count(&resolved.cards)).unwrap_or(u16::MAX),
+        average_mana_value_centi: average_mana_value_centi(&resolved.cards),
+        resolved_cards: u16::try_from(resolved_cards).unwrap_or(u16::MAX),
+        unresolved_cards: u16::try_from(resolved.unresolved.len()).unwrap_or(u16::MAX),
+    })
+}
+
+fn card_matches_kind(card: &DeckCard<'_>, kind: DeckSignalKind) -> bool {
+    let face = card.face;
+    match kind {
+        DeckSignalKind::Counterspells => control::is_counterspell_parts(&face.abilities),
+        DeckSignalKind::SpotRemoval => {
+            !control::is_sweeper_parts(&face.abilities)
+                && control::is_spot_removal_parts(&face.abilities)
+        }
+        DeckSignalKind::Sweepers => control::is_sweeper_parts(&face.abilities),
+        DeckSignalKind::CardAdvantage => {
+            !face.card_type.core_types.contains(&CoreType::Land)
+                && control::is_card_draw_parts(&face.abilities)
+        }
+        DeckSignalKind::FreeInteraction => {
+            unreachable!("free-interaction contributors come from its single authority")
+        }
+        DeckSignalKind::ManaProducers => {
+            mana_ramp::is_mana_dork_parts(&face.card_type.core_types, &face.abilities)
+        }
+        DeckSignalKind::LandFetch => {
+            mana_ramp::is_land_fetch_spell_parts(&face.card_type.core_types, &face.abilities)
+        }
+        DeckSignalKind::Rituals => {
+            mana_ramp::is_ritual_parts(&face.card_type.core_types, &face.abilities)
+        }
+        DeckSignalKind::ExtraLandDrops => {
+            mana_ramp::is_extra_landdrop_parts(&face.static_abilities)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::deck_loading::DeckEntry;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::mana::ManaCost;
+    use strum::IntoEnumIterator;
 
     const CARD_DATA: &str = r#"{
         "commander": {
@@ -164,6 +342,100 @@ mod tests {
             "replacements": [], "keywords": []
         }
     }"#;
+
+    fn face(name: &str, mana_value: u32, core_types: Vec<CoreType>) -> CardFace {
+        CardFace {
+            name: name.into(),
+            mana_cost: ManaCost::generic(mana_value),
+            card_type: CardType {
+                core_types,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn cards(entries: &[DeckEntry]) -> Vec<DeckCard<'_>> {
+        DeckCard::from_deck_entries(entries)
+    }
+
+    #[test]
+    fn average_mana_value_centi_excludes_lands_and_weights_by_count() {
+        let entries = vec![
+            DeckEntry {
+                card: face("Two", 2, vec![CoreType::Creature]),
+                count: 3,
+            },
+            DeckEntry {
+                card: face("Six", 6, vec![CoreType::Sorcery]),
+                count: 1,
+            },
+            DeckEntry {
+                card: face("Land", 0, vec![CoreType::Land]),
+                count: 40,
+            },
+        ];
+        let cards = cards(&entries);
+
+        assert_eq!(average_mana_value_centi(&cards), Some(300));
+    }
+
+    #[test]
+    fn average_mana_value_centi_is_none_for_all_land_deck() {
+        let entries = vec![DeckEntry {
+            card: face("Land", 0, vec![CoreType::Land]),
+            count: 40,
+        }];
+        let cards = cards(&entries);
+
+        assert_eq!(average_mana_value_centi(&cards), None);
+    }
+
+    #[test]
+    fn average_mana_value_centi_rounds_half_up() {
+        let entries = vec![
+            DeckEntry {
+                card: face("Two", 2, vec![CoreType::Creature]),
+                count: 199,
+            },
+            DeckEntry {
+                card: face("Three", 3, vec![CoreType::Creature]),
+                count: 1,
+            },
+        ];
+        let cards = cards(&entries);
+
+        assert_eq!(average_mana_value_centi(&cards), Some(201));
+    }
+
+    #[test]
+    fn average_mana_value_centi_saturates_within_u16_for_a_100_card_deck() {
+        let mut enormous = face("Enormous", 0, vec![CoreType::Creature]);
+        enormous.metadata.off_stack_mana_value_override = Some(u32::MAX);
+        let entries = vec![DeckEntry {
+            card: enormous,
+            count: 100,
+        }];
+        let cards = cards(&entries);
+
+        assert_eq!(average_mana_value_centi(&cards), Some(u16::MAX));
+    }
+
+    #[test]
+    fn deck_signals_emits_every_kind_even_at_zero() {
+        let db = CardDatabase::from_json_str(CARD_DATA).unwrap();
+        let deck = PlayerDeckList {
+            commander: vec!["Commander".into()],
+            ..Default::default()
+        };
+
+        let signals = deck_signals(&deck, &db).expect("commander produces signals");
+
+        for kind in DeckSignalKind::iter() {
+            assert_eq!(signals.readings[&kind].count, 0);
+            assert!(signals.readings[&kind].contributing.is_empty());
+        }
+    }
 
     #[test]
     fn resolve_bracket_sections_folds_duplicates_and_preserves_first_seen_order() {
