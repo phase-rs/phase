@@ -12,7 +12,7 @@ use crate::types::ability::{
     ZoneRef,
 };
 use crate::types::counter::CounterType;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
@@ -30874,10 +30874,10 @@ fn compound_subject_keyword_grant_is_not_split_thorin() {
         def.modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddKeyword {
-                keyword: Keyword::Ward { .. },
-            }
+                keyword: Keyword::Ward(WardCost::Mana(cost)),
+            } if *cost == ManaCost::generic(1)
         )),
-        "expected AddKeyword(Ward), got {:?}",
+        "expected AddKeyword(Ward {{1}}), got {:?}",
         def.modifications
     );
     assert_eq!(def.condition, Some(StaticCondition::HasEnduringStory));
