@@ -31058,6 +31058,8 @@ fn static_reduce_activated_ability_cost_that_ability_activation_cost_floor() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+            targets: None,
+            frequency: None,
         }
     );
     assert_eq!(
