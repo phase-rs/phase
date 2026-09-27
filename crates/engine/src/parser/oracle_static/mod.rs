@@ -125,7 +125,7 @@ mod support {
         try_split_and_cant_attack_scoped, try_split_and_cant_be_attached,
         try_split_and_cant_be_blocked, try_split_and_cant_be_sacrificed,
         try_split_and_cant_be_targeted, try_split_and_cant_block, try_split_and_doesnt_untap,
-        try_split_and_foreign_keyword_grant, try_split_and_must_attack_block,
+        try_split_and_foreign_subject_grant, try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{
@@ -151,7 +151,7 @@ mod support {
 pub(crate) use cost_mod::{
     parse_activated_ability_cost_head, parse_alt_cost_frequency_prefix,
     parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
-    parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
+    parse_collect_evidence_alt_cost, parse_spells_alternative_cost, ActivatedAbilityCostHead,
 };
 pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,

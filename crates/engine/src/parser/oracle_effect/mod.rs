@@ -115,7 +115,7 @@ use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
     ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
     CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DieResultBranch, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
     ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NumberDistinctness, ObjectProperty,
@@ -13936,6 +13936,10 @@ fn reveal_filter_separator(input: &str) -> nom::IResult<&str, &str, OracleError<
 fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
     let mut disjuncts = Vec::new();
     let mut remaining = filter_text;
+    // CR 701.20a: only an "or" connective makes the list disjunctive. A comma
+    // list without one ("a nonlegendary, nonland card" — Plargg, Dean of Chaos)
+    // stacks adjectives on one card and must stay a single conjunctive filter.
+    let mut has_or_connective = false;
     loop {
         // Scan to the next separator (or end of input) via the nom combinator.
         let mut split_at = None;
@@ -13952,7 +13956,8 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
                     return None; // malformed: empty disjunct
                 }
                 disjuncts.push(frag);
-                let (after_sep, _) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                let (after_sep, separator) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                has_or_connective |= separator.trim_start_matches(',').trim() == "or";
                 remaining = after_sep;
             }
             None => {
@@ -13963,7 +13968,7 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
             }
         }
     }
-    (disjuncts.len() >= 2).then_some(disjuncts)
+    (disjuncts.len() >= 2 && has_or_connective).then_some(disjuncts)
 }
 
 /// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
@@ -14074,14 +14079,60 @@ fn build_reveal_until_filter(filter_text: &str) -> TargetFilter {
     // ("a creature or land card"); a comma+or list of distinct filters must be
     // split per-disjunct and assembled into an Or.
     if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
-        let filters: Vec<TargetFilter> = disjuncts
+        let mut filters: Vec<TargetFilter> = disjuncts
             .iter()
             .map(|frag| build_reveal_until_disjunct_filter(frag.trim()))
             .collect();
+        distribute_shared_card_qualifier(&disjuncts, &mut filters);
         return TargetFilter::Or { filters };
     }
     let (parsed, _) = parse_target(filter_text);
     parsed
+}
+
+/// CR 701.20a + CR 202.3: In "an instant, sorcery, or enchantment card with
+/// converted mana cost less than N" (Underdark Beholder) the type words share
+/// ONE head noun, so the qualifier after "card" constrains every disjunct, not
+/// just the last. Applies only when the earlier disjuncts are bare type words
+/// (no "card" noun of their own) and the last one carries a post-noun
+/// qualifier; a list of distinct card phrases ("doctor card, a card with
+/// doctor's companion, or a vehicle card" — An Unearthly Child) is untouched.
+fn distribute_shared_card_qualifier(disjuncts: &[&str], filters: &mut [TargetFilter]) {
+    fn has_card_noun(fragment: &str) -> bool {
+        take_until::<_, _, OracleError<'_>>(" card")
+            .parse(fragment)
+            .is_ok()
+    }
+    fn has_post_noun_qualifier(fragment: &str) -> bool {
+        (take_until(" card"), tag::<_, _, OracleError<'_>>(" card "))
+            .parse(fragment)
+            .is_ok_and(|(qualifier, _)| !qualifier.trim().is_empty())
+    }
+    let (Some((last_text, earlier_texts)), Some((last_filter, earlier_filters))) =
+        (disjuncts.split_last(), filters.split_last_mut())
+    else {
+        return;
+    };
+    if earlier_texts.iter().any(|text| has_card_noun(text))
+        || !has_post_noun_qualifier(last_text.trim())
+    {
+        return;
+    }
+    let TargetFilter::Typed(TypedFilter {
+        properties: shared, ..
+    }) = last_filter
+    else {
+        return;
+    };
+    for filter in earlier_filters {
+        if let TargetFilter::Typed(typed) = filter {
+            for property in shared.iter() {
+                if !typed.properties.contains(property) {
+                    typed.properties.push(property.clone());
+                }
+            }
+        }
+    }
 }
 
 /// CR 701.20a: Parse `"reveal[s] cards from the top of <possessive> library until …"`
@@ -14117,6 +14168,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
             matched_disposition: RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
+            rest_order: DigRestOrder::Random,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -14170,6 +14222,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         matched_disposition: RevealUntilDisposition::KeepEach,
         kept_destination,
         rest_destination: Zone::Library,
+        rest_order: DigRestOrder::Random,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         kept_optional_to: None,
@@ -14375,10 +14428,10 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
 /// attached and are correctly excluded from `has_exile_cast_permission`'s
 /// surfacing. No new variant needed — the existing primitives compose.
 ///
-/// The optional ", and you may spend mana as though it were mana of any
-/// color|type to cast those spells" conjunct folds into the same permission
-/// via `mana_spend_permission` (`parse_any_mana_word` decides the variant),
-/// matching the wire-up used by `try_parse_exile_play_grant_with_any_mana`.
+/// A ", and you may spend mana as though it were mana of any color to cast
+/// those spells" conjunct never reaches this grammar: the clause splitter cuts
+/// it off (`starts_mana_spend_rider_conjunct`) and the chunk loop folds it onto
+/// this grant's `mana_spend_permission`.
 fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (permission_text, explicit_duration) = strip_trailing_duration(tp.original);
     let permission_lower = permission_text.to_lowercase();
@@ -14446,25 +14499,10 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     if !explicit_permission && !owns_exile_lifetime {
         return None;
     }
-    let rest_lower = &permission_tp.lower[permission_tp.lower.len() - rest_orig.len()..];
-
-    // Optional any-color mana conjunct: ", and you may spend mana as though
-    // it were mana of any color to cast those spells" (or "...any type...").
-    let mana_spend_permission = if rest_lower.is_empty() {
-        None
-    } else {
-        // Trailing text that is not the recognized conjunct — reject so the
-        // mana-spend catch-all does not consume an unrelated suffix together
-        // with the cast-permission half.
-        let (permission, _) = nom_on_lower(rest_orig, rest_lower, |i| {
-            let (i, _) = tag(", and you may spend mana as though it were mana of any ").parse(i)?;
-            let (i, permission) = parse_any_mana_word(i)?;
-            let (i, _) = tag(" to cast those spells").parse(i)?;
-            let (i, _) = eof.parse(i)?;
-            Ok((i, permission))
-        })?;
-        Some(permission)
-    };
+    // Trailing text is not this grant's — reject rather than drop it.
+    if !rest_orig.is_empty() {
+        return None;
+    }
 
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
@@ -14481,7 +14519,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             frequency: CastFrequency::Unlimited,
             source_id: None,
             exiled_by_ability_controller: None,
-            mana_spend_permission,
+            mana_spend_permission: None,
             card_filter,
             single_use_group: None,
             single_use,
@@ -14508,118 +14546,10 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     })
 }
 
-fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    // Third-person "they may play/cast that card ... cast a spell this way" (Gonti,
-    // Night Minister) binds to the parent player target via `ParentTargetController`
-    // and the tracked exile set. First-person forms keep the legacy `Any` target
-    // (rebound to TrackedSet by the chain parser when chained after an exile).
-    let (rest, mode, grantee, target) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("they may play ").parse(tp.lower)
-    {
-        (
-            rest,
-            CardPlayMode::Play,
-            crate::types::ability::PermissionGrantee::ParentTargetController,
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            },
-        )
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they may cast ").parse(tp.lower) {
-        (
-            rest,
-            CardPlayMode::Cast,
-            crate::types::ability::PermissionGrantee::ParentTargetController,
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            },
-        )
-    } else {
-        let (rest, mode) = alt((
-            value(
-                CardPlayMode::Play,
-                alt((
-                    tag::<_, _, OracleError<'_>>("you may look at and play "),
-                    tag("you may play "),
-                    tag("look at and play "),
-                    tag("play "),
-                )),
-            ),
-            value(
-                CardPlayMode::Cast,
-                alt((tag("you may cast "), tag("cast "))),
-            ),
-        ))
-        .parse(tp.lower)
-        .ok()?;
-        (rest, mode, Default::default(), TargetFilter::Any)
-    };
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that card"),
-        tag("that spell"),
-        tag("those cards"),
-        tag("it"),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" for as long as ")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("it remains exiled"),
-        tag("that card remains exiled"),
-        tag("those cards remain exiled"),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(", and mana of any ")
-        .parse(rest)
-        .ok()?;
-    let (rest, mana_spend_permission) = parse_any_mana_word(rest).ok()?;
-    // "… to cast that spell" (Hostage Taker), "… to cast it" (Court of
-    // Locthwain, Blightwing Bandit), "… to cast a spell this way".
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>(" can be spent to cast that spell"),
-        tag(" can be spent to cast it"),
-        tag(" can be spent to cast a spell this way"),
-    ))
-    .parse(rest)
-    .ok()?;
-    eof::<_, OracleError<'_>>(rest).ok()?;
-
-    Some(parsed_clause(Effect::GrantCastingPermission {
-        permission: CastingPermission::PlayFromExile {
-            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
-            mode,
-            duration: Duration::Permanent,
-            granted_to: crate::types::player::PlayerId(0),
-            frequency: CastFrequency::Unlimited,
-            source_id: None,
-            exiled_by_ability_controller: None,
-            mana_spend_permission: Some(mana_spend_permission),
-            card_filter: None,
-            single_use_group: None,
-            single_use: false,
-            cast_cost_modifier: None,
-            alt_ability_cost: None,
-            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-            invalidation: None,
-        },
-        target,
-        grantee,
-    }))
-}
-
 /// CR 400.7i: Parse "you may play/cast that card [this turn]" — impulse draw permission.
 fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    // CR 118.14 + CR 609.4b: The any-mana conjunct must win over the bare
-    // per-grantee branch so "you may cast that card for as long as it remains
-    // exiled, and mana of any type can be spent to cast that spell" (Hostage
-    // Taker, Thief of Sanity) keeps `mana_spend_permission: AnyTypeOrColor`.
-    if let Some(clause) = try_parse_exile_play_grant_with_any_mana(tp) {
-        return Some(clause);
-    }
     // CR 611.2a + CR 108.3: Per-object grant clauses from compound-exile chains.
     // These bind the grant to a player OTHER than the ability's controller via
     // Theme D's `granted_to` field, resolved per-iteration by
@@ -14669,8 +14599,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // grant that the permission already implies (the controller can always see
     // a card they may play). Folded in as a verb-prefix variant so the no-mana-
     // conjunct form reaches the same grant as the bare "you may play those
-    // cards" path (the with-mana form is handled earlier by
-    // `try_parse_exile_play_grant_with_any_mana`).
+    // cards" path.
     let full_rest = nom_on_lower(tp.original, tp.lower, |input| {
         alt((
             value(
@@ -14897,12 +14826,14 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
                 value(Duration::UntilEndOfTurn, tag(" until the end of turn")),
             ))
             .parse(input)?;
-            // CR 118.14 + CR 609.4b: optional trailing "[,] and mana of any
-            // type can be spent to cast that spell|it" scopes the mana
-            // concession to the granted cast (Black Widow, Super Spy; Reno and
-            // Rude with the comma and "it").
+            // CR 118.14 + CR 609.4b: optional trailing " and mana of any type
+            // can be spent to cast that spell|it" scopes the mana concession
+            // to the granted cast (Black Widow, Super Spy). The comma form
+            // (Reno and Rude) never reaches here: the clause splitter cuts it
+            // off (`starts_mana_spend_rider_conjunct`) and the chunk loop folds
+            // it onto this grant.
             let (input, mana_spend_permission) = opt(preceded(
-                (opt(tag(",")), tag(" and mana of any ")),
+                tag(" and mana of any "),
                 terminated(
                     parse_any_mana_word,
                     (
@@ -18687,16 +18618,6 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // CR 608.2c: Compound damage actions: "~ deals 3 damage to any target and you gain 3 life"
     if let Some(clause) = try_split_damage_compound(text, ctx) {
         return clause;
-    }
-
-    // CR 601.2 + CR 609.4b: "cast target [type] card from [a | that player's]
-    // graveyard, and mana of any type can be spent to cast that spell" (Quistis
-    // Trepe, Tinybones the Pickpocket) is an in-place graveyard cast-from-zone
-    // grant carrying the any-type concession on the grant. The catch-all below
-    // would report the whole sentence as the standalone concession gap,
-    // dropping the cast. Must run before that catch-all.
-    if let Some(effect) = try_parse_cast_target_from_graveyard_any_mana(text, ctx) {
-        return parsed_clause(effect);
     }
 
     // CR 609.4b: "spend mana as though it were mana of any [color|type]" /
@@ -23729,6 +23650,14 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         // `Effect::Unimplemented` -- discovered via a fresh coverage-parse-diff
         // run against this PR's own fix, not assumed.
         | Effect::SetLifeTotal { target, .. } => target,
+        Effect::TurnFaceUp { target } => {
+            return matches!(
+                target,
+                TargetFilter::ExiledBySource
+                    | TargetFilter::ParentTarget
+                    | TargetFilter::LastRevealed
+            ) || filter_introduces_typed_object(target);
+        }
         Effect::GenericEffect {
             target: Some(target),
             ..
@@ -27885,8 +27814,14 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
     else {
         return false;
     };
+    parse_exile_link_host(after_anchor).is_ok()
+}
+
+/// The object that holds the exile link in "… exiled with ~ / this creature /
+/// …" (CR 607.2a).
+fn parse_exile_link_host(input: &str) -> OracleResult<'_, &str> {
     alt((
-        tag::<_, _, E>("~"),
+        tag("~"),
         tag("this creature"),
         tag("this artifact"),
         tag("this permanent"),
@@ -27894,8 +27829,24 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
         tag("this spell"),
         tag("it"),
     ))
-    .parse(after_anchor)
-    .is_ok()
+    .parse(input)
+}
+
+/// CR 607.2a: the whole cast object is "a[n] <type phrase> card exiled with
+/// ~" (Summon: Esper Valigarmanda: "cast an instant or sorcery card exiled
+/// with this Saga"; Raphael, Most Attitude: "play a card exiled with
+/// Raphael").
+fn names_a_card_exiled_with_self(rest: &str) -> bool {
+    (
+        opt(alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))),
+        super::oracle_nom::target::parse_type_phrase,
+        opt(tag(" card")),
+        tag(" exiled with "),
+        parse_exile_link_host,
+        eof,
+    )
+        .parse(rest)
+        .is_ok()
 }
 
 /// CR 601.3b + CR 702.8a: "you may cast [type] spells as though they had flash"
@@ -28814,6 +28765,20 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         });
     }
 
+    // CR 607.2a + CR 608.2g: "you may cast an instant or sorcery card exiled
+    // with ~" (Summon: Esper Valigarmanda) names one card of the source's
+    // linked exile, cast as the ability resolves. Branch 2 reads a type LIST
+    // through `parse_cast_type_list`, which drops the singular "exiled with ~"
+    // link the single-type reader binds ("a card exiled with ~", Raphael, Most
+    // Attitude), so the grant would cover every exiled card of those types;
+    // and it would linger past the resolution. An honest gap instead.
+    if names_a_card_exiled_with_self(rest) && parse_cast_type_list(rest).is_some() {
+        return Some(Effect::unimplemented(
+            LINKED_EXILE_RESOLUTION_CAST_GAP,
+            rest,
+        ));
+    }
+
     // Branch 1.9: the owned-linked + lesser-mana-value compound exile grant
     // (Triple Triad: "play the card you own exiled this way and each other card
     // exiled this way with lesser mana value than it"). Runs BEFORE Branch 2's
@@ -28890,6 +28855,28 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(cast_target_rest).0);
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
+        // CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from
+        // that player's graveyard" (Tinybones, the Pickpocket; Wrexial, the
+        // Risen Deep) chooses the card as the trigger goes on the stack, in the
+        // graveyard of the player its event names — and a graveyard holds only
+        // its owner's cards. `scan_zone_phrase` reads the possessive as a bare
+        // `InZone { Graveyard }`, so the owner is bound here, read off the same
+        // origin phrase the zone came from; without it any graveyard's card is a
+        // legal target. (`relative_player_scope` does not name that player here:
+        // `relative_player_scope_for_condition` reads a "~ deals combat damage
+        // to a player" head as `TargetPlayer`.)
+        if ctx.in_trigger
+            && cast_target_is_chosen_graveyard_card(rest, &filter)
+            && cast_origin_is_that_players_graveyard(rest)
+        {
+            add_cast_target_props(
+                &mut filter,
+                &[FilterProp::Owned {
+                    controller: ControllerRef::TriggeringPlayer,
+                }],
+                None,
+            );
+        }
         let alt_ability_cost = parse_alt_ability_cost_rider(lower);
         // CR 608.2g vs CR 611.2: shared filter-form driver authority. `mode` and
         // `alt_is_some` are no-ops for every current Branch-2 card (all hand-origin
@@ -29033,6 +29020,10 @@ fn during_resolution_for_filter_cast_clause(
 /// through a static permission and never reaches the cast-clause producer).
 const UNREPRESENTABLE_ADDITIONAL_COST_GAP: &str = "unrepresentable_additional_cost";
 
+/// The parser gap name for a cast of one card of a type list from the
+/// source's linked exile (`names_a_card_exiled_with_self`).
+const LINKED_EXILE_RESOLUTION_CAST_GAP: &str = "linked_exile_resolution_cast";
+
 /// The printed additional-cost wording is present on the clause, whatever
 /// follows "by paying".
 fn names_an_additional_cost(rest: &str) -> bool {
@@ -29069,6 +29060,22 @@ fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::Ma
     Some(cost)
 }
 
+/// The origin phrase `apply_cast_target_suffixes` took the cast target's zone
+/// from (the first zone phrase of the clause) is exactly "from that player's
+/// graveyard" — not a later mention of that graveyard elsewhere in the clause.
+fn cast_origin_is_that_players_graveyard(rest: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    super::oracle_target::scan_zone_phrase_span(rest).is_some_and(|(span, ..)| {
+        (
+            opt(alt((tag::<_, _, E>("cards "), tag("card ")))),
+            tag("from that player's graveyard"),
+            eof,
+        )
+            .parse(span)
+            .is_ok()
+    })
+}
+
 /// CR 601.2c + CR 115.1: A "cast TARGET <card> from [a|your|…] graveyard"
 /// clause names one chosen card in a graveyard — the printed word "target"
 /// on the head and an `InZone { Graveyard }` property on every leaf of the
@@ -29095,86 +29102,6 @@ fn cast_target_is_chosen_graveyard_card(rest: &str, target: &TargetFilter) -> bo
     }
     let names_a_target = strip_cast_target_prefix(rest).len() != rest.len();
     names_a_target && every_leaf_in_a_graveyard(target)
-}
-
-/// CR 601.2 + CR 609.4b + CR 608.2g: "[you may ]cast target [type] card from
-/// [a graveyard | that player's graveyard], and mana of any type can be spent to
-/// cast that spell" — the in-place graveyard cast-from-zone grant with the
-/// any-type-mana concession (Quistis Trepe: instant/sorcery from a graveyard;
-/// Tinybones the Pickpocket: nonland permanent from the triggering player's
-/// graveyard).
-///
-/// Without this, the whole clause is captured by the mana-spend catch-all in
-/// `lower_imperative_clause` and reported as the standalone concession gap,
-/// which DROPS the cast entirely. This routes the head through
-/// the established `CastFromZone`-building combinator (the path Harness the Storm
-/// uses for "cast target ... card from your graveyard") and forwards the any-type
-/// concession into `mana_spend_permission` so it is scoped to this specific cast
-/// rather than a global player permission.
-///
-/// CR 611.2a + CR 108.3 (multiplayer correctness): "that player's graveyard"
-/// binds to the triggering (combat-damaged) player via
-/// `Owned{ControllerRef::TriggeringPlayer}` so in a 3+ player game the cast is
-/// restricted to THAT player's graveyard — never any opponent's. "a graveyard"
-/// (Quistis) carries no owner constraint (own graveyard in practice).
-fn try_parse_cast_target_from_graveyard_any_mana(text: &str, ctx: &ParseContext) -> Option<Effect> {
-    type E<'a> = OracleError<'a>;
-    let lower = text.to_lowercase();
-    let trimmed = lower.trim().trim_end_matches('.');
-    // `clause_shell` usually strips a leading "you may "; strip defensively so
-    // the head reaches `try_parse_cast_effect` either way.
-    let (body, _) = opt(tag::<_, _, E>("you may ")).parse(trimmed).ok()?;
-
-    // Split the cast-from-graveyard head from the trailing any-type-mana
-    // conjunct, then require the full conjunct (no `contains` dispatch — a
-    // `take_until` anchor plus an exhaustive tail combinator).
-    let (rest, head) = take_until::<_, _, E>(", and mana of any ")
-        .parse(body)
-        .ok()?;
-    let (rest, _) = tag::<_, _, E>(", and mana of any ").parse(rest).ok()?;
-    let (rest, concession) = parse_any_mana_word(rest).ok()?;
-    let (rest, _) = tag::<_, _, E>(" can be spent to cast ").parse(rest).ok()?;
-    let (rest, _) = alt((tag::<_, _, E>("that spell"), tag("a spell this way")))
-        .parse(rest)
-        .ok()?;
-    eof::<_, E>(rest).ok()?;
-
-    // Scope to the graveyard cast-from-zone class (not impulse-exile anaphors,
-    // which are handled earlier by `try_parse_play_from_exile`).
-    if !scan_contains_phrase(head, "graveyard") {
-        return None;
-    }
-
-    let mut effect = try_parse_cast_effect(head, ctx)?;
-    let Effect::CastFromZone {
-        mana_spend_permission,
-        target,
-        driver,
-        ..
-    } = &mut effect
-    else {
-        return None;
-    };
-    // CR 609.4b (+ CR 118.14 for "any type"): scope the concession to this
-    // specific granted cast.
-    *mana_spend_permission = Some(concession);
-    // CR 608.2g: "cast target ... from a graveyard" with no duration is a
-    // during-resolution paid cast, not a lingering permission.
-    *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
-    // CR 611.2a + CR 108.3: "that player's graveyard" = the triggering player's
-    // graveyard (`scan_zone_phrase` maps it to a bare `InZone{Graveyard}` with no
-    // owner). Add the owner constraint so the candidate set is the damaged
-    // player's graveyard alone.
-    if scan_contains_phrase(head, "that player's graveyard") {
-        add_cast_target_props(
-            target,
-            &[FilterProp::Owned {
-                controller: ControllerRef::TriggeringPlayer,
-            }],
-            None,
-        );
-    }
-    Some(effect)
 }
 
 fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstraint> {
@@ -29478,43 +29405,62 @@ fn parse_any_mana_can_be_spent(input: &str) -> OracleResult<'_, ManaSpendRider> 
 /// (`parse_any_mana_word`); a rider that relaxes only one kind of mana is
 /// reported as `ManaSpendRider::SingleKind`.
 pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
-    type Vbe<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
     let trimmed = lower.trim().trim_end_matches('.');
-    let cast_object = || {
-        alt((
-            tag::<_, _, Vbe>("that spell"),
-            tag("those spells"),
-            tag("spells this way"),
-            tag("spells cast this way"),
-            tag("a spell this way"),
-            tag("them"),
-            tag("it"),
-        ))
-    };
+    let (_, rider) = terminated(parse_mana_spend_rider, eof)
+        .parse(trimmed)
+        .ok()?;
+    Some(rider)
+}
+
+/// CR 118.14 + CR 609.4b: the rider grammar `try_parse_mana_spend_rider` reads,
+/// up to and including the object it names — without requiring the text to end
+/// there, so the clause splitter can recognize the same rider as a conjunct
+/// (`starts_mana_spend_rider_conjunct`).
+fn parse_mana_spend_rider(input: &str) -> OracleResult<'_, ManaSpendRider> {
     // "If you cast a spell this way, mana of any type can be spent to cast it"
     // (Bloodsoaked Insight): the gate restates what the rider already means —
     // it applies only to a cast made through the grant — so it is dropped, as
     // `try_parse_alt_cost_rider` drops the same prefix.
-    let (trimmed, _) = opt(alt((
-        tag::<_, _, Vbe>("if you cast a spell this way, "),
+    let (input, _) = opt(alt((
+        tag("if you cast a spell this way, "),
         tag("if you cast it this way, "),
     )))
-    .parse(trimmed)
-    .ok()?;
-    let (rest, rider) = alt((
-        preceded(
-            opt(tag::<_, _, Vbe>("you may ")),
-            parse_spend_as_though_any_mana,
-        ),
+    .parse(input)?;
+    let (input, rider) = alt((
+        preceded(opt(tag("you may ")), parse_spend_as_though_any_mana),
         parse_any_mana_can_be_spent,
     ))
-    .parse(trimmed)
-    .ok()?;
-    let (rest, _) = tag::<_, _, Vbe>(" to cast ").parse(rest).ok()?;
-    let (rest, _) = cast_object().parse(rest).ok()?;
-    eof::<_, Vbe>(rest).ok()?;
-    Some(rider)
+    .parse(input)?;
+    let (input, _) = tag(" to cast ").parse(input)?;
+    let (input, _) = alt((
+        tag("that spell"),
+        tag("those spells"),
+        tag("spells this way"),
+        tag("spells cast this way"),
+        tag("a spell this way"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(input)?;
+    Ok((input, rider))
+}
+
+/// CR 118.14 + CR 609.4b: Does the lowercase text after a comma open a
+/// ", and <mana rider>" conjunct that runs to the end of its sentence — "…,
+/// and mana of any type can be spent to cast that spell" (Hostage Taker),
+/// "…, and you may spend mana as though it were mana of any color to cast
+/// those spells" (King Narfi's Betrayal)? Such a conjunct is its own
+/// instruction: the clause splitter cuts it off the grant it follows so the
+/// chunk loop folds it onto that grant, whatever grammar reads the grant.
+pub(crate) fn starts_mana_spend_rider_conjunct(remainder_lower: &str) -> bool {
+    (
+        tag::<_, _, OracleError<'_>>("and "),
+        parse_mana_spend_rider,
+        alt((eof, tag("."))),
+    )
+        .parse(remainder_lower)
+        .is_ok()
 }
 
 /// CR 609.4b: Is `effect` a cast grant the mana rider can attach to — a
@@ -31939,6 +31885,9 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         // publisher so a following "those cards" move receives the tracked-set
         // sentinel that activates that runtime publication.
         || matches!(effect, Effect::SearchLibrary { .. })
+        // Seek publishes its sought cards the same way ("Seek two cards. You may
+        // shuffle them into your library." — Choice of Fortunes).
+        || matches!(effect, Effect::Seek { .. })
         || matches!(
             effect,
             Effect::PutCounter { .. }
@@ -32454,6 +32403,52 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         || copy_token_recall
         || play_from_exile_grant
         || free_cast_that_card_grant
+        || plural_library_shuffle_recall(lower)
+}
+
+/// CR 701.24c + CR 608.2c: the PLURAL library-recall anaphor — "[you may]
+/// shuffle them into <possessive> library" names every object the previous
+/// instruction put elsewhere (Choice of Fortunes: the two sought cards now in
+/// hand). Start-anchored like the other recalls so a same-sentence "create …
+/// and shuffle them into …" (Gunk Slug) is not a cross-clause anaphor.
+pub(crate) fn plural_library_shuffle_recall(lower: &str) -> bool {
+    (
+        opt(tag::<_, _, OracleError<'_>>("you may ")),
+        tag("shuffle them into "),
+    )
+        .parse(lower)
+        .is_ok()
+        && scan_contains_phrase(lower, "library")
+}
+
+/// CR 701.24c + CR 608.2c: "shuffle them into your library" after a tracked-set
+/// publisher moves EVERY member of that set, so the pronoun's singular
+/// `ChangeZone` (whose `TrackedSet` form means "choose one from among" —
+/// Expressive Iteration) becomes a mass `ChangeZoneAll` over the chain set.
+/// CR 701.24a: `TerminalShuffle` leaves the one shuffle to the chained terminal
+/// `Shuffle`, after every member has moved.
+fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
+    if let Effect::ChangeZone {
+        origin,
+        destination: Zone::Library,
+        target: TargetFilter::ParentTarget,
+        ..
+    } = effect
+    {
+        *effect = Effect::ChangeZoneAll {
+            origin: *origin,
+            destination: Zone::Library,
+            target: tracked_set_filter(),
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+        };
+    }
 }
 
 /// CR 608.2c: the SINGULAR battlefield-recall anaphor — "return it " at a
@@ -32966,6 +32961,36 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
     }
 }
 
+/// Apply `f` to every [`QuantityRef`] leaf in a [`QuantityExpr`] tree.
+/// Companion to [`each_quantity_expr_mut`]: that visitor reaches the
+/// top-level expressions of an `Effect`, this one descends into them, so
+/// callers that rewrite refs (the scope-rebind walkers below, the damage
+/// recipient rebind in `lower.rs`) share one traversal instead of
+/// hand-rolling the recursion per call site. The match is exhaustive over
+/// `QuantityExpr` (no wildcard) so a new expression form breaks compilation
+/// here rather than silently escaping every rewrite.
+pub(crate) fn each_quantity_ref_mut(expr: &mut QuantityExpr, f: &mut impl FnMut(&mut QuantityRef)) {
+    match expr {
+        QuantityExpr::Ref { qty } => f(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => each_quantity_ref_mut(inner, f),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                each_quantity_ref_mut(inner, f);
+            }
+        }
+        QuantityExpr::UpTo { max } => each_quantity_ref_mut(max, f),
+        QuantityExpr::Power { exponent, .. } => each_quantity_ref_mut(exponent, f),
+        QuantityExpr::Difference { left, right } => {
+            each_quantity_ref_mut(left, f);
+            each_quantity_ref_mut(right, f);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
 /// CR 109.4 + CR 608.2c: Apply `f` to every `TargetFilter` reachable through
 /// the common target-bearing fields of an `Effect`. Companion to
 /// `each_quantity_expr_mut`; used by callers that need to rewrite target slots
@@ -33354,40 +33379,45 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
         }
     }
 
-    fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::LifeTotal {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+    fn rewrite_quantity_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                QuantityRef::HandSize {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::HandSize {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+            }
+            QuantityRef::HandSize {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                // CR 119.3 + CR 109.5 + CR 608.2c: "the life they/that player lost
-                // this turn" under a per-opponent `player_scope` loop binds to the
-                // iterating player, the same rebind the analogous
-                // `LifeTotal`/`HandSize` arms above perform for "their life"/"their
-                // hand". The leaf combinator emits `Target`; this walker (run only
-                // on `player_scope`-bearing defs) maps it to `ScopedPlayer`. A
-                // purely targeted clause (Blitzwing — no `player_scope`) never
-                // reaches this walker, so its `Target` survives to read the
-                // targeted opponent's own life lost.
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Target,
-                } => {
-                    *qty = QuantityRef::LifeLostThisTurn {
-                        player: PlayerScope::ScopedPlayer,
-                    }
+            }
+            // CR 119.3 + CR 109.5 + CR 608.2c: "the life they/that player lost
+            // this turn" under a per-opponent `player_scope` loop binds to the
+            // iterating player, the same rebind the analogous
+            // `LifeTotal`/`HandSize` arms above perform for "their life"/"their
+            // hand". The leaf combinator emits `Target`; this walker (run only
+            // on `player_scope`-bearing defs) maps it to `ScopedPlayer`. A
+            // purely targeted clause (Blitzwing — no `player_scope`) never
+            // reaches this walker, so its `Target` survives to read the
+            // targeted opponent's own life lost.
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Target,
+            } => {
+                *qty = QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::ScopedPlayer,
                 }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == crate::types::ability::CountBinding::Anaphoric =>
+            {
+                match zone {
                     crate::types::ability::ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::ScopedPlayer,
@@ -33416,29 +33446,15 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                     // form at least lets a targeting ability resolve
                     // correctly.
                     crate::types::ability::ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_quantity_expr(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_quantity_expr(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_quantity_expr(left);
-                rewrite_quantity_expr(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_quantity_ref)
+    });
     // CR 109.5: Explicit All scopes retain Controller for their ScopedPlayer rewrite;
     // inherited opponent-decline nodes have no local scope and still rebind here.
     if !matches!(def.player_scope, Some(PlayerFilter::All))
@@ -33561,24 +33577,29 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
 /// whose condition names "the chosen player's" phase step (The Rack) to read
 /// the source's persisted `ChosenAttribute::Player`.
 pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDefinition) {
-    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
 
-    fn rewrite_qty(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal { player }
-                | QuantityRef::HandSize { player }
-                | QuantityRef::LifeLostThisTurn { player }
-                | QuantityRef::LifeGainedThisTurn { player }
-                | QuantityRef::PartySize { player }
-                    if matches!(
-                        *player,
-                        PlayerScope::Target | PlayerScope::ScopedPlayer | PlayerScope::Controller
-                    ) =>
-                {
-                    *player = PlayerScope::SourceChosenPlayer;
-                }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if matches!(
+                    *player,
+                    PlayerScope::Target | PlayerScope::ScopedPlayer | PlayerScope::Controller
+                ) =>
+            {
+                *player = PlayerScope::SourceChosenPlayer;
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
                     ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::SourceChosenPlayer,
@@ -33593,29 +33614,15 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
                         };
                     }
                     ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_qty(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_qty(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_qty(left);
-                rewrite_qty(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_ref)
+    });
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_player_quantity_refs_to_source_chosen(sub);
     }
@@ -33625,21 +33632,26 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
 }
 
 pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefinition) {
-    use crate::types::ability::{CountScope, PlayerScope, QuantityRef, ZoneRef};
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
 
-    fn rewrite_qty(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal { player }
-                | QuantityRef::HandSize { player }
-                | QuantityRef::LifeLostThisTurn { player }
-                | QuantityRef::LifeGainedThisTurn { player }
-                | QuantityRef::PartySize { player }
-                    if *player == PlayerScope::Target =>
-                {
-                    *player = PlayerScope::ScopedPlayer;
-                }
-                QuantityRef::TargetZoneCardCount { zone } => match zone {
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if *player == PlayerScope::Target =>
+            {
+                *player = PlayerScope::ScopedPlayer;
+            }
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery.
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
                     ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
                             player: PlayerScope::ScopedPlayer,
@@ -33655,34 +33667,86 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
                     }
                     // No scoped-player equivalent for exile counts; leave as-is.
                     ZoneRef::Exile => {}
-                },
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::ClampMin { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
-            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-                for inner in exprs {
-                    rewrite_qty(inner);
                 }
             }
-            QuantityExpr::UpTo { max } => rewrite_qty(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_qty(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_qty(left);
-                rewrite_qty(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
+            _ => {}
         }
     }
 
-    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    each_quantity_expr_mut(&mut def.effect, &mut |expr| {
+        each_quantity_ref_mut(expr, &mut rewrite_ref)
+    });
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_event_player_quantity_refs_to_scoped(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_event_player_quantity_refs_to_scoped(else_branch);
+    }
+}
+
+/// CR 603.2 + CR 608.2c + CR 115.1: Lower an event-anchored anaphoric zone
+/// count to a scoped-player read. In a damage-done trigger whose recipient is
+/// the event player ("... deals damage to that player equal to the number of
+/// cards in their hand" — Sword of War and Peace), "their" is bound to the
+/// damaged player by the triggering event: no player choice is announced, so
+/// the count must not surface a companion announcement slot (the slot builder
+/// reads `TargetZoneCardCount` as proof of a declared target, and an
+/// any-player slot with more than one legal player stalls the trigger at
+/// target selection). Only anaphoric counts (`CountBinding::Anaphoric`) are
+/// rewritten — an explicit "target player's/opponent's ..." count declares
+/// its own announcement and stays for the slot machinery — and only inside
+/// effects whose own player anchor is the event player (`TriggeringPlayer`),
+/// so a genuinely announced recipient keeps its slot. Zone mapping mirrors
+/// `rewrite_event_player_quantity_refs_to_scoped` (exile has no scoped
+/// equivalent and is left as-is).
+pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefinition) {
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
+
+    fn rewrite_ref(qty: &mut QuantityRef) {
+        match qty {
+            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+            // An explicit "target player's/opponent's …" count declares its
+            // own announcement and must survive for the slot machinery —
+            // scope alone cannot tell them apart (both use `TargetPlayer`).
+            QuantityRef::TargetZoneCardCount { zone, binding, .. }
+                if *binding == CountBinding::Anaphoric =>
+            {
+                match zone {
+                    ZoneRef::Hand => {
+                        *qty = QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        }
+                    }
+                    ZoneRef::Library | ZoneRef::Graveyard => {
+                        *qty = QuantityRef::ZoneCardCount {
+                            zone: zone.clone(),
+                            card_types: Vec::new(),
+                            scope: CountScope::ScopedPlayer,
+                            filter: None,
+                        };
+                    }
+                    // No scoped-player equivalent for exile counts; leave as-is.
+                    ZoneRef::Exile => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_effect(effect: &mut Effect) {
+        if matches!(effect.target_filter(), Some(TargetFilter::TriggeringPlayer)) {
+            each_quantity_expr_mut(effect, &mut |expr| {
+                each_quantity_ref_mut(expr, &mut rewrite_ref)
+            });
+        }
+    }
+
+    rewrite_effect(&mut def.effect);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_event_anchored_zone_counts_to_scoped(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_event_anchored_zone_counts_to_scoped(else_branch);
     }
 }
 
@@ -41140,6 +41204,41 @@ pub(crate) fn parse_effect_chain_ir(
             });
         let effective_prev_effect =
             absorbed_choice_prev.or_else(|| non_absorbed.first().map(|c| effective_effect_of(c)));
+        // CR 701.24c + CR 608.2c: "then shuffle(s) the rest into their library"
+        // directly after a `RevealUntil` whose rest pile went into the library
+        // shuffles that library — the revealing player's (Transmogrify, Blessed
+        // Reincarnation: the exiled creature's controller). The subject-elided
+        // clause parses with the caster default, so bind it to the reveal's
+        // player; an explicit subject ("that player shuffles …") already
+        // produced a non-default target. After any other antecedent the
+        // subject-elided "rest" is not a library pile (Wand of Wonder's exiled
+        // misses, Worldpurge's unchosen hand cards): a bare shuffle would drop
+        // the move, so keep the clause an explicit gap.
+        if let Effect::Shuffle {
+            target: TargetFilter::Controller,
+        } = clause.effect
+        {
+            let rest_library_player = match effective_prev_effect.as_ref() {
+                Some(Effect::RevealUntil {
+                    player,
+                    rest_destination: Zone::Library,
+                    ..
+                }) => Some(player.clone()),
+                _ => None,
+            };
+            match (
+                imperative::shuffle_rest_clause(&normalized_text.to_lowercase()),
+                rest_library_player,
+            ) {
+                (Some(_), Some(player)) => {
+                    clause.effect = Effect::Shuffle { target: player };
+                }
+                (Some(imperative::ShuffleRestClause::ThirdPerson), None) => {
+                    clause.effect = Effect::unimplemented("shuffle", normalized_text);
+                }
+                (Some(imperative::ShuffleRestClause::Imperative) | None, _) => {}
+            }
+        }
         let followup_continuation = effective_prev_effect
             .as_ref()
             .and_then(|eff| {
@@ -41175,6 +41274,42 @@ pub(crate) fn parse_effect_chain_ir(
                         _ => None,
                     }
                 })
+            })
+            .or_else(|| {
+                // CR 701.20a + CR 608.2c: A clause disposing of cards revealed by an
+                // earlier `RevealUntil` ("put all cards revealed this way...",
+                // "put the nonland card into your hand and the rest...", "put the revealed cards...")
+                // may be separated from the `RevealUntil` by intervening transparent
+                // instructions that use the revealed card (such as `Pump` on Erratic Mutation,
+                // or `DealDamage` on Explosive Revelation).
+                // Scan `non_absorbed` (nearest-first) for a preceding `RevealUntil` antecedent.
+                // The parser is the detector: only bind if `parse_followup_continuation_ast`
+                // against the candidate `RevealUntil` produces a recognized pile-disposition
+                // continuation. The scan stops at an unparsed clause: an unrecognized
+                // instruction may itself select or re-bind the referent ("Choose one of the
+                // revealed creature cards", Dance, Pathetic Marionette), so a later "all
+                // other cards revealed this way" can no longer be read as the reveal's rest
+                // pile. `RevealUntilKept` is never bound across clauses: its "put it" /
+                // "put that card" anaphor names the nearest referent, and its application
+                // patches only the immediately preceding definition.
+                non_absorbed
+                    .iter()
+                    .map(|c| effective_effect_of(c))
+                    .take_while(|effect| !matches!(effect, Effect::Unimplemented { .. }))
+                    .find_map(|deeper| match deeper {
+                        Effect::RevealUntil { .. } => {
+                            match parse_followup_continuation_ast(normalized_text, &deeper, ctx) {
+                                Some(
+                                    continuation @ (ContinuationAst::RevealUntilAllToZone {
+                                        ..
+                                    }
+                                    | ContinuationAst::PutRest { .. }),
+                                ) => Some(continuation),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
             })
             .or_else(|| {
                 // CR 707.10c: a "you may choose new targets for the copy/copies"

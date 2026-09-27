@@ -486,6 +486,10 @@
     "upNext": "Następny — Mecz {{number}}",
     "nextMatch": "Następny mecz",
     "endRun": "Zakończ bieg",
+    "retryEndRun": "Ponów zakończenie biegu",
+    "retryResume": "Ponów wznawianie",
+    "startUnavailable": "Nie udało się rozpocząć meczu draftu.",
+    "resumeUnavailable": "Ten bieg draftu jest niedostępny. Zakończ go, aby zacząć od nowa.",
     "done": "Gotowe",
     "perfectRun": "Idealny bieg",
     "runComplete": "Bieg zakończony",
@@ -721,5 +725,15 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Autozapis] {{format}}",
+    "slotQuick": "Szybki draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Draft kostki",
+    "slotPremier": "Draft Premier",
+    "slotTraditional": "Draft tradycyjny",
+    "slotCommanderDraft": "Draft Commander",
+    "slotWinston": "Draft Winston"
   }
 }

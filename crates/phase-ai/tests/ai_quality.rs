@@ -78,6 +78,7 @@ fn blocks_lethal_attack() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
         };
     }
 
@@ -114,6 +115,7 @@ fn does_not_block_when_safe() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
         };
     }
 
@@ -1185,6 +1187,7 @@ fn ai_vs_ai_completes_combat_sequence() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
         };
     }
 
@@ -1250,6 +1253,7 @@ fn run_ai_actions_non_empty_batch_carries_break_reason() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
         };
     }
 
@@ -1318,6 +1322,7 @@ fn declare_blockers_never_produces_pass_priority() {
             ]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
         };
     }
 

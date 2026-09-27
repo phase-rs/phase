@@ -23,8 +23,8 @@ use engine::types::ability::{
     Effect, QuantityExpr, ResolvedAbility, SkipScope, StepSkipTarget, TargetFilter, TargetRef,
 };
 use engine::types::game_state::{CombatPhaseSkipState, ExtraPhase, GameState};
-use engine::types::identifiers::ObjectId;
-use engine::types::phase::Phase;
+use engine::types::identifiers::{ExtraPhaseId, ObjectId};
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 use engine::types::player::PlayerId;
 
 /// Build the False Peace effect: a turn-scoped combat skip targeting `player`.
@@ -61,19 +61,22 @@ fn arm_skip(state: &mut GameState, player: PlayerId) {
 }
 
 /// Drive `advance_phase` from PreCombatMain and report the phase the active
-/// player lands in after the (possibly-skipped) combat phase, plus the
-/// combat-phase counter for the turn.
+/// player lands in after the (possibly-skipped) combat phase, plus the number
+/// of beginning of combat steps begun (the step tally's `BeginCombat` count).
 fn run_combat_segment(state: &mut GameState) -> (Phase, u32) {
     state.phase = Phase::PreCombatMain;
-    state.combat_phases_started_this_turn = 0;
+    state.steps_started_this_turn.clear();
     let mut events = Vec::new();
     advance_phase(state, &mut events);
-    (state.phase, state.combat_phases_started_this_turn)
+    (
+        state.phase,
+        state.steps_started_this_turn.count(Phase::BeginCombat),
+    )
 }
 
 /// (a) The bound turn never enters any combat step: advancing from PreCombatMain
-/// lands directly in PostCombatMain and `combat_phases_started_this_turn` stays
-/// 0. Fails if the applier/injection is reverted (combat would run normally).
+/// lands directly in PostCombatMain and the step tally's `BeginCombat` count
+/// stays 0. Fails if the applier/injection is reverted (combat would run normally).
 #[test]
 fn bound_turn_skips_all_combat_phases() {
     let mut state = GameState::new_two_player(42);
@@ -121,9 +124,10 @@ fn extra_combat_phase_on_bound_turn_is_also_skipped() {
     // skip would have been consumed by the first combat and let this one run.
     state.extra_phases.push(ExtraPhase {
         anchor: Phase::EndCombat,
-        phase: Phase::BeginCombat,
+        segment: TurnSegment::Phase(PhaseGroup::Combat),
         attacker_restriction: None,
         attacker_restriction_source: None,
+        id: ExtraPhaseId::default(),
     });
 
     // Single segment drives the whole combat cascade including the extra combat.

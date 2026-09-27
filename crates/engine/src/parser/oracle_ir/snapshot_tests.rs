@@ -106,6 +106,32 @@ fn parser_trace_uses_production_output_and_records_real_item_routes() {
 }
 
 #[test]
+fn elenda_life_threshold_static_preserves_ir_and_lowered_shape() {
+    let text = "As long as your life total is greater than your starting life total, Elenda gets +1/+1 and has menace. Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.";
+    let (ir, lowered) = parse_two_layer(
+        text,
+        "Elenda, Saint of Dusk",
+        &["Legendary", "Creature"],
+        &["Vampire", "Knight"],
+    );
+
+    assert_eq!(
+        lowered.statics.len(),
+        2,
+        "both printed conditional statics must survive lowering: {lowered:#?}"
+    );
+    assert!(
+        lowered
+            .statics
+            .iter()
+            .all(|static_def| static_def.condition.is_some()),
+        "both printed Elenda statics must carry their life conditions: {lowered:#?}"
+    );
+    insta::assert_json_snapshot!("elenda_life_threshold_ir", &ir);
+    insta::assert_json_snapshot!("elenda_life_threshold_lowered", &lowered);
+}
+
+#[test]
 fn parser_trace_skull_skaab_pair_preserves_input_difference_and_omits_trigger_carrier() {
     let left_text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a nontoken creature, create a 2/2 black Zombie creature token.";
     let right_text = "Exploit (When this creature enters, you may sacrifice a creature.)\nWhenever a creature you control exploits a creature, create a 2/2 black Zombie creature token.";

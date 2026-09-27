@@ -34,10 +34,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
     CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
-    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PtValue,
-    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    ControllerRef, CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration,
+    Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
+    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
+    PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
@@ -7379,14 +7379,16 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of your next main phase, "),
             ),
-            // CR 500.8 + CR 603.7a: "at the beginning of that combat" refers to an
-            // additional combat phase just scheduled by the parent effect
-            // (e.g., Moraug, Fury of Akoum's landfall trigger). The additional
-            // combat is pushed as the very next phase, so we fire on the next
-            // BeginCombat.
+            // CR 603.7a + CR 500.6: "at the beginning of that combat" names the
+            // combat phase the preceding instruction added (Moraug, Fury of
+            // Akoum; World at War; Swinging Ship). That combat need not be the
+            // next one (CR 500.8: it follows its anchor, and the most recently
+            // created phase occurs first), so the condition names the added
+            // phase itself; `entry` is bound at creation.
             value(
-                DelayedTriggerCondition::AtNextPhase {
+                DelayedTriggerCondition::AtBeginningOfAddedPhase {
                     phase: Phase::BeginCombat,
+                    entry: None,
                 },
                 tag("at the beginning of that combat, "),
             ),
@@ -9198,6 +9200,44 @@ pub(super) fn parse_contextual_bare_card_aggregate(
 /// Safety: `pos` is computed from `lower.find(...)` and used to slice both `text`
 /// and `lower` at the same byte offset. This is sound because Oracle text is ASCII
 /// and `to_lowercase()` preserves byte length for ASCII characters.
+/// CR 115.1 + CR 601.2c: Rebind a dead event-context damage recipient to the
+/// clause's announced player target. "Tibalt deals damage equal to the number
+/// of cards in target player's hand to that player": the "that player" anaphor
+/// falls back to `TriggeringPlayer`, but a loyalty ability has no triggering
+/// event, so the ref can never resolve — and the amount's
+/// `TargetZoneCardCount` proves the clause declares a player target (it reads
+/// `ability.targets`, empty without a slot). Rebind to `Player` so
+/// announcement prompts and both halves read the same choice. The rebind
+/// targets `Player` (any player): the only printed card in this shape reads
+/// "target player's ...". Gated to non-trigger contexts: inside a trigger
+/// body "that player" is the live event player and must stay event-bound.
+///
+/// Instance sharing: the recipient anaphor inherits the count's target
+/// instance — one announcement, read by both halves — so every `Explicit`
+/// count in the amount flips to `Anaphoric` (shared). Without the flip the
+/// slot gate would surface a second slot for a single CR 601.2c instance.
+fn rebind_dead_event_player_damage_recipient(
+    target: TargetFilter,
+    amount: &mut QuantityExpr,
+    ctx: &ParseContext,
+) -> TargetFilter {
+    if matches!(target, TargetFilter::TriggeringPlayer)
+        && !ctx.in_trigger
+        && amount.contains_target_zone_card_count()
+    {
+        super::each_quantity_ref_mut(amount, &mut |qty| {
+            if let QuantityRef::TargetZoneCardCount { binding, .. } = qty {
+                if *binding == CountBinding::Explicit {
+                    *binding = CountBinding::Anaphoric;
+                }
+            }
+        });
+        TargetFilter::Player
+    } else {
+        target
+    }
+}
+
 pub(super) fn try_parse_damage_with_remainder<'a>(
     text: &'a str,
     lower: &'a str,
@@ -9420,6 +9460,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     parse_event_context_ref_with_ctx(target_phrase, ctx)
                 {
                     let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
+                    let mut qty = qty;
+                    let target = rebind_dead_event_player_damage_recipient(target, &mut qty, ctx);
                     #[cfg(debug_assertions)]
                     assert_no_compound_remainder(ecr_rem, target_phrase);
                     return Some((
@@ -9698,6 +9740,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
     // CR 608.2k: Check for event-context references before standard target parsing.
     if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(after_to, ctx) {
         let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
+        let mut amount = amount;
+        let target = rebind_dead_event_player_damage_recipient(target, &mut amount, ctx);
         return Some((
             Effect::DealDamage {
                 amount: amount.clone(),
@@ -14022,6 +14066,73 @@ mod tests {
                 phase: Phase::EndCombat,
             })
         );
+    }
+
+    /// CR 603.7a + CR 500.6: "at the beginning of that combat" is the anaphor
+    /// for the combat phase the preceding instruction added, so it parses to
+    /// the added-phase condition, unbound (`entry: None`; bound at creation).
+    /// Every printed producer (Moraug, Fury of Akoum; World at War; Swinging
+    /// Ship) carries it as the sibling of its `AdditionalPhase`. Negative: "at
+    /// the beginning of the next end step" stays an occurrence filter.
+    #[test]
+    fn that_combat_prefix_parses_to_an_unbound_added_phase_condition() {
+        fn delayed_condition_in(def: &AbilityDefinition) -> Option<DelayedTriggerCondition> {
+            match &*def.effect {
+                Effect::CreateDelayedTrigger { condition, .. } => Some(condition.clone()),
+                _ => def.sub_ability.as_deref().and_then(delayed_condition_in),
+            }
+        }
+        let that_combat = DelayedTriggerCondition::AtBeginningOfAddedPhase {
+            phase: Phase::BeginCombat,
+            entry: None,
+        };
+
+        let (body, condition) = strip_temporal_prefix(
+            "at the beginning of that combat, untap all creatures you control",
+        );
+        assert_eq!(body, "untap all creatures you control");
+        assert_eq!(condition, Some(that_combat.clone()));
+
+        let (_, next_end) =
+            strip_temporal_prefix("at the beginning of the next end step, sacrifice it");
+        assert_eq!(
+            next_end,
+            Some(DelayedTriggerCondition::AtNextPhase { phase: Phase::End })
+        );
+
+        let moraug = crate::parser::oracle::parse_oracle_text(
+            "Each creature you control gets +1/+0 for each time it has attacked this turn.\nLandfall — Whenever a land you control enters, if it's your main phase, there's an additional combat phase after this phase. At the beginning of that combat, untap all creatures you control.",
+            "Moraug, Fury of Akoum",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Minotaur".to_string(), "Warrior".to_string()],
+        );
+        let world_at_war = crate::parser::oracle::parse_oracle_text(
+            "After the second main phase this turn, there's an additional combat phase followed by an additional main phase. At the beginning of that combat, untap all creatures that attacked this turn.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)",
+            "World at War",
+            &["Rebound".to_string()],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let swinging_ship = crate::parser::oracle::parse_oracle_text(
+            "Visit — After the first combat phase this turn, there's an additional combat phase. At the beginning of that combat, untap all creatures that attacked this turn.",
+            "Swinging Ship",
+            &[],
+            &["Artifact".to_string()],
+            &["Attraction".to_string()],
+        );
+        for (card, parsed) in [
+            ("Moraug", &moraug),
+            ("World at War", &world_at_war),
+            ("Swinging Ship", &swinging_ship),
+        ] {
+            let found = parsed
+                .abilities
+                .iter()
+                .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                .find_map(delayed_condition_in);
+            assert_eq!(found, Some(that_combat.clone()), "{card}");
+        }
     }
 
     /// CR 603.7a + CR 701.31: the inline "When a player planeswalks, …" delayed

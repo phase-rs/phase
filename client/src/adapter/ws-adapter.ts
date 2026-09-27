@@ -210,16 +210,33 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 81 — WaitingFor.ChooseDungeon options (DungeonPreview) gained required
+ * 84 — WaitingFor.ChooseDungeon options (DungeonPreview) gained required
  *      `card`, `rooms`, and `room_count`: the whole dungeon behind each
  *      choice, so the prompt previews each card instead of describing only
  *      its entry room. A PARSE bump like 67, not a capability bump like 24:
- *      none of the fields is serde-optional, so a v80 peer fails
+ *      none of the fields is serde-optional, so a v83 peer fails
  *      deserialization on a snapshot paused at the dungeon choice, and the
  *      reverse skew throws in render — this client reads `card`
  *      unconditionally to resolve the preview art. Saved games still load
  *      through the choice-preview migration. P2P moves in lockstep; lobby
  *      messages are unchanged.
+ * 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
+ *      Kopala): ReduceAbilityCost statics carry targets and frequency,
+ *      GameState journals each turn's activations, and the activation cost
+ *      carrier holds the target-settlement lock. A v82 peer would drop these
+ *      silently and price one activation differently.
+ * 82 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
+ *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
+ *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a
+ *      minted id, and steps_started_this_turn replaces the two per-turn step
+ *      counters — see PROTOCOL_VERSION's own `/// 82` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client hands server frames to
+ *      JSON.parse, so a v81 client would take the new shapes with no decode
+ *      error; the exact-match version check at connect refuses the pairing
+ *      instead.
+ * 81 — AlternativeCastChoice.keyword gains { type: "Surge" } in serialized
+ *      GameState (CR 702.117a); an older client's modal cannot render it. The
+ *      exact-match version check at connect refuses the pairing.
  * 80 — ExileLinkKind.HideawayLookable carries { grant, lookers,
  *      source_incarnation } in serialized GameState, and
  *      DerivedViews.linked_exile_ids is new and rendered directly. The
@@ -562,8 +579,9 @@ export class NativeEngineVersionMismatchError extends Error {
  *      PendingCast.activation_cost_snapshot and AbilityModeChoice
  *      activation_cost_snapshot fields are additive and skipped when empty, so
  *      every spell frame is byte-identical to v78.
+ *
  */
-export const PROTOCOL_VERSION = 81;
+export const PROTOCOL_VERSION = 84;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

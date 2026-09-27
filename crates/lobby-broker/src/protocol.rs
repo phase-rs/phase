@@ -60,19 +60,81 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 81 — `WaitingFor::ChooseDungeon` options (`DungeonPreview`) gained required
+/// 84 — `WaitingFor::ChooseDungeon` options (`DungeonPreview`) gained required
 ///      `card` (`DungeonCardView`), `rooms` (`Vec<DungeonRoomNodeView>`), and
 ///      `room_count` fields, publishing the whole dungeon behind each choice —
 ///      the card's Scryfall identity plus every room with its outgoing edges
 ///      and its position on the card face — so the prompt can preview each
 ///      card instead of describing only its entry room. A PARSE bump like 67,
 ///      not a silent capability loss like 24: none of the fields carries a
-///      serde default, so a v80 peer cannot deserialize a snapshot paused at
-///      the dungeon choice. The break is symmetric — a v81 client reading a
-///      v80 host's option finds no `card` and throws in render rather than
+///      serde default, so a v83 peer cannot deserialize a snapshot paused at
+///      the dungeon choice. The break is symmetric — a v84 client reading a
+///      v83 host's option finds no `card` and throws in render rather than
 ///      degrading. Saved games still load: the choice-preview migration
-///      rebuilds protocol-80 options from their `dungeon` key. P2P moves in
+///      rebuilds older options from their `dungeon` key. P2P moves in
 ///      lockstep; lobby messages are unchanged.
+
+/// 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
+///      Kopala): `StaticMode::ReduceAbilityCost` gains `targets` and
+///      `frequency`, `GameState` gains the per-turn activation journal
+///      `abilities_activated_this_turn_by_player`, `ResolvedAbility` gains its
+///      pre-payment `activation_record`, the `AbilityActivated` ledger edit
+///      gains its record, and the `ActivationCostSnapshot` carrier gains
+///      `mana_carrier`, `settlement_tail` and the `TargetSettlement` lock point.
+///      A v82 peer would drop the new fields silently, which in P2P prices
+///      one activation differently on host and guest.
+///
+/// 82 — Added phases and steps anchored, identified and counted per
+///      CR 500.8–500.10. Every change rides full-game state; lobby messages
+///      are unchanged, and P2P moves in lockstep (wire 64).
+///      `Effect::AdditionalPhase.after` changed from `Phase` to the adjacently
+///      tagged `ExtraPhaseAnchor` (`Step(Phase)` / `ThisStep` /
+///      `ThisPhase { named }` / `FirstOfTurn(PhaseGroup)`, e.g.
+///      `{"type":"FirstOfTurn","data":"PostcombatMain"}`). `after` has no
+///      serde default and abilities ride inside `GameObject`, so every
+///      full-GameState frame holding any additional-phase card is unparseable
+///      across the pair — an unconditional PARSE bump like 23 and 68.
+///      `DelayedTriggerCondition` gained `AtBeginningOfAddedPhase { phase,
+///      entry }` (`{"type":"AtBeginningOfAddedPhase","phase":"BeginCombat"}`),
+///      which "at the beginning of that combat" (Moraug, World at War,
+///      Swinging Ship) parses to; an older peer cannot parse it — PARSE, as
+///      above. `ExtraPhase.phase` (a `Phase`) was replaced by `segment`, a
+///      `TurnSegment` (`{"type":"Phase","data":"Combat"}`,
+///      `{"type":"CreatedPhase","data":"Upkeep"}`,
+///      `{"type":"Step","data":"End"}`), and `GameState::extra_phase_resume`
+///      changed its element type from `Phase` to
+///      `InsertedPhaseResume { anchor, segment, entry }`. Neither `segment`
+///      defaults, so a frame whose `extra_phases` or `extra_phase_resume` is
+///      non-empty is unparseable in both directions — PARSE, as above; empty
+///      vectors serialize identically. `ExtraPhase.id` and
+///      `InsertedPhaseResume.entry` (an `ExtraPhaseId`, a bare `u64` naming
+///      the scheduled extra phase or step), `GameState`'s allocator
+///      `next_extra_phase_id`, and the resolution-scoped
+///      `last_added_phase_ids` (omitted while empty) are all
+///      `#[serde(default)]`, and no type on the path sets
+///      `deny_unknown_fields`, so they parse in both directions, but the
+///      values do not cross: an older peer drops the ids, and a newer peer
+///      reads an older peer's scheduled phases as unminted (0).
+///      `GameState.combat_phases_started_this_turn` and
+///      `end_steps_started_this_turn` (two `u32`s) were replaced by
+///      `steps_started_this_turn`, a per-step tally keyed by `Phase`
+///      (`{"BeginCombat": n, "End": m, …}`) and omitted while empty. All three
+///      fields default, so a frame parses in both directions, but the counts
+///      do not cross: the receiving side reads zero, so the "first combat
+///      phase / first end step of the turn" conditions can answer differently
+///      on the two peers — a silent disagreement, which is why that change
+///      alone would also be a bump rather than an additive field (see 24). A
+///      session persisted mid-turn before the upgrade counts that turn's
+///      steps from zero until its next turn begins; no compat deserializer
+///      ships.
+///
+/// 81 — CR 702.117a Surge cast election: `AlternativeCastKeyword::Surge` is a
+///      new tag on a `#[serde(tag = "type")]` enum carried by
+///      `WaitingFor::AlternativeCastChoice` in serialized `GameState`, with no
+///      fallback. A conditional PARSE bump like 76/79: a v80 peer fails to
+///      parse only when a Surge prompt is actually serialized. Full-game peers
+///      and P2P move in lockstep (wire 63); lobby messages are unchanged.
+///
 /// 80 — CR 406.3 exile look authority: `ExileLinkKind::HideawayLookable`
 ///      changed from a unit variant to `{ grant, lookers, source_incarnation }`
 ///      in serialized `GameState`, and `source_incarnation` has no serde
@@ -643,7 +705,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 81;
+pub const PROTOCOL_VERSION: u32 = 84;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1859,12 +1921,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 81);
+        assert_eq!(PROTOCOL_VERSION, 84);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 80);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 83);
     }
 
     #[test]

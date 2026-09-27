@@ -3319,16 +3319,16 @@ mod tests {
     }
 
     /// `WaitingFor::ChooseDungeon` options gained required `card`, `rooms`,
-    /// and `room_count` fields. A v80 peer cannot decode the expanded choice
-    /// preview, so it must be refused before it receives v81 state.
+    /// and `room_count` fields. A v83 peer cannot decode the expanded choice
+    /// preview, so it must be refused before it receives v84 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_81_for_dungeon_choice_preview() {
-        assert_eq!(PROTOCOL_VERSION, 81);
+    fn protocol_version_is_84_for_dungeon_choice_preview() {
+        assert_eq!(PROTOCOL_VERSION, 84);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3339,7 +3339,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_81_for_dungeon_choice_preview` stays
+    /// `protocol_version_is_84_for_dungeon_choice_preview` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

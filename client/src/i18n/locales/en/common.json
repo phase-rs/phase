@@ -423,5 +423,25 @@
       "no-turn": "No TURN relay provided",
       "aborted": "Request cancelled"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Another Phase tab is busy. Close other Phase tabs and try again.",
+    "title": {
+      "save": "Couldn't save deck",
+      "clone": "Couldn't clone deck",
+      "import": "Couldn't import deck",
+      "delete": "Couldn't delete deck",
+      "organize": "Couldn't update deck organization",
+      "updateFeeds": "Couldn't update deck feeds",
+      "restore": "Couldn't restore backup",
+      "applyCloud": "Couldn't apply cloud decks",
+      "autosaveDraft": "Couldn't autosave your draft deck"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase couldn't reach browser storage. Try again in a moment."
+  },
+  "savedDeckChanged": {
+    "description": "This deck changed before your action ran, so nothing was changed. Check the deck and try again."
   }
 }

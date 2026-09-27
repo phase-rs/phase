@@ -183,6 +183,25 @@ fn resolve_effect_recipients(
     // Tier C exclusion list warns about (its 14 Controller/Owner-only cards are
     // additionally denied pins upstream, so this can only ever fail safe).
     if !ability.targets.is_empty() {
+        // CR 115.1 + CR 601.2c (MED1): a separately announced quantity slot
+        // serves the magnitude, not receipt — the count-source takes no
+        // damage. Absolute announced index, so the exclusion composes with the
+        // positional `[1..]` split below (never the other way round, per the
+        // pin-ordering rule there). `None` for every shape without a separate
+        // player-typed quantity slot, leaving all existing callers unchanged.
+        let excluded = crate::game::ability_utils::quantity_slot_player_ordinal(
+            &ability.targets,
+            Some(ability),
+        )
+        .and_then(|ordinal| {
+            ability
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| matches!(target, TargetRef::Player(_)))
+                .nth(ordinal)
+                .map(|(index, _)| index)
+        });
         if skip_first_target && ability.targets.len() > 1 {
             // The positional split runs on the RAW list and the pin filter is
             // applied AFTER it — never the other way round. `[1..]` encodes slot
@@ -192,14 +211,18 @@ fn resolve_effect_recipients(
             // to this file's own positional convention.
             return ability.targets[1..]
                 .iter()
-                .filter(|target| match target {
-                    TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
-                    TargetRef::Player(_) => true,
+                .enumerate()
+                .filter(|(offset, target)| {
+                    Some(offset + 1) != excluded
+                        && match target {
+                            TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
+                            TargetRef::Player(_) => true,
+                        }
                 })
-                .cloned()
+                .map(|(_, target)| target.clone())
                 .collect();
         }
-        return ability.live_object_targets(state);
+        return ability.live_object_targets_excluding(state, excluded);
     }
     match target_filter {
         TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
@@ -2172,19 +2195,27 @@ fn collect_matching_players(
                     // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
                     // whose [scalar attr] [comparator] [value]" — candidate
                     // satisfies both `relation` and the per-candidate scalar
-                    // comparison. `attr` is read directly off `p`; `value` is
-                    // the controller-relative threshold, resolved once.
+                    // comparison. `attr` is read for `p`; `value`
+                    // keeps the source controller and binds this candidate.
                     PlayerFilter::PlayerAttribute {
                         ref relation,
                         ref attr,
                         ref comparator,
                         ref value,
                     } => {
-                        let threshold = crate::game::quantity::resolve_quantity(
+                        let threshold = crate::game::quantity::resolve_quantity_with_ctx(
                             state,
                             value,
                             source_controller,
-                            source_id,
+                            crate::game::quantity::QuantityContext {
+                                entering: None,
+                                source: source_id,
+                                trigger_source: None,
+                                recipient: None,
+                                scoped_player: Some(p.id),
+                                damage_source: None,
+                                event_amount: None,
+                            },
                         );
                         crate::game::players::matches_relation(
                             state,
@@ -2439,19 +2470,27 @@ pub fn resolve_each_player(
                     // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
                     // whose [scalar attr] [comparator] [value]" — candidate
                     // satisfies both `relation` and the per-candidate scalar
-                    // comparison. `attr` is read directly off `p`; `value` is
-                    // the controller-relative threshold, resolved once.
+                    // comparison. `attr` is read for `p`; `value`
+                    // keeps the ability controller and binds this candidate.
                     PlayerFilter::PlayerAttribute {
                         relation,
                         attr,
                         comparator,
                         value,
                     } => {
-                        let threshold = crate::game::quantity::resolve_quantity(
+                        let threshold = crate::game::quantity::resolve_quantity_with_ctx(
                             state,
                             value,
                             ability.controller,
-                            ability.source_id,
+                            crate::game::quantity::QuantityContext {
+                                entering: None,
+                                source: ability.source_id,
+                                trigger_source: None,
+                                recipient: None,
+                                scoped_player: Some(p.id),
+                                damage_source: None,
+                                event_amount: None,
+                            },
                         );
                         crate::game::players::matches_relation(
                             state,
@@ -2964,15 +3003,85 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        DamageChannel, Duration, FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
-        TypeFilter, TypedFilter,
+        DamageChannel, Duration, FilterProp, ObjectScope, PlayerRelation, PlayerScope,
+        QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 103.4 + CR 904.5 + CR 119.1: P1 is the archenemy with a 40-life
+    /// baseline, while P0 and P2 are heroes with 20-life baselines.
+    fn archenemy_player_attribute_fixture() -> (GameState, PlayerFilter) {
+        let mut format = FormatConfig::archenemy();
+        format.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(format, 3, 42);
+        state.players[1].life = 15;
+        state.players[2].life = 15;
+        let filter = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::LT,
+            value: Box::new(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Down,
+            }),
+        };
+        (state, filter)
+    }
+
+    #[test]
+    fn damage_all_player_population_uses_each_candidates_starting_life() {
+        let (mut state, filter) = archenemy_player_attribute_fixture();
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                player_filter: Some(filter),
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.players[1].life, 14, "archenemy is below half of 40");
+        assert_eq!(state.players[2].life, 15, "hero is above half of 20");
+    }
+
+    #[test]
+    fn damage_each_player_uses_each_candidates_starting_life() {
+        let (mut state, filter) = archenemy_player_attribute_fixture();
+        let ability = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: filter,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_player(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.players[1].life, 14, "archenemy is below half of 40");
+        assert_eq!(state.players[2].life, 15, "hero is above half of 20");
+    }
 
     fn make_ability(num_dmg: u32, targets: Vec<TargetRef>) -> ResolvedAbility {
         ResolvedAbility::new(

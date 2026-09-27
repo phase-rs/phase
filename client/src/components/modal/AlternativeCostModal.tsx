@@ -197,6 +197,15 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.faceDownSubtitle", { name: cardName }),
       };
+    // CR 702.117a: Surge — pay the surge cost if you or a teammate cast another spell this turn.
+    case "Surge":
+      return {
+        eyebrow: t("alternativeCost.surgeEyebrow"),
+        normalLabel: t("alternativeCost.surgeNormalLabel"),
+        altLabel: t("alternativeCost.surgeAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.surgeSubtitle", { name: cardName }),
+      };
   }
   return assertNever(keyword);
 }

@@ -477,6 +477,89 @@ describe("fetchCardData — combined multi-face names", () => {
   });
 });
 
+describe("fetchCardData — names containing a bare slash", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // "Summon: Choco/Mog" is a single-faced card whose printed name contains a
+  // bare "/", keyed the way the export does it: by its own printed name only.
+  // "Revival" is a split card keyed by its front face, whose entry carries the
+  // full composite `name` — the same convention `makeDfcDataMap` uses above.
+  function makeSlashDataMap(): Response {
+    const map: Record<string, unknown> = {
+      "summon: choco/mog": {
+        oracle_id: "choco-oracle",
+        face_names: ["summon: choco/mog"],
+        faces: [
+          { normal: "https://img.example/choco.jpg", art_crop: "https://img.example/choco-art.jpg" },
+        ],
+        name: "Summon: Choco/Mog",
+        mana_cost: "{2}{R}",
+        cmc: 3,
+        type_line: "Enchantment Creature — Saga Bird Moogle",
+        colors: ["R"],
+        color_identity: ["R"],
+        keywords: [],
+      },
+      revival: {
+        oracle_id: "revival-oracle",
+        face_names: ["revival", "revenge"],
+        faces: [
+          { normal: "https://img.example/revival.jpg", art_crop: "https://img.example/revival-art.jpg" },
+          { normal: "https://img.example/revenge.jpg", art_crop: "https://img.example/revenge-art.jpg" },
+        ],
+        layout: "split",
+        name: "Revival // Revenge",
+        mana_cost: "{1}{W}",
+        cmc: 2,
+        type_line: "Sorcery",
+        colors: ["W"],
+        color_identity: ["W"],
+        keywords: [],
+      },
+    };
+    return new Response(JSON.stringify(map), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("resolves the legacy spaced spelling of a bare-slash name to the printed name", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Summon: Choco // Mog");
+
+    expect(card.name).toBe("Summon: Choco/Mog");
+  });
+
+  it("resolves a single-slash split-card name via the front face", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Revival/Revenge");
+
+    expect(card.name).toBe("Revival // Revenge");
+  });
+
+  it("resolves the exact bare-slash printed name directly", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    const card = await fetchCardData("Summon: Choco/Mog");
+
+    expect(card.name).toBe("Summon: Choco/Mog");
+  });
+
+  it("rejects a front-segment-only name that is not itself a card", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(makeSlashDataMap());
+
+    const { fetchCardData } = await loadScryfallModule();
+    await expect(fetchCardData("Summon: Choco")).rejects.toThrow(/not in local data/);
+  });
+});
+
 describe("manaSymbolSourceUrl", () => {
   it.each([
     ["W/U", "WU"],

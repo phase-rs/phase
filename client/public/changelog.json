@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 213,
+      "date": "2026-09-27",
+      "title": "Freeform formats and Surge costs arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Freeform and Freeform Commander are now available as game formats\n• Surge spells offer their alternative cost when casting; Empower Jace creates the Jace planeswalker token\n• Extra phases and steps follow their printed timing (including Obeka), and effects that last until a player casts a spell now expire at that event\n• Yawgmoth’s Will, Gaea’s Will, Magus of the Will, Banon, and Kagha now grant their printed graveyard plays and casts\n• Elenda, Saint of Dusk; Nesting Bot; Surveillance Phantasm; Proctor of Potential; Desperate Futurescribe; and the Play Blitzball and Hunt the Mark Sidequests join the playable pool\n\n🛠️ Cards That Now Work Right\n• Uba Mask exiles would-be draws and lets each player play the cards they exiled with it\n• Stormsurge Kraken, Thunderfoot Baloth, and other “as long as you control your commander” abilities now check the right commander and apply their printed bonuses\n• Pelt Collector checks the other creature’s power on both enters and dies triggers; Fall from Favor applies its monarch untap restriction\n• Lion’s Eye Diamond obeys its instant-speed activation timing; half-life costs and sacrifice costs use the right payer, amount, and eligible permanent\n• Recurring Insight asks for its target opponent, and Mad Wizard’s Lair draws and reveals before offering its free cast\n• Erratic Mutation reads the revealed card’s mana value; Farideh’s Fireball follows the die result instead of applying both outcomes\n• Siphon Insight and similar cast permissions carry their printed “mana of any color” allowance; life-lost cost reductions count life lost this turn, not permanents\n• Support X and “each of X targets” effects use the chosen X, while Balan can attach all of the Equipment the ability names\n• Leonin Shikari lets you equip at instant speed; Locke, Treasure Hunter grants its single cast through end of turn; Rejoin the Fight chooses from the named graveyard instead of only the cards just milled\n• Bre of Clan Stoutarm presents its optional choice to the right player, and declining a repeating “if you do” choice no longer repeats later instructions\n\n⚔️ Combat & Gameplay\n• Creatures with no legal attack target show why they cannot attack\n• Cleanup waits for pending choices and effects to finish before the turn advances\n• The game log names cards that move face up from libraries while keeping eliminated players’ hidden cards private\n• Momir Basic keeps making creature tokens in later games of a best-of-three match\n\n🖥️ Interface\n• Submitted Draft, Sealed, and Cube decks save automatically to your deck library; draft matches now recover more reliably from startup failures\n• Player-hosted draft pods appear in the public lobby, and the chosen bot difficulty stays selected through draft setup\n• Sealed lets you open all remaining packs at once; older saved games restore after the deck-size change\n• Click Mode can run enter-the-battlefield effects when moving a card onto the battlefield\n\n🤖 AI\n• Very Hard and cEDH opponents weigh unused mana again, avoid granting evasion to creatures that cannot attack, and make legal constrained card choices\n• An opt-in model-driven opponent is available for games and drafts when a provider is configured\n\n🌐 Multiplayer\n• Discord /lfg can create multiplayer games with build-synced desktop links; ready games get a private game thread, and Commander defaults to four seats on the preview build\n• Rooms disappear while their host is away and return when the host reconnects; joining, game-code assignment, takebacks, and P2P updates handle interrupted sessions more reliably",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1553856065433767988"
+    },
+    {
       "id": 212,
       "date": "2026-09-21",
       "title": "Cost reductions follow your choices",

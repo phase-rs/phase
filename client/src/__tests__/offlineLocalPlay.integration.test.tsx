@@ -310,7 +310,10 @@ vi.mock("../services/scryfall", () => {
     scryfallLegalityKey: vi.fn(() => undefined),
   };
 });
-vi.mock("../services/deckMigrations", () => ({ migrateSavedDecks: vi.fn() }));
+vi.mock("../services/deckMigrations", () => ({
+  migrateSavedDecks: vi.fn(),
+  canonicalizeSavedDeckNames: vi.fn(async () => undefined),
+}));
 vi.mock("../hooks/useHostingSession", () => ({ useHostingSession: vi.fn() }));
 vi.mock("../hooks/useDeckCardData", () => ({
   useDeckCardData: () => ({ cardDataCache: new Map(), cacheCards: vi.fn() }),
