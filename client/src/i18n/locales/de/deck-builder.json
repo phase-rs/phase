@@ -66,6 +66,13 @@
     "discard": "Verwerfen",
     "saveAndContinue": "Speichern & fortfahren"
   },
+  "saveConflict": {
+    "title": "Deck wurde anderswo geändert",
+    "bodyChanged": "„{{name}}“ wurde anderswo geändert, seit dieser Editor es geöffnet oder zuletzt gespeichert hat, daher wurde nichts gespeichert. Lade die gespeicherte Version, um sie anzusehen (deine ungespeicherten Änderungen werden verworfen), oder speichere deine Version trotzdem.",
+    "bodyDeleted": "„{{name}}“ wurde anderswo gelöscht, seit dieser Editor es geöffnet oder zuletzt gespeichert hat, daher wurde nichts gespeichert. Speichere deine Version trotzdem.",
+    "loadSaved": "Gespeicherte Version laden",
+    "saveMine": "Meine Version speichern"
+  },
   "card": {
     "moveToSideboard": "Ein {{name}} ins Sideboard verschieben",
     "moveToMain": "Ein {{name}} ins Hauptdeck verschieben",

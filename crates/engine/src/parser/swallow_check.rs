@@ -10275,12 +10275,12 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// `Effect::CastFromZone` carrying `mana_spend_permission: Some(AnyTypeOrColor)`
     /// (full-cost graveyard cast with the any-type concession), with the trailing
     /// "exile it instead" rider rebound onto the cast spell as a
-    /// `ChangeZone{Exile, ParentTarget}` sub-ability — NOT degraded to a bare
-    /// `GenericEffect{SpendManaAsAnyColor}` that drops the cast.
+    /// `ChangeZone{Exile, ParentTarget}` sub-ability — NOT the standalone
+    /// concession gap that drops the cast.
     ///
-    /// DISCRIMINATING: reverting the Q1 head parser
-    /// (`try_parse_cast_target_from_graveyard_any_mana`) flips the effect back to
-    /// `GenericEffect{SpendManaAsAnyColor}` (no `CastFromZone`), failing the
+    /// DISCRIMINATING: without the clause splitter's rider cut
+    /// (`starts_mana_spend_rider_conjunct`) nothing claims the sentence and it
+    /// lowers to the standalone concession gap (no `CastFromZone`), failing the
     /// effect-type assertion; reverting Commit 1's rider rebind generalization
     /// binds the exile rider to the triggering source (Quistis), so the
     /// sub-ability target is no longer `ParentTarget`.
@@ -10312,7 +10312,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         } = &*execute.effect
         else {
             panic!(
-                "expected CastFromZone (not degraded GenericEffect), got {:?}",
+                "expected CastFromZone (not the standalone concession gap), got {:?}",
                 execute.effect
             );
         };
@@ -10379,16 +10379,16 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "Condition_If"));
     }
 
-    /// CR 611.2a + CR 108.3 (multiplayer FINDING-4): Tinybones the Pickpocket casts
+    /// CR 400.3 + CR 115.1 (multiplayer FINDING-4): Tinybones the Pickpocket casts
     /// "from that player's graveyard" — the combat-damaged player's. The
     /// `CastFromZone` target MUST carry `Owned{TriggeringPlayer}` so a 3+ player
     /// game restricts the cast to that one player's graveyard, never any
     /// opponent's. Also carries `mana_spend_permission: Some(AnyTypeOrColor)`.
     ///
-    /// DISCRIMINATING: reverting the FINDING-4 owner-add in
-    /// `try_parse_cast_target_from_graveyard_any_mana` drops the
-    /// `Owned{TriggeringPlayer}` property; reverting the Q1 head parser degrades
-    /// the whole clause to `GenericEffect{SpendManaAsAnyColor}` (no CastFromZone).
+    /// DISCRIMINATING: reverting the FINDING-4 owner-add in `try_parse_cast_effect`
+    /// drops the `Owned{TriggeringPlayer}` property; without the clause
+    /// splitter's rider cut (`starts_mana_spend_rider_conjunct`) the whole clause
+    /// lowers to the standalone concession gap (no CastFromZone).
     #[test]
     fn tinybones_cast_from_damaged_player_graveyard_owned_triggering_player_any_mana() {
         use crate::types::ability::{
@@ -10418,7 +10418,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         } = &*execute.effect
         else {
             panic!(
-                "expected CastFromZone (not degraded GenericEffect), got {:?}",
+                "expected CastFromZone (not the standalone concession gap), got {:?}",
                 execute.effect
             );
         };

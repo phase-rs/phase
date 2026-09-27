@@ -1,619 +1,791 @@
-use crate::game::coverage::{CardCoverageResult, CoverageSummary};
-use crate::parser::oracle_effect::gap_diagnosis::is_clause_head_verb;
-use crate::parser::oracle_effect::normalize_verb_token;
-use crate::parser::oracle_effect::subject::starts_with_subject_prefix;
+//! The `parser-gap-analyzer` report. It regroups the coverage summary's gaps by their
+//! typed diagnosis (the category) and by the phrase, feature or handler that diagnosis
+//! names (the family). For each category and family, it reports how many cards the gaps
+//! affect and how many cards that fix alone would make supported.
+
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use strum::IntoEnumIterator;
 
-// ── Recognized verbs ────────────────────────────────────────────────────────
-//
-// The clause-head verb vocabulary MOVED to `parser/oracle_effect/gap_diagnosis.rs`,
-// beside the dispatch table it mirrors, leaving one definition in the workspace. This
-// module keeps only the aggregation that reads it.
+use crate::game::coverage::{
+    normalize_oracle_pattern, CardCoverageResult, GapDetail, GapDiagnosis, ResolverFeatureFamily,
+};
+use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 
-/// Keywords/mechanics known to be unimplemented in the engine.
-const NEW_MECHANIC_KEYWORDS: &[&str] = &[
-    "specialize",
-    "specializes",
-    "perpetually",
-    "seek", // Alchemy-only digital verb (different from search)
-    "draft",
-    "drafted",
-    "ante",
-    "sticker",
-    "attraction",
-    "unfinity",
-    "conspiracy",
-    "scheme",
-    "vanguard",
-    "dungeon",
-];
-
-fn contains_new_mechanic_keyword(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    NEW_MECHANIC_KEYWORDS.iter().any(|kw| lower.contains(kw))
+/// A report category: the layer that explains a gap, refined by the parser verdict or
+/// the resolver feature family. A gap with no diagnosis is `Undiagnosed`; its family is
+/// its coverage handler, and the report never derives a verdict from the gap's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapClass {
+    Parser(ClauseGapKind),
+    Resolver(ResolverFeatureFamily),
+    Undiagnosed,
 }
 
-// ── Classification types ────────────────────────────────────────────────────
+impl GapClass {
+    /// Every category, in declaration order.
+    pub fn all() -> impl Iterator<Item = Self> {
+        ClauseGapKind::iter()
+            .map(Self::Parser)
+            .chain(ResolverFeatureFamily::iter().map(Self::Resolver))
+            .chain(std::iter::once(Self::Undiagnosed))
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GapCategory {
-    /// Text contains a verb the parser handles, but specific pattern failed.
-    VerbVariation,
-    /// Subject phrase not caught by `starts_with_subject_prefix`, but predicate verb is handled.
-    SubjectStripping,
-    /// Trigger mode registered, but execute effect inside it is unimplemented.
-    TriggerEffect,
-    /// Static mode registered, but condition text is unrecognized.
-    StaticCondition,
-    /// Genuinely new mechanic not in the engine.
-    NewMechanic,
-    /// Doesn't fit other categories.
-    Unclassified,
-}
-
-impl GapCategory {
-    pub fn label(&self) -> &'static str {
+    /// The category's key in the report, and the value `--category` accepts. Each half
+    /// is the diagnosis's own wire tag, so a key reads the same as the `kind` or
+    /// `family` field in the coverage export.
+    pub fn label(self) -> String {
         match self {
-            Self::VerbVariation => "A_verb_variation",
-            Self::SubjectStripping => "B_subject_stripping",
-            Self::TriggerEffect => "C_trigger_effect",
-            Self::StaticCondition => "D_static_condition",
-            Self::NewMechanic => "F_new_mechanic",
-            Self::Unclassified => "G_unclassified",
+            Self::Parser(kind) => format!("parser:{}", kind.unimplemented_name()),
+            Self::Resolver(family) => format!("resolver:{}", family.tag()),
+            Self::Undiagnosed => "undiagnosed".to_string(),
         }
     }
 
-    pub fn is_near_miss(&self) -> bool {
-        matches!(
-            self,
-            Self::VerbVariation
-                | Self::SubjectStripping
-                | Self::TriggerEffect
-                | Self::StaticCondition
-        )
+    /// Decodes a report key back to its category, or `None` for an unknown key.
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::all().find(|class| class.label() == label)
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ClassifiedGap {
-    pub handler: String,
-    pub source_text: Option<String>,
-    pub category: GapCategory,
-    /// For VerbVariation, the recognized verb that was detected.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matched_verb: Option<String>,
-    /// Whether the verb was found at a non-initial position.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub non_initial_verb: Option<bool>,
-    pub card_name: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct VerbBreakdown {
-    pub verb: String,
+/// Counts and card lists for one category or family. `cards_affected` and `fixes_alone`
+/// are the lengths of the lists beside them; `count` counts gaps, not cards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GapTally {
+    /// Gaps in this category or family. A gap with several diagnoses here counts once.
     pub count: usize,
-    pub single_gap_unlocks: usize,
-    pub top_patterns: Vec<PatternEntry>,
-    /// Capped preview (up to 5) for human-readable output.
-    pub example_cards: Vec<String>,
-    /// Full deduped card list for programmatic consumers (e.g. parser-velocity skill).
+    pub cards_affected: usize,
+    /// Cards whose every gap is in this category or family and in no other.
+    pub fixes_alone: usize,
+    pub fixes_alone_cards: Vec<String>,
     pub affected_cards: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PatternEntry {
-    pub pattern: String,
-    pub count: usize,
+pub struct FamilySummary {
+    /// The rejected phrase under coverage's pattern normalizer (parser; prefixed
+    /// `"<verb>: "` for verb arguments), the feature name (resolver), or the coverage
+    /// handler (undiagnosed).
+    pub key: String,
+    #[serde(flatten)]
+    pub tally: GapTally,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CategorySummary {
-    pub count: usize,
-    pub single_gap_unlocks: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub by_verb: Vec<VerbBreakdown>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub top_patterns: Vec<PatternEntry>,
-    /// Capped preview (up to 10) for human-readable output.
-    pub example_cards: Vec<String>,
-    /// Full deduped card list for programmatic consumers.
-    pub affected_cards: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QuickWin {
-    pub description: String,
-    pub category: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verb: Option<String>,
-    pub cards_unlocked: usize,
-    pub pattern: String,
-    /// Capped preview (up to 5) for human-readable output.
-    pub example_cards: Vec<String>,
-    /// Full deduped card list; consumed by parser-velocity skill's batch
-    /// selection. Includes every card whose single classified gap matches
-    /// this quick win's (category, verb) key — not just the 5 shown above.
-    pub affected_cards: Vec<String>,
+    #[serde(flatten)]
+    pub tally: GapTally,
+    /// Ordered by `fixes_alone` and then `cards_affected`, both descending, then by `key`.
+    pub families: Vec<FamilySummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GapAnalysis {
     pub analysis_date: String,
+    /// Distinct card names among unsupported cards.
     pub total_unsupported: usize,
+    /// Gaps on unsupported cards.
     pub total_classified: usize,
+    /// Keyed by [`GapClass::label`].
     pub categories: BTreeMap<String, CategorySummary>,
-    pub quick_wins: Vec<QuickWin>,
 }
 
-// ── Classification logic ────────────────────────────────────────────────────
-
-fn classify_gap(
-    handler: &str,
-    source_text: Option<&str>,
-    card_gaps: &[String],
-) -> (GapCategory, Option<String>, Option<bool>) {
-    // Static condition gaps
-    if handler.starts_with("Static:Unrecognized") {
-        return (GapCategory::StaticCondition, None, None);
-    }
-
-    // Trigger gaps where the trigger mode is registered but execute effect failed:
-    // detected by checking if this card also has Effect: gaps co-occurring with
-    // a non-Unknown trigger gap
-    if handler.starts_with("Trigger:") && !handler.contains("Unknown(") {
-        let has_effect_gap = card_gaps
-            .iter()
-            .any(|g| g.starts_with("Effect:") && g != handler);
-        if has_effect_gap {
-            return (GapCategory::TriggerEffect, None, None);
-        }
-    }
-
-    let Some(text) = source_text else {
-        return (GapCategory::Unclassified, None, None);
-    };
-
-    let lower = text.to_lowercase();
-    let lower = lower.trim();
-
-    if lower.is_empty() {
-        return (GapCategory::Unclassified, None, None);
-    }
-
-    // Check for new mechanic keywords first
-    if contains_new_mechanic_keyword(lower) {
-        return (GapCategory::NewMechanic, None, None);
-    }
-
-    // Category A: first word is a recognized verb.
-    // Ask the vocabulary about the RAW token: `is_clause_head_verb` normalizes its
-    // own argument, and `normalize_verb_token` is not idempotent on a possessive.
-    // `gap_diagnosis` pins the counterexample -- "roll's" normalizes to "roll'",
-    // which the vocabulary accepts, while "roll's" itself it rejects. Normalizing
-    // here first therefore admitted a NOUN the clause never used as a verb ("target
-    // die roll's result") and reported the malformed intermediate "roll'" as the
-    // verb -- a token the vocabulary was never asked about, and a verdict
-    // `diagnose_clause_gap` refuses for the same text.
-    if let Some(first_word) = lower.split_whitespace().next() {
-        if is_clause_head_verb(first_word) {
-            return (
-                GapCategory::VerbVariation,
-                Some(normalize_verb_token(first_word)),
-                Some(false),
-            );
-        }
-    }
-
-    // Category B: subject prefix present, and predicate verb after subject is recognized.
-    // Checked before non-initial verb (A) because subject stripping is a more specific
-    // and actionable classification — a single fix in subject.rs vs hunting verb handlers.
-    if starts_with_subject_prefix(lower) {
-        for word in lower.split_whitespace().skip(1) {
-            let normalized = normalize_verb_token(word);
-            if is_clause_head_verb(&normalized) {
-                return (GapCategory::SubjectStripping, Some(normalized), None);
-            }
-        }
-    }
-
-    // Category A (non-initial): text contains a recognized verb at non-initial position
-    for word in lower.split_whitespace().skip(1) {
-        let normalized = normalize_verb_token(word);
-        if is_clause_head_verb(&normalized) {
-            return (GapCategory::VerbVariation, Some(normalized), Some(true));
-        }
-    }
-
-    (GapCategory::Unclassified, None, None)
+/// One (category, family) pair that a gap belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GapKey {
+    category: String,
+    family: String,
 }
 
-/// Dedupe an iterator of strings while preserving first-seen order. Used to
-/// build `affected_cards` lists from gap iterators where the input order
-/// reflects gap discovery (stable) and we want the capped `example_cards`
-/// preview to be a deterministic prefix of the full list.
-fn dedup_preserve_order<I: IntoIterator<Item = String>>(iter: I) -> Vec<String> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for s in iter {
-        if seen.insert(s.clone()) {
-            out.push(s);
-        }
+/// The report keys of one gap: one per distinct diagnosis, or its handler under
+/// `Undiagnosed` when it carries none.
+fn gap_keys(gap: &GapDetail) -> BTreeSet<GapKey> {
+    if gap.diagnoses.is_empty() {
+        return BTreeSet::from([GapKey {
+            category: GapClass::Undiagnosed.label(),
+            family: gap.handler.clone(),
+        }]);
     }
-    out
-}
-
-/// Analyze a coverage summary to classify each gap by failure reason.
-pub fn analyze_gaps(summary: &CoverageSummary) -> GapAnalysis {
-    let today = String::new(); // Set by the binary caller
-
-    let unsupported_cards: Vec<&CardCoverageResult> =
-        summary.cards.iter().filter(|c| !c.supported).collect();
-
-    let mut classified: Vec<ClassifiedGap> = Vec::new();
-
-    for card in &unsupported_cards {
-        let card_gap_handlers: Vec<String> =
-            card.gap_details.iter().map(|g| g.handler.clone()).collect();
-
-        for gap in &card.gap_details {
-            // Skip "Effect:empty" — these are empty clauses after connector stripping
-            if gap.handler == "Effect:empty" {
-                continue;
-            }
-
-            let (category, matched_verb, non_initial) =
-                classify_gap(&gap.handler, gap.source_text.as_deref(), &card_gap_handlers);
-
-            classified.push(ClassifiedGap {
-                handler: gap.handler.clone(),
-                source_text: gap.source_text.clone(),
-                category,
-                matched_verb,
-                non_initial_verb: non_initial,
-                card_name: card.card_name.clone(),
-            });
-        }
-    }
-
-    // Build single-gap card set for unlock counting
-    let single_gap_cards: HashMap<&str, GapCategory> = unsupported_cards
+    gap.diagnoses
         .iter()
-        .filter(|c| c.gap_count == 1)
-        .filter_map(|c| {
-            let gap = c.gap_details.first()?;
-            if gap.handler == "Effect:empty" {
-                return None;
-            }
-            let card_gap_handlers: Vec<String> = vec![gap.handler.clone()];
-            let (cat, _, _) =
-                classify_gap(&gap.handler, gap.source_text.as_deref(), &card_gap_handlers);
-            Some((c.card_name.as_str(), cat))
-        })
-        .collect();
-
-    // Aggregate by category
-    let mut category_data: BTreeMap<GapCategory, Vec<&ClassifiedGap>> = BTreeMap::new();
-    for gap in &classified {
-        category_data.entry(gap.category).or_default().push(gap);
-    }
-
-    let mut categories = BTreeMap::new();
-
-    for (cat, gaps) in &category_data {
-        let count = gaps.len();
-        let single_gap_count = gaps
-            .iter()
-            .filter(|g| single_gap_cards.get(g.card_name.as_str()) == Some(cat))
-            .map(|g| &g.card_name)
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-
-        // Build verb breakdown for VerbVariation and SubjectStripping
-        let by_verb = if matches!(
-            cat,
-            GapCategory::VerbVariation | GapCategory::SubjectStripping
-        ) {
-            let mut verb_groups: BTreeMap<String, Vec<&ClassifiedGap>> = BTreeMap::new();
-            for gap in gaps {
-                if let Some(verb) = &gap.matched_verb {
-                    verb_groups.entry(verb.clone()).or_default().push(gap);
-                }
-            }
-
-            let mut breakdowns: Vec<VerbBreakdown> = verb_groups
-                .into_iter()
-                .map(|(verb, verb_gaps)| {
-                    let verb_count = verb_gaps.len();
-                    let verb_single = verb_gaps
-                        .iter()
-                        .filter(|g| single_gap_cards.get(g.card_name.as_str()) == Some(cat))
-                        .map(|g| &g.card_name)
-                        .collect::<std::collections::HashSet<_>>()
-                        .len();
-
-                    // Aggregate patterns
-                    let mut pattern_counts: HashMap<String, usize> = HashMap::new();
-                    for g in &verb_gaps {
-                        if let Some(text) = &g.source_text {
-                            let pattern = normalize_gap_pattern(text);
-                            *pattern_counts.entry(pattern).or_default() += 1;
-                        }
-                    }
-                    let mut top_patterns: Vec<PatternEntry> = pattern_counts
-                        .into_iter()
-                        .map(|(pattern, count)| PatternEntry { pattern, count })
-                        .collect();
-                    top_patterns.sort_by_key(|p| std::cmp::Reverse(p.count));
-                    top_patterns.truncate(10);
-
-                    let affected_cards: Vec<String> =
-                        dedup_preserve_order(verb_gaps.iter().map(|g| g.card_name.clone()));
-                    let example_cards: Vec<String> =
-                        affected_cards.iter().take(5).cloned().collect();
-
-                    VerbBreakdown {
-                        verb,
-                        count: verb_count,
-                        single_gap_unlocks: verb_single,
-                        top_patterns,
-                        example_cards,
-                        affected_cards,
-                    }
-                })
-                .collect();
-            breakdowns.sort_by_key(|b| std::cmp::Reverse(b.single_gap_unlocks));
-            breakdowns
-        } else {
-            vec![]
-        };
-
-        // Top patterns for non-verb categories
-        let top_patterns = if by_verb.is_empty() {
-            let mut pattern_counts: HashMap<String, usize> = HashMap::new();
-            for g in gaps {
-                if let Some(text) = &g.source_text {
-                    let pattern = normalize_gap_pattern(text);
-                    *pattern_counts.entry(pattern).or_default() += 1;
-                }
-            }
-            let mut patterns: Vec<PatternEntry> = pattern_counts
-                .into_iter()
-                .map(|(pattern, count)| PatternEntry { pattern, count })
-                .collect();
-            patterns.sort_by_key(|p| std::cmp::Reverse(p.count));
-            patterns.truncate(20);
-            patterns
-        } else {
-            vec![]
-        };
-
-        let affected_cards: Vec<String> =
-            dedup_preserve_order(gaps.iter().map(|g| g.card_name.clone()));
-        let example_cards: Vec<String> = affected_cards.iter().take(10).cloned().collect();
-
-        categories.insert(
-            cat.label().to_string(),
-            CategorySummary {
-                count,
-                single_gap_unlocks: single_gap_count,
-                by_verb,
-                top_patterns,
-                example_cards,
-                affected_cards,
+        .map(|diagnosis| match diagnosis {
+            GapDiagnosis::Parser(clause) => GapKey {
+                category: GapClass::Parser(clause.kind()).label(),
+                family: parser_family(clause),
             },
-        );
+            GapDiagnosis::Resolver { family, feature } => GapKey {
+                category: GapClass::Resolver(*family).label(),
+                family: feature.clone(),
+            },
+        })
+        .collect()
+}
+
+/// A parser verdict's family: the phrase it rejected, under the normalizer coverage's
+/// `oracle_patterns` uses. For verb arguments the verb is part of the family, because
+/// that verb's argument grammar did the rejecting.
+fn parser_family(clause: &ClauseGap) -> String {
+    let phrase = normalize_oracle_pattern(clause.phrase());
+    match clause {
+        ClauseGap::VerbArguments { verb, .. } => format!("{verb}: {phrase}"),
+        ClauseGap::Replacement { .. }
+        | ClauseGap::Condition { .. }
+        | ClauseGap::Quantity { .. }
+        | ClauseGap::UnrecognizedHead { .. } => phrase,
+    }
+}
+
+#[derive(Default)]
+struct Tally<'a> {
+    count: usize,
+    affected: BTreeSet<&'a str>,
+    fixes_alone: BTreeSet<&'a str>,
+}
+
+impl<'a> Tally<'a> {
+    /// Records a card that has a gap here.
+    fn affect(&mut self, card: &'a str) {
+        self.affected.insert(card);
     }
 
-    // Build quick wins from highest-impact verb breakdowns
-    let mut quick_wins: Vec<QuickWin> = Vec::new();
-    for (cat_label, cat_summary) in &categories {
-        for verb_bd in &cat_summary.by_verb {
-            if verb_bd.single_gap_unlocks > 0 {
-                let top_pattern = verb_bd
-                    .top_patterns
-                    .first()
-                    .map(|p| p.pattern.clone())
-                    .unwrap_or_default();
-                quick_wins.push(QuickWin {
-                    description: format!(
-                        "Handle '{}' variation: \"{}\" ({} cards)",
-                        verb_bd.verb, top_pattern, verb_bd.single_gap_unlocks
-                    ),
-                    category: cat_label.clone(),
-                    verb: Some(verb_bd.verb.clone()),
-                    cards_unlocked: verb_bd.single_gap_unlocks,
-                    pattern: top_pattern,
-                    example_cards: verb_bd.example_cards.clone(),
-                    affected_cards: verb_bd.affected_cards.clone(),
-                });
-            }
-        }
-        // For non-verb categories with single-gap unlocks
-        if cat_summary.by_verb.is_empty() && cat_summary.single_gap_unlocks > 0 {
-            let top_pattern = cat_summary
-                .top_patterns
-                .first()
-                .map(|p| p.pattern.clone())
-                .unwrap_or_default();
-            quick_wins.push(QuickWin {
-                description: format!(
-                    "{}: \"{}\" ({} cards)",
-                    cat_label, top_pattern, cat_summary.single_gap_unlocks
-                ),
-                category: cat_label.clone(),
-                verb: None,
-                cards_unlocked: cat_summary.single_gap_unlocks,
-                pattern: top_pattern,
-                example_cards: cat_summary.example_cards.iter().take(5).cloned().collect(),
-                affected_cards: cat_summary.affected_cards.clone(),
-            });
+    /// Records a card whose every gap is here. Such a card is affected too.
+    fn fix_alone(&mut self, card: &'a str) {
+        self.affect(card);
+        self.fixes_alone.insert(card);
+    }
+
+    /// Builds both card lists in one place, so they share one order (by name).
+    fn finish(self) -> GapTally {
+        let owned =
+            |cards: BTreeSet<&str>| cards.into_iter().map(str::to_string).collect::<Vec<_>>();
+        GapTally {
+            count: self.count,
+            cards_affected: self.affected.len(),
+            fixes_alone: self.fixes_alone.len(),
+            fixes_alone_cards: owned(self.fixes_alone),
+            affected_cards: owned(self.affected),
         }
     }
-    quick_wins.sort_by_key(|w| std::cmp::Reverse(w.cards_unlocked));
-    quick_wins.truncate(30);
+}
+
+#[derive(Default)]
+struct CategoryTally<'a> {
+    tally: Tally<'a>,
+    families: BTreeMap<String, Tally<'a>>,
+}
+
+impl CategoryTally<'_> {
+    fn finish(self) -> CategorySummary {
+        let mut families: Vec<FamilySummary> = self
+            .families
+            .into_iter()
+            .map(|(key, tally)| FamilySummary {
+                key,
+                tally: tally.finish(),
+            })
+            .collect();
+        families.sort_by(|a, b| {
+            b.tally
+                .fixes_alone
+                .cmp(&a.tally.fixes_alone)
+                .then(b.tally.cards_affected.cmp(&a.tally.cards_affected))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        CategorySummary {
+            tally: self.tally.finish(),
+            families,
+        }
+    }
+}
+
+/// Groups every gap on every unsupported card by category and family.
+pub fn analyze_gaps(cards: &[CardCoverageResult]) -> GapAnalysis {
+    let mut categories: BTreeMap<String, CategoryTally> = BTreeMap::new();
+    // A card is its name. Results that share a printed name pool their gaps, so a family
+    // fixes a card alone only if every gap under that name is in the family.
+    let mut keys_by_card: BTreeMap<&str, BTreeSet<GapKey>> = BTreeMap::new();
+    let mut total_classified = 0;
+
+    for card in cards.iter().filter(|card| !card.supported) {
+        let card_keys = keys_by_card.entry(card.card_name.as_str()).or_default();
+        for gap in &card.gap_details {
+            total_classified += 1;
+            let keys = gap_keys(gap);
+            let gap_categories: BTreeSet<&str> =
+                keys.iter().map(|key| key.category.as_str()).collect();
+            for category in gap_categories {
+                categories
+                    .entry(category.to_string())
+                    .or_default()
+                    .tally
+                    .count += 1;
+            }
+            for key in &keys {
+                categories
+                    .entry(key.category.clone())
+                    .or_default()
+                    .families
+                    .entry(key.family.clone())
+                    .or_default()
+                    .count += 1;
+            }
+            card_keys.extend(keys);
+        }
+    }
+
+    for (&card, keys) in &keys_by_card {
+        let card_categories: BTreeSet<&str> =
+            keys.iter().map(|key| key.category.as_str()).collect();
+        for key in keys {
+            let family = categories
+                .entry(key.category.clone())
+                .or_default()
+                .families
+                .entry(key.family.clone())
+                .or_default();
+            if keys.len() == 1 {
+                family.fix_alone(card);
+            } else {
+                family.affect(card);
+            }
+        }
+        for category in &card_categories {
+            let tally = &mut categories.entry(category.to_string()).or_default().tally;
+            if card_categories.len() == 1 {
+                tally.fix_alone(card);
+            } else {
+                tally.affect(card);
+            }
+        }
+    }
 
     GapAnalysis {
-        analysis_date: today,
-        total_unsupported: unsupported_cards.len(),
-        total_classified: classified.len(),
-        categories,
-        quick_wins,
+        analysis_date: String::new(),
+        total_unsupported: keys_by_card.len(),
+        total_classified,
+        categories: categories
+            .into_iter()
+            .map(|(label, category)| (label, category.finish()))
+            .collect(),
     }
-}
-
-/// Simplified pattern normalization for gap text — lowercases and normalizes
-/// card-specific details while preserving the structural verb + pattern.
-fn normalize_gap_pattern(text: &str) -> String {
-    let s = text.to_lowercase();
-    let s = s.trim_end_matches('.');
-    // Collapse multiple spaces
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_effect::parse_effect;
+    use crate::types::ability::Effect;
 
-    #[test]
-    fn dedup_preserve_order_keeps_first_seen_order() {
-        let input = ["b", "a", "b", "c", "a", "d", "b"]
+    fn unsupported(name: &str, gap_details: Vec<GapDetail>) -> CardCoverageResult {
+        CardCoverageResult {
+            card_face_key: None,
+            card_name: name.to_string(),
+            set_code: String::new(),
+            supported: false,
+            gap_count: gap_details.len(),
+            gap_details,
+            oracle_text: None,
+            parse_details: Vec::new(),
+            printings: Vec::new(),
+        }
+    }
+
+    fn gap(handler: &str, diagnoses: Vec<GapDiagnosis>) -> GapDetail {
+        GapDetail {
+            handler: handler.to_string(),
+            source_text: None,
+            diagnoses,
+        }
+    }
+
+    fn condition(guard: &str) -> GapDiagnosis {
+        GapDiagnosis::Parser(ClauseGap::Condition {
+            guard: guard.to_string(),
+        })
+    }
+
+    fn verb(verb: &str, arguments: &str) -> GapDiagnosis {
+        GapDiagnosis::Parser(ClauseGap::VerbArguments {
+            verb: verb.to_string(),
+            arguments: arguments.to_string(),
+        })
+    }
+
+    fn feature(family: ResolverFeatureFamily, name: &str) -> GapDiagnosis {
+        GapDiagnosis::Resolver {
+            family,
+            feature: name.to_string(),
+        }
+    }
+
+    fn category(analysis: &GapAnalysis, class: GapClass) -> &CategorySummary {
+        analysis
+            .categories
+            .get(&class.label())
+            .unwrap_or_else(|| panic!("no category {}", class.label()))
+    }
+
+    fn family<'a>(summary: &'a CategorySummary, key: &str) -> &'a GapTally {
+        &summary
+            .families
             .iter()
-            .map(|s| s.to_string());
-        let out = dedup_preserve_order(input);
-        assert_eq!(out, vec!["b", "a", "c", "d"]);
+            .find(|family| family.key == key)
+            .unwrap_or_else(|| panic!("no family {key:?}"))
+            .tally
+    }
+
+    fn family_keys(summary: &CategorySummary) -> Vec<&str> {
+        summary
+            .families
+            .iter()
+            .map(|family| family.key.as_str())
+            .collect()
+    }
+
+    fn keys(analysis: &GapAnalysis) -> Vec<String> {
+        analysis.categories.keys().cloned().collect()
+    }
+
+    /// The expected tally. `cards_affected` and `fixes_alone` are taken from their lists'
+    /// lengths, so each card count and its list are asserted together.
+    fn tally(count: usize, affected: &[&str], alone: &[&str]) -> GapTally {
+        let owned = |cards: &[&str]| {
+            cards
+                .iter()
+                .map(|card| card.to_string())
+                .collect::<Vec<_>>()
+        };
+        GapTally {
+            count,
+            cards_affected: affected.len(),
+            fixes_alone: alone.len(),
+            fixes_alone_cards: owned(alone),
+            affected_cards: owned(affected),
+        }
     }
 
     #[test]
-    fn dedup_preserve_order_empty() {
-        let out = dedup_preserve_order(std::iter::empty::<String>());
-        assert!(out.is_empty());
-    }
-
-    // The three vocabulary tests (`recognized_verbs_cover_predicate_verbs`,
-    // `recognized_verbs_cover_clause_head_verbs`, `deconjugated_verbs_recognized`) moved
-    // with the vocabulary into `parser/oracle_effect/gap_diagnosis.rs`.
-
-    #[test]
-    fn classify_verb_variation_first_word() {
-        let (cat, verb, non_initial) = classify_gap(
-            "Effect:destroy",
-            Some("destroy each creature with flying"),
-            &[],
+    fn gap_class_labels_are_distinct_and_round_trip() {
+        let labels: Vec<String> = GapClass::all().map(GapClass::label).collect();
+        assert_eq!(
+            labels.len(),
+            ClauseGapKind::iter().count() + ResolverFeatureFamily::iter().count() + 1
         );
-        assert_eq!(cat, GapCategory::VerbVariation);
-        assert_eq!(verb.as_deref(), Some("destroy"));
-        assert_eq!(non_initial, Some(false));
-    }
-
-    #[test]
-    fn classify_reports_a_first_word_verb_in_normal_form() {
-        // `is_clause_head_verb` normalizes its own argument, and `normalize_verb_token`
-        // is not idempotent on a possessive, so normalizing before the vocabulary check
-        // runs it twice: "roll's" → "roll'" → "roll", and the vocabulary accepts the
-        // last. That admitted a possessive NOUN as a clause head and reported the
-        // malformed intermediate "roll'" -- a verdict `diagnose_clause_gap` refuses for
-        // the same text.
-        //
-        // The invariant is that a reported first-word verb is in NORMAL FORM, i.e. it
-        // survives normalization unchanged. Note what cannot be used here:
-        // `is_clause_head_verb(reported)` accepts "roll'" for exactly the reason under
-        // test, so asserting with it agrees with the bug instead of catching it. Asking
-        // whether the token is a fixed point is independent of the vocabulary.
-        let (cat, verb, non_initial) =
-            classify_gap("Effect:unknown", Some("roll's result is doubled"), &[]);
-        if cat == GapCategory::VerbVariation && non_initial == Some(false) {
-            let reported = verb.as_deref().expect("VerbVariation carries its verb");
+        assert_eq!(
+            labels.iter().collect::<BTreeSet<_>>().len(),
+            labels.len(),
+            "{labels:?}"
+        );
+        for class in GapClass::all() {
+            assert_eq!(GapClass::from_label(&class.label()), Some(class));
+        }
+        for unknown in [
+            "",
+            "parser:",
+            "resolver:",
+            "parser:unknown",
+            "Undiagnosed",
+            "PARSER:UNPARSED_CONDITION",
+            "A",
+        ] {
             assert_eq!(
-                normalize_verb_token(reported),
-                reported,
-                "reported first-word verb {reported:?} is not in normal form, so it \
-                 reached the vocabulary through a second normalization pass"
+                GapClass::from_label(unknown),
+                None,
+                "{unknown:?} must not decode"
             );
         }
+        // The key halves are the coverage export's wire tags, which the report gate reads.
+        for family in ResolverFeatureFamily::iter() {
+            assert_eq!(
+                serde_json::to_value(family).unwrap(),
+                serde_json::json!(family.tag())
+            );
+        }
+    }
 
-        // Positive control. The assertion above is guarded, so it would also pass if
-        // Category A simply stopped classifying anything. This pins that the path is
-        // live, and fails if first-word classification breaks for an ordinary verb.
-        let (cat, verb, non_initial) =
-            classify_gap("Effect:destroy", Some("destroy target creature"), &[]);
+    #[test]
+    fn a_family_fixes_alone_only_the_cards_whose_every_gap_is_in_it() {
+        let quantity = GapDiagnosis::Parser(ClauseGap::Quantity {
+            operand: "the number of elves".to_string(),
+        });
+        let analysis = analyze_gaps(&[
+            unsupported(
+                "Alpha",
+                vec![gap(
+                    "Effect:unparsed_condition",
+                    vec![condition("if you control an elf")],
+                )],
+            ),
+            // Two gaps that normalize to one family, so the family still fixes Beta alone.
+            unsupported(
+                "Beta",
+                vec![
+                    gap(
+                        "Effect:unparsed_condition",
+                        vec![condition("If you control an Elf.")],
+                    ),
+                    gap(
+                        "Swallow:Condition_If",
+                        vec![condition("if you control an elf")],
+                    ),
+                ],
+            ),
+            // One gap in the family and one outside it: affected, not fixed alone.
+            unsupported(
+                "Gamma",
+                vec![
+                    gap(
+                        "Effect:unparsed_condition",
+                        vec![condition("if you control an elf")],
+                    ),
+                    gap("Effect:unparsed_quantity", vec![quantity]),
+                ],
+            ),
+        ]);
+        let conditions = category(&analysis, GapClass::Parser(ClauseGapKind::Condition));
+        let expected = tally(4, &["Alpha", "Beta", "Gamma"], &["Alpha", "Beta"]);
+        assert_eq!(*family(conditions, "if you control an elf"), expected);
+        assert_eq!(conditions.tally, expected);
         assert_eq!(
-            (cat, verb.as_deref(), non_initial),
-            (GapCategory::VerbVariation, Some("destroy"), Some(false)),
-            "first-word classification must still fire for a plain recognized verb"
+            category(&analysis, GapClass::Parser(ClauseGapKind::Quantity)).tally,
+            tally(1, &["Gamma"], &[])
+        );
+        assert_eq!(
+            (analysis.total_unsupported, analysis.total_classified),
+            (3, 5)
+        );
+    }
+
+    /// C4.3b. The two summaries differ in one variable only: the layer of Delta's second
+    /// diagnosis. The handler, the card and the first gap are identical.
+    #[test]
+    fn a_resolver_gap_is_its_own_layer_and_never_inflates_a_parser_family() {
+        let summary = |second: GapDiagnosis| {
+            analyze_gaps(&[unsupported(
+                "Delta",
+                vec![
+                    gap(
+                        "Effect:unparsed_condition",
+                        vec![condition("if it's your turn")],
+                    ),
+                    gap("Effect:second", vec![second]),
+                ],
+            )])
+        };
+        let parser_only = summary(condition("if it's your turn"));
+        let with_resolver = summary(feature(ResolverFeatureFamily::StaticCondition, "Future"));
+
+        let parser = GapClass::Parser(ClauseGapKind::Condition);
+        let resolver = GapClass::Resolver(ResolverFeatureFamily::StaticCondition);
+        assert_eq!(keys(&parser_only), vec![parser.label()]);
+        assert_eq!(keys(&with_resolver), vec![parser.label(), resolver.label()]);
+        assert_eq!(
+            *family(category(&parser_only, parser), "if it's your turn"),
+            tally(2, &["Delta"], &["Delta"])
+        );
+        assert_eq!(
+            *family(category(&with_resolver, parser), "if it's your turn"),
+            tally(1, &["Delta"], &[])
+        );
+        assert_eq!(
+            *family(category(&with_resolver, resolver), "Future"),
+            tally(1, &["Delta"], &[])
+        );
+    }
+
+    /// C4.4. A gap without a diagnosis is reported under its handler, and its text is
+    /// never read, even when the text starts with a clause-head verb.
+    #[test]
+    fn undiagnosed_gaps_are_keyed_by_handler_not_by_text() {
+        let with_text = |handler: &str, text: &str| GapDetail {
+            handler: handler.to_string(),
+            source_text: Some(text.to_string()),
+            diagnoses: Vec::new(),
+        };
+        let analysis = analyze_gaps(&[
+            unsupported(
+                "Epsilon",
+                vec![with_text("Effect:unknown", "destroy target creature")],
+            ),
+            unsupported(
+                "Eta",
+                vec![with_text("Effect:unknown", "exile target creature")],
+            ),
+            unsupported(
+                "Zeta",
+                vec![
+                    gap("Static:Unrecognized(as long as it's night)", vec![]),
+                    gap("Effect:empty", vec![]),
+                ],
+            ),
+        ]);
+        assert_eq!(keys(&analysis), vec![GapClass::Undiagnosed.label()]);
+        let undiagnosed = category(&analysis, GapClass::Undiagnosed);
+        assert_eq!(
+            family_keys(undiagnosed),
+            [
+                "Effect:unknown",
+                "Effect:empty",
+                "Static:Unrecognized(as long as it's night)"
+            ]
+        );
+        assert_eq!(
+            *family(undiagnosed, "Effect:unknown"),
+            tally(2, &["Epsilon", "Eta"], &["Epsilon", "Eta"])
+        );
+        // Zeta's gaps fall in two families, so neither family fixes it alone, but the category does.
+        assert_eq!(
+            *family(undiagnosed, "Effect:empty"),
+            tally(1, &["Zeta"], &[])
+        );
+        assert_eq!(
+            undiagnosed.tally,
+            tally(4, &["Epsilon", "Eta", "Zeta"], &["Epsilon", "Eta", "Zeta"])
         );
     }
 
     #[test]
-    fn classify_verb_variation_non_initial() {
-        let (cat, verb, non_initial) =
-            classify_gap("Effect:unknown", Some("Lightning Bolt deals 3 damage"), &[]);
-        assert_eq!(cat, GapCategory::VerbVariation);
-        assert_eq!(verb.as_deref(), Some("deal"));
-        assert_eq!(non_initial, Some(true));
-    }
-
-    #[test]
-    fn classify_subject_stripping() {
-        let (cat, verb, _) = classify_gap("Effect:that", Some("that player discards a card"), &[]);
-        // "that" starts_with_subject_prefix, "discards" → "discard" is recognized
-        assert_eq!(cat, GapCategory::SubjectStripping);
-        assert_eq!(verb.as_deref(), Some("discard"));
-    }
-
-    #[test]
-    fn classify_new_mechanic() {
-        let (cat, _, _) = classify_gap("Effect:specialize", Some("specialize into a color"), &[]);
-        assert_eq!(cat, GapCategory::NewMechanic);
-    }
-
-    #[test]
-    fn classify_static_condition() {
-        let (cat, _, _) = classify_gap(
-            "Static:Unrecognized(some condition)",
-            Some("as long as something"),
-            &[],
+    fn a_gap_with_several_verdicts_counts_once_per_family_and_once_per_category() {
+        let analysis = analyze_gaps(&[
+            // The coverage merge keeps a repeated verdict; the report counts it once.
+            unsupported(
+                "Theta",
+                vec![gap(
+                    "Swallow:Condition_If",
+                    vec![condition("if a"), condition("if b"), condition("if a")],
+                )],
+            ),
+            unsupported(
+                "Iota",
+                vec![gap(
+                    "Effect:unparsed_verb_arguments",
+                    vec![verb("tap", "up to two lands")],
+                )],
+            ),
+            unsupported(
+                "Kappa",
+                vec![gap(
+                    "Effect:unparsed_verb_arguments",
+                    vec![verb("untap", "up to two lands")],
+                )],
+            ),
+        ]);
+        let conditions = category(&analysis, GapClass::Parser(ClauseGapKind::Condition));
+        assert_eq!(conditions.tally, tally(1, &["Theta"], &["Theta"]));
+        assert_eq!(*family(conditions, "if a"), tally(1, &["Theta"], &[]));
+        assert_eq!(*family(conditions, "if b"), tally(1, &["Theta"], &[]));
+        // One argument phrase under two verbs makes two families.
+        let verbs = category(&analysis, GapClass::Parser(ClauseGapKind::VerbArguments));
+        assert_eq!(
+            *family(verbs, "tap: up to two lands"),
+            tally(1, &["Iota"], &["Iota"])
         );
-        assert_eq!(cat, GapCategory::StaticCondition);
+        assert_eq!(
+            *family(verbs, "untap: up to two lands"),
+            tally(1, &["Kappa"], &["Kappa"])
+        );
     }
 
     #[test]
-    fn classify_trigger_effect() {
-        let (cat, _, _) = classify_gap(
-            "Trigger:ChangesZone",
-            Some("when this enters the battlefield"),
-            &[
-                "Trigger:ChangesZone".to_string(),
-                "Effect:unknown".to_string(),
+    fn families_rank_by_fixes_alone_then_reach_then_key_and_card_lists_by_name() {
+        let alone = |name: &str, guard: &str| {
+            unsupported(
+                name,
+                vec![gap("Effect:unparsed_condition", vec![condition(guard)])],
+            )
+        };
+        let analysis = analyze_gaps(&[
+            alone("Zulu", "if b"),
+            alone("Alpha", "if b"),
+            alone("November", "if d"),
+            alone("Mike", "if c"),
+            alone("Lima", "if e"),
+            unsupported(
+                "Echo",
+                vec![
+                    gap("Effect:unparsed_condition", vec![condition("if e")]),
+                    gap("Effect:unknown", vec![]),
+                ],
+            ),
+            unsupported(
+                "Foxtrot",
+                vec![
+                    gap("Effect:unparsed_condition", vec![condition("if e")]),
+                    gap("Effect:unknown", vec![]),
+                ],
+            ),
+        ]);
+        let conditions = category(&analysis, GapClass::Parser(ClauseGapKind::Condition));
+        assert_eq!(family_keys(conditions), ["if b", "if e", "if c", "if d"]);
+        assert_eq!(
+            *family(conditions, "if b"),
+            tally(2, &["Alpha", "Zulu"], &["Alpha", "Zulu"])
+        );
+        assert_eq!(
+            *family(conditions, "if e"),
+            tally(3, &["Echo", "Foxtrot", "Lima"], &["Lima"])
+        );
+    }
+
+    #[test]
+    fn the_report_serializes_every_tally_key_even_when_empty() {
+        let analysis = analyze_gaps(&[unsupported(
+            "Lambda",
+            vec![
+                gap("Effect:unparsed_condition", vec![condition("if x")]),
+                gap("Effect:unknown", vec![]),
             ],
+        )]);
+        let json = serde_json::to_value(&analysis).unwrap();
+        fn key_set(value: &serde_json::Value) -> BTreeSet<&str> {
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect()
+        }
+        assert_eq!(
+            key_set(&json),
+            BTreeSet::from([
+                "analysis_date",
+                "categories",
+                "total_classified",
+                "total_unsupported"
+            ])
         );
-        assert_eq!(cat, GapCategory::TriggerEffect);
+        let undiagnosed = &json["categories"]["undiagnosed"];
+        assert_eq!(
+            key_set(undiagnosed),
+            BTreeSet::from([
+                "affected_cards",
+                "cards_affected",
+                "count",
+                "families",
+                "fixes_alone",
+                "fixes_alone_cards"
+            ])
+        );
+        assert_eq!(
+            key_set(&undiagnosed["families"][0]),
+            BTreeSet::from([
+                "affected_cards",
+                "cards_affected",
+                "count",
+                "fixes_alone",
+                "fixes_alone_cards",
+                "key"
+            ])
+        );
+        assert_eq!(undiagnosed["fixes_alone_cards"], serde_json::json!([]));
     }
 
     #[test]
-    fn classify_none_source_text() {
-        let (cat, _, _) = classify_gap("Keyword:SomeKeyword", None, &[]);
-        assert_eq!(cat, GapCategory::Unclassified);
+    fn supported_cards_and_empty_input_contribute_nothing() {
+        let with_gap = || unsupported("Mu", vec![gap("Effect:unknown", vec![])]);
+        // Reach guard: the same card, unsupported, does contribute.
+        assert_eq!(
+            keys(&analyze_gaps(&[with_gap()])),
+            vec![GapClass::Undiagnosed.label()]
+        );
+        let mut supported = with_gap();
+        supported.supported = true;
+        for cards in [vec![], vec![supported]] {
+            let analysis = analyze_gaps(&cards);
+            assert!(analysis.categories.is_empty());
+            assert_eq!(
+                (analysis.total_unsupported, analysis.total_classified),
+                (0, 0)
+            );
+        }
     }
 
     #[test]
-    fn near_miss_categories() {
-        assert!(GapCategory::VerbVariation.is_near_miss());
-        assert!(GapCategory::SubjectStripping.is_near_miss());
-        assert!(GapCategory::TriggerEffect.is_near_miss());
-        assert!(GapCategory::StaticCondition.is_near_miss());
-        assert!(!GapCategory::NewMechanic.is_near_miss());
-        assert!(!GapCategory::Unclassified.is_near_miss());
+    fn results_sharing_a_name_pool_their_gaps() {
+        let analysis = analyze_gaps(&[
+            unsupported(
+                "Nu",
+                vec![gap("Effect:unparsed_condition", vec![condition("if x")])],
+            ),
+            unsupported("Nu", vec![gap("Effect:unknown", vec![])]),
+        ]);
+        assert_eq!(analysis.total_unsupported, 1);
+        let conditions = category(&analysis, GapClass::Parser(ClauseGapKind::Condition));
+        assert_eq!(*family(conditions, "if x"), tally(1, &["Nu"], &[]));
+        assert_eq!(
+            category(&analysis, GapClass::Undiagnosed).tally,
+            tally(1, &["Nu"], &[])
+        );
     }
 
-    /// Verify key verbs in RECOGNIZED_VERBS are actually handled by the parser
+    /// B-2. Parser families key on the normalizer coverage's `oracle_patterns` uses, so
+    /// phrases that differ only in a number are one family; a phrase that differs in a
+    /// word is another.
+    #[test]
+    fn parser_families_key_on_the_coverage_pattern_normalizer() {
+        let analysis = analyze_gaps(&[
+            unsupported(
+                "Omicron",
+                vec![gap(
+                    "Effect:unparsed_condition",
+                    vec![condition("if you have 3 or more cards in hand")],
+                )],
+            ),
+            unsupported(
+                "Pi",
+                vec![gap(
+                    "Effect:unparsed_condition",
+                    vec![condition("If you have 7 or more cards in hand.")],
+                )],
+            ),
+            unsupported(
+                "Rho",
+                vec![gap(
+                    "Effect:unparsed_condition",
+                    vec![condition("if you have 3 or more lands in play")],
+                )],
+            ),
+            unsupported(
+                "Sigma",
+                vec![gap(
+                    "Effect:unparsed_verb_arguments",
+                    vec![verb("deal", "3 damage to each opponent")],
+                )],
+            ),
+            unsupported(
+                "Tau",
+                vec![gap(
+                    "Effect:unparsed_verb_arguments",
+                    vec![verb("deal", "5 damage to each opponent")],
+                )],
+            ),
+        ]);
+        let hand = normalize_oracle_pattern("if you have 3 or more cards in hand");
+        assert_eq!(hand, "if you have N or more cards in hand");
+        let conditions = category(&analysis, GapClass::Parser(ClauseGapKind::Condition));
+        let lands = normalize_oracle_pattern("if you have 3 or more lands in play");
+        assert_eq!(family_keys(conditions), [hand.as_str(), lands.as_str()]);
+        assert_eq!(
+            *family(conditions, &hand),
+            tally(2, &["Omicron", "Pi"], &["Omicron", "Pi"])
+        );
+        let verbs = category(&analysis, GapClass::Parser(ClauseGapKind::VerbArguments));
+        let deal = format!(
+            "deal: {}",
+            normalize_oracle_pattern("3 damage to each opponent")
+        );
+        assert_eq!(family_keys(verbs), [deal.as_str()]);
+        assert_eq!(
+            *family(verbs, &deal),
+            tally(2, &["Sigma", "Tau"], &["Sigma", "Tau"])
+        );
+    }
+
+    /// Verify core verbs are handled by the parser
     /// by parsing a canonical phrase and checking it doesn't return Unimplemented.
     #[test]
     fn recognized_verbs_parse_successfully() {
-        use crate::parser::oracle_effect::parse_effect;
-        use crate::types::ability::Effect;
-
         // Canonical test phrases for verbs — each should parse to a non-Unimplemented effect.
         // Not exhaustive (some verbs require card context), but covers the core set.
         let test_phrases: &[(&str, &str)] = &[

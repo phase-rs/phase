@@ -3318,18 +3318,18 @@ mod tests {
         }
     }
 
-    /// `FormatConfig` gained `allow_experimental_dungeons`; a v80 peer fails
+    /// `FormatConfig` gained `allow_experimental_dungeons`; a v83 peer fails
     /// the flag closed to `false` and runs the game without the experimental
     /// dungeon pool the host chose, so it must be refused before it receives
-    /// v81 state.
+    /// v84 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_81_for_experimental_dungeon_pool() {
-        assert_eq!(PROTOCOL_VERSION, 81);
+    fn protocol_version_is_84_for_experimental_dungeon_pool() {
+        assert_eq!(PROTOCOL_VERSION, 84);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3340,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_81_for_experimental_dungeon_pool` stays
+    /// `protocol_version_is_84_for_experimental_dungeon_pool` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

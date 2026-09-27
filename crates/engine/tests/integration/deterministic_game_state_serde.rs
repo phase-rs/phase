@@ -16,11 +16,11 @@ use engine::types::card_type::CardType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AutoPassMode, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot,
-    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
-    StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
-    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
-    WaitingFor,
+    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, LandPlayRecord, LiminalEntrant,
+    LiminalEntry, LinkedExileSnapshot, PendingConniveReentry, PersistedGameState,
+    PriorityPassingMode, SpellCastRecord, StackEntry, StackEntryKind, StackPaidSnapshot,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, TokenProjection, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -115,6 +115,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_game", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_game_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::abilities_activated_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lands_played_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacking_creatures_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::attacked_defenders_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -143,6 +144,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::valid_block_targets", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::block_requirements", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
     NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::blocker_constraints", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::WaitingFor::DeclareBlockers::must_be_blocked_targets", map_key_types: &["ObjectId"], group: RoundTripGroup::DeclareBlockers, numeric_deserializer: Some(NUMERIC_HASH_MAP_DESERIALIZER) },
 ];
 
 fn owner_id(file: &str, owner: &str, variant: Option<&str>, field: &str) -> String {
@@ -309,6 +311,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_MAP),
         );
     }
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "abilities_activated_this_turn_by_player",
+        "Box<HashMap>",
+        Classification::Canonical(HASH_MAP),
+    );
     add_spec(
         &mut specs,
         game_state,
@@ -482,6 +493,13 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "WaitingFor",
             Some("DeclareBlockers"),
             "blocker_constraints",
+            "HashMap",
+            HASH_MAP,
+        ),
+        (
+            "WaitingFor",
+            Some("DeclareBlockers"),
+            "must_be_blocked_targets",
             "HashMap",
             HASH_MAP,
         ),
@@ -1170,7 +1188,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        52,
+        54,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1670,6 +1688,33 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (ObjectId(1), first_lki.clone()),
         (ObjectId(2), second_lki.clone()),
     ]);
+    state.abilities_activated_this_turn_by_player = Box::new(HashMap::from([
+        (
+            PlayerId(0),
+            im::Vector::from(vec![AbilityActivationRecord {
+                activator: PlayerId(0),
+                source: ObjectId(1),
+                source_lki: first_lki.clone(),
+                ability_tag: None,
+                is_loyalty_ability: false,
+                targets: vec![ActivationTargetFact::Object {
+                    id: ObjectId(2),
+                    lki: Box::new(second_lki.clone()),
+                }],
+            }]),
+        ),
+        (
+            PlayerId(1),
+            im::Vector::from(vec![AbilityActivationRecord {
+                activator: PlayerId(1),
+                source: ObjectId(2),
+                source_lki: second_lki.clone(),
+                ability_tag: None,
+                is_loyalty_ability: true,
+                targets: vec![ActivationTargetFact::Player(PlayerId(0))],
+            }]),
+        ),
+    ]));
     state.lki_copiable_values = HashMap::from([
         (ObjectId(1), intrinsic_copiable_values(&first)),
         (ObjectId(2), intrinsic_copiable_values(&second)),
@@ -1763,6 +1808,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "spells_cast_this_game",
         "spells_cast_this_game_by_player",
         "spells_cast_this_turn_by_player",
+        "abilities_activated_this_turn_by_player",
         "lands_played_this_turn_by_player",
         "attacking_creatures_this_turn",
         "attacked_defenders_this_turn",
@@ -1783,7 +1829,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        41,
+        42,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -2063,12 +2109,17 @@ fn declare_blockers_numeric_maps_round_trip_through_value_bare_raw_and_trusted()
                 },
             ),
         ]),
+        must_be_blocked_targets: HashMap::from([
+            (ObjectId(3), vec![ObjectId(1)]),
+            (ObjectId(4), vec![ObjectId(1)]),
+        ]),
     };
     let value = waiting_value(&waiting);
     for field in [
         "valid_block_targets",
         "block_requirements",
         "blocker_constraints",
+        "must_be_blocked_targets",
     ] {
         assert_eq!(
             value["data"][field].as_object().map(serde_json::Map::len),
@@ -2089,6 +2140,7 @@ fn declare_blockers_numeric_maps_round_trip_through_value_bare_raw_and_trusted()
         valid_block_targets: HashMap::new(),
         block_requirements: HashMap::new(),
         blocker_constraints: HashMap::new(),
+        must_be_blocked_targets: HashMap::new(),
     };
     let empty_value = waiting_value(&empty);
     assert_eq!(

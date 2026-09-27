@@ -139205,6 +139205,11 @@ scryfall_oracle_id = "da93264e-4e04-401a-9809-e4e1056cf604"
 scryfall_id = "5e1c14a0-cd68-45fc-a127-422ca6113048"
 
 [[token.source_card_refs]]
+card_name = "Shadrix Silverquill"
+scryfall_oracle_id = "2143f413-7baa-4fd6-a7ca-32f52bfa553f"
+scryfall_id = "cf3e5f36-b024-4342-846d-2cf1d4965ca1"
+
+[[token.source_card_refs]]
 card_name = "Fain, the Broker"
 scryfall_oracle_id = "31b990e3-9bad-4b0a-a9d5-f5b9ed2ad0b0"
 scryfall_id = "f5829ea0-1f41-46ba-a5e6-b7bd7051a591"

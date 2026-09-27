@@ -7528,7 +7528,9 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
                 assert_eq!(
                     **inner,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::StartingLifeTotal,
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::Controller,
+                        },
                     },
                     "DivideRounded.inner must be Ref(StartingLifeTotal), got {inner:?}",
                 );
@@ -19235,7 +19237,7 @@ fn phase_trigger_enchanted_players_first_upkeep() {
         Some(Effect::AdditionalPhase {
             target: TargetFilter::TriggeringPlayer,
             phase: Phase::Upkeep,
-            after: Phase::Upkeep,
+            after: crate::types::ability::ExtraPhaseAnchor::ThisStep,
             followed_by,
             ..
         }) if followed_by.is_empty()

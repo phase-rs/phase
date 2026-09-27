@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, eof, map, opt, peek, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, peek, rest, value, verify};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, separated_pair, terminated};
@@ -257,6 +257,26 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
     parse_single_cost(parts.first().map_or(text, String::as_str))
 }
 
+// CR 107.1a: Keep an explicit fractional rounding suffix inside its cost
+// component, rather than treating its comma as a component separator.
+fn parse_half_life_cost_prefix(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        pair(
+            tag("pay half "),
+            verify(nom_quantity::parse_possessive_quantity_ref, |qty| {
+                matches!(
+                    qty,
+                    QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller
+                    }
+                )
+            }),
+        ),
+    )
+    .parse(input)
+}
+
 fn split_cost_parts(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
@@ -270,6 +290,18 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
             '{' => brace_depth += 1,
             '}' => brace_depth = brace_depth.saturating_sub(1),
             ',' if brace_depth == 0 => {
+                // CR 107.1a: The rounding comma is part of the fractional
+                // life-cost clause; a later comma still separates costs.
+                let prefix = text[start..i].trim().to_lowercase();
+                let suffix = text[i..].to_lowercase();
+                if all_consuming(parse_half_life_cost_prefix)
+                    .parse(prefix.as_str())
+                    .is_ok()
+                    && nom_quantity::parse_explicit_rounding_suffix(&suffix).is_ok()
+                {
+                    i += ch.len_utf8();
+                    continue;
+                }
                 let part = text[start..i].trim();
                 if !part.is_empty() {
                     parts.push(part);
@@ -832,6 +864,20 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "Pay N life" / "Pay life equal to <dynamic quantity>" / "N life"
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("pay ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
+        // CR 107.1a + CR 601.2f: An explicit rounding direction belongs to
+        // this activation cost. Require the complete G12 grammar before using
+        // parse_half_rounded, whose absent-suffix fallback is for other contexts.
+        if all_consuming(pair(
+            parse_half_life_cost_prefix,
+            nom_quantity::parse_explicit_rounding_suffix,
+        ))
+        .parse(lower.as_str())
+        .is_ok()
+        {
+            let (_, amount) = nom_quantity::parse_half_rounded(&rest_lower)
+                .expect("complete half-life cost grammar was verified");
+            return AbilityCost::PayLife { amount };
+        }
         // CR 119.4 + CR 903.4 + CR 903.4f: "Pay life equal to the number of
         // colors in your commander(s)' color identity" — War Room. Parse via
         // dedicated combinator so the class covers both "commander's" and
@@ -2306,6 +2352,74 @@ mod tests {
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
+
+    #[test]
+    fn half_life_activation_cost_keeps_rounding_in_its_component() {
+        for (text, expected) in [
+            (
+                "Pay half your life, rounded up",
+                crate::types::ability::RoundingMode::Up,
+            ),
+            (
+                "Pay half your life, rounded down",
+                crate::types::ability::RoundingMode::Down,
+            ),
+        ] {
+            assert!(matches!(
+                parse_oracle_cost(text),
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding,
+                    },
+                } if rounding == expected
+                    && matches!(*inner, QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal { player: PlayerScope::Controller }
+                    })
+            ));
+        }
+
+        let AbilityCost::Composite { costs } =
+            parse_oracle_cost("{B}{B}, Pay half your life, rounded up, {T}")
+        else {
+            panic!("expected three cost components");
+        };
+        assert_eq!(costs.len(), 3);
+        assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+        assert!(matches!(
+            costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::DivideRounded {
+                    rounding: crate::types::ability::RoundingMode::Up,
+                    ..
+                }
+            }
+        ));
+        assert!(matches!(costs[2], AbilityCost::Tap));
+
+        assert!(matches!(
+            parse_oracle_cost("Pay 2 life"),
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
+        assert!(matches!(
+            parse_oracle_cost("{W/P}"),
+            AbilityCost::Mana { .. }
+        ));
+    }
+
+    #[test]
+    fn half_life_cost_rejects_unsupported_rounding_qualifier() {
+        let AbilityCost::Composite { costs } =
+            parse_oracle_cost("{B}, Pay half your life, rounded up somehow")
+        else {
+            panic!("mana component must remain separate");
+        };
+        assert!(matches!(costs[0], AbilityCost::Mana { .. }));
+        assert!(matches!(costs[1], AbilityCost::Unimplemented { .. }));
+    }
 
     /// CR 205.2a + CR 601.2h: a sacrifice cost whose filter is a TYPE UNION with
     /// an article-led right conjunct keeps BOTH legs — "Sacrifice another

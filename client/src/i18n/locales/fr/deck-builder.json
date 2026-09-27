@@ -66,6 +66,13 @@
     "discard": "Abandonner",
     "saveAndContinue": "Enregistrer et continuer"
   },
+  "saveConflict": {
+    "title": "Deck modifié ailleurs",
+    "bodyChanged": "« {{name}} » a été modifié ailleurs depuis que cet éditeur l'a ouvert ou enregistré pour la dernière fois, donc rien n'a été enregistré. Chargez la version enregistrée pour la voir (vos modifications non enregistrées seront abandonnées), ou enregistrez votre version quand même.",
+    "bodyDeleted": "« {{name}} » a été supprimé ailleurs depuis que cet éditeur l'a ouvert ou enregistré pour la dernière fois, donc rien n'a été enregistré. Enregistrez votre version quand même.",
+    "loadSaved": "Charger la version enregistrée",
+    "saveMine": "Enregistrer ma version"
+  },
   "card": {
     "moveToSideboard": "Déplacer un {{name}} vers la réserve",
     "moveToMain": "Déplacer un {{name}} vers le deck principal",

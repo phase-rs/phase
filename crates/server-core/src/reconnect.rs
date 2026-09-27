@@ -140,11 +140,6 @@ impl ReconnectManager {
         self.disconnected
             .retain(|_, info| info.game_code != game_code);
     }
-
-    pub fn remove_disconnect(&mut self, game_code: &str, player: PlayerId) {
-        let key = format!("{}:{}", game_code, player.0);
-        self.disconnected.remove(&key);
-    }
 }
 
 impl Default for ReconnectManager {
