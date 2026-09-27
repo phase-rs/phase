@@ -639,6 +639,7 @@ mod tests {
                 valid_block_targets: Default::default(),
                 block_requirements: Default::default(),
                 blocker_constraints: Default::default(),
+                must_be_blocked_targets: Default::default(),
             }),
             Some(Phase::DeclareBlockers),
         );

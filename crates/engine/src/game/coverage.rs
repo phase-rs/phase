@@ -386,9 +386,8 @@ impl ResolverFeatureFamily {
     /// is not under any family.
     ///
     /// A family whose classifier has no `Unhandled` arm never produces a `ResolverFeature`
-    /// gap, so it never reaches this decode from a coverage gap. When this was written that
-    /// held for `Structural` and `Condition`; it is a snapshot, and a new `Unhandled` arm
-    /// changes it.
+    /// gap, so it never reaches this decode from a coverage gap. Which families that
+    /// describes changes whenever a classifier gains or loses an `Unhandled` arm.
     pub fn from_feature_key(key: &str) -> Option<(Self, &str)> {
         Self::iter().find_map(|family| {
             key.strip_prefix(family.tag())?
@@ -5981,7 +5980,7 @@ fn build_casting_option_item(option: &SpellCastingOption, items: &mut Vec<Parsed
 ///
 /// Replaces concrete numbers, mana symbols, and p/t modifiers with placeholders
 /// so that structurally identical Oracle phrases group together.
-fn normalize_oracle_pattern(text: &str) -> String {
+pub(crate) fn normalize_oracle_pattern(text: &str) -> String {
     let s = text.to_lowercase();
     let s = s.trim_end_matches('.');
     let mut result = String::with_capacity(s.len());
