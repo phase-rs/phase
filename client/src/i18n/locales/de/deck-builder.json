@@ -290,6 +290,26 @@
     "ariaLabel": "Deck-Bracket",
     "unrated": "Unbewertet"
   },
+  "comboBarometer": {
+    "ariaLabel": "Unendliche Zwei-Karten-Kombo",
+    "question": "Beabsichtigte unendliche Zwei-Karten-Kombo?",
+    "undeclared": "Nicht beantwortet",
+    "noneIntended": "Keine beabsichtigt",
+    "intended": "Beabsichtigt",
+    "windowAriaLabel": "Wann kann sie zusammengestellt werden?",
+    "windowUnstated": "Nicht angegeben",
+    "windowEarly": "Frühes Spiel",
+    "windowLate": "Nur spätes Spiel",
+    "declaredFloor": "(deklariert — erzwingt B{{tier}})",
+    "heading": "Barometer",
+    "authorityEngine": "Von phase geprüft",
+    "authorityDeckOwner": "Von dir deklariert",
+    "authorityUnanswered": "Nicht beantwortet",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Extrazüge",
+    "rowMassLandDenial": "Massenhafte Landzerstörung",
+    "rowTwoCardCombos": "Unendliche Zwei-Karten-Kombos"
+  },
   "warnings": {
     "commanderCount": "Das Deck hat {{count}} Karten (genau {{expected}} erforderlich)",
     "singleton": "{{name}}: mehrere Kopien (Singleton-Format)",

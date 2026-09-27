@@ -27,8 +27,13 @@ import {
   isRandomDeckSelection,
   loadActiveDeck,
   loadSavedDeckBracket,
+  loadSavedDeckComboDeclaration,
 } from "../constants/storage";
-import type { CommanderBracket } from "../types/bracket";
+import {
+  UNDECLARED_COMBO,
+  type ComboDeclaration,
+  type CommanderBracket,
+} from "../types/bracket";
 import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
@@ -253,6 +258,13 @@ function loadActiveDeckBracket(): CommanderBracket | null {
   return loadSavedDeckBracket(name);
 }
 
+/** Single bridge from the active saved deck's sidecar to engine-bound deck data. */
+function loadActiveDeckComboDeclaration(): ComboDeclaration {
+  const name = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!name || isRandomDeckSelection(name)) return UNDECLARED_COMBO;
+  return loadSavedDeckComboDeclaration(name);
+}
+
 /**
  * Convert the numeric `CommanderBracket` (1–5) stored on deck metadata into the
  * lowercase string tier the Rust engine expects on `PlayerDeckList.bracket_tier`.
@@ -282,6 +294,7 @@ type ExpandedDeckWithTier = {
   companion: string[];
   sticker_sheets: string[];
   bracket_tier: CommanderBracketTier;
+  combo_declaration: ComboDeclaration;
 };
 type DeckListPayload = {
   player: ExpandedDeckWithTier;
@@ -369,9 +382,17 @@ function pickOpponentDeck(
 // builders below ignore its contents for such formats.
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
 
-function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBracket | null): DeckListPayload {
+function buildPlayerOnlyDeckList(
+  deck: ParsedDeck,
+  playerBracket: CommanderBracket | null | undefined,
+  comboDeclaration: ComboDeclaration,
+): DeckListPayload {
   const expanded = expandParsedDeck(deck);
-  const player: ExpandedDeckWithTier = { ...expanded, bracket_tier: bracketToEngineTier(playerBracket) };
+  const player: ExpandedDeckWithTier = {
+    ...expanded,
+    bracket_tier: bracketToEngineTier(playerBracket),
+    combo_declaration: comboDeclaration,
+  };
   return {
     player,
     opponent: {
@@ -384,6 +405,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
       companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
+      combo_declaration: UNDECLARED_COMBO,
     },
     ai_decks: [],
     ai_difficulties: [],
@@ -397,6 +419,7 @@ async function buildLocalAiDeckList(
   formatConfig?: FormatConfig,
   selectedMatchType?: MatchType,
   playerBracket?: CommanderBracket | null,
+  comboDeclaration: ComboDeclaration = UNDECLARED_COMBO,
 ): Promise<DeckListPayload> {
   // Fixed-deck formats (Momir's Madness) supply the deck for every seat from the
   // engine, so there is no AI deck catalog to draw from — submit empty seats and
@@ -414,6 +437,7 @@ async function buildLocalAiDeckList(
       companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
+      combo_declaration: UNDECLARED_COMBO,
     });
     const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
       effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
@@ -489,9 +513,17 @@ async function buildLocalAiDeckList(
     effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
   );
   return {
-    player: { ...playerExpanded, bracket_tier: playerTier },
-    opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
-    ai_decks: picks.slice(1).map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: bracketToEngineTier(c.bracket) })),
+    player: { ...playerExpanded, bracket_tier: playerTier, combo_declaration: comboDeclaration },
+    opponent: {
+      ...expandParsedDeck(picks[0].deck),
+      bracket_tier: bracketToEngineTier(picks[0].bracket),
+      combo_declaration: UNDECLARED_COMBO,
+    },
+    ai_decks: picks.slice(1).map((c) => ({
+      ...expandParsedDeck(c.deck),
+      bracket_tier: bracketToEngineTier(c.bracket),
+      combo_declaration: UNDECLARED_COMBO,
+    })),
     ai_difficulties: aiDifficulties,
   };
 }
@@ -854,6 +886,7 @@ export function GameProvider({
         const deckList = buildPlayerOnlyDeckList(
           parsedDeck ?? EMPTY_PARSED_DECK,
           loadActiveDeckBracket(),
+          loadActiveDeckComboDeclaration(),
         );
         signal.throwIfAborted();
 
@@ -1510,6 +1543,7 @@ export function GameProvider({
               formatConfig,
               matchConfig?.match_type,
               loadActiveDeckBracket(),
+              loadActiveDeckComboDeclaration(),
             );
           } catch (deckErr) {
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1646,6 +1680,7 @@ export function GameProvider({
           formatConfig,
           matchConfig?.match_type,
           loadActiveDeckBracket(),
+          loadActiveDeckComboDeclaration(),
         );
       } catch (deckErr) {
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1731,6 +1766,7 @@ export function GameProvider({
               formatConfig,
               matchConfig?.match_type,
               loadActiveDeckBracket(),
+              loadActiveDeckComboDeclaration(),
             );
             if (cancelled) return;
           }

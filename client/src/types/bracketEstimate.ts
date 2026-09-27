@@ -5,6 +5,36 @@ export type CommanderBracketTier =
   | "optimized"
   | "cedh";
 
+export type ComboWindow = "early_game" | "late_game";
+
+/** Mirrors the engine's `ComboDeclaration` (internally tagged on `kind`). */
+export type ComboDeclaration =
+  | { kind: "undeclared" }
+  | { kind: "none_intended" }
+  | { kind: "intended"; window: ComboWindow | null };
+
+export const UNDECLARED_COMBO: ComboDeclaration = { kind: "undeclared" };
+
+export type Barometer =
+  | "game_changers"
+  | "extra_turns"
+  | "mass_land_denial"
+  | "two_card_combos";
+
+export const BAROMETERS: readonly Barometer[] = [
+  "game_changers",
+  "extra_turns",
+  "mass_land_denial",
+  "two_card_combos",
+];
+
+export type BarometerAuthority = "engine" | "deck_owner" | "unanswered";
+
+export interface ComboBarometer {
+  declaration: ComboDeclaration;
+  floor: CommanderBracketTier | null;
+}
+
 export type BracketAxis =
   | "game_changers"
   | "mass_land_denial"
@@ -66,6 +96,8 @@ export interface BracketEstimate {
   data_version: string;
   /** Engine verdict on the player's declaration; `null` when none was sent. */
   declaration: DeclarationVerdict | null;
+  combo_barometer: ComboBarometer;
+  barometers: Partial<Record<Barometer, BarometerAuthority>>;
 }
 
 // Mirrors the sections `estimate_bracket` counts, plus `sideboard`, which the
@@ -76,6 +108,7 @@ export interface BracketDeckRequest {
   sideboard: string[];
   companion: string[];
   signature_spell: string[];
+  combo_declaration: ComboDeclaration;
 }
 
 export interface BracketEstimateRequest {
@@ -122,6 +155,36 @@ function hasReadingByAxis(value: unknown): value is BracketAxisReadings {
 
 function isTier(value: unknown): value is CommanderBracketTier {
   return typeof value === "string" && value in BRACKET_TIER_NUMERIC;
+}
+
+export function isComboDeclaration(value: unknown): value is ComboDeclaration {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "undeclared":
+    case "none_intended":
+      return true;
+    case "intended":
+      return (
+        value.window === undefined ||
+        value.window === null ||
+        value.window === "early_game" ||
+        value.window === "late_game"
+      );
+    default:
+      return false;
+  }
+}
+
+function isBarometerAuthority(value: unknown): value is BarometerAuthority {
+  return value === "engine" || value === "deck_owner" || value === "unanswered";
+}
+
+function isComboBarometer(value: unknown): value is ComboBarometer {
+  return (
+    isRecord(value) &&
+    isComboDeclaration(value.declaration) &&
+    (value.floor === null || isTier(value.floor))
+  );
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -182,6 +245,10 @@ export function isBracketEstimate(value: unknown): value is BracketEstimate {
     isCoverage(value.coverage) &&
     (value.declaration === undefined ||
       value.declaration === null ||
-      isDeclarationVerdict(value.declaration))
+      isDeclarationVerdict(value.declaration)) &&
+    (value.combo_barometer === undefined || isComboBarometer(value.combo_barometer)) &&
+    (value.barometers === undefined ||
+      (isRecord(value.barometers) &&
+        Object.values(value.barometers).every(isBarometerAuthority)))
   );
 }

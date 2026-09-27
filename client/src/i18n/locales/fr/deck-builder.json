@@ -290,6 +290,26 @@
     "ariaLabel": "Palier du deck",
     "unrated": "Non classé"
   },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinie à deux cartes",
+    "question": "Combo infinie intentionnelle à deux cartes ?",
+    "undeclared": "Sans réponse",
+    "noneIntended": "Aucune prévue",
+    "intended": "Prévue",
+    "windowAriaLabel": "Quand peut-elle être assemblée ?",
+    "windowUnstated": "Non précisé",
+    "windowEarly": "Début de partie",
+    "windowLate": "Fin de partie uniquement",
+    "declaredFloor": "(déclaré — impose B{{tier}})",
+    "heading": "Baromètres",
+    "authorityEngine": "Vérifié par phase",
+    "authorityDeckOwner": "Déclaré par vous",
+    "authorityUnanswered": "Sans réponse",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Tours supplémentaires",
+    "rowMassLandDenial": "Déni massif de terrains",
+    "rowTwoCardCombos": "Combos infinies à deux cartes"
+  },
   "warnings": {
     "commanderCount": "Le deck contient {{count}} cartes (il en faut exactement {{expected}})",
     "singleton": "{{name}} : plusieurs copies (format singleton)",

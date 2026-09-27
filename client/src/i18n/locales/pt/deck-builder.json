@@ -290,6 +290,26 @@
     "ariaLabel": "Bracket do deck",
     "unrated": "Sem classificação"
   },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinito de duas cartas",
+    "question": "Combo infinito intencional de duas cartas?",
+    "undeclared": "Sem resposta",
+    "noneIntended": "Nenhum intencional",
+    "intended": "Intencional",
+    "windowAriaLabel": "Quando pode ser montado?",
+    "windowUnstated": "Não especificado",
+    "windowEarly": "Início de jogo",
+    "windowLate": "Apenas no fim do jogo",
+    "declaredFloor": "(declarado — força B{{tier}})",
+    "heading": "Barômetros",
+    "authorityEngine": "Verificado pelo phase",
+    "authorityDeckOwner": "Declarado por você",
+    "authorityUnanswered": "Sem resposta",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Turnos extras",
+    "rowMassLandDenial": "Negação em massa de terrenos",
+    "rowTwoCardCombos": "Combos infinitos de duas cartas"
+  },
   "warnings": {
     "commanderCount": "O deck tem {{count}} cartas (precisa de exatamente {{expected}})",
     "singleton": "{{name}}: várias cópias (formato singleton)",

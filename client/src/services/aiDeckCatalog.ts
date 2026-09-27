@@ -11,7 +11,11 @@ import {
 import type { DeckArchetype } from "./engineRuntime";
 import { expandParsedDeck, type ParsedDeck } from "./deckParser";
 import type { CommanderBracket } from "../types/bracket";
-import { BRACKET_TIER_NUMERIC, isCommanderFamilyFormat } from "../types/bracket";
+import {
+  BRACKET_TIER_NUMERIC,
+  isCommanderFamilyFormat,
+  UNDECLARED_COMBO,
+} from "../types/bracket";
 
 export type AiDeckSource = DeckCatalogSource;
 
@@ -65,7 +69,10 @@ async function resolveBracket(
   if (!isCommanderFamilyFormat(format)) return null;
   const request = expandParsedDeck(deck);
   if (request.commander.length === 0) return null;
-  const outcome = await estimateDeckBracket({ deck: request, declared_tier: null });
+  const outcome = await estimateDeckBracket({
+    deck: { ...request, combo_declaration: UNDECLARED_COMBO },
+    declared_tier: null,
+  });
   switch (outcome.kind) {
     case "estimate":
       return BRACKET_TIER_NUMERIC[outcome.estimate.tier];

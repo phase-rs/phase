@@ -2,12 +2,15 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
+  BAROMETERS,
   BRACKET_AXES,
   BRACKET_LABEL,
   BRACKET_TIER_CHIP_CLASS,
   BRACKET_TIER_NUMERIC,
   type BracketAxis,
   type BracketEstimate,
+  type Barometer,
+  type BarometerAuthority,
   type CommanderBracket,
 } from "../../types/bracket";
 
@@ -29,6 +32,19 @@ const AXIS_I18N_KEY: Record<BracketAxis, string> = {
   mass_land_denial: "bracket.axis.massLandDenial",
   extra_turns: "bracket.axis.extraTurns",
   efficient_tutors: "bracket.axis.efficientTutors",
+};
+
+const BAROMETER_I18N_KEY: Record<Barometer, string> = {
+  game_changers: "comboBarometer.rowGameChangers",
+  extra_turns: "comboBarometer.rowExtraTurns",
+  mass_land_denial: "comboBarometer.rowMassLandDenial",
+  two_card_combos: "comboBarometer.rowTwoCardCombos",
+};
+
+const AUTHORITY_I18N_KEY: Record<BarometerAuthority, string> = {
+  engine: "comboBarometer.authorityEngine",
+  deck_owner: "comboBarometer.authorityDeckOwner",
+  unanswered: "comboBarometer.authorityUnanswered",
 };
 
 export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyReason }: Props) {
@@ -90,6 +106,37 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
         >
           {expanded ? t("bracket.hideBreakdownButton") : t("bracket.showBreakdownButton")}
         </button>
+      </div>
+
+      <div className="mt-3 border-t border-white/5 pt-2 text-xs">
+        <div className="mb-1.5 text-[10px] uppercase tracking-wider text-slate-500">
+          {t("comboBarometer.heading")}
+        </div>
+        <dl className="space-y-1.5">
+          {BAROMETERS.map((barometer) => {
+            const authority = estimate.barometers?.[barometer] ?? "unanswered";
+            const unanswered = authority === "unanswered";
+            return (
+              <div
+                key={barometer}
+                className={`grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2 ${unanswered ? "text-slate-500" : "text-slate-300"}`}
+              >
+                <dt>{t(BAROMETER_I18N_KEY[barometer])}</dt>
+                <dd className={unanswered ? "text-slate-500" : "text-slate-400"}>
+                  {t(AUTHORITY_I18N_KEY[authority])}
+                  {barometer === "two_card_combos" &&
+                    estimate.combo_barometer?.floor != null && (
+                      <span className="ml-1 text-amber-300">
+                        {t("comboBarometer.declaredFloor", {
+                          tier: BRACKET_TIER_NUMERIC[estimate.combo_barometer.floor],
+                        })}
+                      </span>
+                    )}
+                </dd>
+              </div>
+            );
+          })}
+        </dl>
       </div>
 
       {expanded && (

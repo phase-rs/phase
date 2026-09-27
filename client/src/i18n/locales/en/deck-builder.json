@@ -290,6 +290,26 @@
     "ariaLabel": "Deck bracket",
     "unrated": "Unrated"
   },
+  "comboBarometer": {
+    "ariaLabel": "Two-card infinite combo",
+    "question": "Intentional two-card infinite combo?",
+    "undeclared": "Not answered",
+    "noneIntended": "None intended",
+    "intended": "Intended",
+    "windowAriaLabel": "When can it assemble?",
+    "windowUnstated": "Unstated",
+    "windowEarly": "Early game",
+    "windowLate": "Late game only",
+    "declaredFloor": "(declared — forces B{{tier}})",
+    "heading": "Barometers",
+    "authorityEngine": "Checked by phase",
+    "authorityDeckOwner": "Declared by you",
+    "authorityUnanswered": "Not answered",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Extra Turns",
+    "rowMassLandDenial": "Mass Land Denial",
+    "rowTwoCardCombos": "Two-Card Infinite Combos"
+  },
   "warnings": {
     "commanderCount": "Deck has {{count}} cards (need exactly {{expected}})",
     "singleton": "{{name}}: multiple copies (singleton format)",

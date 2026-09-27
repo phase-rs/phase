@@ -5,7 +5,11 @@ import {
   estimateDeckBracket,
   type BracketEstimateOutcome,
 } from "../services/bracketEstimate";
-import type { BracketEstimate, CommanderBracketTier } from "../types/bracket";
+import type {
+  BracketEstimate,
+  ComboDeclaration,
+  CommanderBracketTier,
+} from "../types/bracket";
 import { isCommanderFamilyFormat } from "../types/bracket";
 import { expandParsedDeck } from "../services/deckParser";
 import type { ParsedDeck } from "../services/deckParser";
@@ -51,6 +55,7 @@ interface Options {
   commanders: string[];
   format: GameFormat | undefined;
   declaredTier: CommanderBracketTier | null;
+  comboDeclaration: ComboDeclaration;
 }
 
 interface Result {
@@ -75,6 +80,7 @@ export function useBracketEstimate({
   commanders,
   format,
   declaredTier,
+  comboDeclaration,
 }: Options): Result {
   const [estimate, setEstimate] = useState<BracketEstimate | null>(null);
   const [loading, setLoading] = useState(false);
@@ -86,7 +92,9 @@ export function useBracketEstimate({
 
   const eligible = isCommanderFamilyFormat(format) && commanders.length > 0;
 
-  const deckKey = eligible ? buildBracketDeckKey(commanders, deck, declaredTier) : null;
+  const deckKey = eligible
+    ? buildBracketDeckKey(commanders, deck, declaredTier, comboDeclaration)
+    : null;
 
   useEffect(() => {
     if (!eligible || !deckKey) {
@@ -114,6 +122,7 @@ export function useBracketEstimate({
               sideboard: expanded.sideboard,
               companion: expanded.companion,
               signature_spell: expanded.signature_spell,
+              combo_declaration: comboDeclaration,
             },
             declared_tier: declaredTier,
           }),

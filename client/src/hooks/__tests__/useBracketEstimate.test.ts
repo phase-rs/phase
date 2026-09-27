@@ -3,7 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { estimateDeckBracket } from "../../services/bracketEstimate";
 import type { ParsedDeck } from "../../services/deckParser";
-import type { BracketEstimate, CommanderBracketTier } from "../../types/bracket";
+import type {
+  BracketEstimate,
+  ComboDeclaration,
+  CommanderBracketTier,
+} from "../../types/bracket";
 import { clearBracketEstimateCache, useBracketEstimate } from "../useBracketEstimate";
 
 vi.mock("../../services/bracketEstimate", () => ({ estimateDeckBracket: vi.fn() }));
@@ -20,6 +24,8 @@ const mockEstimate: BracketEstimate = {
   coverage: { counted: 4, resolved: 4, unresolved: [], confidence: "complete" },
   data_version: "test-1",
   declaration: null,
+  combo_barometer: { declaration: { kind: "undeclared" }, floor: null },
+  barometers: {},
 };
 
 const deck: ParsedDeck = {
@@ -37,6 +43,7 @@ const baseOptions = {
   commanders: ["Krenko, Mob Boss"],
   format: "Commander" as const,
   declaredTier: null,
+  comboDeclaration: { kind: "undeclared" } as const,
 };
 
 function mockEstimateOutcome(estimate: BracketEstimate = mockEstimate): void {
@@ -71,7 +78,7 @@ describe("useBracketEstimate", () => {
     expect(estimateDeckBracket).not.toHaveBeenCalled();
   });
 
-  it("sends all five deck sections and the declared tier", async () => {
+  it("sends all five deck sections, the declared tier, and combo declaration", async () => {
     mockEstimateOutcome();
     const { result } = renderHook(() =>
       useBracketEstimate({ ...baseOptions, declaredTier: "optimized" }),
@@ -85,6 +92,7 @@ describe("useBracketEstimate", () => {
         sideboard: ["Pyroblast"],
         companion: ["Lutri, the Spellchaser"],
         signature_spell: ["Lightning Bolt"],
+        combo_declaration: { kind: "undeclared" },
       },
       declared_tier: "optimized",
     });
@@ -166,6 +174,28 @@ describe("useBracketEstimate", () => {
     await waitFor(() => expect(estimateDeckBracket).toHaveBeenCalledTimes(2));
     expect(estimateDeckBracket).toHaveBeenLastCalledWith(
       expect.objectContaining({ declared_tier: "optimized" }),
+    );
+  });
+
+  it("changing only comboDeclaration refires the service exactly once", async () => {
+    mockEstimateOutcome();
+    const { rerender } = renderHook(
+      ({ comboDeclaration }: { comboDeclaration: ComboDeclaration }) =>
+        useBracketEstimate({ ...baseOptions, comboDeclaration }),
+      { initialProps: { comboDeclaration: { kind: "undeclared" } } },
+    );
+    await waitFor(() => expect(estimateDeckBracket).toHaveBeenCalledTimes(1));
+
+    rerender({
+      comboDeclaration: { kind: "intended", window: "early_game" },
+    });
+    await waitFor(() => expect(estimateDeckBracket).toHaveBeenCalledTimes(2));
+    expect(estimateDeckBracket).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        deck: expect.objectContaining({
+          combo_declaration: { kind: "intended", window: "early_game" },
+        }),
+      }),
     );
   });
 
