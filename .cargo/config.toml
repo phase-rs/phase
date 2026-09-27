@@ -13,6 +13,7 @@ bracket-baseline = "run --profile tool --bin bracket-baseline -- data/"
 rules-audit = "run --profile tool --bin rules-audit --features audit --"
 semantic-audit = "run --profile tool --features cli --bin oracle-gen -- semantic-audit"
 combo-verify = "run --profile tool --features combo-verify --bin combo-verify -- data/"
+combo-audit = "run --profile tool --features combo-verify --bin combo-audit --"
 scrape-feeds = "run --release -p feed-scraper --"
 tune-ai = "run --release --features tune --bin ai-tune --"
 # AI gates run `server-release`, NOT the default dev profile and NOT `--release`.

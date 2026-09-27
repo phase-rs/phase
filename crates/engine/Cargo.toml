@@ -90,6 +90,11 @@ required-features = ["combo-verify"]
 test = false
 
 [[bin]]
+name = "combo-audit"
+path = "src/bin/combo_audit.rs"
+required-features = ["combo-verify"]
+
+[[bin]]
 name = "card-data-validate"
 path = "src/bin/card_data_validate.rs"
 test = false

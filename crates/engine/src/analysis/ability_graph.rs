@@ -1895,44 +1895,49 @@ fn build_node(
 /// spell/activated abilities, trigger executes, replacement executes, and the
 /// `GrantAbility`/`GrantTrigger` children of static abilities. A trigger or
 /// replacement whose `execute == None` produces no node (LOW-4).
-fn build_nodes(faces: &[&CardFace]) -> Vec<AbilityNode> {
+fn build_nodes_for_face(face: &CardFace) -> Vec<AbilityNode> {
     let mut nodes = Vec::new();
-    for face in faces {
-        for def in &face.abilities {
+    for def in &face.abilities {
+        nodes.push(build_node(&face.name, def, None));
+    }
+    for trig in &face.triggers {
+        if let Some(def) = &trig.execute {
+            nodes.push(build_node(&face.name, def, trigger_axis(trig)));
+        }
+    }
+    for repl in &face.replacements {
+        if let Some(def) = &repl.execute {
             nodes.push(build_node(&face.name, def, None));
         }
-        for trig in &face.triggers {
-            if let Some(def) = &trig.execute {
-                nodes.push(build_node(&face.name, def, trigger_axis(trig)));
-            }
-        }
-        for repl in &face.replacements {
-            if let Some(def) = &repl.execute {
-                nodes.push(build_node(&face.name, def, None));
-            }
-        }
-        for stat in &face.static_abilities {
-            for modi in &stat.modifications {
-                match modi {
-                    ContinuousModification::GrantAbility { definition } => {
-                        nodes.push(build_node(&face.name, definition, None));
-                    }
-                    ContinuousModification::GrantTrigger { trigger } => {
-                        if let Some(def) = &trigger.execute {
-                            nodes.push(build_node(&face.name, def, trigger_axis(trigger)));
-                        }
-                    }
-                    ContinuousModification::GrantReplacement { replacement } => {
-                        if let Some(def) = &replacement.execute {
-                            nodes.push(build_node(&face.name, def, None));
-                        }
-                    }
-                    _ => {}
+    }
+    for stat in &face.static_abilities {
+        for modi in &stat.modifications {
+            match modi {
+                ContinuousModification::GrantAbility { definition } => {
+                    nodes.push(build_node(&face.name, definition, None));
                 }
+                ContinuousModification::GrantTrigger { trigger } => {
+                    if let Some(def) = &trigger.execute {
+                        nodes.push(build_node(&face.name, def, trigger_axis(trigger)));
+                    }
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(def) = &replacement.execute {
+                        nodes.push(build_node(&face.name, def, None));
+                    }
+                }
+                _ => {}
             }
         }
     }
     nodes
+}
+
+fn build_nodes(faces: &[&CardFace]) -> Vec<AbilityNode> {
+    faces
+        .iter()
+        .flat_map(|face| build_nodes_for_face(face))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2003,6 +2008,15 @@ pub struct CandidateCycle {
     pub win_kind: WinKind,
     /// Whether ≥1 member node had unmodeled effects (lower confidence).
     pub completeness: ModelCompleteness,
+}
+
+/// One candidate cycle found while examining exactly two input faces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairCandidate {
+    /// Indices into the input slice — the caller owns the names.
+    pub left: usize,
+    pub right: usize,
+    pub cycle: CandidateCycle,
 }
 
 impl CandidateCycle {
@@ -2097,6 +2111,144 @@ fn axis_key_to_resource(key: &AxisKey, net: &ResourceVector) -> Option<ResourceA
 /// card list and a set of expected axes.
 pub fn candidate_cycles(faces: &[&CardFace]) -> Vec<CandidateCycle> {
     candidate_cycles_from_nodes(build_nodes(faces))
+}
+
+/// Engine B restricted to the input regime it was actually built and tested for.
+/// Every existing test drives `candidate_cycles_from_nodes` with exactly two
+/// faces' worth of nodes, so a pair-restricted entry point inherits that
+/// validation instead of extrapolating past it.
+///
+/// EVIDENCE ONLY. A [`CandidateCycle`] is unconfirmed by construction — this
+/// module's own header states it ignores targeting legality, timing windows,
+/// "may" choices, and replacement interactions — so a result here MUST NOT floor
+/// a tier, contribute to a `BracketAxis`, or change a `BracketEstimate.tier`. It
+/// is rendered beside a table match, or alone, as "these two cards may combo".
+pub fn candidate_pairs(faces: &[&CardFace]) -> Vec<PairCandidate> {
+    let nodes_by_face: Vec<Vec<AbilityNode>> = faces
+        .iter()
+        .map(|face| build_nodes_for_face(face))
+        .collect();
+    let mut out = Vec::new();
+
+    for left in 0..nodes_by_face.len() {
+        for right in (left + 1)..nodes_by_face.len() {
+            let nodes = nodes_by_face[left]
+                .iter()
+                .chain(&nodes_by_face[right])
+                .cloned()
+                .collect();
+            out.extend(
+                candidate_cycles_from_nodes(nodes)
+                    .into_iter()
+                    .map(|cycle| PairCandidate { left, right, cycle }),
+            );
+        }
+    }
+
+    out
+}
+
+#[cfg(feature = "combo-verify")]
+pub const COMBO_AUDIT_BLIND_SPOT: &str = "Blind spot: Thassa's Oracle + Demonic Consultation is a one-shot win, produces no SCC, and cannot be found by this detector; Effect::WinTheGame and Effect::AdditionalPhase project to Unmodeled so infinite-combat lines are invisible too — a missing candidate never means \"no combo\".";
+
+/// Evidence-only measurements over the two-card corpus rows and optional decks.
+#[cfg(feature = "combo-verify")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PairAuditReport {
+    /// Pair candidates proposed over two-card corpus rows and input decks.
+    pub proposed: u32,
+    /// Proposed candidates whose unordered name pair appears in the WU-2 table.
+    pub table_agree: Option<u32>,
+    /// Two-card corpus rows that emitted at least one candidate.
+    pub corpus_agree: u32,
+    /// All rows in the current corpus, including rows not eligible for pair analysis.
+    pub corpus_total: u32,
+    /// Proposed pair candidates whose cycle contains no unmodeled projection.
+    pub fully_modeled: u32,
+    /// Largest number of distinct faces in any proposed cycle.
+    pub max_scc_faces: u32,
+}
+
+/// Assemble the pair detector's measured corpus/deck profile without changing
+/// game state or feeding any bracket-tier input.
+#[cfg(feature = "combo-verify")]
+pub fn pair_audit_report(
+    db: &crate::database::CardDatabase,
+    table: Option<&crate::database::combo_table::ComboTable>,
+    decks: &[Vec<&CardFace>],
+) -> PairAuditReport {
+    fn table_contains_pair(
+        table: &crate::database::combo_table::ComboTable,
+        left: &str,
+        right: &str,
+    ) -> bool {
+        let left = left.to_lowercase();
+        let right = right.to_lowercase();
+        table.entries_for(&left).iter().any(|&index| {
+            table.entry(index).is_some_and(|entry| {
+                let [first, second] = &entry.pieces;
+                (first.key == left && second.key == right)
+                    || (first.key == right && second.key == left)
+            })
+        })
+    }
+
+    fn record_candidates(
+        faces: &[&CardFace],
+        table: Option<&crate::database::combo_table::ComboTable>,
+        report: &mut PairAuditReport,
+    ) -> bool {
+        let candidates = candidate_pairs(faces);
+        for candidate in &candidates {
+            report.proposed = report.proposed.saturating_add(1);
+            if candidate.cycle.completeness == ModelCompleteness::FullyModeled {
+                report.fully_modeled = report.fully_modeled.saturating_add(1);
+            }
+            report.max_scc_faces = report
+                .max_scc_faces
+                .max(u32::try_from(candidate.cycle.faces.len()).unwrap_or(u32::MAX));
+            if let (Some(table), Some(agreed)) = (table, report.table_agree.as_mut()) {
+                let left = &faces[candidate.left].name;
+                let right = &faces[candidate.right].name;
+                if table_contains_pair(table, left, right) {
+                    *agreed = agreed.saturating_add(1);
+                }
+            }
+        }
+        !candidates.is_empty()
+    }
+
+    let mut report = PairAuditReport {
+        proposed: 0,
+        table_agree: table.map(|_| 0),
+        corpus_agree: 0,
+        corpus_total: u32::try_from(crate::analysis::corpus::corpus_len()).unwrap_or(u32::MAX),
+        fully_modeled: 0,
+        max_scc_faces: 0,
+    };
+
+    for index in 0..crate::analysis::corpus::corpus_len() {
+        let row = crate::analysis::corpus::row(index);
+        if row.cards.len() != 2 {
+            continue;
+        }
+        let Some(faces) = row
+            .cards
+            .iter()
+            .map(|name| db.get_face_by_name(name))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if record_candidates(&faces, table, &mut report) {
+            report.corpus_agree = report.corpus_agree.saturating_add(1);
+        }
+    }
+    for faces in decks {
+        record_candidates(faces, table, &mut report);
+    }
+
+    report
 }
 
 /// The SCC + coverability core (steps 2–5), separated from node construction so
