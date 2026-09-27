@@ -14,15 +14,21 @@
 
 use engine::ai_support::legal_actions_full;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{AbilityCost, TargetRef};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, PlayerFilter, QuantityExpr,
+    QuantityModification, ReplacementDefinition, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, ManaChoice, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
+const FUMAROLE: &str =
+    "As an additional cost to cast this spell, pay 3 life.\nDestroy target creature and target land.";
 const TOXIC_DELUGE: &str = "As an additional cost to cast this spell, pay X life.\nAll creatures get -X/-X until end of turn.";
 const MANA_CONFLUENCE: &str = "{T}, Pay 1 life: Add one mana of any color.";
 const PLATINUM_ANGEL: &str =
@@ -412,4 +418,141 @@ fn activation_paid_down_to_zero_life_goes_on_the_stack_before_the_player_loses()
     assert!(eliminated(&runner));
     assert!(p1_won(&runner), "got {:?}", runner.state().waiting_for);
     assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+}
+
+/// A `LoseLife` replacement that keeps the payment's amount but then runs an
+/// interactive "gain 1 life" choice (CR 616.1). The life is already paid when
+/// that choice opens.
+fn life_loss_rider() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::LoseLife)
+        .quantity_modification(QuantityModification::Plus { value: 0 })
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )],
+            },
+        ))
+}
+
+/// The rider's choice opens with P0 at 0 life, still paying the cost.
+fn assert_rider_open_at_zero_life(runner: &GameRunner) {
+    assert_eq!(runner.life(P0), 0);
+    assert!(!eliminated(runner));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch { player, .. } if player == P0
+        ),
+        "the replacement's choice must stay open to P0, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+#[test]
+fn replacement_choice_after_a_mana_ability_paid_the_last_life_stays_open() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 1);
+    let confluence = scenario
+        .add_land_from_oracle(P0, "Mana Confluence", MANA_CONFLUENCE)
+        .id();
+    scenario
+        .add_creature(P0, "Life-Loss Rider", 0, 1)
+        .with_replacement_definition(life_loss_rider());
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: confluence,
+            ability_index: 0,
+        })
+        .expect("activate Mana Confluence");
+    // CR 605.3b + CR 616.1: the replacement's choice is part of paying the mana
+    // ability's cost, so no one has priority yet. Answering it isn't driven
+    // here: a separate, pre-existing defect re-charges the life after the
+    // rider resolves on this path, at any life total.
+    assert_rider_open_at_zero_life(&runner);
+}
+
+#[test]
+fn replacement_choice_after_a_spell_cost_paid_the_last_life_stays_open() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 3);
+    let fumarole = scenario
+        .add_spell_to_hand_from_oracle(P0, "Fumarole", false, FUMAROLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Red],
+            generic: 3,
+        })
+        .id();
+    scenario
+        .add_creature(P0, "Life-Loss Rider", 0, 1)
+        .with_replacement_definition(life_loss_rider());
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let land = scenario.add_basic_land(P1, ManaColor::Green);
+    scenario.with_mana_pool(
+        P0,
+        pool(&[
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Black,
+            ManaType::Red,
+        ]),
+    );
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&fumarole].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: fumarole,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce Fumarole");
+    // CR 601.2c: one target per slot, in written order.
+    for target in [bears, land] {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("choose the target");
+    }
+    // CR 601.2h + CR 616.1: the 3 life is paid, and the replacement's choice is
+    // still part of paying Fumarole's cost.
+    assert_rider_open_at_zero_life(&runner);
+    let events = runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("gain 1 life")
+        .events;
+    assert_eq!(runner.life(P0), 1);
+
+    assert!(
+        spell_cast(&events, fumarole),
+        "Fumarole must become cast: {events:?}"
+    );
+    assert!(!eliminated(&runner));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
 }

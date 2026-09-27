@@ -7368,6 +7368,19 @@ pub enum DeferredLifeCostResume {
 }
 
 impl DeferredLifeCostResume {
+    /// CR 601.2h + CR 602.2b: Whether the suspended payment belongs to casting a
+    /// spell or activating an ability, rather than to a resolution or a
+    /// special action. Exhaustive so a new owner has to be classified.
+    pub fn is_casting_or_activation_cost(&self) -> bool {
+        match self {
+            DeferredLifeCostResume::Cast { .. } => true,
+            // A resolution-time "pay any amount of life" choice (CR 608.2).
+            DeferredLifeCostResume::PayAmount { .. } => false,
+            // A resolution or special-action mana payment's Phyrexian life.
+            DeferredLifeCostResume::ManaRoot { .. } => false,
+        }
+    }
+
     pub fn resume_at_resolution_depth(&self) -> usize {
         match self {
             DeferredLifeCostResume::Cast {
@@ -7728,6 +7741,40 @@ pub enum PendingCostMoveResume {
     /// a replacement pause, which is exactly the shape that guard says to box
     /// rather than widen the budget for.
     RandomDiscardUnlessPayment(Box<RandomDiscardUnlessPaymentResume>),
+}
+
+impl PendingCostMoveResume {
+    /// CR 601.2h + CR 602.2b + CR 605.3b: Whether the paused cost move belongs
+    /// to casting a spell or activating an ability (a mana ability included),
+    /// rather than to a resolution, a replacement's own optional cost, or a
+    /// special action. Exhaustive so a new owner has to be classified.
+    pub fn is_casting_or_activation_cost(&self) -> bool {
+        match self {
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::DelveManaPayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. } => true,
+            // Cast and activation payments keep their announcement; an
+            // optional payment made during a resolution does not.
+            PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.is_some(),
+            PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::Casting { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => true,
+                CollectEvidenceResume::Effect { .. } => false,
+            },
+            // Unless-costs and ward payments are made while an ability resolves
+            // (CR 118.12), and a replacement's optional cost belongs to that
+            // replacement (CR 614.1).
+            PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
+            // CR 116.2h: foretelling is a special action, not a cast.
+            PendingCostMoveResume::Foretell { .. } => false,
+        }
+    }
 }
 
 /// CR 701.9b + CR 118.12 + CR 616.1: payload of
@@ -22746,13 +22793,31 @@ impl GameState {
     /// CR 704.3 state-based action check waits for it.
     ///
     /// Wider than [`WaitingFor::has_pending_cast`], the display and
-    /// `CancelCast` predicate: it also counts a cast parked in the external
-    /// `pending_cast` carrier behind a prompt that doesn't carry it (Assist),
-    /// and the continuations of a mana ability's activation.
+    /// `CancelCast` predicate. It also counts:
+    /// - a cast parked in the external `pending_cast` carrier behind a prompt
+    ///   that doesn't carry it (Assist);
+    /// - the continuations of a mana ability's activation;
+    /// - a cast or activation cost paused on a replacement (CR 616.1): a cost
+    ///   move awaiting its replacement, a life payment whose replacement is
+    ///   still running its interactive effect, or a cost discard.
+    ///
+    /// Those replacement prompts (`ReplacementChoice`, `ChooseOneOfBranch`,
+    /// ...) are shared with resolutions, so their owner is read from the typed
+    /// resume rather than from the prompt.
     pub fn is_casting_or_activating(&self) -> bool {
         self.pending_cast.is_some()
             || self.waiting_for.has_pending_cast()
             || self.waiting_for.is_mana_ability_continuation()
+            || self
+                .pending_cost_move_resume
+                .as_ref()
+                .is_some_and(PendingCostMoveResume::is_casting_or_activation_cost)
+            || self
+                .pending_deferred_life_cost_resume
+                .as_ref()
+                .is_some_and(DeferredLifeCostResume::is_casting_or_activation_cost)
+            // Both variants carry the cast being paid for.
+            || self.pending_discard_for_cost.is_some()
     }
 
     /// Returns the active continuation only when its typed frame is the stack
@@ -38174,6 +38239,52 @@ mod tests {
             ability,
             ManaCost::zero(),
         )));
+        assert!(state.is_casting_or_activating());
+    }
+
+    /// CR 608.2 + CR 616.1: a replacement prompt left over from a resolution's
+    /// own life payment keeps the resolution's #962 safety net; the same prompt
+    /// during a cast's payment does not.
+    #[test]
+    fn cost_owner_decides_casting_or_activating() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 3,
+            resume_at_resolution_depth: 0,
+        });
+        assert!(!state.is_casting_or_activating());
+
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::Cast {
+            player: PlayerId(0),
+            pending: None,
+            remaining_life_payments: Vec::new(),
+            resume_at_resolution_depth: 0,
+        });
+        assert!(state.is_casting_or_activating());
+
+        // CR 601.2h + CR 616.1: a cost discard paused on a replacement carries
+        // its cast inside the resume, not in `pending_cast`.
+        state.pending_deferred_life_cost_resume = None;
+        assert!(!state.is_casting_or_activating());
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
+            player: PlayerId(0),
+            pending: PendingCast::new(ObjectId(2), CardId(2), ability, ManaCost::zero()),
+            chosen: vec![ObjectId(3)],
+            paused_at_index: 0,
+        }));
         assert!(state.is_casting_or_activating());
     }
 
