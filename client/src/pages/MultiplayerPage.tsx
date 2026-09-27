@@ -20,9 +20,11 @@ import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
+import type { AIDifficulty } from "../constants/ai";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import { expandParsedDeck } from "../services/deckParser";
+import { resolveSeatDifficulty } from "../services/cedhLock";
 import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
@@ -494,7 +496,11 @@ function MultiplayerPageContent({
             difficulty: seat.difficulty,
             deckName: seat.deckName,
           }));
-          const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
+          const headDifficulty = resolveSeatDifficulty(
+            aiSeats[0]?.difficulty as AIDifficulty | undefined,
+            null,
+            "advisory",
+          );
           const gameId = crypto.randomUUID();
           clearWsSession();
           saveActiveGame({
@@ -591,7 +597,7 @@ function MultiplayerPageContent({
 
       return true;
     },
-    [expandDeck, startHosting, startP2PHostingSession, navigate, showToast, joinP2PRoom, t],
+    [expandDeck, startHosting, startP2PHostingSession, navigate, setView, showToast, joinP2PRoom, t],
   );
 
   // Host setup complete → execute immediately if deck exists, otherwise prompt
@@ -605,7 +611,7 @@ function MultiplayerPageContent({
       setView("deck-select");
       return true;
     },
-    [connectionMode, activeDeckName, executeAction],
+    [connectionMode, activeDeckName, executeAction, setView],
   );
 
   // Navigate to draft setup page. The multiplayer draft page handles its
@@ -626,7 +632,7 @@ function MultiplayerPageContent({
         showToast(t("page.failedToJoinDraft"));
       }
     },
-    [joinDraft, showToast, t],
+    [joinDraft, setView, showToast, t],
   );
 
   const handleSpectate = useCallback(
@@ -750,7 +756,7 @@ function MultiplayerPageContent({
       setPendingAction(action);
       setView("deck-select");
     },
-    [lookupJoinTargetFromStore, handleJoinDraftFromLobby, showToast, t],
+    [lookupJoinTargetFromStore, handleJoinDraftFromLobby, setView, showToast, t],
   );
 
   const handleBack = () => {

@@ -29,6 +29,7 @@ import {
   loadSavedDeckBracket,
   loadSavedDeckComboDeclaration,
 } from "../constants/storage";
+import type { AIDifficulty } from "../constants/ai";
 import {
   UNDECLARED_COMBO,
   type ComboDeclaration,
@@ -40,7 +41,7 @@ import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
-import { effectiveAiDifficulty, resolveSeatDifficulty } from "../services/cedhLock";
+import { resolveSeatDifficulty } from "../services/cedhLock";
 import {
   aiDeckCandidateToWire,
   POD_SELECTION_CONSTRAINTS,
@@ -116,11 +117,13 @@ function resolveAiSeatBindings(
   if (opponentCount === 0) return undefined;
   const meta = loadActiveGame();
   const snapshot = meta?.id === gameId ? meta.aiSeats : undefined;
-  const fallback = fallbackDifficulty ?? "Medium";
-  return Array.from({ length: opponentCount }, (_, i) => ({
-    playerId: i + 1,
-    difficulty: snapshot?.[i]?.difficulty ?? fallback,
-  }));
+  return Array.from({ length: opponentCount }, (_, i) => {
+    const explicit = snapshot?.[i]?.difficulty ?? fallbackDifficulty;
+    return {
+      playerId: i + 1,
+      difficulty: resolveSeatDifficulty(explicit as AIDifficulty | undefined, null, "advisory"),
+    };
+  });
 }
 
 // eslint-disable-next-line react-refresh/only-export-components -- shared error guard is covered by provider tests
@@ -324,7 +327,11 @@ type DeckListPayload = {
 function nativeAiSeatsFromDeckList(deckList: DeckListPayload): NativeAiSeat[] {
   return [deckList.opponent, ...deckList.ai_decks].map((deck, index) => ({
     seatIndex: index + 1,
-    difficulty: deckList.ai_difficulties[index] ?? "Medium",
+    difficulty: resolveSeatDifficulty(
+      deckList.ai_difficulties[index] as AIDifficulty | undefined,
+      null,
+      "advisory",
+    ),
     deck,
   }));
 }
@@ -338,17 +345,22 @@ function saveWasmAiResumePointer(
 ): void {
   const { aiSeats, cedhMode } = usePreferencesStore.getState();
   const opponentCount = Math.max(1, (playerCount ?? 2) - 1);
+  const enforcement: TierEnforcement = cedhMode ? "hard_gate" : "advisory";
   const seats = Array.from({ length: opponentCount }, (_, index) => {
     const seat = aiSeats[index];
     return {
-      difficulty: effectiveAiDifficulty(seat?.difficulty ?? fallbackDifficulty ?? "Medium", cedhMode),
+      difficulty: resolveSeatDifficulty(
+        seat?.difficulty ?? fallbackDifficulty as AIDifficulty | undefined,
+        null,
+        enforcement,
+      ),
       deckId: seat?.deckId === AI_DECK_RANDOM ? null : seat?.deckId ?? null,
     };
   });
   saveActiveGame({
     id: gameId,
     mode: "ai",
-    difficulty: seats[0]?.difficulty ?? fallbackDifficulty ?? "Medium",
+    difficulty: resolveSeatDifficulty(seats[0]?.difficulty, null, enforcement),
     aiSeats: seats,
     formatConfig,
     podSeed: podSeedsByGame.get(gameId),
@@ -427,6 +439,7 @@ export async function buildLocalAiDeckList(
   if (formatConfig && formatSuppliesDeck(formatConfig.format)) {
     const { aiSeats, cedhMode } = usePreferencesStore.getState();
     const opponentCount = Math.max(1, playerCount - 1);
+    const enforcement: TierEnforcement = cedhMode ? "hard_gate" : "advisory";
     const emptySeat = (): ExpandedDeckWithTier => ({
       main_deck: [],
       sideboard: [],
@@ -440,7 +453,7 @@ export async function buildLocalAiDeckList(
       combo_declaration: UNDECLARED_COMBO,
     });
     const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
-      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+      resolveSeatDifficulty(aiSeats[i]?.difficulty, null, enforcement),
     );
     return {
       player: emptySeat(),
@@ -551,7 +564,8 @@ export async function buildLocalAiDeckList(
   const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
-  // to ai_decks. Missing seat prefs default to "Medium".
+  // to ai_decks. Missing seat prefs follow the selected deck's engine-authored
+  // bracket default.
   // cEDH is a table-wide toggle: every seat resolves to "CEDH" when it's on,
   // regardless of the remembered per-seat difficulty.
   const aiDifficulties = picks.map((pick, i) =>
@@ -1948,7 +1962,11 @@ export function GameProvider({
                 : {
                     id: gameId,
                     mode: "ai",
-                    difficulty: difficulty ?? "Medium",
+                    difficulty: resolveSeatDifficulty(
+                      difficulty as AIDifficulty | undefined,
+                      null,
+                      "advisory",
+                    ),
                     aiSeats: deckList
                       ? nativeAiSeatsFromDeckList(deckList).map((seat) => ({
                           difficulty: seat.difficulty,

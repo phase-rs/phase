@@ -79,6 +79,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("AiOpponentConfig — cEDH toggle", () => {
+  it("offers the bracket default and can restore a concrete seat to it", async () => {
+    const user = userEvent.setup();
+
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    const difficultyTrigger = screen.getByRole("button", { name: /^Difficulty$/i });
+    await user.click(difficultyTrigger);
+    await user.click(screen.getByRole("option", { name: "Default (Medium)" }));
+
+    await waitFor(() => {
+      expect(usePreferencesStore.getState().aiSeats[0].difficulty).toBeNull();
+      expect(difficultyTrigger).toHaveTextContent("Default (Medium)");
+    });
+  });
+
   it("enabling cEDH mode sets the table flag without touching per-seat difficulties", async () => {
     const user = userEvent.setup();
 
@@ -120,7 +135,7 @@ describe("AiOpponentConfig — cEDH toggle", () => {
     await user.click(screen.getByRole("button", { name: /Opponent 1/i }));
     const difficultyTriggers = screen.getAllByRole("button", { name: /^Difficulty$/i });
     await user.click(difficultyTriggers[0]);
-    await user.click(screen.getByRole("option", { name: /Medium/i }));
+    await user.click(screen.getByRole("option", { name: /^Medium$/i }));
 
     // Seat 1 must still be Hard — changing one seat never affects another.
     await waitFor(() => {

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
+import { BRACKET_DIFFICULTY_DEFAULT } from "../../data/bracketDifficulty";
 import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
@@ -30,6 +31,7 @@ const AI_MENU_CLASS =
   "min-h-[44px] rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm sm:min-h-0";
 const AI_MENU_LAYOUT = "dropdown" as const;
 const AI_MENU_WRAPPER = "w-full min-w-0";
+const AI_DIFFICULTY_DEFAULT_VALUE = "bracket-default";
 
 interface Props {
   selectedFormat?: GameFormat | null;
@@ -100,7 +102,7 @@ export function AiOpponentConfig({
   }, [opponentCount, ensureAiSeatCount]);
 
   // cEDH mode is a persisted preference read directly at game start
-  // (GameProvider → effectiveAiDifficulty). When the format is known to be a
+  // (GameProvider → resolveSeatDifficulty). When the format is known to be a
   // non-Commander variant the toggle is hidden, so clear any stale enabled
   // state to stop it silently forcing cEDH difficulty on non-Commander tables.
   // Guard on a truthy format so the brief format-loading window doesn't clobber
@@ -179,7 +181,7 @@ export function AiOpponentConfig({
   const seatsToRender = useMemo(() => {
     const fallback = aiSeats[0];
     return Array.from({ length: opponentCount }, (_, i) =>
-      aiSeats[i] ?? fallback ?? { difficulty: "Medium" as AIDifficulty, deckId: AI_DECK_RANDOM },
+      aiSeats[i] ?? fallback ?? { difficulty: null, deckId: AI_DECK_RANDOM },
     );
   }, [aiSeats, opponentCount]);
 
@@ -331,7 +333,7 @@ export function AiOpponentConfig({
 
 interface AiSeatPanelProps {
   index: number;
-  seat: { difficulty: AIDifficulty; deckId: AiDeckSelection };
+  seat: { difficulty: AIDifficulty | null; deckId: AiDeckSelection };
   /** Table-wide cEDH mode. When on, the per-seat difficulty is overridden by
    *  cEDH, so the dropdown is disabled and badged (the remembered value is kept
    *  for when cEDH is turned back off). */
@@ -345,7 +347,7 @@ interface AiSeatPanelProps {
   collapsible: boolean;
   onToggle: () => void;
   onDeckChange: (name: AiDeckSelection) => void;
-  onDifficultyChange: (d: AIDifficulty) => void;
+  onDifficultyChange: (d: AIDifficulty | null) => void;
 }
 
 function AiSeatPanel({
@@ -387,7 +389,11 @@ function AiSeatPanel({
     : (selectedCandidate?.name ?? t("aiOpponent.deckRandom"));
   const summaryDifficulty = cedhMode
     ? t("aiOpponent.cedhToggle.badge")
-    : t(`aiDifficulty.levels.${seat.difficulty}`);
+    : seat.difficulty === null
+      ? t("aiOpponent.difficultyDefault", {
+          difficulty: t(`aiDifficulty.levels.${BRACKET_DIFFICULTY_DEFAULT.core}`),
+        })
+      : t(`aiDifficulty.levels.${seat.difficulty}`);
 
   const formatDeckLabel = (candidate: AiDeckCandidate): string => {
     const suffix = [sourceLabel(candidate), candidate.archetype, candidate.coveragePct != null ? `${candidate.coveragePct}%` : null]
@@ -407,16 +413,24 @@ function AiSeatPanel({
       : (deckMenuItems.find((item) => item.value === effectiveSelection)?.label ?? randomDeckLabel);
 
   const difficultyItems = useMemo(
-    () =>
-      AI_DIFFICULTIES.map((item) => ({
+    () => [
+      {
+        value: AI_DIFFICULTY_DEFAULT_VALUE,
+        label: t("aiOpponent.difficultyDefault", {
+          difficulty: t(`aiDifficulty.levels.${BRACKET_DIFFICULTY_DEFAULT.core}`),
+        }),
+      },
+      ...AI_DIFFICULTIES.map((item) => ({
         value: item.id,
         label: t(`aiDifficulty.levels.${item.id}`),
       })),
+    ],
     [t],
   );
-  const selectedDifficultyLabel =
-    difficultyItems.find((item) => item.value === seat.difficulty)?.label ??
-    t(`aiDifficulty.levels.${seat.difficulty}`);
+  const selectedDifficultyValue = seat.difficulty ?? AI_DIFFICULTY_DEFAULT_VALUE;
+  const selectedDifficultyLabel = difficultyItems.find(
+    (item) => item.value === selectedDifficultyValue,
+  )?.label ?? difficultyItems[0].label;
 
   const body = (
     <div className="flex flex-col gap-2.5 px-3 pb-3 pt-1">
@@ -443,9 +457,13 @@ function AiSeatPanel({
           <MenuSelect
             ariaLabel={t("aiOpponent.difficulty")}
             label={selectedDifficultyLabel}
-            selectedValue={seat.difficulty}
+            selectedValue={selectedDifficultyValue}
             items={difficultyItems}
-            onSelect={(value) => onDifficultyChange(value as AIDifficulty)}
+            onSelect={(value) =>
+              onDifficultyChange(
+                value === AI_DIFFICULTY_DEFAULT_VALUE ? null : value as AIDifficulty,
+              )
+            }
             disabled={cedhMode}
             menuLayout={AI_MENU_LAYOUT}
             fitContainer
