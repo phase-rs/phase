@@ -4908,7 +4908,7 @@ describe("P2P wire-protocol version gate", () => {
   // bump. Reverting WIRE_PROTOCOL_VERSION itself (65 → 64) breaks both
   // halves' premise: the v64 frame now equals the reverted constant and is
   // admitted instead of refused — measured, this test reds at that first
-  // assertion ("promise resolved … instead of rejecting") — and the v64
+  // assertion ("promise resolved … instead of rejecting") — and the v65
   // frame no longer equals it and would be refused instead of admitted,
   // though this single synchronous test body never reaches that second
   // assertion once the first has thrown. The admitting half is still the
