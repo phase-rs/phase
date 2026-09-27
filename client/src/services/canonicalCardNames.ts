@@ -1,6 +1,39 @@
 import { getSharedAdapter } from "../adapter/wasm-adapter";
 import { deduplicateEntries, type DeckEntry, type ParsedDeck } from "./deckParser";
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isNameEntryArray(v: unknown): boolean {
+  return Array.isArray(v) && v.every((entry) => isObject(entry) && typeof entry.name === "string");
+}
+
+function isOptionalStringArray(v: unknown): boolean {
+  return v === undefined || (Array.isArray(v) && v.every((entry) => typeof entry === "string"));
+}
+
+/**
+ * True when `value` has every field `deckCardNames` and `applyCanonicalNames`
+ * read: `main`/`sideboard` as arrays of entries with a string `name`, the
+ * other name-list fields as arrays of strings when present, and `companion`
+ * as a string when present. Guards untrusted stored JSON before it reaches
+ * those two functions, which otherwise throw or corrupt data on a malformed
+ * shape (e.g. `deck.main.flatMap` on a non-array, or spreading a non-array
+ * `commander` into characters).
+ */
+export function isCanonicalizableDeck(value: unknown): value is ParsedDeck & Record<string, unknown> {
+  if (!isObject(value)) return false;
+  if (!isNameEntryArray(value.main) || !isNameEntryArray(value.sideboard)) return false;
+  if (!isOptionalStringArray(value.commander)) return false;
+  if (!isOptionalStringArray(value.signature_spell)) return false;
+  if (!isOptionalStringArray(value.planar_deck)) return false;
+  if (!isOptionalStringArray(value.scheme_deck)) return false;
+  if (!isOptionalStringArray(value.sticker_sheets)) return false;
+  if (value.companion !== undefined && typeof value.companion !== "string") return false;
+  return true;
+}
+
 /** Every card name in `deck`, across all of its name fields. */
 export function deckCardNames(deck: ParsedDeck): string[] {
   return [

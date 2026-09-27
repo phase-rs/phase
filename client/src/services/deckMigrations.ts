@@ -29,7 +29,12 @@ import {
 import { withSavedDeckLibraryOrSkip } from "./savedDeckTransaction";
 import { withStorageWatchSuppressed } from "./cloudSync/storageWatcher";
 import { projectSavedDeckSpecialSlots } from "./savedDeckProjection";
-import { applyCanonicalNames, canonicalNameMap, deckCardNames } from "./canonicalCardNames";
+import {
+  applyCanonicalNames,
+  canonicalNameMap,
+  deckCardNames,
+  isCanonicalizableDeck,
+} from "./canonicalCardNames";
 
 /**
  * Walk every saved deck, repair its JSON, and persist the repaired form when
@@ -85,11 +90,18 @@ export async function canonicalizeSavedDeckNames(): Promise<void> {
     .map(captureSavedDeck)
     .flatMap((snapshot) => {
       if (snapshot.raw === null) return [];
+      let deck: unknown;
       try {
-        return [{ snapshot, deck: JSON.parse(snapshot.raw) as ParsedDeck & Record<string, unknown> }];
+        deck = JSON.parse(snapshot.raw);
       } catch {
         return [];
       }
+      // A malformed record (wrong `main`/`sideboard` shape, a non-string
+      // name field) is left untouched rather than thrown on: `deckCardNames`
+      // and `applyCanonicalNames` below assume this shape and one bad
+      // record must not abort the repair of every other saved deck.
+      if (!isCanonicalizableDeck(deck)) return [];
+      return [{ snapshot, deck }];
     });
   const renamed = await canonicalNameMap(saved.flatMap(({ deck }) => deckCardNames(deck)));
   const rewrites = saved

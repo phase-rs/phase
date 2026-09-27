@@ -197,4 +197,36 @@ describe("canonicalizeSavedDeckNames", () => {
 
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "A")).toBe(raw);
   });
+
+  it("skips malformed stored records and still repairs every well-formed deck", async () => {
+    const goodRaw = JSON.stringify({
+      main: [{ count: 1, name: "Summon: Choco // Mog" }],
+      sideboard: [],
+    });
+    const missingMainRaw = JSON.stringify({ sideboard: [] });
+    const mainNotArrayRaw = JSON.stringify({ main: "not-an-array", sideboard: [] });
+    const nullRaw = JSON.stringify(null);
+    const commanderStringRaw = JSON.stringify({
+      main: [{ count: 1, name: "Lightning Bolt" }],
+      sideboard: [],
+      commander: "Not An Array",
+    });
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Good", goodRaw);
+    localStorage.setItem(STORAGE_KEY_PREFIX + "MissingMain", missingMainRaw);
+    localStorage.setItem(STORAGE_KEY_PREFIX + "MainNotArray", mainNotArrayRaw);
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Null", nullRaw);
+    localStorage.setItem(STORAGE_KEY_PREFIX + "CommanderString", commanderStringRaw);
+    mocks.canonicalCardNames.mockImplementation(
+      renameTo({ "Summon: Choco // Mog": "Summon: Choco/Mog" }),
+    );
+
+    await canonicalizeSavedDeckNames();
+
+    const storedGood = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Good") ?? "{}");
+    expect(storedGood.main).toEqual([{ count: 1, name: "Summon: Choco/Mog" }]);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "MissingMain")).toBe(missingMainRaw);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "MainNotArray")).toBe(mainNotArrayRaw);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Null")).toBe(nullRaw);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "CommanderString")).toBe(commanderStringRaw);
+  });
 });

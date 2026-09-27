@@ -12,6 +12,7 @@ import {
   canonicalizeDeckNames,
   canonicalNameMap,
   deckCardNames,
+  isCanonicalizableDeck,
 } from "../canonicalCardNames";
 
 beforeEach(() => {
@@ -170,5 +171,29 @@ describe("deckCardNames / canonicalNameMap / applyCanonicalNames", () => {
   it("returns the input deck object unchanged when renamed is empty", () => {
     const deck: ParsedDeck = { main: [], sideboard: [] };
     expect(applyCanonicalNames(deck, new Map())).toBe(deck);
+  });
+});
+
+describe("isCanonicalizableDeck", () => {
+  it("accepts a well-formed deck", () => {
+    const deck: ParsedDeck = {
+      main: [{ count: 1, name: "A" }],
+      sideboard: [{ count: 1, name: "B" }],
+      commander: ["C"],
+      companion: "D",
+    };
+    expect(isCanonicalizableDeck(deck)).toBe(true);
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "not-a-deck"],
+    ["missing main", { sideboard: [] }],
+    ["main not an array", { main: "x", sideboard: [] }],
+    ["main entry with a non-string name", { main: [{ count: 1, name: 5 }], sideboard: [] }],
+    ["commander as a string instead of an array", { main: [], sideboard: [], commander: "X" }],
+    ["companion as a number", { main: [], sideboard: [], companion: 1 }],
+  ])("rejects %s", (_label, value) => {
+    expect(isCanonicalizableDeck(value)).toBe(false);
   });
 });
