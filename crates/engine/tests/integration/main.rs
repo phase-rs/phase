@@ -1736,12 +1736,14 @@ mod zhulodok_double_cascade;
 
 mod arm_the_cathars_conjunct_anaphor_p6;
 mod context_ref_slot_hygiene;
+mod controls_commander_statics;
 mod declared_target_damage_source;
 mod dismantle;
 mod event_deadline_duration;
 mod exchange_control_of_a_spell;
 mod exploit_ceased_exploiter_lki;
 mod extra_turn_quantity;
+mod foreign_subject_split_guard;
 mod locke_milled_single_use_cast;
 mod optional_chain_link_prompt_description;
 mod planeswalker_token;
