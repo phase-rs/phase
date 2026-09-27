@@ -1590,13 +1590,14 @@ mod ai_pod_export_tests {
         assert_eq!(table["optimized"], AiDifficulty::VeryHard);
         assert_eq!(table["cedh"], AiDifficulty::CEDH);
         for tier in COMMANDER_BRACKET_TIERS {
-            let _: CommanderBracketTier = match tier {
-                CommanderBracketTier::Exhibition => CommanderBracketTier::Exhibition,
-                CommanderBracketTier::Core => CommanderBracketTier::Core,
-                CommanderBracketTier::Upgraded => CommanderBracketTier::Upgraded,
-                CommanderBracketTier::Optimized => CommanderBracketTier::Optimized,
-                CommanderBracketTier::Cedh => CommanderBracketTier::Cedh,
+            let key = match tier {
+                CommanderBracketTier::Exhibition => "exhibition",
+                CommanderBracketTier::Core => "core",
+                CommanderBracketTier::Upgraded => "upgraded",
+                CommanderBracketTier::Optimized => "optimized",
+                CommanderBracketTier::Cedh => "cedh",
             };
+            assert!(table.contains_key(key));
         }
     }
 
