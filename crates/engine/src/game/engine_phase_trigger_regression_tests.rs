@@ -18,7 +18,7 @@ use crate::types::game_state::{AutoPassMode, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
-use crate::types::phase::{PhaseStop, PhaseStopScope};
+use crate::types::phase::{PhaseGroup, PhaseStop, PhaseStopScope, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -232,6 +232,7 @@ fn combat_phase_stops_pause_damage_and_end_combat_windows() {
         valid_block_targets: Default::default(),
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
+        must_be_blocked_targets: Default::default(),
     };
     state.phase_stops.insert(
         PlayerId(0),
@@ -327,9 +328,10 @@ fn inserted_begin_combat_gets_priority_window() {
         .extra_phases
         .push(crate::types::game_state::ExtraPhase {
             anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: crate::types::identifiers::ExtraPhaseId::default(),
         });
 
     let mut events = Vec::new();

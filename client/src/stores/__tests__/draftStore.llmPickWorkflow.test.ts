@@ -138,6 +138,7 @@ async function startDraft(): Promise<void> {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
   persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
   useDraftStore.getState().reset();
   resetLlmDraftBreaker();
@@ -158,6 +159,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   resetLlmDraftBreaker();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 

@@ -15,14 +15,14 @@ use crate::game::filter::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
-    CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
-    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
+    CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
+    ContinuousModification, ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
     DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
     ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption, StaticCondition,
     StaticDefinition, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypedFilter, UnloweredGuard, VoteSubject,
+    TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card::DraftEffect;
@@ -33,11 +33,11 @@ use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::prevention::has_each_time_event_relative_prevention;
 use super::oracle_nom::primitives::{
@@ -113,7 +113,7 @@ use super::oracle_replacement::{
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
     parse_bidirectional_damage_prevention, parse_oneshot_damage_replacement,
     parse_replacement_line, parse_replacement_line_ir, parse_whenever_you_cast_enters_with_outcome,
-    CastEntersWithOutcome,
+    parse_windowed_graveyard_redirect_install, CastEntersWithOutcome,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -2232,6 +2232,268 @@ fn retarget_creature_type_choice_dig_filters_in_ability_in_place(
     }
 }
 
+// --- CR 116.2a + CR 611.2c: deliver a coordinated graveyard play/cast grant ---
+
+/// CR 116.2a + CR 601.2a + CR 611.2c: "Until end of turn, you may play lands
+/// **and** cast spells from your graveyard" (Yawgmoth's Will, Gaea's Will, Magus
+/// of the Will) is ONE permission naming two actions.
+///
+/// **The parse gap.** `"cast "` starts a bare-`and` clause, so the sequence
+/// splitter separates the halves. The CAST half keeps the zone clause and lowers
+/// to `Effect::CastFromZone`; the LAND half is left as the bare fragment
+/// `"play lands"`, which the cast-effect guard refuses -- correctly, in
+/// isolation, because a zone-less "play lands" is not a grant.
+///
+/// **The delivery gap, which is the bigger one.** `Effect::CastFromZone` is not a
+/// channel any land-permission consumer reads. MEASURED: resolving the real
+/// Oracle text left `casting::graveyard_lands_playable_by_permission` returning
+/// `[]`, because `cast_from_zone::resolve` derives its batch from
+/// `ability.live_object_targets()` and `build_resolved_from_def` supplies
+/// `Vec::new()`. The channel the runtime actually consults is
+/// `StaticMode::GraveyardCastPermission`, read by
+/// `casting::graveyard_permission_sources`.
+///
+/// So this pass replaces BOTH halves with one `Effect::GenericEffect` that
+/// installs that permission for the stated window.
+///
+/// **Why one grant for both halves, bound to the player.** CR 611.2c: a
+/// resolution-created continuous effect that does not modify characteristics
+/// "modifies the rules of the game, so it can affect objects that weren't
+/// affected when that continuous effect began." Playing a land is a special
+/// action (CR 116.2a), not a characteristic, so this is that kind -- and it MUST
+/// be, for this card: the second sentence of Yawgmoth's Will ("If a card would be
+/// put into your graveyard from anywhere this turn, exile that card instead")
+/// only makes sense if the permission covers cards that arrive in the graveyard
+/// AFTER it resolved. A per-object stamp would miss every card milled, discarded
+/// or cast later in the turn.
+///
+/// The `affected` filter therefore stays class-wide and is re-evaluated live by
+/// the consumer, and the grant is bound to the GRANTEE rather than the source --
+/// Magus of the Will exiles itself as an activation cost, so a
+/// source-presence-bound grant would never exist.
+/// CR 116.2a: the bare land-play fragment the cast-effect guard leaves behind when
+/// the sequence splitter separates a coordinated "play lands and cast spells from
+/// `<zone>`" sentence.
+///
+/// Composed from nom axes rather than matched as a literal sentence, so the
+/// recognizer covers the PHRASE CLASS and not one spelling: an optional
+/// permission head ("you may "), the verb, and the land noun in either number.
+/// `all_consuming` keeps it boundary-safe — a longer sentence that merely STARTS
+/// with these words is not this fragment and must stay refused, which is what
+/// preserves strict failure for forms outside the implemented class.
+fn parse_refused_land_play_fragment(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(value(
+        (),
+        (
+            opt(tag("you may ")),
+            tag("play "),
+            alt((tag("lands"), tag("land"))),
+        ),
+    ))
+    .parse(input)
+}
+
+fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefinition) {
+    // The land half is what the cast-effect guard refused, so it arrives as an
+    // `Unimplemented` carrying the bare land-play phrase.
+    let head_is_refused_land_play = matches!(
+        &*def.effect,
+        Effect::Unimplemented { description, .. }
+            if description
+                .as_deref()
+                .is_some_and(|d| {
+                    // The fragment's case is not guaranteed, and the combinator
+                    // matches lowercase tags: normalize once here rather than
+                    // spelling every arm twice.
+                    nom_parse_lower(&d.to_lowercase(), parse_refused_land_play_fragment)
+                        .is_some()
+                })
+    );
+
+    if head_is_refused_land_play {
+        let recovered = def
+            .sub_ability
+            .as_deref()
+            .and_then(|sub| match &*sub.effect {
+                Effect::CastFromZone {
+                    target, duration, ..
+                } => duration
+                    .as_ref()
+                    // CR 611.2a: "If no duration is stated, it lasts until the end
+                    // of the game." A sibling that lowered WITHOUT a window did not
+                    // capture whatever the card printed, so copying that absence
+                    // would synthesize a PERMANENT permission -- strictly worse
+                    // than leaving the fragment refused. MEASURED: Shaman's Trance
+                    // prints "this turn" but its cast sibling carries
+                    // `duration: None`, and its filter is independently unfaithful
+                    // (`controller: You` against "other players' graveyards"), so
+                    // it declines here.
+                    .and_then(|window| {
+                        coordinated_graveyard_permission(target)
+                            .map(|permission| (window.clone(), permission))
+                    })
+                    .map(|(window, permission)| Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(TargetFilter::Controller)
+                            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                                definition: Box::new(permission),
+                            }])],
+                        // CR 611.2a: one stated window scopes both halves;
+                        // `layers::prune_end_of_turn_effects` ends it at cleanup
+                        // (CR 514.2).
+                        duration: Some(window),
+                        target: Some(TargetFilter::Controller),
+                        end_cost: None,
+                    }),
+                _ => None,
+            });
+
+        if let Some(effect) = recovered {
+            // Both halves are now carried by the single permission, so the cast
+            // sibling must not ALSO lower to its own `CastFromZone` -- that would
+            // leave two grants for one printed sentence.
+            //
+            // SPLICE, do not truncate. The cast node is removed and its OWN tail is
+            // reattached, because that tail can carry an INDEPENDENT printed clause.
+            //
+            // MEASURED on Magus of the Will, whose activated ability puts the whole
+            // card on one line: its cast sibling owns the following sentence's
+            // lowered replacement ("If a card would be put into your graveyard from
+            // anywhere this turn, exile that card instead") as its own
+            // `sub_ability`. Dropping the chain wholesale discarded that clause and
+            // raised two `swallowed-clause` warnings, while Yawgmoth's Will — which
+            // prints the same sentence on a SEPARATE line, so it lowers to a second
+            // top-level ability — was unaffected. The one-line arrival shape is the
+            // one that loses text, which is exactly the case a chain-truncating
+            // rewrite hides.
+            *def.effect = effect;
+            def.sub_ability = def
+                .sub_ability
+                .take()
+                .and_then(|cast_node| cast_node.sub_ability);
+            // CR 608.2d + CR 116.2a: the printed "you MAY play lands" is the
+            // permission being granted, NOT a choice the resolving spell offers.
+            //
+            // CR 608.2d scopes resolution-time optionality to choices a player
+            // "announces while applying the effect". This sorcery offers none: it
+            // unconditionally creates a continuous effect, and the "may" is
+            // exercised LATER, each time the player chooses to take the special
+            // action of playing a land (CR 116.2a) or to cast from the graveyard
+            // (CR 601.2a) while the window is open.
+            //
+            // The flag arrives here from the refused `"play lands"` head, whose
+            // upstream "you may ..." parse legitimately set it for a one-shot
+            // reading. Carrying it onto the recovered grant would make the engine
+            // prompt "do you want to do this?" as the spell resolves and, on a
+            // decline, install NO permission at all.
+            //
+            // MEASURED, and this is exactly how the whole delivery looked broken:
+            // `upfront_optional_gate` (`effects/mod.rs`) fired on `optional`,
+            // installed `WaitingFor::OptionalEffectChoice`, and returned BEFORE the
+            // effect dispatch — so the spell resolved to the graveyard with zero
+            // transient effects and `graveyard_lands_playable_by_permission`
+            // returned `[]`, while no error surfaced anywhere.
+            //
+            // All four CR 608.2d optionality fields are cleared together: leaving
+            // `optional_player` / `optional_for` set would re-route the same prompt
+            // to a different player rather than removing it.
+            def.optional = false;
+            def.optional_player = None;
+            def.optional_for = None;
+            def.optional_targeting = false;
+        }
+    }
+
+    if let Some(sub) = def.sub_ability.as_mut() {
+        deliver_coordinated_graveyard_permission_in_ability(sub);
+    }
+}
+
+/// CR 116.2a + CR 601.2a: build the two-part permission from the cast half of the
+/// sentence -- the land axis and the card axis under ONE grant, because the
+/// printed sentence is one permission naming two actions.
+///
+/// Returns `None` for any shape this pass does not model, so an unrecognized cast
+/// sibling leaves the refused fragment refused rather than inventing a grant.
+fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<StaticDefinition> {
+    let TargetFilter::Typed(typed) = cast_target else {
+        return None;
+    };
+    // A class-wide "cast spells from <zone>" lowers to the bare `Card` type axis.
+    // Anything narrower is a specific grant, not the sibling of a "play lands":
+    // permitting creature cards licenses nothing about playing LANDS from that
+    // zone (CR 115.1 -- a targeted permission names objects chosen on
+    // announcement and is not class-wide).
+    if typed.type_filters != vec![TypeFilter::Card] {
+        return None;
+    }
+    // CR 116.2a: the recovered half is a permission to PLAY A LAND, which without
+    // a zone anchor reads as "play lands from anywhere". Require the sibling to
+    // name the zone rather than copying an empty property list.
+    //
+    // FAILS CLOSED on any zone but the graveyard: this grant is delivered through
+    // `casting::graveyard_permission_sources`, which is graveyard-only. A
+    // Hand-anchored sibling (Sen Triplets, "that player's hand") has no consumer
+    // here, and its filter lowers with `controller: None` so it cannot express
+    // whose hand is meant even in principle -- emitting it would trade an honest
+    // unsupported gap for a grant the runtime ignores.
+    let graveyard_anchored = typed.properties.iter().any(|p| {
+        matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+                ..
+            }
+        )
+    });
+    if !graveyard_anchored {
+        return None;
+    }
+
+    let mut land = typed.clone();
+    land.type_filters = vec![TypeFilter::Land];
+
+    Some(
+        StaticDefinition::new(StaticMode::GraveyardCastPermission {
+            frequency: CastFrequency::Unlimited,
+            // CR 116.2a + CR 601.2a: `Play` is the WIDER mode --
+            // `graveyard_permission_play_mode_matches` admits a `Play` grant for a
+            // `Cast` query but not the reverse -- so one grant serves the land
+            // half (a special action) and the spell half (casting), which is what
+            // the single printed permission says.
+            play_mode: CardPlayMode::Play,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+        })
+        // CR 611.2c: class-wide and re-evaluated live, so cards that reach the
+        // graveyard later this turn are covered.
+        .affected(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(land),
+                TargetFilter::Typed(typed.clone()),
+            ],
+        })
+        // CR 113.6: the grant is consulted while its source sits in the graveyard
+        // (a resolved sorcery), so an empty `active_zones` -- which defaults to
+        // battlefield-only -- would make it invisible.
+        .active_zones(vec![Zone::Graveyard]),
+    )
+}
+
+/// CR 116.2a + CR 611.2c: entry point for
+/// [`deliver_coordinated_graveyard_permission_in_ability`].
+fn deliver_coordinated_graveyard_permission(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        deliver_coordinated_graveyard_permission_in_ability(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            deliver_coordinated_graveyard_permission_in_ability(execute);
+        }
+    }
+}
+
 /// Retarget both filters on a spell-cast trigger atomically. An incomplete
 /// union walk rejects the relation application instead of retaining a partially
 /// rewritten trigger.
@@ -3749,6 +4011,10 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         &static_ids,
     );
     reconcile_host_bound_phase_outs(&mut result);
+    // CR 116.2a + CR 611.2c: deliver the coordinated "play lands and cast spells
+    // from your graveyard" grant through the permission channel the runtime
+    // actually reads.
+    deliver_coordinated_graveyard_permission(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
@@ -8171,6 +8437,21 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
              clause_text,
          }| {
             (reading == GuardReading::Event && !guard_owner(&def.effect, parent)).then(|| {
+                // Before gapping, attempt the whole-body graveyard-redirect
+                // authority (`parse_windowed_graveyard_redirect_install`): a
+                // chain-position "If <subject> would be put into <graveyard>
+                // ..., exile it instead" sentence (Magus of the Will's one-line
+                // activated body) never reaches the line-level replacement
+                // dispatcher, so without this attempt it gaps here while the
+                // identical sentence on its own line lowers. The authority's
+                // own mandatory grammar is the single recognition gate —
+                // anything outside the class still gaps below. (Sibling attempt
+                // serves the legacy `parse_effect_chain` path at
+                // `oracle_effect::lower_clause_ast`; a clause resolved there
+                // carries no mark here, so the populations are disjoint.)
+                if let Some(effect) = parse_windowed_graveyard_redirect_install(&clause_text) {
+                    return effect;
+                }
                 // CR 614.1a: nothing on the assembled tree consumes the body in the dropped
                 // guard's stead, so the whole "if <guard>, <body>" clause is recorded as one
                 // honest gap. The EVENT reading is the replacement reading, so the kind is
@@ -9758,8 +10039,8 @@ fn render_ability_descriptions(def: &mut AbilityDefinition, card_name: &str) {
 /// not about `description`.)
 ///
 /// WILDCARD-FREE on purpose, for the same reason
-/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has nine
-/// variants, so the non-descending arm costs seven leaf names — not the ~206
+/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has ten
+/// variants, so the non-descending arm costs eight leaf names — not the ~206
 /// that justify the wildcard in [`render_effect_descriptions`]. A new variant
 /// carrying a `TriggerDefinition` must be a COMPILE ERROR here, not a silent
 /// pass-through.
@@ -9780,10 +10061,11 @@ fn render_delayed_condition_descriptions(
                 render_trigger_descriptions(other, card_name);
             }
         }
-        // The remaining seven conditions are phase gates or object/filter
+        // The remaining eight conditions are phase gates or object/filter
         // matchers with no nested `TriggerDefinition`, hence no description.
         D::AtNextPhase { .. }
         | D::AtNextPhaseForPlayer { .. }
+        | D::AtBeginningOfAddedPhase { .. }
         | D::WhenLeavesPlay { .. }
         | D::WhenDies { .. }
         | D::WhenLeavesPlayFiltered { .. }
@@ -11168,8 +11450,13 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
         // timing parser used by the "Any player may activate ... but only"
         // composition path. The condition-only form stays on its specialized
         // branch below so the once-per-turn rider is stripped before condition
-        // parsing.
-        if let Some((before, restriction)) = tp.rsplit_around("activate only ") {
+        // parsing. Here and below, the unmodernized "Activate this ability
+        // only …" wording (M'Odo, the Gnarled Oracle; Piercing Rays; Riku and
+        // Riku) is the same restriction as "Activate only …".
+        if let Some((before, restriction)) = tp
+            .rsplit_around("activate this ability only ")
+            .or_else(|| tp.rsplit_around("activate only "))
+        {
             if tag::<_, _, OracleError<'_>>("if ")
                 .parse(restriction.lower.trim_start())
                 .is_err()
@@ -11188,15 +11475,32 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
-        if let Some(prefix) = lower.strip_suffix("activate only during combat") {
-            let end = remaining.len() - "activate only during combat".len();
+        let strip_activated_constraint_suffix =
+            |text: &str, suffixes: &[&str]| -> Option<(usize, usize)> {
+                for &sfx in suffixes {
+                    // allow-noncombinator: structural suffix match on activated ability constraints
+                    if let Some(p) = text.strip_suffix(sfx) {
+                        return Some((p.len(), sfx.len()));
+                    }
+                }
+                None
+            };
+
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &[
+                "activate this ability only during combat",
+                "activate only during combat",
+            ],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::DuringCombat);
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
@@ -11211,29 +11515,38 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
         // BeforeCombatDamage]` via the during-role + before-window sub-combinators).
         // Pinned by Test 10c and the combat-damage building-block tests.
 
-        if let Some(prefix) = lower.strip_suffix("activate only once each turn") {
-            let end = remaining.len() - "activate only once each turn".len();
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &[
+                "activate this ability only once each turn",
+                "activate only once each turn",
+            ],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::OnlyOnceEachTurn);
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
         }
 
-        if let Some(prefix) = lower.strip_suffix("activate only once") {
-            let end = remaining.len() - "activate only once".len();
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &["activate this ability only once", "activate only once"],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::OnlyOnce);
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
@@ -11258,37 +11571,52 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue 'parse_constraints;
         }
 
-        if let Some(prefix) = lower.strip_suffix("activate no more than twice each turn") {
-            let end = remaining.len() - "activate no more than twice each turn".len();
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &[
+                "activate this ability no more than twice each turn",
+                "activate no more than twice each turn",
+            ],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::MaxTimesEachTurn { count: 2 });
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
         }
 
-        if let Some(prefix) = lower.strip_suffix("activate no more than three times each turn") {
-            let end = remaining.len() - "activate no more than three times each turn".len();
+        if let Some((prefix_len, suffix_len)) = strip_activated_constraint_suffix(
+            &lower,
+            &[
+                "activate this ability no more than three times each turn",
+                "activate no more than three times each turn",
+            ],
+        ) {
+            let end = remaining.len() - suffix_len;
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints
                 .restrictions
                 .push(ActivationRestriction::MaxTimesEachTurn { count: 3 });
-            if prefix.trim().is_empty() {
+            if lower[..prefix_len].trim().is_empty() {
                 break;
             }
             continue;
         }
 
-        if let Some(idx) = tp.rfind("activate only if ") {
+        if let Some((idx, trigger_len)) = ["activate this ability only if ", "activate only if "]
+            .into_iter()
+            .find_map(|pfx| tp.rfind(pfx).map(|idx| (idx, pfx.len())))
+        {
             if idx == 0 {
-                let condition_text = remaining["activate only if ".len()..].to_string();
+                let condition_text = remaining[trigger_len..].to_string();
                 if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
                     break;
                 }
@@ -11296,7 +11624,7 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
                 break;
             }
             if lower[..idx].ends_with(". ") {
-                let condition_text = remaining[idx + "activate only if ".len()..].to_string();
+                let condition_text = remaining[idx + trigger_len..].to_string();
                 if !commit_requires_condition(&condition_text, &mut constraints.restrictions) {
                     break;
                 }
@@ -11307,9 +11635,13 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
-        if let Some(idx) = tp.rfind("activate only from ") {
+        if let Some((idx, trigger_len)) =
+            ["activate this ability only from ", "activate only from "]
+                .into_iter()
+                .find_map(|pfx| tp.rfind(pfx).map(|idx| (idx, pfx.len())))
+        {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only from ".len()..].trim();
+                let restriction_text = remaining[idx + trigger_len..].trim();
                 let full_text = format!("from {restriction_text}");
                 if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
                     break;
@@ -11321,9 +11653,12 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
-        if let Some(idx) = tp.rfind("activate only ") {
+        if let Some((idx, trigger_len)) = ["activate this ability only ", "activate only "]
+            .into_iter()
+            .find_map(|pfx| tp.rfind(pfx).map(|idx| (idx, pfx.len())))
+        {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate only ".len()..].to_string();
+                let restriction_text = remaining[idx + trigger_len..].to_string();
                 if !commit_requires_condition(&restriction_text, &mut constraints.restrictions) {
                     break;
                 }
@@ -11334,9 +11669,15 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             }
         }
 
-        if let Some(idx) = tp.rfind("activate no more than ") {
+        if let Some((idx, trigger_len)) = [
+            "activate this ability no more than ",
+            "activate no more than ",
+        ]
+        .into_iter()
+        .find_map(|pfx| tp.rfind(pfx).map(|idx| (idx, pfx.len())))
+        {
             if idx == 0 || lower[..idx].ends_with(". ") {
-                let restriction_text = remaining[idx + "activate no more than ".len()..].trim();
+                let restriction_text = remaining[idx + trigger_len..].trim();
                 let full_text = format!("no more than {restriction_text}");
                 if !commit_requires_condition(&full_text, &mut constraints.restrictions) {
                     break;

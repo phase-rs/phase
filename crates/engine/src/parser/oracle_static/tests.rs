@@ -5,13 +5,14 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, AttackedYouScope, CardTypeSetSource, Comparator,
-    CountScope, DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SharedQuality, SharedQualityRelation, SubtypeExclusion, TypeFilter, ZoneRef,
+    ActivationRestriction, AggregateFunction, AttackedYouScope, CardTypeSetSource,
+    CommanderOwnership, Comparator, CountScope, DamageKindFilter, Duration, Effect, FilterProp,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, SubtypeExclusion, TypeFilter,
+    ZoneRef,
 };
 use crate::types::counter::CounterType;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::ManaCost;
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 
@@ -8767,6 +8768,31 @@ fn static_life_more_than_starting_conditional() {
 }
 
 #[test]
+fn static_elenda_additional_buff_uses_life_above_starting_condition() {
+    let def = parse_static_line(
+        "Elenda gets an additional +5/+5 as long as your life total is at least ten greater than your starting life total.",
+    )
+    .expect("Elenda's conditional additional buff must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeAboveStarting,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 10 },
+        })
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 5 }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 5 }));
+}
+
+#[test]
 fn static_devotion_condition() {
     use crate::types::mana::ManaColor;
     // CR 110.4b: "less than five" → Not(DevotionGE { threshold: 5 })
@@ -17026,7 +17052,7 @@ fn static_for_each_opponent_below_half_starting_life_is_dynamic_anya() {
                         inner,
                     } if matches!(
                         inner.as_ref(),
-                        QuantityExpr::Ref { qty: QuantityRef::StartingLifeTotal }
+                        QuantityExpr::Ref { qty: QuantityRef::StartingLifeTotal { player: PlayerScope::ScopedPlayer } }
                     )
                 ),
                 "threshold must be half (rounded down) their starting life, got {value:?}"
@@ -17034,6 +17060,50 @@ fn static_for_each_opponent_below_half_starting_life_is_dynamic_anya() {
         }
         other => panic!("expected PlayerAttribute filter, got {other:?}"),
     }
+
+    // Anya's second clause uses the same candidate-relative "an opponent"
+    // threshold. Keeping this explicit prevents it from regressing to the
+    // controller's starting-life baseline while the first clause remains
+    // candidate-relative.
+    let indestructible = parse_static_line(
+        "As long as an opponent's life total is less than half their starting life total, Anya has indestructible.",
+    )
+    .expect("Anya indestructible condition must parse");
+    assert!(matches!(
+        indestructible.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount { filter }
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }) if matches!(
+            &filter,
+            PlayerFilter::PlayerAttribute {
+                relation: crate::types::ability::PlayerRelation::Opponent,
+                attr,
+                comparator: Comparator::LT,
+                value,
+            } if matches!(
+                attr.as_ref(),
+                QuantityRef::LifeTotal { player: PlayerScope::ScopedPlayer }
+            ) && matches!(
+                value.as_ref(),
+                QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Down,
+                    inner,
+                } if matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::ScopedPlayer
+                        }
+                    }
+                )
+            )
+        )
+    ));
 }
 
 /// Helper: the dynamic-power `QuantityExpr` from a static line's first
@@ -17630,6 +17700,9 @@ fn static_reduce_ability_cost_ninjutsu() {
                 exemption: _,
                 // CR 602.2: "abilities you activate" is activator-scoped.
                 activator: Some(PlayerFilter::Controller),
+
+                targets: None,
+                frequency: None,
             } if keyword == "ninjutsu"
         ),
         "Expected ReduceAbilityCost {{ keyword: ninjutsu, amount: 1 }}, got {:?}",
@@ -17637,6 +17710,10 @@ fn static_reduce_ability_cost_ninjutsu() {
     );
 }
 
+/// CR 602.2: "Equip abilities you activate of other Equipment" (Bladehold
+/// War-Whip) discounts equip abilities whose SOURCE is another Equipment: the
+/// "of <sources>" qualifier is the `affected` filter, not dropped (which would
+/// discount War-Whip's own equip too).
 #[test]
 fn static_reduce_equip_abilities_with_object_qualifier() {
     let def = parse_static_line(
@@ -17654,8 +17731,116 @@ fn static_reduce_equip_abilities_with_object_qualifier() {
             exemption: ActivationExemption::None,
             // CR 602.2: "abilities you activate" is activator-scoped.
             activator: Some(PlayerFilter::Controller),
+            targets: None,
+            frequency: None,
         }
     );
+    let Some(TargetFilter::Typed(source)) = def.affected else {
+        panic!("the qualifier scopes the sources: {:?}", def.affected);
+    };
+    assert!(
+        source
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("equipment"))),
+        "{source:?}"
+    );
+    assert!(
+        source.properties.contains(&FilterProp::Another),
+        "other: {source:?}"
+    );
+}
+
+/// CR 601.2f + CR 602.2b: a qualifier between an activated-ability cost
+/// modifier's ability subject and "cost" restricts WHICH abilities it applies
+/// to. The modifier has no field for an arbitrary qualifier, so the line is
+/// refused rather than emitted as a broader modifier: "Equip abilities you
+/// activate of other Equipment" is not a discount on every equip ability.
+/// Controls: the same lines without the qualifier (or with only a target
+/// restriction) still parse.
+#[test]
+fn activated_ability_cost_modifier_refuses_an_unmodelled_qualifier() {
+    fn reduces(line: &str) -> bool {
+        parse_static_line(line)
+            .is_some_and(|def| matches!(def.mode, StaticMode::ReduceAbilityCost { .. }))
+    }
+    // The keyword + activator arm: an unmodelled qualifier is refused.
+    assert!(!reduces(
+        "Equip abilities you activate while you're attacking cost {1} less to activate."
+    ));
+    assert!(reduces(
+        "Equip abilities you activate cost {1} less to activate."
+    ));
+    assert!(reduces(
+        "Equip abilities you activate that target a creature you control cost {1} less to activate."
+    ));
+    // The once-per-turn (Hojo) arm.
+    assert!(!reduces(
+        "The first activated ability you activate during your turn of an artifact that targets a creature you control costs {2} less to activate."
+    ));
+    assert!(reduces(
+        "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate."
+    ));
+    // The unscoped / activator arm.
+    assert!(!reduces(
+        "Abilities you activate of legendary creatures cost {1} less to activate."
+    ));
+    assert!(reduces("Abilities you activate cost {1} less to activate."));
+}
+
+/// CR 602.2: the once-per-turn arm's "of <sources>" subject is consumed whole
+/// or the line declines; it is never widened to every activated ability.
+#[test]
+fn once_per_turn_activation_discount_subject_fails_closed() {
+    let parsed = parse_static_line(
+        "The first activated ability of an artifact you activate each turn that targets a creature you control costs {1} less to activate.",
+    )
+    .expect("a readable subject parses");
+    let Some(TargetFilter::Typed(source)) = &parsed.affected else {
+        panic!("the subject scopes the sources: {:?}", parsed.affected);
+    };
+    assert!(
+        source
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Artifact)),
+        "{source:?}"
+    );
+    for unreadable in [
+        "The first activated ability of an artifact beneath the waves you activate each turn that targets a creature you control costs {1} less to activate.",
+        "The first activated ability of zorblax quux you activate each turn that targets a creature you control costs {1} less to activate.",
+    ] {
+        assert!(
+            !parse_static_line(unreadable)
+                .is_some_and(|def| matches!(def.mode, StaticMode::ReduceAbilityCost { .. })),
+            "{unreadable}"
+        );
+    }
+}
+
+/// CR 602.2: the "<keyword> abilities of <subject>" arm consumes its subject
+/// whole or declines the line, like the once-per-turn arm.
+#[test]
+fn keyword_abilities_of_subject_fails_closed_on_an_unread_subject() {
+    let readable = parse_static_line(
+        "Exhaust abilities of other permanents you control cost {2} less to activate.",
+    )
+    .expect("reach guard: a readable subject parses");
+    assert!(
+        matches!(readable.affected, Some(TargetFilter::Typed(_))),
+        "{:?}",
+        readable.affected
+    );
+    for unreadable in [
+        "Exhaust abilities of other permanents you control beneath the waves cost {2} less to activate.",
+        "Exhaust abilities of zorblax quux cost {2} less to activate.",
+    ] {
+        assert!(
+            !parse_static_line(unreadable)
+                .is_some_and(|def| matches!(def.mode, StaticMode::ReduceAbilityCost { .. })),
+            "{unreadable}"
+        );
+    }
 }
 
 // --- Phase 33-01: Conditional, dynamic, and non-standard enchanted/equipped patterns ---
@@ -24163,6 +24348,47 @@ fn parser_shape_evelyn_collection_counter_play_permission_static_is_not_unimplem
     assert_eq!(def.mode, StaticMode::LinkedCollectionCounterPlayPermission);
 }
 
+/// CR 609.4b + CR 118.14: the collection-counter grant carries Evelyn's printed
+/// any-COLOR concession. A broader "mana of any type" spelling is declined and
+/// stays an honest gap — never a grant that would pay `{C}` the card does not
+/// allow. The printed line is the positive half.
+#[test]
+fn evelyn_collection_counter_any_type_variant_remains_an_honest_gap() {
+    let printed = "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were mana of any color to cast it.";
+    let broader = "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and mana of any type can be spent to cast that spell.";
+    let parse = |text| {
+        crate::parser::oracle::parse_oracle_text(
+            text,
+            "Evelyn, the Covetous",
+            &[],
+            &["Creature".to_string()],
+            &["Vampire".to_string(), "Rogue".to_string()],
+        )
+    };
+    let actual = parse(printed);
+    assert_eq!(actual.statics.len(), 1, "{actual:#?}");
+    assert_eq!(
+        actual.statics[0].mode,
+        StaticMode::LinkedCollectionCounterPlayPermission
+    );
+
+    assert!(parse_static_line(broader).is_none());
+    let unsupported = parse(broader);
+    assert!(unsupported.statics.is_empty(), "{unsupported:#?}");
+    assert!(
+        !unsupported.abilities.is_empty(),
+        "expected an explicit gap: {unsupported:#?}"
+    );
+    for ability in &unsupported.abilities {
+        for node in std::iter::successors(Some(ability), |node| node.sub_ability.as_deref()) {
+            assert!(
+                matches!(node.effect.as_ref(), Effect::Unimplemented { .. }),
+                "the declined concession must not produce another permission: {node:#?}"
+            );
+        }
+    }
+}
+
 // CR 609.4b: Mycosynth Lattice / Mycosynthwave — "Players may spend mana as
 // though it were mana of any color" grants the board-wide any-color concession to
 // every player (affected: TargetFilter::Player, which the runtime scopes to all
@@ -24177,6 +24403,7 @@ fn static_players_may_spend_mana_as_any_color() {
         StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: crate::types::ability::ManaSpendPermission::AnyColor,
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::Player));
@@ -24191,6 +24418,7 @@ fn static_you_may_spend_mana_as_any_color_still_parses() {
         StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: crate::types::ability::ManaSpendPermission::AnyColor,
         }
     );
 }
@@ -24214,6 +24442,9 @@ fn static_reduce_activated_ability_cost_generic() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
 }
@@ -24234,6 +24465,9 @@ fn static_reduce_activated_ability_cost_generic_with_minimum() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
 }
@@ -24254,6 +24488,9 @@ fn static_reduce_activated_ability_cost_enchanted_artifact_with_minimum() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
     assert!(matches!(
@@ -24278,6 +24515,9 @@ fn static_reduce_activated_ability_cost_equipped_artifact_with_minimum() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
     assert!(matches!(
@@ -24307,6 +24547,9 @@ fn static_reduce_exhaust_ability_cost_other_permanents() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
     // "other ... you control" must exclude the source permanent (CR 109.5).
@@ -24360,6 +24603,9 @@ fn static_activated_ability_cost_increase_chosen_name() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
     assert_eq!(
@@ -24390,6 +24636,9 @@ fn static_loyalty_ability_cost_increase_eidolon_of_obstruction() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
     assert!(
@@ -24442,6 +24691,9 @@ fn static_activated_ability_cost_opponent_activator_scope() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: Some(PlayerFilter::Opponent),
+
+            targets: None,
+            frequency: None,
         },
     );
 
@@ -24462,6 +24714,9 @@ fn static_activated_ability_cost_opponent_activator_scope() {
             dynamic_count: None,
             exemption: ActivationExemption::ManaAbilities,
             activator: Some(PlayerFilter::Opponent),
+
+            targets: None,
+            frequency: None,
         },
     );
 
@@ -24529,6 +24784,9 @@ fn static_possessive_equip_ability_cost_reduction_self_ref() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
     assert_eq!(
@@ -24551,6 +24809,9 @@ fn static_reduce_ability_cost_registry_round_trip_preserves_direction() {
             dynamic_count: None,
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         };
         let encoded = original.to_string();
         let decoded = encoded
@@ -24593,6 +24854,9 @@ fn static_reduce_activated_ability_cost_dynamic_power() {
             }),
             exemption: ActivationExemption::None,
             activator: None,
+
+            targets: None,
+            frequency: None,
         }
     );
     match &def.affected {
@@ -30626,6 +30890,183 @@ fn compound_static_foreign_keyword_grant_splits_angelic_field_marshal() {
     assert!(
         companion.condition.is_some(),
         "companion must carry the as-long-as condition"
+    );
+}
+
+/// CR 611.3a + CR 613.1f + CR 613.4c: Compound static where the foreign-subject
+/// conjunct is a P/T-and-keyword modification, not a keyword grant. Thunderfoot
+/// Baloth: "As long as you control your commander, this creature gets +2/+2 and
+/// other creatures you control get +2/+2 and have trample."
+/// Must decompose into TWO StaticDefinitions sharing the same condition:
+///   - def[0]: SelfRef subject, exactly [AddPower(2), AddToughness(2)]
+///   - def[1]: Typed(creatures you control, Another) subject, [AddPower(2),
+///     AddToughness(2), AddKeyword(Trample)]
+#[test]
+fn compound_static_foreign_pt_grant_splits_thunderfoot_baloth() {
+    let defs = parse_static_line_multi(
+        "Lieutenant — As long as you control your commander, this creature gets +2/+2 and other creatures you control get +2/+2 and have trample.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "expected 2 StaticDefinitions (self P/T + other-creatures P/T and trample), got {defs:?}"
+    );
+
+    let def0 = &defs[0];
+    assert_eq!(def0.mode, StaticMode::Continuous);
+    assert!(
+        matches!(&def0.affected, Some(TargetFilter::SelfRef)),
+        "def0 must target SelfRef, got {:?}",
+        def0.affected
+    );
+    assert_eq!(
+        def0.modifications,
+        vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ]
+    );
+    assert_eq!(
+        def0.condition,
+        Some(StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own
+        })
+    );
+
+    let def1 = &defs[1];
+    assert_eq!(def1.mode, StaticMode::Continuous);
+    match &def1.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "def1 must affect creatures you control, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Another),
+                "def1 must exclude the source (\"other creatures\"), got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("def1 affected must be Typed(other creatures you control), got {other:?}"),
+    }
+    assert!(
+        def1.modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "def1 must add +2 power, got {:?}",
+        def1.modifications
+    );
+    assert!(
+        def1.modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }),
+        "def1 must add +2 toughness, got {:?}",
+        def1.modifications
+    );
+    assert!(
+        def1.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Trample)
+        ),
+        "def1 must add Trample, got {:?}",
+        def1.modifications
+    );
+    assert_eq!(
+        def1.condition,
+        Some(StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own
+        })
+    );
+}
+
+/// A compound subject ("artifacts and creatures you control") must parse to
+/// ONE static, not split by `try_split_and_foreign_subject_grant` — the
+/// splitter's empty-modifications guard declines the candidate split here
+/// because the leading "artifacts" conjunct alone re-parses to a `Continuous`
+/// def with no modifications. Thorin Oakenshield: "As long as you have an
+/// enduring story, artifacts and creatures you control have ward {1}."
+#[test]
+fn compound_subject_keyword_grant_is_not_split_thorin() {
+    let defs = parse_static_line_multi(
+        "As long as you have an enduring story, artifacts and creatures you control have ward {1}.",
+    );
+    assert_eq!(
+        defs.len(),
+        1,
+        "the compound subject must not be split into a false SelfRef + companion pair, got {defs:?}"
+    );
+
+    let def = &defs[0];
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::Or { filters }) => {
+            assert_eq!(
+                filters.len(),
+                2,
+                "expected Artifact + Creature, got {filters:?}"
+            );
+            for filter in filters {
+                match filter {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(
+                            tf.type_filters.contains(&TypeFilter::Artifact)
+                                || tf.type_filters.contains(&TypeFilter::Creature),
+                            "expected an Artifact or Creature conjunct, got {:?}",
+                            tf.type_filters
+                        );
+                    }
+                    other => panic!("expected a Typed conjunct, got {other:?}"),
+                }
+            }
+        }
+        other => panic!("affected must be Or(Artifact You, Creature You), got {other:?}"),
+    }
+    assert!(
+        def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(WardCost::Mana(cost)),
+            } if *cost == ManaCost::generic(1)
+        )),
+        "expected AddKeyword(Ward {{1}}), got {:?}",
+        def.modifications
+    );
+    assert_eq!(def.condition, Some(StaticCondition::HasEnduringStory));
+}
+
+/// CR 601.2f + CR 602.2b + CR 118.7a: the cost-reduction floor accepts BOTH
+/// referent phrasings — "that cost" (Training Grounds) and "that ability's
+/// activation cost" (Convergence of Dominion) — for the same `minimum_mana`
+/// floor. Convergence of Dominion: "As long as you control your commander,
+/// activated abilities of cards in your graveyard cost {2} less to activate.
+/// This effect can't reduce the mana in that ability's activation cost to less
+/// than one mana."
+#[test]
+fn static_reduce_activated_ability_cost_that_ability_activation_cost_floor() {
+    let defs = parse_static_line_multi(
+        "As long as you control your commander, activated abilities of cards in your graveyard cost {2} less to activate. This effect can't reduce the mana in that ability's activation cost to less than one mana.",
+    );
+    assert_eq!(defs.len(), 1, "expected exactly one def, got {defs:?}");
+    let def = &defs[0];
+    assert_eq!(
+        def.mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "activated".to_string(),
+            amount: 2,
+            minimum_mana: Some(1),
+            dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: None,
+            targets: None,
+            frequency: None,
+        }
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own
+        })
     );
 }
 
@@ -36765,7 +37206,10 @@ fn weathered_sentinels_line_is_consumed_by_the_non_attached_static_production() 
     let lower = P3_WEATHERED_SENTINELS_L2.to_lowercase();
     let tp = TextPair::new(P3_WEATHERED_SENTINELS_L2, &lower);
     let def = super::evasion::parse_can_attack_despite_defender(&tp, P3_WEATHERED_SENTINELS_L2)
-        .expect("C3.1: production (b) itself must consume this line, not a shadowing branch");
+        .expect(
+            "production (b) — `parse_can_attack_despite_defender` — must parse the \
+             Weathered Sentinels line directly",
+        );
     assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(
@@ -37000,7 +37444,9 @@ fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() 
     assert_eq!(
         crate::game::coverage::card_face_gaps(&ok_face),
         Vec::<String>::new(),
-        "the anchored class must be GREEN — Phase 1's C1.5 labelling is FINAL"
+        "a RECOGNIZED anchored class must report NO coverage gap — the gap signal \
+         comes from the unenforceable marker, not from `CanAttackWithDefender` \
+         being unsupported in the registry"
     );
 }
 

@@ -209,6 +209,7 @@ pub(crate) mod zones;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
+pub use ante::face_uses_ante;
 pub use bracket_estimate::{
     estimate_bracket, BracketAxis, BracketAxisCounts, BracketContributingCards, BracketEstimate,
     BracketViolation, CommanderBracketTier,

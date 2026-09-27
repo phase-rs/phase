@@ -1797,6 +1797,14 @@
       "subtitle_one": "Put {{count}} revealed card on the bottom of your library",
       "subtitle_other": "Put {{count}} revealed cards on the bottom of your library, in any order",
       "hint": "Drag to reorder · position 1 ends up on top of this pile"
+    },
+    "revealUntilBottom": {
+      "title": "Pon el resto en el fondo",
+      "subtitle_one": "Pon {{count}} carta mostrada en el fondo de tu biblioteca",
+      "subtitle_other": "Pon {{count}} cartas mostradas en el fondo de tu biblioteca en cualquier orden",
+      "hint": "Arrastra para reordenar · la posición 1 queda arriba de este montón",
+      "moveLeft": "Mover a la izquierda",
+      "moveRight": "Mover a la derecha"
     }
   },
   "specializeColor": {
@@ -1908,6 +1916,10 @@
     "prowlNormalLabel": "Lanzar normalmente",
     "prowlAltLabel": "Lanzar con Prowl",
     "prowlSubtitle": "Lanza {{name}} normalmente, o paga su coste de Prowl (disponible porque una criatura correspondiente hizo daño de combate a un jugador este turno).",
+    "surgeEyebrow": "Surge",
+    "surgeNormalLabel": "Lanzar normalmente",
+    "surgeAltLabel": "Lanzar con Surge",
+    "surgeSubtitle": "Lanza {{name}} normalmente, o paga su coste de Surge (disponible porque tú o un compañero de equipo lanzasteis otro hechizo este turno).",
     "overloadEyebrow": "Sobrecargar",
     "overloadNormalLabel": "Lanzar normalmente",
     "overloadAltLabel": "Lanzar con Sobrecargar",
@@ -2380,10 +2392,11 @@
     "reachSpills": "Puede reducir maná genérico",
     "multiplier": "×{{count}}",
     "confirmOrder": "Confirmar orden",
-    "cancelCast": "Cancelar el lanzamiento",
+    "cancel": "Cancelar",
     "moveUp": "Subir",
     "moveDown": "Bajar",
-    "reductionFallback": "Reducción {{number}}"
+    "reductionFallback": "Reducción {{number}}",
+    "floor": "No puede reducir el coste por debajo de {{count}} de maná"
   },
   "unhandledWaitingFor": {
     "title": "Se requiere una acción, pero falta la interfaz",

@@ -22,9 +22,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::ability::AbilityCost;
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostReductionReach;
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
 
 /// Where one snapshot reduction came from.
 ///
@@ -35,15 +40,16 @@ use crate::types::statics::CostReductionReach;
 /// `player` / `amount` / `spell_filter`. A sentinel id for those would be a lie
 /// the UI and the AI would both have to decode.
 ///
-/// RESERVED VARIANTS: only [`ReductionProvenance::Static`] and
-/// [`ReductionProvenance::Defiler`] are constructed today.
-/// `PendingOneShot` / `Affinity` / `Undaunted` name the three channels that are
-/// structurally generic-only — they reduce generic mana and nothing else — so
-/// [`CostReductionEntry::is_order_relevant`] excludes them from the permutation
-/// set by construction and they never reach a snapshot. They are kept (and
-/// wire-tested) because the taxonomy is the honest one: the day a printed
-/// Affinity-shaped or one-shot reduction carries a shard, the entry needs a
-/// name that is not a fabricated `ObjectId`.
+/// RESERVED VARIANTS: `PendingOneShot` / `Affinity` / `Undaunted` name the three
+/// spell channels that are structurally generic-only — they reduce generic mana
+/// and nothing else — so [`CostReductionEntry::is_order_relevant`] excludes them
+/// from the spell permutation set by construction and they never reach a
+/// snapshot. They are kept (and wire-tested) because the taxonomy is the honest
+/// one: the day a printed Affinity-shaped or one-shot reduction carries a shard,
+/// the entry needs a name that is not a fabricated `ObjectId`. Every other
+/// variant is constructed: `Static`, `Defiler` and `CastingPermission` by the
+/// spell election, `Static`, `AbilityCostRider` and `TransientEffect` by the
+/// activation election.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ReductionProvenance {
@@ -72,6 +78,16 @@ pub enum ReductionProvenance {
     /// RESERVED (see the type-level note). CR 702.125a: Undaunted, derived from
     /// the spell's own keyword. Reduces generic mana only.
     Undaunted,
+    /// CR 602.2b: the activating ability's OWN "this ability costs {N} less to
+    /// activate" rider (`AbilityDefinition::cost_reduction`). Like Affinity it
+    /// has no producing permanent. An ability carries at most one rider, so the
+    /// bare variant is already unique within one activation's reduction set.
+    AbilityCostRider,
+    /// CR 611.2: a duration-scoped continuous `ReduceAbilityCost` effect (The
+    /// Dining Car's "activated abilities of <X> cost {N} less this turn").
+    /// `effect` is the installing `TransientContinuousEffect::id`; `ordinal`
+    /// is the reducer's index among that effect's `AddStaticMode` reducers.
+    TransientEffect { effect: u64, ordinal: u8 },
 }
 
 /// CR 601.2b + CR 601.2f: everything the caster elects at the cost-determination
@@ -120,6 +136,13 @@ pub struct CostReductionEntry {
     /// Human-readable label for the prompt ("Morophon, the Boundless"). The
     /// frontend renders this verbatim; it computes nothing from it.
     pub display_name: String,
+    /// CR 601.2f: the reduction's floor — "This effect can't reduce the mana in
+    /// that cost to less than N mana" (Training Grounds, Zirda, Agatha). 0 means
+    /// unfloored. Only activated-ability reductions carry one: `ModifyCost` has
+    /// no floor, so every spell entry is 0 and, skipped at 0, serializes exactly
+    /// as it did before the field existed.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub minimum_mana: u32,
 }
 
 impl CostReductionEntry {
@@ -136,6 +159,13 @@ impl CostReductionEntry {
     /// the overwhelmingly common cast (Affinity, Undaunted, one-shot "costs
     /// {N} less" reductions, and the 492 generic-only `Reduce` statics) never
     /// reaches a prompt.
+    ///
+    /// This is the FLOOR-FREE (spell) criterion. It does not hold once floors
+    /// differ: an unfloored and a floored generic reduction do not commute
+    /// (CR 601.2f "can't reduce ... to less than one mana" binds only when the
+    /// floored one runs last). The activated-ability election therefore decides
+    /// relevance over the whole set — "do the effective floors differ?" — in
+    /// `crate::game::casting`, not per entry here.
     pub fn is_order_relevant(&self) -> bool {
         amount_is_order_relevant(&self.amount)
     }
@@ -203,4 +233,120 @@ impl CostReductionAnalysis {
     pub fn needs_election(&self) -> bool {
         self.outcomes.len() > 1
     }
+}
+
+/// CR 601.2f + CR 602.2b: every cost modifier that applies to one activation,
+/// captured ONCE at the fold, together with where its total cost stands.
+///
+/// CR 602.2b makes an activation cost the analog of a spell's mana cost for
+/// CR 601.2f, so the same "plus all ... cost increases, and minus all cost
+/// reductions ... in any order" determination applies. The lock re-applies an
+/// order to THIS snapshot rather than re-collecting the board, for the reason
+/// CR 601.2h's Altar's Reap example gives: a reduction stays determined even if
+/// paying a cost later removes its source.
+///
+/// Its presence on an in-flight activation IS the fold state: an activation
+/// that has passed its fold carries one on every `PendingCast` (and on
+/// `WaitingFor::AbilityModeChoice`) until it reaches the stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationCostSnapshot {
+    /// The activation cost before any modifier: the printed cost.
+    pub base_cost: AbilityCost,
+    /// The sum of every applying raise. Raises are generic-only and are all
+    /// applied before any reduction (CR 601.2f), so only their sum is
+    /// observable; they never enter the election.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub raise_total: u32,
+    /// Every applying reduction, dynamic counts already resolved, in canonical
+    /// collection order: the ability's own rider, then battlefield statics,
+    /// then duration-scoped continuous effects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reductions: Vec<CostReductionEntry>,
+    /// Which `PendingCast` field holds the activation's unpaid mana while the
+    /// lock waits for committed targets.
+    #[serde(default, skip_serializing_if = "ManaCarrier::is_whole")]
+    pub mana_carrier: ManaCarrier,
+    /// Set only while an `Open` carrier awaits the caster's CR 601.2f election
+    /// at target settlement: the continuation its lock resumes into. An
+    /// announcement election leaves it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_tail: Option<SettledTail>,
+    pub lock: ActivationCostLock,
+}
+
+/// Which `PendingCast` field holds an activation's mana obligation while its
+/// cost lock waits for committed targets (CR 601.2c + CR 602.2b).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ManaCarrier {
+    /// `activation_cost` holds the whole cost and `pending.cost` is `NoCost`.
+    #[default]
+    Whole,
+    /// `pending.cost` holds the concretized mana leg and `activation_cost` holds
+    /// only the non-mana residual (the `{X}` and hoisted-mana-leg paths).
+    Split,
+}
+
+impl ManaCarrier {
+    pub fn is_whole(&self) -> bool {
+        matches!(self, Self::Whole)
+    }
+}
+
+/// The continuation a target-settlement cost lock resumes into once the
+/// caster answers its CR 601.2f election.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SettledTail {
+    /// Surface the next unpaid interactive cost, else go to the payment boundary.
+    SurfaceThenBoundary,
+    /// Go straight to the payment boundary.
+    Boundary,
+}
+
+/// CR 601.2f: whether an activation's total cost has been "locked in".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ActivationCostLock {
+    /// Not locked yet. `point` is where it WILL lock: the pending activation a
+    /// `WaitingFor::OrderCostReductions` prompt carries names the continuation
+    /// its answer resumes, and a carrier whose lock was deferred past
+    /// announcement (a mana `{X}`, announced later — CR 601.2b before
+    /// CR 601.2f) names the later point that locks it.
+    Open {
+        #[serde(default)]
+        point: ActivationCostLockPoint,
+    },
+    /// Locked exactly once, at `point`. `order` is the caster's elected
+    /// reduction order; `None` means no order was observable, so the
+    /// caster-optimal default governs.
+    Locked {
+        #[serde(default)]
+        point: ActivationCostLockPoint,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<Vec<ReductionProvenance>>,
+    },
+}
+
+/// The fold point after which an activation's cost lock runs, and so where the
+/// activation resumes once the caster answers. The contract every point obeys:
+/// a lock DEFERS while a later fold can still change the modifiers or the cost
+/// they apply to, and runs exactly once, after the final fold and before the
+/// first payment. Externally tagged so a later fold point can be added without
+/// changing an existing point's bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ActivationCostLockPoint {
+    /// CR 602.2b + CR 601.2b-f: the activation's announcement, where every
+    /// activation cost modifier this engine models is determined — the final
+    /// fold unless the cost carries a mana `{X}`.
+    #[default]
+    Announcement,
+    /// CR 601.2b + CR 601.2f: a mana `{X}` is announced before the total cost
+    /// is determined, so its reductions (and their floors, which count the
+    /// cost's mana) are folded and locked once X is chosen.
+    XAnnounced,
+    /// CR 601.2c + CR 602.2b: target settlement. An activation whose cost may
+    /// depend on its targets (Professor Hojo, Kopala) locks once they are
+    /// committed. Where it continues depends on the settling route, so an
+    /// election prompt raised here records that in the snapshot's
+    /// `settlement_tail`.
+    TargetSettlement,
 }

@@ -3318,18 +3318,20 @@ mod tests {
         }
     }
 
-    /// `Duration::UntilEvent` and `TransientContinuousEffect`'s
-    /// `duration_event_source` are new in serialized full-game state; a v77
-    /// peer cannot parse the new duration tag, so it must be refused before it
-    /// receives v78 state.
+    /// `ReduceAbilityCost` statics now carry a target restriction and a
+    /// once-per-turn frequency, `GameState` journals each turn's activations,
+    /// and the activation cost carrier holds the target-settlement lock, all in
+    /// serialized full-game state; a v82 peer would drop them silently and
+    /// price an activation differently, so it must be refused before it
+    /// receives v83 state.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_78_for_event_deadline_duration() {
-        assert_eq!(PROTOCOL_VERSION, 78);
+    fn protocol_version_is_83_for_target_gated_activation_costs() {
+        assert_eq!(PROTOCOL_VERSION, 83);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3342,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_78_for_event_deadline_duration` stays
+    /// `protocol_version_is_83_for_target_gated_activation_costs` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

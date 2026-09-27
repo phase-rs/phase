@@ -944,6 +944,28 @@ fn append_resolve_all_revocations(
     );
 }
 
+/// States whose finite candidate domain `candidate_actions_exact` enumerates in
+/// full. The broad enumerator delegates them to the exact one, and
+/// `semantic_candidate_actions_with_probe` skips the broad pass for them, so
+/// each candidate is issued exactly once. Duplicates are not harmless: search
+/// policies that sample over candidates (softmax) would weight a duplicated
+/// choice twice.
+fn exact_owns_candidate_domain(waiting_for: &WaitingFor) -> bool {
+    matches!(
+        waiting_for,
+        WaitingFor::ResolveAllConsent { .. }
+            | WaitingFor::ResolveAllReady { .. }
+            | WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
+            | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::ChooseAnnouncingOpponent { .. }
+            | WaitingFor::ChooseGiftRecipient { .. }
+            | WaitingFor::MoveCountersDistribution { .. }
+            | WaitingFor::RemoveCountersChoice { .. }
+    )
+}
+
 pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
     candidate_actions_broad_with_probe(state, None)
 }
@@ -953,52 +975,22 @@ pub fn candidate_actions_broad_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let actions = match &state.waiting_for {
+        // Keep in sync with `exact_owns_candidate_domain`; the match below is
+        // exhaustive, so a guard arm cannot stand in for these patterns.
         WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
-        | WaitingFor::EntryAttackTargetChoice { .. } => candidate_actions_exact(state),
+        | WaitingFor::EntryAttackTargetChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::ChooseAnnouncingOpponent { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
+        | WaitingFor::MoveCountersDistribution { .. }
+        | WaitingFor::RemoveCountersChoice { .. } => {
+            debug_assert!(exact_owns_candidate_domain(&state.waiting_for));
+            candidate_actions_exact(state)
+        }
         WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
-        WaitingFor::ChooseAnnouncingOpponent {
-            player, candidates, ..
-        } => candidates
-            .iter()
-            .map(|opponent| {
-                candidate(
-                    GameAction::ChooseAnnouncingOpponent {
-                        opponent: *opponent,
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        WaitingFor::ChooseGiftRecipient {
-            player, candidates, ..
-        } => candidates
-            .iter()
-            .map(|opponent| {
-                candidate(
-                    GameAction::ChooseGiftRecipient {
-                        opponent: *opponent,
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        WaitingFor::EntryControllerChoice { player, candidates } => candidates
-            .iter()
-            .map(|opponent| {
-                candidate(
-                    GameAction::ChooseEntryController {
-                        opponent: *opponent,
-                    },
-                    TacticalClass::Replacement,
-                    Some(*player),
-                )
-            })
-            .collect(),
         WaitingFor::ManaPayment {
             player,
             convoke_mode,
@@ -1024,15 +1016,6 @@ pub fn candidate_actions_broad_with_probe(
             ));
             actions
         }
-        WaitingFor::MoveCountersDistribution {
-            player,
-            available,
-            destinations,
-            ..
-        } => counter_move_distribution_candidates(*player, available, destinations),
-        WaitingFor::RemoveCountersChoice {
-            player, available, ..
-        } => counter_removal_candidates(*player, available),
         WaitingFor::TargetSelection {
             player,
             target_slots,
@@ -1285,11 +1268,13 @@ pub fn candidate_actions_broad_with_probe(
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
-        // CR 702.60a: the Ripple bottom-order response is a full permutation of
-        // the uncast revealed pile. `select_cards_variants` yields the identity
-        // ordering (+ a couple of variants); `apply()` validates any permutation.
-        WaitingFor::RippleBottomOrder { player, cards, .. } => {
-            select_cards_variants(*player, cards, Some(cards.len()))
+        // CR 702.60a + CR 608.2d + CR 401.4: the bottom-order response is a full
+        // permutation of the revealed pile. The owner of those cards may arrange
+        // them in any order (CR 401.4). `bounded_select_card_permutations` yields
+        // bounded permutations (identity, reverse, and variants up to output cap).
+        WaitingFor::RippleBottomOrder { player, cards, .. }
+        | WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+            bounded_select_card_permutations(*player, cards)
         }
         WaitingFor::ArrangePlanarDeckTopChoice {
             player,
@@ -3826,14 +3811,10 @@ fn semantic_candidate_actions_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let mut actions = candidate_actions_exact(state);
-    // Resolve All consent is wholly represented by its finite exact domain.
-    // The broad enumerator delegates these same states to `candidate_actions_exact`
-    // for broad-only callers, so composing both here would expose every
-    // Grant, Decline, and Revoke choice twice.
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
-    ) {
+    // The broad enumerator delegates exact-owned states back to
+    // `candidate_actions_exact` for broad-only callers, so composing both here
+    // would expose every choice twice.
+    if !exact_owns_candidate_domain(&state.waiting_for) {
         actions.extend(candidate_actions_broad_with_probe(state, probe));
     }
 
@@ -5296,6 +5277,26 @@ fn bounded_select_card_candidates(
         .collect()
 }
 
+/// CR 401.4 + CR 608.2d + CR 702.60a: The bottom-order response is a full
+/// permutation of the revealed pile. The owner of those cards may arrange them
+/// in any order (CR 401.4). `bounded_select_card_permutations` yields bounded
+/// permutations (identity, alternate permutations, and reverse up to output cap).
+fn bounded_select_card_permutations(
+    player: PlayerId,
+    cards: &[crate::types::identifiers::ObjectId],
+) -> Vec<CandidateAction> {
+    bounded_permutations(cards, SELECTION_CANDIDATE_CAP)
+        .into_iter()
+        .map(|permutation| {
+            candidate(
+                GameAction::SelectCards { cards: permutation },
+                TacticalClass::Selection,
+                Some(player),
+            )
+        })
+        .collect()
+}
+
 fn remove_counter_cost_distribution_candidate(
     state: &GameState,
     player: PlayerId,
@@ -6030,6 +6031,70 @@ fn push_object_combo(
     }
 }
 
+/// CR 401.4: Generates permutations of `items` bounded by `output_cap`.
+///
+/// Identity order is always emitted first. For pools up to `SELECTION_POOL_CAP`,
+/// recursive backtracking yields up to `output_cap` permutations (all 24 at len 4,
+/// 64 of 120 at len 5), ensuring reverse is included. For larger pools, factorial
+/// blowup is avoided by providing the identity and reverse orders.
+fn bounded_permutations(
+    items: &[crate::types::identifiers::ObjectId],
+    output_cap: usize,
+) -> Vec<Vec<crate::types::identifiers::ObjectId>> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    if items.len() == 1 {
+        return vec![items.to_vec()];
+    }
+    if items.len() > SELECTION_POOL_CAP {
+        let mut reverse = items.to_vec();
+        reverse.reverse();
+        return vec![items.to_vec(), reverse];
+    }
+    let mut output = Vec::new();
+    let mut current = Vec::with_capacity(items.len());
+    let mut used = vec![false; items.len()];
+    permute_objects_into(items, &mut current, &mut used, &mut output, output_cap);
+    let reverse: Vec<_> = items.iter().rev().copied().collect();
+    if !output.contains(&reverse) {
+        if output.len() >= output_cap {
+            output.pop();
+        }
+        output.push(reverse);
+    }
+    output
+}
+
+fn permute_objects_into(
+    items: &[crate::types::identifiers::ObjectId],
+    current: &mut Vec<crate::types::identifiers::ObjectId>,
+    used: &mut [bool],
+    out: &mut Vec<Vec<crate::types::identifiers::ObjectId>>,
+    cap: usize,
+) {
+    if out.len() >= cap {
+        return;
+    }
+    if current.len() == items.len() {
+        out.push(current.clone());
+        return;
+    }
+    for (i, &item) in items.iter().enumerate() {
+        if used[i] {
+            continue;
+        }
+        used[i] = true;
+        current.push(item);
+        permute_objects_into(items, current, used, out, cap);
+        current.pop();
+        used[i] = false;
+        if out.len() >= cap {
+            break;
+        }
+    }
+}
+
 /// CR 706.6: The die-roll ignore submissions to offer for a `DieKeepChoice`.
 ///
 /// Enumerates `C(ignorable, ignore_count)` under the shared selection caps, so a
@@ -6362,6 +6427,33 @@ mod tests {
     /// CR 700.3a: the candidate set must offer a weight-balanced partition
     /// alongside the three legacy shapes, deterministically, and never the same
     /// vector twice (the decision contract matches these by exact equality).
+    /// CR 614.12a: an exact-owned opponent picker must issue each opponent
+    /// once. `candidate_actions` composes the exact and broad enumerators, and
+    /// the broad one used to repeat this arm, doubling every candidate.
+    #[test]
+    fn entry_controller_choice_issues_each_opponent_once() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.waiting_for = WaitingFor::EntryControllerChoice {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1), PlayerId(2)],
+        };
+        let actions: Vec<GameAction> = candidate_actions(&state)
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                GameAction::ChooseEntryController {
+                    opponent: PlayerId(1)
+                },
+                GameAction::ChooseEntryController {
+                    opponent: PlayerId(2)
+                },
+            ]
+        );
+    }
+
     #[test]
     fn balanced_partition_candidate_present_and_deterministic() {
         let mut state = GameState::new_two_player(42);
@@ -9358,5 +9450,36 @@ mod tests {
             crate::ai_support::legal_actions(&declared).contains(&GameAction::DeclineShortcut),
             "the decline stays legal on both arms, which is what keeps the pair one axis apart"
         );
+    }
+
+    /// CR 401.4 + CR 608.2d: for RevealUntilBottomOrder and RippleBottomOrder, the owner
+    /// may arrange cards in any order. The AI must be able to offer alternate permutations
+    /// (e.g. [B, A] for [A, B]), not only the identity combination [A, B].
+    #[test]
+    fn reveal_until_bottom_order_ai_candidates_include_alternate_permutations() {
+        let mut state = GameState::new_two_player(42);
+        let a = ObjectId(10);
+        let b = ObjectId(20);
+        state.waiting_for = WaitingFor::RevealUntilBottomOrder {
+            player: PlayerId(0),
+            source_id: ObjectId(100),
+            cards: vec![a, b],
+            clear_markers: Vec::new(),
+            emit_reveal_until_resolved: None,
+            reveal_until_hit_snapshot: None,
+        };
+
+        let actions = candidate_actions_broad(&state);
+        let permutations: Vec<Vec<ObjectId>> = actions
+            .into_iter()
+            .filter_map(|cand| match cand.action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(permutations.len(), 2);
+        assert_eq!(permutations[0], vec![a, b]);
+        assert_eq!(permutations[1], vec![b, a]);
     }
 }

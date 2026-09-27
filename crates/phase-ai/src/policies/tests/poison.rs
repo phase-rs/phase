@@ -495,6 +495,7 @@ fn ability_mode_decision(source_id: ObjectId) -> AiDecisionContext {
             is_activated: true,
             ability_index: Some(0),
             ability_cost: None,
+            activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
         },
         candidates: Vec::new(),

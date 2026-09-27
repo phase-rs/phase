@@ -32,15 +32,17 @@ use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_for
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
-    evaluate_deck_compatibility, filter_state_for_viewer, is_brawl_commander_eligible,
-    is_commander_eligible, is_freeform_commander_eligible, is_tiny_leader_eligible,
-    load_and_hydrate_decks, max_deck_copies, rehydrate_game_from_card_db_with_finalization,
-    resolve_deck_list, signature_spell_selection_policy, start_game,
-    start_game_with_starting_player, validate_name_deck_for_format_full, BracketEstimate,
-    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
+    evaluate_deck_compatibility, filter_events_for_viewer, filter_state_for_viewer,
+    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
+    is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
+    rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
+    signature_spell_selection_policy, start_game, start_game_with_starting_player,
+    validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
+    PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
+use engine::types::events::GameEvent;
 use engine::types::format::{
     validate_starting_life_bounds, DeckCopyLimit, FormatConfig, GameFormat,
 };
@@ -979,6 +981,26 @@ pub fn get_card_face_data(name: &str) -> JsValue {
             Some(face) => to_js(face),
             None => JsValue::NULL,
         }
+    })
+}
+
+/// The canonical printed name of each of `names`, index-aligned, `null` where
+/// `CardDatabase::canonical_name` has none. Errors if the card database is
+/// not loaded.
+#[wasm_bindgen(js_name = canonicalCardNames)]
+pub fn canonical_card_names(names: JsValue) -> Result<JsValue, JsValue> {
+    let names: Vec<String> = serde_wasm_bindgen::from_value(names)
+        .map_err(|e| JsValue::from_str(&format!("Invalid card name list: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        let canonical: Vec<Option<String>> =
+            names.iter().map(|name| db.canonical_name(name)).collect();
+        Ok(to_js(&canonical))
     })
 }
 
@@ -1963,11 +1985,10 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         if debug_action.is_zero_count_create() {
             return match with_state(|state| {
                 preflight_debug_action_with_rejection(state, actor, debug_action)?;
-                Ok::<_, ActionRejection>(engine::types::game_state::ActionResult {
-                    events: vec![],
-                    waiting_for: state.waiting_for.clone(),
-                    log_entries: vec![],
-                })
+                Ok::<_, ActionRejection>(engine::types::game_state::ActionResult::applied(
+                    vec![],
+                    state.waiting_for.clone(),
+                ))
             }) {
                 Ok(result) => action_outcome(result),
                 Err(error) => error,
@@ -2178,11 +2199,10 @@ fn handle_debug_create_card_inner(
     })
     .unwrap_or_else(|_| Err(NOT_INITIALIZED_ERR.to_string()))?;
     if count == 0 {
-        return Ok(engine::types::game_state::ActionResult {
-            events: vec![],
+        return Ok(engine::types::game_state::ActionResult::applied(
+            vec![],
             waiting_for,
-            log_entries: vec![],
-        });
+        ));
     }
     let source = CARD_DB.with(|cell| {
         let db = cell.borrow();
@@ -2395,6 +2415,17 @@ struct ViewerSnapshot<'a> {
     viewer_interaction: engine::types::interaction::ViewerInteraction,
 }
 
+/// ViewerSnapshot plus the event slice that belongs to the same caller-owned
+/// transition. Keeping this as a distinct wire type preserves the legacy
+/// state-only endpoint while making event filtering an engine-owned operation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewerTransitionSnapshot<'a> {
+    #[serde(flatten)]
+    snapshot: ViewerSnapshot<'a>,
+    events: Vec<GameEvent>,
+}
+
 fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsResult {
     let (actions, spell_costs, legal_actions_by_object) = legal_actions_for_viewer(state, viewer);
     let auto_pass_recommended = auto_pass_recommended_for_viewer(state, viewer, &actions);
@@ -2419,6 +2450,50 @@ fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> Legal
         viewer_interaction: engine::game::interaction::derive_viewer_interaction(
             state, state, viewer,
         ),
+    }
+}
+
+fn viewer_snapshot<'a>(
+    state: &GameState,
+    filtered: &'a GameState,
+    viewer: PlayerId,
+) -> ViewerSnapshot<'a> {
+    let legal = legal_actions_result_for_viewer(state, viewer);
+    let viewer_interaction =
+        engine::game::interaction::derive_viewer_interaction(state, filtered, viewer);
+    ViewerSnapshot {
+        state: engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+            state,
+            filtered,
+            Some(viewer),
+        ),
+        actions: legal.actions,
+        auto_pass_recommended: legal.auto_pass_recommended,
+        end_continuous_effect_offers: legal.end_continuous_effect_offers,
+        mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
+        spell_costs: legal.spell_costs,
+        legal_actions_by_object: legal.legal_actions_by_object,
+        activation_block_reasons: legal.activation_block_reasons,
+        stuck_diagnostic: legal.stuck_diagnostic,
+        viewer_interaction,
+    }
+}
+
+fn viewer_player_id(player_id: u32) -> Result<PlayerId, String> {
+    u8::try_from(player_id)
+        .map(PlayerId)
+        .map_err(|_| format!("INVALID_VIEWER_ID: {player_id} exceeds u8 range"))
+}
+
+fn viewer_transition_snapshot<'a>(
+    state: &GameState,
+    filtered: &'a GameState,
+    viewer: PlayerId,
+    events: &[GameEvent],
+) -> ViewerTransitionSnapshot<'a> {
+    ViewerTransitionSnapshot {
+        snapshot: viewer_snapshot(state, filtered, viewer),
+        events: filter_events_for_viewer(events, state, viewer),
     }
 }
 
@@ -2463,6 +2538,22 @@ mod viewer_priority_tests {
             !controlled_result.auto_pass_recommended,
             "the controlled viewer is not authorized to act and must receive false"
         );
+
+        let controller_filtered = filter_state_for_viewer(&state, controller);
+        let controller_snapshot =
+            viewer_transition_snapshot(&state, &controller_filtered, controller, &[]);
+        assert!(controller_snapshot
+            .snapshot
+            .actions
+            .iter()
+            .any(|action| matches!(action, GameAction::PassPriority)));
+        assert!(controller_snapshot.snapshot.viewer_interaction.can_submit);
+
+        let controlled_filtered = filter_state_for_viewer(&state, controlled);
+        let controlled_snapshot =
+            viewer_transition_snapshot(&state, &controlled_filtered, controlled, &[]);
+        assert!(controlled_snapshot.snapshot.actions.is_empty());
+        assert!(!controlled_snapshot.snapshot.viewer_interaction.can_submit);
     }
 
     #[test]
@@ -2481,6 +2572,78 @@ mod viewer_priority_tests {
             "normal P2P must not receive the debug-library capability"
         );
     }
+
+    #[test]
+    fn viewer_transition_projects_hidden_state_and_filters_face_down_exile_events() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let card = engine::game::zones::create_object(
+            &mut state,
+            engine::types::identifiers::CardId(7),
+            owner,
+            "Hidden Exile".to_string(),
+            engine::types::zones::Zone::Exile,
+        );
+        {
+            let object = state.objects.get_mut(&card).expect("created object");
+            object.face_down = true;
+            object.foretold = true;
+        }
+        let record = state.objects[&card].snapshot_for_zone_change(
+            card,
+            Some(engine::types::zones::Zone::Library),
+            engine::types::zones::Zone::Exile,
+        );
+        let events = vec![
+            GameEvent::CardDrawn {
+                player_id: owner,
+                object_id: card,
+                nth_in_turn: 1,
+                nth_in_step: 1,
+            },
+            GameEvent::ZoneChanged {
+                object_id: card,
+                from: Some(engine::types::zones::Zone::Library),
+                to: engine::types::zones::Zone::Exile,
+                record: Box::new(record),
+            },
+        ];
+
+        let opponent = PlayerId(0);
+        let opponent_filtered = filter_state_for_viewer(&state, opponent);
+        let opponent_snapshot =
+            viewer_transition_snapshot(&state, &opponent_filtered, opponent, &events);
+        assert_eq!(opponent_snapshot.events, Vec::<GameEvent>::new());
+        assert_eq!(
+            opponent_snapshot.snapshot.state.state.objects[&card].name,
+            "Hidden Card"
+        );
+
+        let owner_filtered = filter_state_for_viewer(&state, owner);
+        let owner_snapshot = viewer_transition_snapshot(&state, &owner_filtered, owner, &events);
+        assert_eq!(owner_snapshot.events, events);
+        assert_eq!(
+            owner_snapshot.snapshot.state.state.objects[&card].name,
+            "Hidden Exile"
+        );
+
+        let legacy = serde_json::to_value(&opponent_snapshot.snapshot)
+            .expect("legacy viewer snapshot serializes");
+        assert!(legacy.get("events").is_none());
+        let transition = serde_json::to_value(&opponent_snapshot)
+            .expect("viewer transition snapshot serializes");
+        assert_eq!(transition["events"], serde_json::json!([]));
+        assert!(transition.get("state").is_some());
+    }
+
+    #[test]
+    fn viewer_transition_rejects_unrepresentable_viewer_ids() {
+        assert_eq!(viewer_player_id(255), Ok(PlayerId(255)));
+        assert_eq!(
+            viewer_player_id(256),
+            Err("INVALID_VIEWER_ID: 256 exceeds u8 range".to_string())
+        );
+    }
 }
 
 #[wasm_bindgen]
@@ -2489,27 +2652,35 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
         engine::game::layers::flush_layers(state);
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
-        let legal = legal_actions_result_for_viewer(state, viewer);
-        let viewer_interaction =
-            engine::game::interaction::derive_viewer_interaction(state, &filtered, viewer);
-        to_js(&ViewerSnapshot {
-            state: engine::game::derived_views::ClientGameStateRef::wrap_filtered(
-                state,
-                &filtered,
-                Some(viewer),
-            ),
-            actions: legal.actions,
-            auto_pass_recommended: legal.auto_pass_recommended,
-            end_continuous_effect_offers: legal.end_continuous_effect_offers,
-            mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
-            spell_costs: legal.spell_costs,
-            legal_actions_by_object: legal.legal_actions_by_object,
-            activation_block_reasons: legal.activation_block_reasons,
-            stuck_diagnostic: legal.stuck_diagnostic,
-            viewer_interaction,
-        })
+        to_js(&viewer_snapshot(state, &filtered, viewer))
     }) {
         Ok(val) => val,
+        Err(_) => JsValue::NULL,
+    }
+}
+
+/// Combined viewer projection and event slice for one engine transition.
+/// Unlike the legacy state-only endpoint, this path validates the viewer id
+/// before narrowing it to the engine's representable PlayerId domain.
+#[wasm_bindgen]
+pub fn get_viewer_transition_snapshot_js(player_id: u32, events: JsValue) -> JsValue {
+    let events: Vec<GameEvent> = match serde_wasm_bindgen::from_value(events) {
+        Ok(events) => events,
+        Err(error) => return JsValue::from_str(&format!("INVALID_TRANSITION_EVENTS: {error}")),
+    };
+    let viewer = match viewer_player_id(player_id) {
+        Ok(viewer) => viewer,
+        Err(error) => return JsValue::from_str(&error),
+    };
+
+    match with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let filtered = filter_state_for_viewer(state, viewer);
+        to_js(&viewer_transition_snapshot(
+            state, &filtered, viewer, &events,
+        ))
+    }) {
+        Ok(value) => value,
         Err(_) => JsValue::NULL,
     }
 }
@@ -6752,11 +6923,25 @@ mod deck_list_seat_validation_tests {
         }
     }
 
+    fn forest() -> CardFace {
+        CardFace {
+            name: "Forest".to_string(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+            },
+            color_identity: vec![ManaColor::Green],
+            ..CardFace::default()
+        }
+    }
+
     fn test_db() -> CardDatabase {
         let faces = vec![
             legendary_creature(LEGEND_A),
             legendary_creature(LEGEND_B),
             plains(),
+            forest(),
         ];
         let mut entries = BTreeMap::new();
         for f in faces {
@@ -6879,6 +7064,72 @@ mod deck_list_seat_validation_tests {
         }
     }
 
+    #[test]
+    fn limited_initializer_seat_validation_accepts_known_short_decks_and_rejects_unresolved() {
+        let db = test_db();
+        assert!(db.get_face_by_name("Forest").is_some());
+        let legal = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 40).collect(),
+            ..Default::default()
+        };
+        let short_39 = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 39).collect(),
+            ..Default::default()
+        };
+        let custom_20 = PlayerDeckList {
+            main_deck: std::iter::repeat_n("Forest".to_string(), 20).collect(),
+            ..Default::default()
+        };
+        let mut unknown_main = legal.clone();
+        unknown_main.main_deck[0] = "Unknown Limited Probe".to_string();
+        let mut unknown_side = legal.clone();
+        unknown_side.sideboard = vec!["Unknown Limited Probe".to_string()];
+        let mut unknown_20 = custom_20.clone();
+        unknown_20.main_deck[0] = "Unknown Limited Probe".to_string();
+        let check = |player, opponent| {
+            validate_deck_list_seats(
+                &db,
+                &two_seat_list(player, opponent),
+                &FormatConfig::limited(),
+                Some(MatchType::Bo1),
+                2,
+            )
+        };
+
+        assert_eq!(check(legal.clone(), legal.clone()), None);
+        assert_eq!(check(short_39.clone(), legal.clone()), None);
+        assert_eq!(check(legal.clone(), short_39), None);
+        assert_eq!(check(custom_20.clone(), legal.clone()), None);
+        assert_eq!(check(legal.clone(), custom_20), None);
+        for (seat, player, opponent, reason) in [
+            ("Player", unknown_20.clone(), legal.clone(), "Unknown cards"),
+            (
+                "Player",
+                unknown_main.clone(),
+                legal.clone(),
+                "Unknown cards",
+            ),
+            (
+                "Player",
+                unknown_side.clone(),
+                legal.clone(),
+                "Unknown cards",
+            ),
+            ("AI opponent", legal.clone(), unknown_20, "Unknown cards"),
+            ("AI opponent", legal.clone(), unknown_main, "Unknown cards"),
+            ("AI opponent", legal.clone(), unknown_side, "Unknown cards"),
+        ] {
+            let refused = check(player, opponent).expect("the exact seat must be refused");
+            assert!(
+                refused
+                    .iter()
+                    .any(|entry| entry.starts_with(&format!("{seat} deck:"))
+                        && entry.contains(reason)),
+                "{seat}: {refused:?}"
+            );
+        }
+    }
+
     /// Establishes separately that the verdict is reached
     /// through the surface the client actually calls — driven through
     /// `validate_deck_list_seats`, the seat loop `initialize_game_impl` runs
@@ -6961,6 +7212,141 @@ mod deck_list_seat_validation_tests {
                  being a commander: Plains"
                     .to_string()
             ]),
+        );
+    }
+}
+
+/// #9248 RT-2's P2P leg: an activation paused at its target-settlement
+/// election (CR 601.2c + CR 601.2f + CR 602.2b) survives the P2P host's own
+/// resume path, not just the persisted-state decoder: the host exports the
+/// trusted envelope, a fresh engine resumes it through
+/// `resume_multiplayer_host_state` (its separate `restore_runtime` hook and
+/// finalization), and the caster's non-default order then locks the same cost,
+/// on the same targets, with the same stack entry and activation journal as a
+/// host that was never interrupted.
+#[cfg(test)]
+mod settlement_election_host_resume_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::TargetRef;
+    use engine::types::game_state::{TrustedGameStateEnvelope, WaitingFor};
+    use engine::types::mana::{ManaColor, ManaUnit};
+    use engine::types::phase::Phase;
+
+    const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+    const GROUNDS: &str = "Activated abilities of creatures you control cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.";
+
+    /// `{3}` under Hojo's unfloored `-2` and a floored `-2`, targeting your own
+    /// creature: the orders lock `{0}` and `{1}`. Paused at that election.
+    fn paused_at_settlement_election() -> (GameState, ObjectId) {
+        let mut s = GameScenario::new_n_player(2, 42);
+        s.at_phase(Phase::PreCombatMain);
+        s.add_artifact_from_oracle(P0, "Training Grounds", GROUNDS);
+        s.add_creature_from_oracle(P0, "Professor Hojo", 2, 2, HOJO);
+        let own = s.add_creature(P0, "Own", 1, 1).id();
+        s.add_creature(P1, "Bear", 2, 2);
+        let src = s
+            .add_creature_from_oracle(P0, "Tapper", 2, 2, "{3}: Tap target creature.")
+            .id();
+        s.with_mana_pool(
+            P0,
+            (0..5)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut state = s.build().state().clone();
+        state.objects.get_mut(&src).unwrap().has_summoning_sickness = false;
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            },
+        )
+        .expect("the activation starts");
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            },
+        )
+        .expect("targets settle");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OrderCostReductions { .. }),
+            "reach guard: paused at the settlement election, got {:?}",
+            state.waiting_for
+        );
+        (state, own)
+    }
+
+    /// The costlier order, then priority passes until the activation is on the
+    /// stack and paid. Returns what the comparison reads.
+    fn elect_costlier(state: &mut GameState) -> serde_json::Value {
+        let WaitingFor::OrderCostReductions { outcomes, .. } = state.waiting_for.clone() else {
+            panic!("expected the election, got {:?}", state.waiting_for);
+        };
+        let costly = outcomes
+            .iter()
+            .find(|o| o.locked_cost.mana_value() == 1)
+            .expect("the {1} order");
+        engine::game::engine::apply_as_current(
+            state,
+            GameAction::OrderCostReductions {
+                order: costly.order.clone(),
+                hybrid_announcement: Vec::new(),
+            },
+        )
+        .expect("the election resumes");
+        for _ in 0..4 {
+            if matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+                engine::game::engine::apply_as_current(state, GameAction::PassPriority)
+                    .expect("mana payment");
+            }
+        }
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        serde_json::json!({
+            "pool": state.players[0].mana_pool.total(),
+            "stack": serde_json::to_value(&state.stack).unwrap(),
+            "journal": serde_json::to_value(&state.abilities_activated_this_turn_by_player)
+                .unwrap(),
+        })
+    }
+
+    #[test]
+    fn a_settlement_election_resumed_by_the_p2p_host_prices_like_an_uninterrupted_host() {
+        let (paused, own) = paused_at_settlement_election();
+
+        // The uninterrupted host.
+        let mut uninterrupted = paused.clone();
+        let expected = elect_costlier(&mut uninterrupted);
+        assert_eq!(
+            expected["pool"], 4,
+            "reach guard: the elected {{1}} was paid"
+        );
+        let placed = uninterrupted.stack.back().expect("placed");
+        let engine::types::game_state::StackEntryKind::ActivatedAbility { ability, .. } =
+            &placed.kind
+        else {
+            panic!("an activated ability");
+        };
+        assert_eq!(ability.targets, vec![TargetRef::Object(own)]);
+
+        // The P2P host: export, then resume on a fresh engine.
+        let mut exported = paused.clone();
+        exported.capture_rng_word_pos();
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(exported))
+            .expect("the host exports its state");
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        resume_multiplayer_host_state_inner(&json).expect("the P2P host resumes");
+        let resumed = with_state_mut(elect_costlier).expect("a live game");
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        assert_eq!(
+            resumed, expected,
+            "the resumed host locks and places the same activation"
         );
     }
 }

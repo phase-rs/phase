@@ -11,6 +11,7 @@ import type {
   EngineSnapshot,
   FormatConfig,
   GameAction,
+  GameEvent,
   GameState,
   LegalActionsResult,
   LlmDecisionRequestResult,
@@ -22,6 +23,7 @@ import type {
   RestoredStackAutomationPresentation,
   SubmitResult,
   ViewerSnapshot,
+  ViewerTransitionSnapshot,
 } from "./types";
 import type {
   InteractionPreview,
@@ -622,6 +624,21 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     }
   }
 
+  async getViewerTransitionSnapshot(
+    viewerId: number,
+    events: GameEvent[],
+  ): Promise<ViewerTransitionSnapshot> {
+    this.assertInitialized("getViewerTransitionSnapshot");
+    try {
+      const wrapped = this.engine
+        ? await this.engine.getViewerTransitionSnapshot(viewerId, events)
+        : await this.fallback!.getViewerTransitionSnapshot(viewerId, events);
+      return { ...wrapped, state: unwrapClientGameState(wrapped.state) };
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
   async getAiActionProposal(
     difficulty: string,
     playerId: number,
@@ -1126,6 +1143,16 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     return this.fallback!.evaluateDeckCompatibility(request);
   }
 
+  /** The engine's canonical spelling of each of `names`, index-aligned, `null` where it has none. */
+  async canonicalCardNames(names: string[]): Promise<(string | null)[]> {
+    await this.initialize();
+    await this.requireCardDb();
+    const answer = this.engine
+      ? await this.engine.canonicalCardNames(names)
+      : await this.fallback!.canonicalCardNames(names);
+    return answer as (string | null)[];
+  }
+
   /**
    * ENFORCING deck/format check. Always returns a DEFINITE verdict —
    * `{ compatible: boolean, reasons: string[] }`, never a tri-state — backed by
@@ -1405,6 +1432,10 @@ interface MainThreadFallback {
   getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }>;
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
+  getViewerTransitionSnapshot(
+    viewerId: number,
+    events: GameEvent[],
+  ): Promise<ViewerTransitionSnapshot>;
   getAiActionProposal(difficulty: string, playerId: number): Promise<AiActionProposal | null>;
   getAiTacticalActionProposal(difficulty: string, playerId: number): Promise<AiActionProposal | null>;
   getAiActionProposalWithDiagnostics(
@@ -1464,6 +1495,7 @@ interface MainThreadFallback {
   getCardFaceData(cardName: string): Promise<unknown>;
   getCardParseDetails(cardName: string): Promise<unknown>;
   getCardRulings(cardName: string): Promise<unknown>;
+  canonicalCardNames(names: string[]): Promise<unknown>;
 }
 
 type RestoredFallbackResult = {
@@ -1591,6 +1623,16 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const r = wasm.get_viewer_snapshot_js(viewerId);
         if (r === null) throw new Error("NOT_INITIALIZED: get_viewer_snapshot_js returned null");
         return r as ViewerSnapshot;
+      }),
+
+    getViewerTransitionSnapshot: (viewerId: number, events: GameEvent[]) =>
+      enqueue(() => {
+        const r = wasm.get_viewer_transition_snapshot_js(viewerId, events);
+        if (typeof r === "string") throw new Error(r);
+        if (r === null) {
+          throw new Error("NOT_INITIALIZED: get_viewer_transition_snapshot_js returned null");
+        }
+        return r as ViewerTransitionSnapshot;
       }),
 
     getAiActionProposal: (difficulty: string, playerId: number) =>
@@ -1786,5 +1828,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     getCardRulings: (cardName: string) =>
       enqueue(() => wasm.get_card_rulings(cardName)),
+
+    canonicalCardNames: (names: string[]) =>
+      enqueue(() => wasm.canonicalCardNames(names)),
   };
 }

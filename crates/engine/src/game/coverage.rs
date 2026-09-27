@@ -210,7 +210,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the spell-filtered `Some` shape (Vizier of the Menagerie) carries
             // an unbounded filter value space, so coverage support lives here.
             // Runtime enforcement is in
-            // casting.rs::player_can_spend_as_any_color_for_optional_spell.
+            // casting.rs::player_mana_spend_permission_for_optional_spell.
             | StaticMode::SpendManaAsAnyColor { .. }
             // CR 121.6: CantDraw carries `who` (controller vs all_players) —
             // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.
@@ -386,9 +386,8 @@ impl ResolverFeatureFamily {
     /// is not under any family.
     ///
     /// A family whose classifier has no `Unhandled` arm never produces a `ResolverFeature`
-    /// gap, so it never reaches this decode from a coverage gap. When this was written that
-    /// held for `Structural` and `Condition`; it is a snapshot, and a new `Unhandled` arm
-    /// changes it.
+    /// gap, so it never reaches this decode from a coverage gap. Which families that
+    /// describes changes whenever a classifier gains or loses an `Unhandled` arm.
     pub fn from_feature_key(key: &str) -> Option<(Self, &str)> {
         Self::iter().find_map(|family| {
             key.strip_prefix(family.tag())?
@@ -1520,7 +1519,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("cards in graveyard ({})", fmt_player_scope(player))
         }
         QuantityRef::LifeAboveStarting => "life above starting".into(),
-        QuantityRef::StartingLifeTotal => "starting life total".into(),
+        QuantityRef::StartingLifeTotal { .. } => "starting life total".into(),
         QuantityRef::TriggeringDiscoverValue => "the triggering discover's value".into(),
         QuantityRef::TriggeringScryLookCount => {
             "the number of cards looked at while scrying this way".into()
@@ -2431,6 +2430,9 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
                 format!("at that player's next {}", fmt_phase(phase))
             }
         },
+        DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, .. } => {
+            format!("at that added {}", fmt_phase(phase))
+        }
         DelayedTriggerCondition::WhenLeavesPlay { .. } => "when leaves play".into(),
         DelayedTriggerCondition::WhenDies { .. } => "when dies".into(),
         DelayedTriggerCondition::WhenLeavesPlayFiltered { filter } => {
@@ -5978,7 +5980,7 @@ fn build_casting_option_item(option: &SpellCastingOption, items: &mut Vec<Parsed
 ///
 /// Replaces concrete numbers, mana symbols, and p/t modifiers with placeholders
 /// so that structurally identical Oracle phrases group together.
-fn normalize_oracle_pattern(text: &str) -> String {
+pub(crate) fn normalize_oracle_pattern(text: &str) -> String {
     let s = text.to_lowercase();
     let s = s.trim_end_matches('.');
     let mut result = String::with_capacity(s.len());
@@ -9575,7 +9577,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
-        // CR 903.3d: evaluated at resolution via `game::commander`.
+        // CR 903.3 / CR 903.3d: evaluated at resolution via `game::commander`
+        // (both ownership scopes).
         AbilityCondition::ControlsCommander { .. } => ("ControlsCommander", Handled),
         // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
         AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
@@ -9678,7 +9681,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::UnspentMana { .. } => ("UnspentMana", Handled),
         QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
-        QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
+        QuantityRef::StartingLifeTotal { .. } => ("StartingLifeTotal", Handled),
         QuantityRef::TriggeringDiscoverValue => ("TriggeringDiscoverValue", Handled),
         QuantityRef::TriggeringScryLookCount => ("TriggeringScryLookCount", Handled),
         QuantityRef::TriggeringScryBottomCount => ("TriggeringScryBottomCount", Handled),
@@ -10030,8 +10033,14 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceControllerEquals { .. } => ("SourceControllerEquals", Handled),
         StaticCondition::Unrecognized { .. } => ("Unrecognized", Handled),
         StaticCondition::None => ("None", Handled),
-        // Variants below are parsed but not classified as handled by the prior registry.
-        StaticCondition::HasMaxSpeed => ("HasMaxSpeed", Unhandled),
+        // CR 702.178a-b + CR 702.179e: resolved at runtime by
+        // `layers::evaluate_condition_with_context`'s `HasMaxSpeed` arm
+        // (`speed::has_max_speed`), consumed by
+        // `functioning_abilities::active_static_definitions`,
+        // `combat::creature_cant_attack`/`combat::can_block_pair`, and
+        // `casting::evaluate_cost_mod_static_condition`.
+        StaticCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
+        // Variant below is parsed but not classified as handled by the prior registry.
         StaticCondition::SpeedGE { .. } => ("SpeedGE", Unhandled),
         // Compound conditions — resolved recursively by
         // `layers::evaluate_condition`, which short-circuits And/Or and
@@ -10093,28 +10102,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         }
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
-        // CR 903.3d: the RUNTIME does evaluate this static
-        // (the `ControlsCommander` arm of `layers::evaluate_condition_with_context`,
-        // delegating both ownership arms to the single `game::commander` authority), so the
-        // `Unhandled` tag below understates the resolver.
-        //
-        // It stays `Unhandled` DELIBERATELY, and must not be flipped as a rider on
-        // an unrelated change: the tag is currently the only thing holding two
-        // demonstrably MISPARSED Lieutenant cards out of the supported set. Of the
-        // seven `ControlsCommander` statics in the pool, Convergence of Dominion
-        // parses to a static with `modifications: []` (a no-op continuous effect)
-        // and Thunderfoot Baloth collapses "this creature gets +2/+2 and other
-        // creatures you control get +2/+2 and have trample" into ONE `SelfRef`
-        // static, dropping the "other creatures you control" clause and granting
-        // trample to the Baloth itself. Flipping the tag alone would advertise both
-        // as `supported: true, gap_count: 0`.
-        //
-        // Land the flip in its own change, AFTER an empty-`modifications` static
-        // and a dropped continuous-modification clause each register as real gaps.
-        // Nothing in the commander-gate work depends on this tag — Fight for the
-        // Throne's intervening-`if` is an `AbilityCondition`, classified `Handled`
-        // in `condition_feature` above.
-        StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
+        // CR 903.3 / CR 903.3d: resolved by the `ControlsCommander` arm of
+        // `layers::evaluate_condition_inner` (both ownership scopes).
+        StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Handled),
         // SourceIsEquipped resolved by layers::evaluate_condition_inner.
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Handled),
         // SourceIsEnchanted resolved by layers::evaluate_condition_inner.
@@ -10125,7 +10115,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsHarnessed => ("SourceIsHarnessed", Handled),
         // SourceAttachedToCreature resolved by `layers::evaluate_condition`
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Handled),
-        // SourceMatchesFilter resolved by layers::evaluate_condition (layers.rs:1104)
+        // SourceMatchesFilter resolved by layers::evaluate_condition.
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
         // CR 401.1 + CR 401.5: top-of-library gate, resolved by
         // layers::evaluate_condition_with_context against the controller's library top.
@@ -14855,75 +14845,174 @@ mod tests {
         );
     }
 
-    /// CR 903.3d: the Lieutenant STATIC's `Unhandled` coverage tag is a
-    /// deliberate mask, not an oversight — this pins both halves so the flip
-    /// cannot be smuggled in as a rider on an unrelated change.
-    ///
-    /// The runtime DOES evaluate `StaticCondition::ControlsCommander`
-    /// (the `ControlsCommander` arm of `layers::evaluate_condition_with_context`), so on the
-    /// resolver axis alone the tag understates the engine. But the tag is also
-    /// the only thing keeping two demonstrably misparsed Lieutenant cards out
-    /// of the supported set, so it must stay until those misparses register as
-    /// real gaps.
-    ///
-    /// The second assertion is the evidence, on verbatim Oracle text: Thunderfoot
-    /// Baloth's "…this creature gets +2/+2 AND OTHER CREATURES YOU CONTROL get
-    /// +2/+2 and have trample" collapses into a single `SelfRef` static, so the
-    /// other-creatures clause is silently dropped and trample lands on the Baloth
-    /// itself — with no gap recorded anywhere.
-    ///
-    /// FLIP PROTOCOL: when the dropped-clause misparse (and Convergence of
-    /// Dominion's empty-`modifications` no-op static) each register as a gap, the
-    /// second assertion here goes red. THAT is the signal to flip the tag to
-    /// `Handled` and delete this test — not before.
-    #[test]
-    fn lieutenant_commander_static_tag_is_a_deliberate_mask() {
-        let (label, support) = static_condition_feature(&StaticCondition::ControlsCommander {
-            ownership: CommanderOwnership::Own,
-        });
-        assert_eq!(label, "ControlsCommander");
-        assert!(
-            matches!(support, FeatureSupport::Unhandled),
-            "the mask must stay until the two misparses register as gaps; see the \
-             FLIP PROTOCOL on this test"
-        );
+    /// Build an `AtomicCard` for a `ControlsCommander` static-ability test with
+    /// its real MTGJSON keyword array, so the tests exercise the production
+    /// MTGJSON→face path (shaped like `tiered_atomic_card`).
+    fn commander_condition_atomic_card(case: &CommanderConditionCase) -> AtomicCard {
+        AtomicCard {
+            name: case.name.to_string(),
+            mana_cost: Some("{1}{G}".to_string()),
+            colors: vec!["G".to_string()],
+            color_identity: vec!["G".to_string()],
+            power: case.power.map(|p| p.to_string()),
+            toughness: case.toughness.map(|t| t.to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some(case.oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some(case.type_line.to_string()),
+            types: case.types.iter().map(|t| (*t).to_string()).collect(),
+            subtypes: case.subtypes.iter().map(|t| (*t).to_string()).collect(),
+            supertypes: vec![],
+            keywords: if case.keywords.is_empty() {
+                None
+            } else {
+                // allow-raw-authority: fixture copies MTGJSON keyword text, not game-object state.
+                Some(case.keywords.iter().map(|k| (*k).to_string()).collect())
+            },
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", case.name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", case.name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        }
+    }
 
-        let parsed = crate::parser::parse_oracle_text(
-            "Trample\nLieutenant — As long as you control your commander, this creature gets \
-             +2/+2 and other creatures you control get +2/+2 and have trample.",
-            "Thunderfoot Baloth",
-            &[],
-            &["Creature".to_string()],
-            &["Beast".to_string()],
-        );
-        // Reach-guard: the fixture only exercises the misparse if the parser
-        // really produced the OWNER-scoped commander gate.
-        let commander_statics: Vec<_> = parsed
-            .statics
-            .iter()
-            .filter(|s| {
-                matches!(
+    /// One row of the `controls_commander_statics_report_supported` table.
+    struct CommanderConditionCase<'a> {
+        name: &'a str,
+        type_line: &'a str,
+        types: &'a [&'a str],
+        subtypes: &'a [&'a str],
+        keywords: &'a [&'a str],
+        power: Option<&'a str>,
+        toughness: Option<&'a str>,
+        oracle: &'a str,
+    }
+
+    /// CR 903.3: Own-scoped statics gated on `StaticCondition::ControlsCommander`
+    /// carry no resolver gap in `analyze_coverage`.
+    #[test]
+    fn controls_commander_statics_report_supported() {
+        let cases: &[CommanderConditionCase] = &[
+            CommanderConditionCase {
+                name: "Stormsurge Kraken",
+                type_line: "Creature — Kraken",
+                types: &["Creature"],
+                subtypes: &["Kraken"],
+                keywords: &["Hexproof", "Lieutenant"],
+                power: Some("5"),
+                toughness: Some("5"),
+                oracle: "Hexproof\nLieutenant — As long as you control your commander, this \
+                 creature gets +2/+2 and has \"Whenever this creature becomes blocked, you may \
+                 draw two cards.\"",
+            },
+            CommanderConditionCase {
+                name: "Angelic Field Marshal",
+                type_line: "Creature — Angel",
+                types: &["Creature"],
+                subtypes: &["Angel"],
+                keywords: &["Flying", "Lieutenant"],
+                power: Some("3"),
+                toughness: Some("3"),
+                oracle: "Flying\nLieutenant — As long as you control your commander, this \
+                 creature gets +2/+2 and creatures you control have vigilance.",
+            },
+            CommanderConditionCase {
+                name: "Demon of Wailing Agonies",
+                type_line: "Creature — Demon",
+                types: &["Creature"],
+                subtypes: &["Demon"],
+                keywords: &["Flying", "Lieutenant"],
+                power: Some("4"),
+                toughness: Some("4"),
+                oracle: "Flying\nLieutenant — As long as you control your commander, this \
+                 creature gets +2/+2 and has \"Whenever this creature deals combat damage to a \
+                 player, that player sacrifices a creature of their choice.\"",
+            },
+            CommanderConditionCase {
+                name: "Tyrant's Familiar",
+                type_line: "Creature — Dragon",
+                types: &["Creature"],
+                subtypes: &["Dragon"],
+                keywords: &["Flying", "Haste", "Lieutenant"],
+                power: Some("5"),
+                toughness: Some("5"),
+                oracle: "Flying, haste\nLieutenant — As long as you control your commander, \
+                 this creature gets +2/+2 and has \"Whenever this creature attacks, it deals 7 \
+                 damage to target creature defending player controls.\"",
+            },
+            CommanderConditionCase {
+                name: "Skyhunter Strike Force",
+                type_line: "Creature — Cat Knight",
+                types: &["Creature"],
+                subtypes: &["Cat", "Knight"],
+                keywords: &["Flying", "Lieutenant", "Melee"],
+                power: Some("2"),
+                toughness: Some("2"),
+                oracle: "Flying\nMelee (Whenever this creature attacks, it gets +1/+1 until \
+                 end of turn for each opponent you attacked this combat.)\nLieutenant — As \
+                 long as you control your commander, other creatures you control have melee.",
+            },
+            CommanderConditionCase {
+                name: "Thunderfoot Baloth",
+                type_line: "Creature — Beast",
+                types: &["Creature"],
+                subtypes: &["Beast"],
+                keywords: &["Lieutenant", "Trample"],
+                power: Some("5"),
+                toughness: Some("5"),
+                oracle: "Trample\nLieutenant — As long as you control your commander, this \
+                 creature gets +2/+2 and other creatures you control get +2/+2 and have \
+                 trample.",
+            },
+            CommanderConditionCase {
+                name: "Convergence of Dominion",
+                type_line: "Artifact",
+                types: &["Artifact"],
+                subtypes: &[],
+                keywords: &["Dynastic Command Node", "Mill", "Translocation Protocols"],
+                power: None,
+                toughness: None,
+                oracle: "Dynastic Command Node — As long as you control your commander, \
+                 activated abilities of cards in your graveyard cost {2} less to activate. \
+                 This effect can't reduce the mana in that ability's activation cost to less \
+                 than one mana.\nTranslocation Protocols — {3}, {T}: Mill three cards.",
+            },
+        ];
+
+        for case in cases {
+            let card = commander_condition_atomic_card(case);
+            let name = case.name;
+            let face = build_oracle_face(&card, None);
+            // Reach-guard: the fixture only counts if the parser really produced
+            // an Own-scoped ControlsCommander static.
+            assert!(
+                face.static_abilities.iter().any(|s| matches!(
                     &s.condition,
                     Some(StaticCondition::ControlsCommander {
                         ownership: CommanderOwnership::Own
                     })
-                )
-            })
-            .collect();
-        assert!(
-            !commander_statics.is_empty(),
-            "the Lieutenant line must parse to an Own-scoped ControlsCommander static: {:#?}",
-            parsed.statics
-        );
-        assert!(
-            commander_statics
-                .iter()
-                .all(|s| matches!(s.affected, Some(TargetFilter::SelfRef))),
-            "MISPARSE STILL PRESENT (expected): the \"other creatures you control\" clause \
-             is dropped and the whole Lieutenant grant lands on SelfRef. When this goes \
-             red the parser was fixed — flip `static_condition_feature` to Handled and \
-             delete this test. Got {commander_statics:#?}"
-        );
+                )),
+                "{name} must parse a static gated on ControlsCommander{{Own}}: {:#?}",
+                face.static_abilities
+            );
+            let result = coverage_result_for_face(face);
+            assert!(
+                result.gap_details.is_empty(),
+                "{name} must carry no resolver gap: {:?}",
+                result.gap_details
+            );
+        }
     }
 
     /// CR 903.3 vs CR 903.3d: the parse-details label is what bug triage reads,
@@ -18185,6 +18274,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     fn target_zone_card_count_quantity_feature_is_marked_handled() {
         let (name, support) = quantity_ref_feature(&QuantityRef::TargetZoneCardCount {
             zone: ZoneRef::Library,
+            scope: ControllerRef::TargetPlayer,
+            binding: crate::types::ability::CountBinding::Explicit,
         });
 
         assert_eq!(name, "TargetZoneCardCount");
@@ -18192,6 +18283,17 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             support,
             FeatureSupport::Handled,
             "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
+        );
+    }
+
+    #[test]
+    fn starting_life_total_quantity_feature_is_marked_handled() {
+        assert_eq!(
+            quantity_ref_feature(&QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            }),
+            ("StartingLifeTotal", FeatureSupport::Handled),
+            "starting-life totals resolve through the selected player's format topology"
         );
     }
 
@@ -20044,6 +20146,278 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .get("static_condition:IsMonarch"),
             Some(&FeatureSupport::Handled)
         );
+    }
+
+    /// Drift guard for the Aetherdrift max-speed coverage promotion:
+    /// `StaticCondition::HasMaxSpeed` is resolved at runtime by
+    /// `layers::evaluate_condition_with_context` (`speed::has_max_speed`),
+    /// consumed by `functioning_abilities::active_static_definitions`,
+    /// `combat::creature_cant_attack`/`combat::can_block_pair`, and
+    /// `casting::evaluate_cost_mod_static_condition` — so the classifier
+    /// must report it `Handled`. `SpeedGE` must stay `Unhandled`.
+    ///
+    /// Revert-failing: restore the pre-fix `HasMaxSpeed => (.., Unhandled)`
+    /// arm and the first assertion fails.
+    #[test]
+    fn has_max_speed_static_condition_is_handled_without_promoting_speed_ge() {
+        let (name, support) = static_condition_feature(&StaticCondition::HasMaxSpeed);
+        assert_eq!(name, "HasMaxSpeed");
+        assert_eq!(
+            support,
+            FeatureSupport::Handled,
+            "StaticCondition::HasMaxSpeed is resolved by \
+             layers::evaluate_condition_with_context (speed::has_max_speed)",
+        );
+
+        let (speed_ge_name, speed_ge_support) =
+            static_condition_feature(&StaticCondition::SpeedGE { threshold: 4 });
+        assert_eq!(speed_ge_name, "SpeedGE");
+        assert_eq!(
+            speed_ge_support,
+            FeatureSupport::Unhandled,
+            "SpeedGE must stay unpromoted alongside the HasMaxSpeed fix",
+        );
+
+        // `extract_static_condition_features` must surface the leaf under
+        // `Not` exactly as `static_condition_not_recurses_into_its_operand`
+        // proves for other leaves above — Hazoret's printed restriction is
+        // `Not(HasMaxSpeed)` ("can't attack or block unless you have max
+        // speed").
+        let mut features = HashMap::new();
+        extract_static_condition_features(
+            &StaticCondition::Not {
+                condition: Box::new(StaticCondition::HasMaxSpeed),
+            },
+            &mut features,
+        );
+        assert_eq!(
+            features.get("static_condition:HasMaxSpeed"),
+            Some(&FeatureSupport::Handled),
+            "the operand under `Not` must reach the classifier as Handled"
+        );
+        assert!(
+            !features.contains_key("static_condition:Not"),
+            "`Not` is a combinator and contributes no tag of its own"
+        );
+    }
+
+    /// Build a `CardFace` from verbatim Oracle text the same way
+    /// `game::scenario::build_face_from_oracle` does for the runtime harness —
+    /// every `ParsedAbilities` field is copied (abilities, triggers, statics,
+    /// replacements, modal, additional cost, strive cost, casting
+    /// restrictions/options, solve condition, parse warnings), and MTGJSON
+    /// keyword names are parsed then merged with `parsed.extracted_keywords`
+    /// through the production `merge_extracted_keywords` authority — so a
+    /// printed-keyword-only source (e.g. "Flying, haste") and a
+    /// parser-extracted source (e.g. a granted "has menace") cannot silently
+    /// drop each other.
+    fn max_speed_matrix_face(
+        name: &str,
+        oracle: &str,
+        keyword_names: &[&str],
+        core_types: &[&str],
+        subtypes: &[&str],
+    ) -> CardFace {
+        let type_strings: Vec<String> = core_types.iter().map(|t| t.to_string()).collect();
+        let subtype_strings: Vec<String> = subtypes.iter().map(|t| t.to_string()).collect();
+        // Mirrors `database::synthesis::prepare_oracle_parser_input`, which
+        // lowercases every MTGJSON keyword name before handing it to the
+        // parser as a hint. Several hint checks compare case-sensitively
+        // against a lowercase literal (e.g. `extract_granted_keyword_list`'s
+        // `n == "enchant"` multi-type gate) — passing MTGJSON's original
+        // casing ("Enchant") silently misses that gate and drops the whole
+        // "Enchant creature or Vehicle" keyword.
+        let kw_strings: Vec<String> = keyword_names
+            .iter()
+            .map(|k| k.to_ascii_lowercase())
+            .collect();
+
+        let parsed = crate::parser::parse_oracle_text(
+            oracle,
+            name,
+            &kw_strings,
+            &type_strings,
+            &subtype_strings,
+        );
+
+        let mut keywords: Vec<Keyword> = keyword_names
+            .iter()
+            .filter_map(|s| {
+                let kw: Keyword = s.parse().unwrap();
+                if matches!(kw, Keyword::Unknown(_)) {
+                    None
+                } else {
+                    Some(kw)
+                }
+            })
+            .collect();
+        crate::database::synthesis::merge_extracted_keywords(
+            &mut keywords,
+            parsed.extracted_keywords,
+        );
+
+        CardFace {
+            name: name.to_string(),
+            card_type: CardType {
+                core_types: core_types
+                    .iter()
+                    .map(|t| t.parse::<CoreType>().expect("known core type"))
+                    .collect(),
+                subtypes: subtype_strings,
+                supertypes: vec![],
+            },
+            oracle_text: Some(oracle.to_string()),
+            keywords,
+            abilities: parsed.abilities,
+            triggers: parsed.triggers,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            modal: parsed.modal,
+            additional_cost: parsed.additional_cost,
+            casting_restrictions: parsed.casting_restrictions,
+            casting_options: parsed.casting_options,
+            solve_condition: parsed.solve_condition,
+            strive_cost: parsed.strive_cost,
+            parse_warnings: parsed.parse_warnings,
+            ..make_face()
+        }
+    }
+
+    /// One row of the ten-card matrix: (name, verbatim Oracle text, MTGJSON
+    /// keyword hints, core types, subtypes).
+    type MaxSpeedMatrixRow = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+
+    /// The complete 2026-09-24 MTGJSON population of Standard-legal cards whose
+    /// SOLE provisional coverage gap was `ResolverFeature:static_condition:
+    /// HasMaxSpeed` (Tsagan, Raider Warlord has the same sole gap but is not
+    /// Standard legal, so it is deliberately excluded). Oracle text, keyword
+    /// arrays, types, and subtypes are verbatim from MTGJSON, spanning all
+    /// five shapes the classifier promotion must cover: continuous P/T
+    /// (Gastal Raider, Nesting Bot, Swiftwing Assailant, Walking Sarcophagus),
+    /// continuous keyword grants (Burnout Bashtronaut, Gastal Raider, Gastal
+    /// Thrillseeker, Streaking Oilgorger, Swiftwing Assailant), a negated
+    /// combat restriction (Hazoret), an off-zone cast permission (Lightwheel),
+    /// and a cost reduction (Racers' Scoreboard).
+    ///
+    /// Revert-failing: reverting only the `static_condition_feature` arm
+    /// leaves every row's `ResolverFeature:static_condition:HasMaxSpeed` gap
+    /// in place, so every row in this table fails its `supported` /
+    /// `gap_count` assertions.
+    #[test]
+    fn max_speed_standard_cards_ten_card_matrix_reports_zero_gaps() {
+        let rows: [MaxSpeedMatrixRow; 10] = [
+            (
+                "Burnout Bashtronaut",
+                "Menace\nStart your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\n{2}: This creature gets +1/+0 until end of turn.\nMax speed — This creature has double strike.",
+                &["Max speed", "Menace", "Start your engines!"],
+                &["Creature"],
+                &["Goblin", "Warrior"],
+            ),
+            (
+                "Gastal Raider",
+                "Start your engines!\nWhen this creature enters, target opponent reveals their hand. You choose an instant or sorcery card from it. That player discards that card.\nMax speed — This creature gets +1/+1 and has menace.",
+                &["Max speed", "Start your engines!"],
+                &["Creature"],
+                &["Vampire", "Rogue"],
+            ),
+            (
+                "Gastal Thrillseeker",
+                "Start your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\nWhen this creature enters, it deals 1 damage to target opponent and you gain 1 life.\nMax speed — This creature has deathtouch and haste.",
+                &["Max speed", "Start your engines!"],
+                &["Creature"],
+                &["Lizard", "Berserker"],
+            ),
+            (
+                "Hazoret, Godseeker",
+                "Indestructible, haste\nStart your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\n{1}, {T}: Target creature with power 2 or less can't be blocked this turn.\nHazoret can't attack or block unless you have max speed.",
+                &["Haste", "Indestructible", "Start your engines!"],
+                &["Creature"],
+                &["God"],
+            ),
+            (
+                "Lightwheel Enhancements",
+                "Enchant creature or Vehicle\nStart your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\nEnchanted permanent gets +1/+1 and has vigilance.\nMax speed — You may cast this card from your graveyard.",
+                &["Enchant", "Max speed", "Start your engines!"],
+                &["Enchantment"],
+                &["Aura"],
+            ),
+            (
+                "Nesting Bot",
+                "Start your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\nWhen this creature dies, create a 1/1 colorless Servo artifact creature token.\nMax speed — This creature gets +1/+0.",
+                &["Max speed", "Start your engines!"],
+                &["Artifact", "Creature"],
+                &["Robot"],
+            ),
+            (
+                "Racers' Scoreboard",
+                "Start your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\nWhen this artifact enters, draw two cards, then discard a card.\nMax speed — Spells you cast cost {1} less to cast.",
+                &["Max speed", "Start your engines!"],
+                &["Artifact"],
+                &[],
+            ),
+            (
+                "Streaking Oilgorger",
+                "Flying, haste\nStart your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\nMax speed — This creature has lifelink.",
+                &["Flying", "Haste", "Max speed", "Start your engines!"],
+                &["Creature"],
+                &["Vampire"],
+            ),
+            (
+                "Swiftwing Assailant",
+                "Flying\nStart your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\nMax speed — This creature gets +0/+1 and has vigilance.",
+                &["Flying", "Max speed", "Start your engines!"],
+                &["Creature"],
+                &["Bird", "Warrior"],
+            ),
+            (
+                "Walking Sarcophagus",
+                "Start your engines! (If you have no speed, it starts at 1. It increases once on each of your turns when an opponent loses life. Max speed is 4.)\nMax speed — This creature gets +1/+2.",
+                &["Max speed", "Start your engines!"],
+                &["Artifact", "Creature"],
+                &["Zombie", "Cat"],
+            ),
+        ];
+
+        for (name, oracle, keyword_names, core_types, subtypes) in rows {
+            let face = max_speed_matrix_face(name, oracle, keyword_names, core_types, subtypes);
+
+            // Positive reach guard: the row's own parse must contain at least
+            // one HasMaxSpeed leaf before coverage classifies it — otherwise a
+            // card whose "Max speed —" line silently failed to parse would
+            // still read `gap_count: 0` for the wrong reason.
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get("static_condition:HasMaxSpeed"),
+                Some(&FeatureSupport::Handled),
+                "{name}: parse must surface a HasMaxSpeed leaf before coverage is meaningful"
+            );
+
+            let card = coverage_result_for_face(face);
+            assert!(
+                card.supported,
+                "{name}: expected supported=true, gaps: {:?}",
+                card.gap_details
+            );
+            assert_eq!(
+                card.gap_count, 0,
+                "{name}: expected zero gaps, got {:?}",
+                card.gap_details
+            );
+            assert!(
+                !card
+                    .gap_details
+                    .iter()
+                    .any(|gap| gap.handler == "ResolverFeature:static_condition:HasMaxSpeed"),
+                "{name}: the named HasMaxSpeed resolver-feature gap must be gone"
+            );
+        }
     }
 
     #[test]

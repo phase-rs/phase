@@ -877,7 +877,10 @@ fn spell_in_zone(state: &GameState, id: ObjectId, zone: Zone) -> bool {
     state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
 }
 
-fn has_missing_required_stack_targets(state: &GameState, ability: &ResolvedAbility) -> bool {
+pub(crate) fn has_missing_required_stack_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
     if !flatten_targets_in_chain(ability).is_empty() {
         return false;
     }
@@ -1300,6 +1303,85 @@ fn resolving_saga_chapter(entry: &StackEntry) -> Option<ResolvingSagaChapter> {
     })
 }
 
+/// The rewrites [`resolve_top`] applies to the ability it pops,
+/// after [`bind_resolution_scope`] has bound `state` and before it checks the
+/// ability's targets: `scoped_player` from the trigger event or from a lone
+/// player target, and a `ParentTarget` seeded from the trigger event.
+///
+/// A rewrite of the popped ability that a node's binding reads belongs here,
+/// not inline in [`resolve_top`]: `effects::stack_reach` answers a pending
+/// entry's nodes through this function.
+pub(crate) fn bind_resolving_ability_referents(
+    state: &GameState,
+    entry: &StackEntry,
+    ability: &mut ResolvedAbility,
+) {
+    // CR 120.3 + CR 506.2: A "deals [combat] damage to a player" /
+    // "attacks a player" trigger introduces the damaged/attacked player as the
+    // event referent. Stamp it onto the resolving ability's `scoped_player`
+    // (when not already bound) so `PlayerScope::ScopedPlayer` quantities such as
+    // "they lose half their life, rounded up" (Unstoppable Slasher) resolve
+    // against that player rather than falling back to the source's controller.
+    // Mirrors the Phase-trigger stamping in `triggers::build_triggered_ability`;
+    // the parser rebinds these possessives to `ScopedPlayer` in
+    // `lower_trigger_ir`.
+    if ability.scoped_player.is_none() {
+        if let Some(pid) = state.current_trigger_event.as_ref().and_then(|event| {
+            matches!(
+                event,
+                GameEvent::DamageDealt {
+                    target: TargetRef::Player(_),
+                    ..
+                } | GameEvent::AttackersDeclared { .. }
+            )
+            .then(|| targeting::extract_player_from_event(event, state))
+            .flatten()
+        }) {
+            ability.set_scoped_player_recursive(pid);
+        }
+    }
+
+    // CR 109.4 + CR 115.10a/b (issue #6505): "Target opponent exiles a creature
+    // they control and their graveyard" (Strategic Betrayal). The spell targets
+    // ONLY the opponent (CR 115.1a); that opponent then CHOOSES a creature they
+    // control and exiles their graveyard — so a `ScopedPlayer`-scoped move-object
+    // filter must resolve its acting/choosing player against the resolved single
+    // player target, not the caster. Sibling of the DamageDealt/AttackersDeclared
+    // scoped-player stamp above: bind `scoped_player` from the ability's lone
+    // `TargetRef::Player` before the change_zone choosers run at resolution.
+    if ability.scoped_player.is_none() {
+        let single_player_target = ability
+            .targets
+            .iter()
+            .filter(|target| matches!(target, TargetRef::Player(_)))
+            .count()
+            == 1;
+        if single_player_target
+            && crate::game::effects::ability_uses_relative_controller_scoped(ability)
+        {
+            let actor = ability.target_player();
+            ability.set_scoped_player_recursive(actor);
+        }
+    }
+
+    // CR 608.2c: Re-stamp ParentTarget anaphora from the stack entry's trigger
+    // event at resolution time (Stationed/VehicleCrewed/Saddled/attack batches).
+    // Push-time seeding in `push_pending_trigger_to_stack_with_event_batch` can
+    // be skipped on alternate dispatch paths; this guarantees the referent is
+    // bound before `execute_effect` when `trigger_event` is present on the entry.
+    if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &entry.kind {
+        let event_ref = trigger_event
+            .as_ref()
+            .or(state.current_trigger_event.as_ref());
+        super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
+        super::triggers::seed_event_context_parent_targets(
+            ability,
+            event_ref,
+            super::triggers::EventContextSeedTiming::ResolutionFallback,
+        );
+    }
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
@@ -1493,75 +1575,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" /
-    // "attacks a player" trigger introduces the damaged/attacked player as the
-    // event referent. Stamp it onto the resolving ability's `scoped_player`
-    // (when not already bound) so `PlayerScope::ScopedPlayer` quantities such as
-    // "they lose half their life, rounded up" (Unstoppable Slasher) resolve
-    // against that player rather than falling back to the source's controller.
-    // Mirrors the Phase-trigger stamping in `triggers::build_triggered_ability`;
-    // the parser rebinds these possessives to `ScopedPlayer` in
-    // `lower_trigger_ir`.
     if let Some(ability) = ability.as_mut() {
-        if ability.scoped_player.is_none() {
-            if let Some(pid) = state.current_trigger_event.as_ref().and_then(|event| {
-                matches!(
-                    event,
-                    GameEvent::DamageDealt {
-                        target: TargetRef::Player(_),
-                        ..
-                    } | GameEvent::AttackersDeclared { .. }
-                )
-                .then(|| targeting::extract_player_from_event(event, state))
-                .flatten()
-            }) {
-                ability.set_scoped_player_recursive(pid);
-            }
-        }
-    }
-
-    // CR 109.4 + CR 115.10a/b (issue #6505): "Target opponent exiles a creature
-    // they control and their graveyard" (Strategic Betrayal). The spell targets
-    // ONLY the opponent (CR 115.1a); that opponent then CHOOSES a creature they
-    // control and exiles their graveyard — so a `ScopedPlayer`-scoped move-object
-    // filter must resolve its acting/choosing player against the resolved single
-    // player target, not the caster. Sibling of the DamageDealt/AttackersDeclared
-    // scoped-player stamp above: bind `scoped_player` from the ability's lone
-    // `TargetRef::Player` before the change_zone choosers run at resolution.
-    if let Some(ability) = ability.as_mut() {
-        if ability.scoped_player.is_none() {
-            let single_player_target = ability
-                .targets
-                .iter()
-                .filter(|target| matches!(target, TargetRef::Player(_)))
-                .count()
-                == 1;
-            if single_player_target
-                && crate::game::effects::ability_uses_relative_controller_scoped(ability)
-            {
-                let actor = ability.target_player();
-                ability.set_scoped_player_recursive(actor);
-            }
-        }
-    }
-
-    // CR 608.2c: Re-stamp ParentTarget anaphora from the stack entry's trigger
-    // event at resolution time (Stationed/VehicleCrewed/Saddled/attack batches).
-    // Push-time seeding in `push_pending_trigger_to_stack_with_event_batch` can
-    // be skipped on alternate dispatch paths; this guarantees the referent is
-    // bound before `execute_effect` when `trigger_event` is present on the entry.
-    if let (Some(ability), StackEntryKind::TriggeredAbility { trigger_event, .. }) =
-        (ability.as_mut(), &entry.kind)
-    {
-        let event_ref = trigger_event
-            .as_ref()
-            .or(state.current_trigger_event.as_ref());
-        super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
-        super::triggers::seed_event_context_parent_targets(
-            ability,
-            event_ref,
-            super::triggers::EventContextSeedTiming::ResolutionFallback,
-        );
+        bind_resolving_ability_referents(state, &entry, ability);
     }
 
     if ability
@@ -3725,6 +3740,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        activation_cost_reduction: _,
+        activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller,
@@ -3956,6 +3973,8 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        activation_cost_reduction: _,
+        activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
@@ -4167,6 +4186,8 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
+        activation_cost_reduction: _,
+        activation_record: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         controller: _,
         original_controller: _,
@@ -4700,6 +4721,8 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
         selected_target_incarnations: a_selected_target_incarnations,
+        activation_cost_reduction: a_activation_cost_reduction,
+        activation_record: a_activation_record,
         illegal_target_slots: a_illegal_target_slots,
     } = a;
     let ResolvedAbility {
@@ -4774,6 +4797,8 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
         selected_target_incarnations: b_selected_target_incarnations,
+        activation_cost_reduction: b_activation_cost_reduction,
+        activation_record: b_activation_record,
         illegal_target_slots: b_illegal_target_slots,
     } = b;
 
@@ -4788,6 +4813,8 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_selected_target_incarnations == b_selected_target_incarnations
         // CR 608.2b: the resolution legality stamp participates for the same
         // reason — agreement with the derived `PartialEq`.
+        && a_activation_cost_reduction == b_activation_cost_reduction
+        && a_activation_record == b_activation_record
         && a_illegal_target_slots == b_illegal_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player

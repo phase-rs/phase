@@ -4686,6 +4686,7 @@ mod tests {
             is_activated: false,
             ability_index: None,
             ability_cost: None,
+            activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
         };
         entry

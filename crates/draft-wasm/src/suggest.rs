@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use draft_core::types::{DeckAddableCardPolicy, DeckAddableCards, DraftCardInstance};
 use engine::database::CardDatabase;
 use engine::game::deck_validation::card_color_identity;
+use engine::game::face_uses_ante;
 use engine::types::mana::{ManaColor, ManaType};
 use engine::types::CardFace;
 use phase_ai::config::AiDifficulty;
@@ -46,6 +47,20 @@ pub fn suggest_deck(
     // `_difficulty` is intentionally unused: deck suggestion always builds the
     // strongest legal deck. Difficulty governs the *opponents*, not the player's
     // own deck.
+    // CR 407.3: classify drafted faces before commander designation, colour
+    // choice, scoring, and fixing lands. Preserve instance order and copies.
+    // Without a database, ordinary set-backed bots retain an unclassified
+    // proposal; the final game gate validates every submitted card name.
+    let eligible_pool = card_db.map(|db| {
+        pool.iter()
+            .filter(|card| {
+                db.get_face_by_name(&card.name)
+                    .is_some_and(|face| !face_uses_ante(face))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    let pool = eligible_pool.as_deref().unwrap_or(pool);
     if pool.is_empty() {
         return SuggestedDeck {
             main_deck: Vec::new(),
@@ -62,15 +77,9 @@ pub fn suggest_deck(
     // ((1) >=60 cards, (2) any number of same-named cards, (3) the Commander
     // Masters partner grant), and none of them is 903.5c.
     //
-    // The `card_db.is_none()` disjunct is NOT the Commander path's behaviour, and
-    // must not be re-read as one: `get_bot_deck_inner` refuses
-    // `commanders_required > 0` with no database BEFORE this function is called,
-    // so from production only the left disjunct is reachable -- the four
-    // CR 905.1a kinds, which pass `0`. The right-hand half survives for direct
-    // callers (this file's own `#[cfg(test)]` rows) and as a total function's
-    // honest answer: eligibility (CR 903.3) and colour identity (CR 903.4) are
-    // both read off a `CardFace`, so with no database there is nothing to
-    // designate from.
+    // `get_bot_deck_inner` refuses a missing database for Commander Draft and
+    // Cube. Without a face there is no commander eligibility or colour identity
+    // to judge.
     let (commander, identity): (Vec<String>, Option<HashSet<ManaColor>>) =
         match (commanders_required, card_db) {
             (0, _) | (_, None) => (Vec::new(), None),
@@ -591,14 +600,16 @@ fn suggest_addable_cards(
             // produce this policy, so two runs over one session agree exactly as
             // `.first()` did.
             let mut result = HashMap::new();
-            let chosen = match identity {
-                None => addable_cards.custom.first(),
-                Some(identity) => addable_cards.custom.iter().find(|name| {
-                    card_db
-                        .and_then(|db| db.get_face_by_name(name.as_str()))
-                        .is_some_and(|face| card_color_identity(face).is_subset(identity))
-                }),
-            };
+            // CR 407.3: the configured list can contain an ante card too;
+            // resolve each face before allowing it into the game deck.
+            let chosen = addable_cards.custom.iter().find(|name| {
+                card_db
+                    .and_then(|db| db.get_face_by_name(name.as_str()))
+                    .is_some_and(|face| {
+                        !face_uses_ante(face)
+                            && identity.is_none_or(|id| card_color_identity(face).is_subset(id))
+                    })
+            });
             if let Some(card) = chosen {
                 result.insert(card.clone(), total);
             }
@@ -950,6 +961,152 @@ mod tests {
             // so CR 903.5d does not restrict it and its identity is empty.
             basic_land_face("Wastes", Vec::new()),
         ]
+    }
+
+    fn contract_face() -> CardFace {
+        CardFace {
+            name: "Contract from Below".to_string(),
+            card_type: CardType {
+                supertypes: Vec::new(),
+                core_types: vec![CoreType::Sorcery],
+                subtypes: Vec::new(),
+            },
+            oracle_text: Some("Remove this card from your deck before playing if you're not playing for ante.\nDiscard your hand, ante the top card of your library, then draw seven cards.".to_string()),
+            ..CardFace::default()
+        }
+    }
+
+    #[test]
+    fn typed_pool_filter_precedes_scoring_and_exhaustion() {
+        let mut faces = basic_faces();
+        faces.push(contract_face());
+        faces.push(creature_face("Legal Spell", false, vec![ManaColor::White]));
+        let db = db_from_faces(faces);
+        assert!(db
+            .get_face_by_name("Contract from Below")
+            .is_some_and(face_uses_ante));
+        assert!(db
+            .get_face_by_name("Legal Spell")
+            .is_some_and(|face| !face_uses_ante(face)));
+        let ante = instance("Contract from Below", &["B"], 1, "Sorcery");
+        let legal = instance("Legal Spell", &["W"], 2, "Creature");
+
+        let deck = suggest_deck(
+            &[ante.clone(), legal.clone()],
+            AiDifficulty::Medium,
+            Some(&db),
+            40,
+            0,
+            &DeckAddableCards::standard_basics(),
+        );
+        assert_eq!(deck.main_deck, vec!["Legal Spell"]);
+        assert_eq!(
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
+            40
+        );
+
+        let exhausted = suggest_deck(
+            std::slice::from_ref(&ante),
+            AiDifficulty::Medium,
+            Some(&db),
+            40,
+            0,
+            &DeckAddableCards::standard_basics(),
+        );
+        assert!(exhausted.main_deck.is_empty() && exhausted.lands.is_empty());
+
+        let unknown = instance("Unknown Pool Card", &["W"], 1, "Creature");
+        let resolved = suggest_deck(
+            &[unknown, legal],
+            AiDifficulty::Medium,
+            Some(&db),
+            40,
+            0,
+            &DeckAddableCards::standard_basics(),
+        );
+        assert_eq!(resolved.main_deck, vec!["Legal Spell"]);
+    }
+
+    #[test]
+    fn ante_commander_candidate_cannot_win_designation() {
+        let mut ante = creature_face("Ante Legend", true, vec![ManaColor::White]);
+        ante.oracle_text = Some(
+            "Remove this card from your deck before playing if you're not playing for ante."
+                .to_string(),
+        );
+        let legal = creature_face("Legal Legend", true, vec![ManaColor::White]);
+        let mut faces = basic_faces();
+        faces.extend([ante, legal]);
+        let db = db_from_faces(faces);
+        assert!(db
+            .get_face_by_name("Ante Legend")
+            .is_some_and(face_uses_ante));
+        assert!(db
+            .get_face_by_name("Legal Legend")
+            .is_some_and(|face| !face_uses_ante(face)));
+        let pool = [
+            instance("Ante Legend", &["W"], 1, "Legendary Creature"),
+            instance("Legal Legend", &["W"], 2, "Legendary Creature"),
+        ];
+        let deck = suggest_deck(
+            &pool,
+            AiDifficulty::Medium,
+            Some(&db),
+            60,
+            1,
+            &DeckAddableCards::standard_basics(),
+        );
+        assert_eq!(deck.commander, vec!["Legal Legend"]);
+        assert!(deck.main_deck.contains(&"Legal Legend".to_string()));
+        assert!(!deck.main_deck.contains(&"Ante Legend".to_string()));
+        assert_eq!(
+            deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
+            60
+        );
+    }
+
+    #[test]
+    fn custom_only_skips_ante_and_unresolved_names_before_legal_land() {
+        let mut faces = basic_faces();
+        faces.push(contract_face());
+        faces.push(creature_face("Legal Spell", false, vec![ManaColor::Green]));
+        let db = db_from_faces(faces);
+        let pool = [instance("Legal Spell", &["G"], 2, "Creature")];
+        let addable = |custom: Vec<&str>| DeckAddableCards {
+            policy: DeckAddableCardPolicy::CustomOnly,
+            custom: custom.into_iter().map(str::to_string).collect(),
+        };
+        let choice = suggest_deck(
+            &pool,
+            AiDifficulty::Medium,
+            Some(&db),
+            40,
+            0,
+            &addable(vec!["Unknown Addable", "Contract from Below", "Forest"]),
+        );
+        assert_eq!(choice.main_deck, vec!["Legal Spell"]);
+        assert_eq!(choice.lands.get("Forest"), Some(&39));
+
+        let exhausted = suggest_deck(
+            &pool,
+            AiDifficulty::Medium,
+            Some(&db),
+            40,
+            0,
+            &addable(vec!["Contract from Below"]),
+        );
+        assert_eq!(exhausted.main_deck, vec!["Legal Spell"]);
+        assert!(exhausted.lands.is_empty());
+
+        let legal = suggest_deck(
+            &pool,
+            AiDifficulty::Medium,
+            Some(&db),
+            40,
+            0,
+            &addable(vec!["Forest"]),
+        );
+        assert_eq!(legal.lands.get("Forest"), Some(&39));
     }
 
     /// PROBE C's fixture: the only commander-eligible card is mono-white, and

@@ -157,6 +157,7 @@ pub fn resolve(
     // Calamity). Set last_revealed_ids (and emit CardsRevealed for public
     // reveals) then return without creating a DigChoice interaction.
     if raw_keep_count == 0 {
+        super::publish_fresh_tracked_set(state, cards.clone());
         state.last_revealed_ids = cards.clone();
         if is_reveal {
             // CR 701.20a: public reveal — show to all players.
