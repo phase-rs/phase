@@ -106,12 +106,17 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  65 — game_setup and state_update carry GameState, whose DeclareBlockers
+ *  66 — game_setup and state_update carry GameState, whose DeclareBlockers
  *       prompt can now carry must_be_blocked_targets (CR 509.1c) and
  *       block_capacities (CR 509.1a + CR 101.1). Both peers are browsers and
- *       neither validates the shape, so a v64 peer would take the new fields
+ *       neither validates the shape, so a v65 peer would take the new fields
  *       with no decode error; first contact rejects the skew instead. Bumped
- *       in lockstep with full-game protocol 83.
+ *       in lockstep with full-game protocol 84.
+ *  65 — game_setup and state_update carry GameState, whose reduce-ability-cost
+ *       statics can now carry a target restriction and a once-per-turn
+ *       frequency, whose per-turn activation journal records each turn's
+ *       activations, and whose activation cost carrier holds the
+ *       target-settlement lock. Bumped in lockstep with full-game protocol 83.
  *  64 — game_setup and state_update carry GameState, whose additional-phase
  *       abilities now hold an ExtraPhaseAnchor, whose delayed triggers can hold
  *       AtBeginningOfAddedPhase, whose scheduled extra phases and resume
@@ -437,7 +442,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 65 as const;
+export const WIRE_PROTOCOL_VERSION = 66 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

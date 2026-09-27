@@ -52,6 +52,11 @@ export const DECK_FOLDERS_KEY = "phase-deck-folders";
  * themselves are tracked separately (callers re-list saved-deck keys). */
 export const DECKS_CHANGED_EVENT = "phase-decks-changed";
 
+/** Window event fired for each saved deck a background pass rewrote without
+ * changing which cards it holds, inside the library transaction that wrote
+ * it. `detail` is a {@link SavedDeckRewrite}. */
+export const SAVED_DECK_REWRITTEN_EVENT = "phase:saved-deck-rewritten";
+
 /** Max length for a folder name; longer input is trimmed on create/rename. */
 export const MAX_FOLDER_NAME_LENGTH = 40;
 
@@ -281,7 +286,7 @@ export interface SavedDeckSnapshot {
   readonly raw: string | null;
 }
 
-/** Read the deck saved under `deckName` before waiting for the library lock; pass the result into the transaction. */
+/** Read the deck saved under `deckName`; pass the result into the transaction. */
 export function captureSavedDeck(deckName: string): SavedDeckSnapshot {
   return { name: deckName, raw: localStorage.getItem(STORAGE_KEY_PREFIX + deckName) };
 }
@@ -302,6 +307,35 @@ export function writeSavedDeckData(txn: SavedDeckTxn, deckName: string, raw: str
   void txn;
   localStorage.setItem(STORAGE_KEY_PREFIX + deckName, raw);
   return { name: deckName, raw };
+}
+
+/** A rewrite announced by {@link SAVED_DECK_REWRITTEN_EVENT}: the bytes `name` held before it and after it. */
+export interface SavedDeckRewrite {
+  name: string;
+  previousRaw: string;
+  raw: string;
+}
+
+/** Announce `rewrite` from inside the transaction that wrote it. */
+export function notifySavedDeckRewritten(txn: SavedDeckTxn, rewrite: SavedDeckRewrite): void {
+  void txn;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent<SavedDeckRewrite>(SAVED_DECK_REWRITTEN_EVENT, { detail: rewrite }));
+  }
+}
+
+/** Call `listener` with each {@link SAVED_DECK_REWRITTEN_EVENT}'s rewrite; returns the unsubscribe. */
+export function onSavedDeckRewritten(listener: (rewrite: SavedDeckRewrite) => void): () => void {
+  const handler = (event: Event) => listener((event as CustomEvent<SavedDeckRewrite>).detail);
+  window.addEventListener(SAVED_DECK_REWRITTEN_EVENT, handler);
+  return () => window.removeEventListener(SAVED_DECK_REWRITTEN_EVENT, handler);
+}
+
+/** `baseline` moved past `rewrite` when it holds exactly the bytes `rewrite` replaced; otherwise `baseline`. */
+export function adoptSavedDeckRewrite(baseline: SavedDeckSnapshot, rewrite: SavedDeckRewrite): SavedDeckSnapshot {
+  return baseline.name === rewrite.name && baseline.raw === rewrite.previousRaw
+    ? { name: rewrite.name, raw: rewrite.raw }
+    : baseline;
 }
 
 /** Remove a saved deck's data. */
@@ -428,10 +462,13 @@ export function writeDraftAutosaveDeck(
 
 /**
  * Save the deck builder's deck as `nextName`. When renamed, move it from `previous.name` only if
- * that name still holds the deck `previous` captured; otherwise leave that name's deck alone. The
- * check reads `savedDeckRef` under the lock, not just `previous`: when an earlier queued save or
- * clone to that same name has already committed by the time this transaction runs, its write is
- * what `previous` should be compared against, not the value captured back at this click.
+ * that name still holds the deck `previous` captured; otherwise leave that name's deck alone.
+ * When `previous.name` is `nextName`, throw `SavedDeckChangedError`, writing nothing, unless that
+ * name still holds exactly what `previous` captured (`raw: null` meaning no deck is saved there).
+ * Both checks read `savedDeckRef` under the lock, not just `previous`: when an earlier queued save
+ * or clone to that same name has already committed by the time this transaction runs, its write is
+ * what `previous` should be compared against, not the value captured back at this click. A refusal
+ * leaves `savedDeckRef` as it was.
  *
  * On success, `savedDeckRef` is updated to this write's snapshot only if `claimsEditor` (checked
  * again after the write) still says so — a Load that switched the editor to a different deck
@@ -447,7 +484,13 @@ export function saveBuilderDeck(
   return withSavedDeckLibrary(async (txn) => {
     const live = savedDeckRef.current;
     const effective = claimsEditor() && previous && live && live.name === previous.name ? live : previous;
-    if (effective && effective.name !== nextName && savedDeckUnchanged(txn, effective)) {
+    if (effective && effective.name === nextName) {
+      // Captured under this transaction's own lock, not a fresh read by the caller after this
+      // throws: that is what lets a caller (the conflict dialog's "keep mine") act on exactly the
+      // bytes this refusal saw instead of racing whatever lands next.
+      const stored = captureSavedDeck(nextName);
+      if (stored.raw !== effective.raw) throw new SavedDeckChangedError(nextName, stored.raw);
+    } else if (effective && savedDeckUnchanged(txn, effective)) {
       // If nextName already names another deck, the writeSavedDeckData below overwrites
       // its data (pre-existing Save behavior) and moveSavedDeck's metadata
       // carry likewise replaces its metadata — both correctly reflect the

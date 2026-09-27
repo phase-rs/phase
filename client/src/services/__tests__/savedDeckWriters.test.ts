@@ -12,6 +12,7 @@ import {
   removeDeckMeta,
   saveBuilderDeck,
   stampDeckMeta,
+  writeDraftAutosaveDeck,
   writeSavedDeckData,
   type DeckFolder,
 } from "../../constants/storage";
@@ -403,5 +404,99 @@ describe("queued organization and adopt refuse against a deck that changed while
     await expect(call).rejects.toBeInstanceOf(SavedDeckChangedError);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Adopted Deck")).toBeNull();
     expect(loadDeckOrigins()).toEqual({});
+  });
+});
+
+describe("saveBuilderDeck under the deck's own name", () => {
+  it("refuses, writing nothing, when a write queued ahead of it replaced the deck", async () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Built", JSON.stringify({ main: [], sideboard: [] }));
+    const snapshot = { name: "Built", raw: localStorage.getItem(STORAGE_KEY_PREFIX + "Built") };
+    const ref = { current: snapshot };
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = withSavedDeckLibrary(async (txn) => {
+      await held;
+      removeDeckMeta(txn, "Built");
+      writeSavedDeckData(txn, "Built", "REPLACEMENT-DATA");
+      stampDeckMeta(txn, "Built", 2000);
+    });
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).held).toHaveLength(1);
+    });
+
+    const call = saveBuilderDeck(snapshot, ref, () => true, "Built", "EDITOR-DATA");
+    call.catch(() => {});
+    await vi.waitFor(async () => {
+      expect((await navigator.locks.query()).pending).toHaveLength(1);
+    });
+    release();
+    await holder;
+
+    await expect(call).rejects.toBeInstanceOf(SavedDeckChangedError);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Built")).toBe("REPLACEMENT-DATA");
+    expect(getDeckMeta("Built")).toEqual({ addedAt: 2000 });
+    expect(ref.current).toBe(snapshot);
+  });
+
+  it("writes when the deck still holds the snapshot (paired positive)", async () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Built", JSON.stringify({ main: [], sideboard: [] }));
+    const snapshot = { name: "Built", raw: localStorage.getItem(STORAGE_KEY_PREFIX + "Built") };
+    const ref = { current: snapshot };
+
+    const saved = await saveBuilderDeck(snapshot, ref, () => true, "Built", "EDITOR-DATA");
+    expect(saved).toEqual({ name: "Built", raw: "EDITOR-DATA" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Built")).toBe("EDITOR-DATA");
+  });
+
+  it("refuses, writing nothing, when the draft autosave rewrote the deck after the snapshot", async () => {
+    await writeDraftAutosaveDeck("Sealed", "[Autosave] Sealed", "AUTOSAVE-V1");
+    const snapshot = {
+      name: "[Autosave] Sealed",
+      raw: localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed"),
+    };
+    await writeDraftAutosaveDeck("Sealed", "[Autosave] Sealed", "AUTOSAVE-V2");
+
+    await expect(
+      saveBuilderDeck(snapshot, { current: snapshot }, () => true, "[Autosave] Sealed", "EDITOR-DATA"),
+    ).rejects.toBeInstanceOf(SavedDeckChangedError);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed")).toBe("AUTOSAVE-V2");
+    expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBe("Sealed");
+  });
+
+  it("overwrites a deck the draft autosave owns when the snapshot is current, and clears that ownership", async () => {
+    await writeDraftAutosaveDeck("Sealed", "[Autosave] Sealed", "AUTOSAVE-V2");
+    const snapshot = {
+      name: "[Autosave] Sealed",
+      raw: localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed"),
+    };
+
+    const saved = await saveBuilderDeck(
+      snapshot,
+      { current: snapshot },
+      () => true,
+      "[Autosave] Sealed",
+      "EDITOR-DATA",
+    );
+    expect(saved.raw).toBe("EDITOR-DATA");
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed")).toBe("EDITOR-DATA");
+    expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBeUndefined();
+  });
+
+  it("writes when the snapshot records the deck as absent and it still is", async () => {
+    const snapshot = { name: "Gone", raw: null };
+    const saved = await saveBuilderDeck(snapshot, { current: snapshot }, () => true, "Gone", "EDITOR-DATA");
+    expect(saved).toEqual({ name: "Gone", raw: "EDITOR-DATA" });
+  });
+
+  it("refuses when the snapshot records the deck as absent but a deck was saved there", async () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Gone", "OTHER");
+    const snapshot = { name: "Gone", raw: null };
+    await expect(
+      saveBuilderDeck(snapshot, { current: snapshot }, () => true, "Gone", "EDITOR-DATA"),
+    ).rejects.toBeInstanceOf(SavedDeckChangedError);
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Gone")).toBe("OTHER");
   });
 });

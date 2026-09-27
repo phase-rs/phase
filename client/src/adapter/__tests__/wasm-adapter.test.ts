@@ -36,6 +36,7 @@ const getLegalActionsJs = vi.hoisted(() => vi.fn());
 const getViewerTransitionSnapshotJs = vi.hoisted(() => vi.fn());
 const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
+const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
 
 vi.mock("../../services/cardData", () => ({
   ensureWasmInit,
@@ -52,6 +53,7 @@ vi.mock("@wasm/engine", () => ({
   get_viewer_transition_snapshot_js: getViewerTransitionSnapshotJs,
   set_multiplayer_mode: setMultiplayerModeJs,
   clear_game_state: clearGameStateJs,
+  canonicalCardNames: canonicalCardNamesJs,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -72,6 +74,7 @@ const mockWorkerClient = {
   getCardFaceData: vi.fn().mockResolvedValue({ name: "Lightning Bolt" }),
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
+  canonicalCardNames: vi.fn().mockResolvedValue([]),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -659,6 +662,20 @@ describe("WasmAdapter", () => {
       expect(mockWorkerClient.getCardFaceData).toHaveBeenCalledWith("Lightning Bolt");
       expect(mockWorkerClient.getCardParseDetails).toHaveBeenCalledWith("Lightning Bolt");
       expect(mockWorkerClient.getCardRulings).toHaveBeenCalledWith("Lightning Bolt");
+    });
+
+    it("canonicalCardNames ensures the DB is loaded then delegates to the worker", async () => {
+      mockWorkerClient.canonicalCardNames.mockResolvedValueOnce(["Revival // Revenge", null]);
+
+      await expect(
+        adapter.canonicalCardNames(["Revival/Revenge", "Not A Card"]),
+      ).resolves.toEqual(["Revival // Revenge", null]);
+
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.canonicalCardNames).toHaveBeenCalledWith([
+        "Revival/Revenge",
+        "Not A Card",
+      ]);
     });
   });
 
@@ -1262,6 +1279,25 @@ describe("WasmAdapter.getViewerTransitionSnapshot", () => {
   });
 });
 
+describe("WasmAdapter.canonicalCardNames", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("canonicalCardNames uses the main-thread fallback", async () => {
+    canonicalCardNamesJs.mockReturnValue(["Revival // Revenge"]);
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    const result = await adapter.canonicalCardNames(["Revival/Revenge"]);
+
+    expect(canonicalCardNamesJs).toHaveBeenCalledExactlyOnceWith(["Revival/Revenge"]);
+    expect(mockWorkerClient.canonicalCardNames).not.toHaveBeenCalled();
+    expect(result).toEqual(["Revival // Revenge"]);
+  });
+});
+
 describe("WasmAdapter.previewInteraction", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1489,7 +1525,7 @@ describe("worker message lockstep", () => {
 // posts to the ones `engine-worker.ts` reads off `msg`. The row above compares only the `type`
 // literal. This one runs the REAL client method against a stubbed `Worker` and compares the keys
 // it actually posts against the reads that case performs, taken from the worker module as text.
-// It executes the client body only; the worker's own body still has no test.
+// It executes the client body only.
 
 /** The distinct `msg.<field>` names one dispatch case reads. */
 function caseFieldReads(workerSource: string, type: string): string[] {

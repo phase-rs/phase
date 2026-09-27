@@ -210,14 +210,19 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 83 — WaitingFor.DeclareBlockers gains must_be_blocked_targets (CR 509.1c):
+ * 84 — WaitingFor.DeclareBlockers gains must_be_blocked_targets (CR 509.1c):
  *      the attackers whose "must be blocked" static a given blocker's block
  *      would obey; and block_capacities (CR 509.1a + CR 101.1): each able
  *      blocker's block limit, null for any number — see PROTOCOL_VERSION's
- *      own `/// 83` entry in crates/lobby-broker/src/protocol.rs. This client
+ *      own `/// 84` entry in crates/lobby-broker/src/protocol.rs. This client
  *      renders each map directly, one to reach a member of a collapsed token
  *      pile and the other as the pile stepper's ceiling; the exact-match
  *      version check at connect refuses a mismatched pairing.
+ * 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
+ *      Kopala): ReduceAbilityCost statics carry targets and frequency,
+ *      GameState journals each turn's activations, and the activation cost
+ *      carrier holds the target-settlement lock. A v82 peer would drop these
+ *      silently and price one activation differently.
  * 82 — Added-phase anchoring (CR 500.8–500.10): AdditionalPhase.after is an
  *      ExtraPhaseAnchor, DelayedTriggerCondition gained AtBeginningOfAddedPhase,
  *      ExtraPhase and extra_phase_resume entries carry a TurnSegment and a
@@ -572,8 +577,9 @@ export class NativeEngineVersionMismatchError extends Error {
  *      PendingCast.activation_cost_snapshot and AbilityModeChoice
  *      activation_cost_snapshot fields are additive and skipped when empty, so
  *      every spell frame is byte-identical to v78.
+ *
  */
-export const PROTOCOL_VERSION = 83;
+export const PROTOCOL_VERSION = 84;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

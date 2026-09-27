@@ -9,19 +9,22 @@ import { deduplicateEntries, expandParsedDeck, resolveCommander } from "../../se
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
   STORAGE_KEY_PREFIX,
+  adoptSavedDeckRewrite,
   captureSavedDeck,
   freeDeckName,
   getDeckMeta,
   listFolders,
   loadSavedDeck,
   loadSavedDeckBracket,
+  onSavedDeckRewritten,
   saveBuilderDeck,
   setDeckFolder,
   stampDeckMeta,
   writeSavedDeckData,
   type SavedDeckSnapshot,
 } from "../../constants/storage";
-import { withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { SavedDeckChangedError, withSavedDeckLibrary } from "../../services/savedDeckTransaction";
+import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import { attemptSavedDeckWrite } from "../../services/savedDeckWriteFailure";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
@@ -49,6 +52,21 @@ const PRECON_PREFIX = "[Pre-built] ";
 
 /** "saved-then-changed": the write committed, but the editor changed while it was pending, so it no longer holds what was written. */
 export type SaveOutcome = "refused" | "saved" | "saved-then-changed";
+
+/** Outcome of resolving a save conflict: a `SaveOutcome` for "keepMine", `"loaded"` once a
+ *  "load" choice actually replaced the editor with the saved deck, or `undefined` for "dismiss"
+ *  or a "load" that bailed (a newer Load/edit won the race). */
+export type SaveConflictResolution = SaveOutcome | "loaded";
+
+/** A same-name Save refused because `snapshot.name` no longer held what this editor last loaded
+ *  or saved. `snapshot` is the bytes the refusal itself saw (`SavedDeckChangedError.stored`), not
+ *  a value re-read afterward — re-basing "Save my version" onto it is what refuses that save again
+ *  if a further write lands while this conflict is still being shown. */
+export interface SaveConflict {
+  snapshot: SavedDeckSnapshot;
+}
+
+export type SaveConflictChoice = "load" | "keepMine" | "dismiss";
 
 function listSavedDecks(): string[] {
   const keys: string[] = [];
@@ -86,7 +104,18 @@ export function useDeckBuilder({
   // just wrote, so a save queued behind an earlier one to the same name sees that write and not
   // a value captured before it (see saveBuilderDeck's doc).
   const savedDeckRef = useRef<SavedDeckSnapshot | null>(null);
+  // A SAVED_DECK_REWRITTEN_EVENT that replaced the open deck's stored bytes moves the Save
+  // baseline with it, so a later same-name Save is not refused and a rename still moves that deck.
+  useEffect(
+    () =>
+      onSavedDeckRewritten((rewrite) => {
+        const baseline = savedDeckRef.current;
+        if (baseline) savedDeckRef.current = adoptSavedDeckRewrite(baseline, rewrite);
+      }),
+    [],
+  );
   const [justSaved, setJustSaved] = useState(false);
+  const [saveConflict, setSaveConflict] = useState<SaveConflict | null>(null);
   const [commanders, setCommanders] = useState<string[]>([]);
   // Which surface is foregrounded on phone (tablet/desktop show columns and
   // ignore this). Deck-first: the main canvas (deck or, while searching, the
@@ -562,13 +591,23 @@ export function useDeckBuilder({
       // matches what we're about to persist.
       applyDeckToEditor(resolved);
     }
-    const data = serializeSavedDeck(resolved, format, bracket);
+    // The editor can still hold spellings the saved-deck name repair already replaced.
+    const data = serializeSavedDeck(await canonicalizeDeckNames(resolved), format, bracket);
     const nextName = deckName.trim();
     const claimsEditor = () => !editorChangedSince(captured).reloaded;
-    const saved = await attemptSavedDeckWrite("save", () =>
-      saveBuilderDeck(previous, savedDeckRef, claimsEditor, nextName, data),
-    );
-    if (!saved.ok) return "refused";
+    const saved = await attemptSavedDeckWrite("save", async () => {
+      try {
+        return await saveBuilderDeck(previous, savedDeckRef, claimsEditor, nextName, data);
+      } catch (error) {
+        // Refused while this save still owns the editor: ask the user instead of toasting. A
+        // refusal after the editor switched decks is rethrown and keeps today's toast
+        // (attemptSavedDeckWrite's own SavedDeckChangedError handling, below).
+        if (!(error instanceof SavedDeckChangedError) || !claimsEditor() || error.stored === undefined) throw error;
+        setSaveConflict({ snapshot: { name: nextName, raw: error.stored } });
+        return null;
+      }
+    });
+    if (!saved.ok || saved.value === null) return "refused";
     const after = editorChangedSince(captured);
     if (!after.reloaded) {
       setJustSaved(true);
@@ -602,7 +641,7 @@ export function useDeckBuilder({
     // capture it now, before any await lets a Load or rename-Save race this transaction.
     const folderAtClick = sourceAtClick ? getDeckMeta(sourceAtClick.name)?.folderId ?? null : null;
     const base = deckName.trim() || "Untitled Deck";
-    const data = serializeSavedDeck(currentDeck, format, bracket);
+    const data = serializeSavedDeck(await canonicalizeDeckNames(currentDeck), format, bracket);
     const cloned = await attemptSavedDeckWrite("clone", () =>
       withSavedDeckLibrary((txn) => {
         const name = freeDeckName(txn, `${base} copy`, (i) => `${base} copy ${i}`);
@@ -643,21 +682,24 @@ export function useDeckBuilder({
     return () => clearTimeout(timer);
   }, [justSaved]);
 
-  const handleLoad = useCallback(async (name: string) => {
+  // Returns whether the load actually replaced the editor. Callers that only fire-and-forget a
+  // Load ignore it; resolveSaveConflict's "load" case uses it to tell a genuine load from a bail
+  // so it knows whether to continue a pending action.
+  const handleLoad = useCallback(async (name: string): Promise<boolean> => {
     // Captured before the resolveCommander await below: a newer Load/Clone (reloaded) or any edit
     // that marks the deck dirty, including an Import (edited), must win over this Load.
     const captured = captureEditor();
     const parsed = loadSavedDeck(name);
     const stored = captureSavedDeck(name);
     if (!parsed || stored.raw === null) {
-      if (!name.startsWith(PRECON_PREFIX)) return;
+      if (!name.startsWith(PRECON_PREFIX)) return false;
       const decks = await loadPreconDeckMap();
       const found = Object.entries(decks ?? {}).find(([, entry]) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
-      if (!found) return;
+      if (!found) return false;
       const [deckId, deckEntry] = found;
       const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
       const changedAfterPrecon = editorChangedSince(captured);
-      if (changedAfterPrecon.reloaded || changedAfterPrecon.edited) return;
+      if (changedAfterPrecon.reloaded || changedAfterPrecon.edited) return false;
       applyDeckToEditor(resolved);
       setActiveSurface("deck");
       deckIdentityRevision.current += 1;
@@ -665,30 +707,70 @@ export function useDeckBuilder({
       setDeckName(`${deckEntry.name} (${deckEntry.code})`);
       savedDeckRef.current = null;
       setBracket(getPreconBracket(deckId) ?? null);
-      return;
+      return true;
     }
     const persisted = JSON.parse(stored.raw) as ParsedDeck & { format?: string };
-    const resolved = await resolveCommander(parsed);
-    const changedAfterLoad = editorChangedSince(captured);
-    if (changedAfterLoad.reloaded || changedAfterLoad.edited) return;
-    const savedFormat = persisted.format
-      ? DECK_CONSTRUCTION_FORMATS.find(
-          (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
-        )?.format
-      : undefined;
-    applyDeckToEditor(resolved, savedFormat);
-    setActiveSurface("deck");
-    deckIdentityRevision.current += 1;
-    setDirty(false);
-    if (savedFormat) {
-      onFormatChange(savedFormat);
-    } else if (resolved.commander?.length) {
-      onFormatChange("Commander");
+    // A rewrite that lands while resolveCommander runs is missed by the hook-level
+    // subscription, which follows savedDeckRef and not this Load.
+    let baseline: SavedDeckSnapshot = stored;
+    const stopAdopting = onSavedDeckRewritten((rewrite) => {
+      baseline = adoptSavedDeckRewrite(baseline, rewrite);
+    });
+    try {
+      const resolved = await resolveCommander(parsed);
+      const changedAfterLoad = editorChangedSince(captured);
+      if (changedAfterLoad.reloaded || changedAfterLoad.edited) {
+        return false;
+      }
+      const savedFormat = persisted.format
+        ? DECK_CONSTRUCTION_FORMATS.find(
+            (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
+          )?.format
+        : undefined;
+      applyDeckToEditor(resolved, savedFormat);
+      setActiveSurface("deck");
+      deckIdentityRevision.current += 1;
+      setDirty(false);
+      if (savedFormat) {
+        onFormatChange(savedFormat);
+      } else if (resolved.commander?.length) {
+        onFormatChange("Commander");
+      }
+      setDeckName(name);
+      savedDeckRef.current = baseline;
+    } finally {
+      stopAdopting();
     }
-    setDeckName(name);
-    savedDeckRef.current = stored;
     setBracket(loadSavedDeckBracket(name));
+    return true;
   }, [applyDeckToEditor, onFormatChange, captureEditor, editorChangedSince]);
+
+  // Returns the "keepMine" save's outcome, `"loaded"` once "load" actually replaced the editor,
+  // or undefined for "dismiss" or a "load" that bailed, so a caller that resolved a conflict
+  // raised mid-Save-&-continue can drive the same pending-navigation continuation the Save &
+  // continue button itself uses (DeckBuilder.tsx's confirmSaveThen).
+  const resolveSaveConflict = useCallback(
+    async (choice: SaveConflictChoice): Promise<SaveConflictResolution | undefined> => {
+      const conflict = saveConflict;
+      setSaveConflict(null);
+      if (!conflict) return undefined;
+      switch (choice) {
+        case "dismiss":
+          return undefined;
+        case "load":
+          return (await handleLoad(conflict.snapshot.name)) ? "loaded" : undefined;
+        case "keepMine":
+          // Re-base onto the bytes the refusal saw, not a fresh re-read at this click: only then
+          // does a further write landing while the dialog was open still win and reopen the
+          // dialog, instead of this save silently overwriting it. Skipped when the editor's name
+          // has since diverged from the conflict's — that Save is a rename, and the rename rule
+          // already leaves the conflicted deck in place.
+          if (deckName.trim() === conflict.snapshot.name) savedDeckRef.current = conflict.snapshot;
+          return await handleSave();
+      }
+    },
+    [saveConflict, handleLoad, handleSave, deckName],
+  );
 
   const handleLoadRef = useRef(handleLoad);
   handleLoadRef.current = handleLoad;
@@ -936,6 +1018,8 @@ export function useDeckBuilder({
     handleSave,
     handleClone,
     handleLoad,
+    saveConflict,
+    resolveSaveConflict,
     handleSetCommander,
     isCommanderEligible,
     handleRemoveCommander,
