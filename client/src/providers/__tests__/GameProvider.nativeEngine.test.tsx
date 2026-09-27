@@ -42,6 +42,7 @@ const {
   const fetchAvatarArtUrl = vi.fn<() => Promise<string | null>>();
   const preferences = {
     aiArchetypeFilter: "Any",
+    aiBracketFilter: [],
     aiCoverageFloor: 0,
     aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
     cedhMode: false,
@@ -232,6 +233,30 @@ vi.mock("../../services/aiDeckCatalog", () => ({
   })),
 }));
 
+vi.mock("../../services/podSelection", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/podSelection")>();
+  return {
+    ...actual,
+    POD_SELECTION_CONSTRAINTS: [],
+    podSelectionSeed: () => 31,
+    aiDeckCandidateToWire: (candidate: { id: string }) => ({ id: candidate.id }),
+    selectPod: vi.fn(async (_candidates: unknown[], request: { seats: number }) => ({
+      kind: "assignment",
+      assignment: {
+        seats: Array.from({ length: request.seats }, (_, seat_index) => ({
+          seat_index,
+          candidate_id: "ai-deck",
+          tier: null,
+          provenance: null,
+          difficulty: "Medium",
+          color_identity: [],
+        })),
+        relaxations: [],
+      },
+    })),
+  };
+});
+
 vi.mock("../../services/randomDeckSelection", () => ({
   pickRandomDeckCandidate: (candidates: unknown[]) => candidates[0],
 }));
@@ -262,6 +287,8 @@ vi.mock("../../stores/preferencesStore", () => {
 
 vi.mock("../../services/cedhLock", () => ({
   effectiveAiDifficulty: (difficulty: string) => difficulty,
+  resolveSeatDifficulty: (difficulty: string | null | undefined, _tier: unknown, enforcement: string) =>
+    enforcement === "hard_gate" ? "CEDH" : (difficulty ?? "Medium"),
 }));
 
 vi.mock("../../game/controllers/gameLoopController", () => ({

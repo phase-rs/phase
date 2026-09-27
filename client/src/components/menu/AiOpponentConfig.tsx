@@ -8,6 +8,14 @@ import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { CEDH_BRACKET } from "../../services/cedhLock";
 import { isCommanderFamilyFormat } from "../../types/bracket";
+import { BRACKET_TIER_BY_NUMERIC } from "../../types/bracketEstimate";
+import {
+  aiDeckCandidateToWire,
+  POD_SELECTION_CONSTRAINTS,
+  podSelectionSeed,
+  selectPod,
+} from "../../services/podSelection";
+import type { PodSelectionRequest } from "../../types/podSelection";
 import {
   AI_DECK_RANDOM,
   usePreferencesStore,
@@ -105,29 +113,65 @@ export function AiOpponentConfig({
 
   const { candidates, loading, error } = useAiDeckCatalog({ selectedFormat, selectedMatchType });
 
-  useEffect(() => {
-    onCandidateCountChange?.(loading ? null : candidates.length);
-  }, [candidates.length, loading, onCandidateCountChange]);
+  const [filteredDecks, setFilteredDecks] = useState<AiDeckCandidate[]>([]);
 
   // The archetype + coverage filters only affect the *Random* pool. They are
   // global across all AI seats because they describe which decks are worth
   // considering, not which deck ends up assigned — a concept that doesn't
   // vary per seat.
-  const filteredDecks = useMemo(() => {
-    // In cEDH mode, restrict the random pool to bracket-5 decks.
-    const cedhFiltered = effectiveCedhMode ? filterByBracket(candidates, CEDH_BRACKET) : candidates;
-    return cedhFiltered.filter((d) => {
-      if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
-      if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
-        return false;
-      }
-      if (!effectiveCedhMode && bracketFilter.length > 0 && isCedhFormat) {
-        if (d.bracket === null) return false;             // untagged excluded
-        if (!bracketFilter.includes(d.bracket)) return false;
-      }
-      return true;
-    });
-  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, isCedhFormat, effectiveCedhMode]);
+  useEffect(() => {
+    let cancelled = false;
+    if (loading || suppliesDeck) {
+      setFilteredDecks([]);
+      onCandidateCountChange?.(loading ? null : 0);
+      return () => { cancelled = true; };
+    }
+    const timer = window.setTimeout(() => {
+      const previewCandidates = effectiveCedhMode
+        ? filterByBracket(candidates, CEDH_BRACKET)
+        : candidates;
+      const allowed = effectiveCedhMode
+        ? (["cedh"] as const)
+        : bracketFilter.map((tier) => BRACKET_TIER_BY_NUMERIC[tier]);
+      const baseRequest: PodSelectionRequest = {
+        allowed: [...allowed],
+        prefer: allowed.length === 1 ? allowed[0] : null,
+        enforcement: effectiveCedhMode ? "hard_gate" : "advisory",
+        seats: 1,
+        constraints: [...POD_SELECTION_CONSTRAINTS],
+        coverage_floor_pct: coverageFloor,
+        archetype: archetypeFilter === "Any" ? null : archetypeFilter,
+        seed: podSelectionSeed(),
+        occupied: [],
+      };
+      void Promise.all(
+        previewCandidates.map(async (candidate) => ({
+          candidate,
+          outcome: await selectPod([aiDeckCandidateToWire(candidate)], baseRequest),
+        })),
+      ).then((results) => {
+        if (cancelled) return;
+        const considered = results
+          .filter(({ outcome }) => outcome.kind === "assignment")
+          .map(({ candidate }) => candidate);
+        setFilteredDecks(considered);
+        onCandidateCountChange?.(considered.length);
+      });
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    archetypeFilter,
+    bracketFilter,
+    candidates,
+    coverageFloor,
+    effectiveCedhMode,
+    loading,
+    onCandidateCountChange,
+    suppliesDeck,
+  ]);
 
   // Render exactly `opponentCount` panels regardless of how many slots the
   // store currently holds — the effect above will catch the store up on the
@@ -211,6 +255,12 @@ export function AiOpponentConfig({
       {!loading && candidates.length === 0 && !suppliesDeck && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
           {t("aiOpponent.noLegalDecks")}
+        </div>
+      )}
+
+      {!loading && !suppliesDeck && (
+        <div className="text-[10px] text-slate-500">
+          {t("aiOpponent.podPreviewCount", { n: filteredDecks.length })}
         </div>
       )}
 
@@ -347,13 +397,10 @@ function AiSeatPanel({
   };
 
   const randomDeckLabel = t("aiOpponent.deckRandomCount", { count: filteredDecks.length });
-  const deckMenuItems = useMemo(
-    () => [
-      { value: AI_DECK_RANDOM, label: randomDeckLabel },
-      ...deckOptions.map((d) => ({ value: d.id, label: formatDeckLabel(d) })),
-    ],
-    [deckOptions, randomDeckLabel],
-  );
+  const deckMenuItems = [
+    { value: AI_DECK_RANDOM, label: randomDeckLabel },
+    ...deckOptions.map((d) => ({ value: d.id, label: formatDeckLabel(d) })),
+  ];
   const selectedDeckLabel =
     effectiveSelection === AI_DECK_RANDOM
       ? randomDeckLabel

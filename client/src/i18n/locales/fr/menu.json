@@ -131,6 +131,25 @@
       "feed": "Flux",
       "user": "Utilisateur",
       "precon": "Precon"
+    },
+    "podRelaxation": {
+      "heading": "Ajustements du pod",
+      "bracketDistance": "Place {{seat}} — aucun deck du bracket demandé n'était disponible ; un deck de Bracket {{tier}} a été attribué.",
+      "bracketDistanceNoTier": "Place {{seat}} — aucun deck du bracket demandé n'était disponible ; un deck sans étiquette a été attribué.",
+      "labelProvenance": "Place {{seat}} — aucun deck avec un bracket déclaré n'était disponible ; un deck au bracket estimé a été attribué.",
+      "archetype": "Place {{seat}} — aucun deck de l'archétype demandé n'était disponible.",
+      "distinctColorIdentity": "Place {{seat}} — partage une identité couleur avec une autre place.",
+      "distinctCommander": "Place {{seat}} — partage un commandant avec une autre place."
+    },
+    "podPreviewCount": "{{n}} decks correspondent aux réglages actuels du pod"
+  },
+  "gameProvider": {
+    "podSelectionRefused": {
+      "insufficientCandidates": "Pas assez de decks distincts : {{requested}} places demandées, {{available}} disponibles.",
+      "hardGateUnsatisfiable": "Pas assez de decks cEDH pour une table cEDH : {{requested}} places demandées, {{available}} disponibles.",
+      "tooManySeats": "Une table cEDH accueille au maximum quatre joueurs ({{seats}} places IA demandées).",
+      "unknownCommander": "Le catalogue de decks nomme un commandant inconnu des données de cartes : {{name}}.",
+      "cardDataUnavailable": "La sélection des places IA nécessite les données de cartes, qui ne sont pas encore chargées."
     }
   },
   "feedManager": {

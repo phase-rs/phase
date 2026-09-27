@@ -131,6 +131,25 @@
       "feed": "Feed",
       "user": "Benutzer",
       "precon": "Precon"
+    },
+    "podRelaxation": {
+      "heading": "Pod-Anpassungen",
+      "bracketDistance": "Sitz {{seat}} — kein Deck im gewünschten Bracket war verfügbar; ein Deck aus Bracket {{tier}} wurde gesetzt.",
+      "bracketDistanceNoTier": "Sitz {{seat}} — kein Deck im gewünschten Bracket war verfügbar; ein Deck ohne Einstufung wurde gesetzt.",
+      "labelProvenance": "Sitz {{seat}} — kein Deck mit deklarierter Bracket-Einstufung war verfügbar; ein Deck mit geschätztem Bracket wurde gesetzt.",
+      "archetype": "Sitz {{seat}} — kein Deck des gewünschten Archetyps war verfügbar.",
+      "distinctColorIdentity": "Sitz {{seat}} — teilt eine Farbidentität mit einem anderen Sitz.",
+      "distinctCommander": "Sitz {{seat}} — teilt einen Commander mit einem anderen Sitz."
+    },
+    "podPreviewCount": "{{n}} Decks entsprechen den aktuellen Pod-Einstellungen"
+  },
+  "gameProvider": {
+    "podSelectionRefused": {
+      "insufficientCandidates": "Nicht genügend unterschiedliche Decks: {{requested}} Sitze angefordert, {{available}} verfügbar.",
+      "hardGateUnsatisfiable": "Nicht genügend cEDH-Decks für einen cEDH-Tisch: {{requested}} Sitze angefordert, {{available}} verfügbar.",
+      "tooManySeats": "An einem cEDH-Tisch können höchstens vier Spieler sitzen ({{seats}} KI-Sitze angefordert).",
+      "unknownCommander": "Der Deckkatalog nennt einen Commander, den die Kartendaten nicht kennen: {{name}}.",
+      "cardDataUnavailable": "Für die Auswahl der KI-Sitze werden Kartendaten benötigt, die noch nicht geladen sind."
     }
   },
   "feedManager": {

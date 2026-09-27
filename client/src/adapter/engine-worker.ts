@@ -39,6 +39,7 @@ import init, {
   clear_game_state,
   set_multiplayer_mode,
   estimate_bracket_for_deck,
+  selectAiPod,
   deck_signals_for_deck,
   has_replay_recording,
   export_replay_log,
@@ -60,6 +61,7 @@ import type {
   InteractionSubmission,
 } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimateRequest } from "../types/bracketEstimate";
+import type { AiDeckCandidateWire, PodSelectionRequest } from "../types/podSelection";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
@@ -125,6 +127,12 @@ type EngineRequest =
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "projectSeatView"; id: number; stateJson: string }
   | { type: "estimateBracketForDeck"; id: number; request: BracketEstimateRequest }
+  | {
+      type: "selectAiPod";
+      id: number;
+      candidates: AiDeckCandidateWire[];
+      request: PodSelectionRequest;
+    }
   | { type: "deckSignalsForDeck"; id: number; deck: BracketDeckRequest }
   | { type: "hasReplayRecording"; id: number }
   | { type: "exportReplayLog"; id: number }
@@ -646,6 +654,11 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         // ensured that the card database is loaded.
         const estimate = estimate_bracket_for_deck(msg.request);
         result(msg.id, estimate ?? null);
+        break;
+      }
+
+      case "selectAiPod": {
+        result(msg.id, selectAiPod(msg.candidates, msg.request));
         break;
       }
 

@@ -28,6 +28,19 @@ import type { DirectorySource } from "../../services/serverDirectory";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
+  aiDeckCandidateToWire,
+  POD_SELECTION_CONSTRAINTS,
+  podConstraintI18nKey,
+  podSelectionErrorMessage,
+  podSelectionSeed,
+  selectPod,
+} from "../../services/podSelection";
+import type {
+  PodAssignment,
+  PodSelectionRequest,
+} from "../../types/podSelection";
+import { BRACKET_TIER_NUMERIC } from "../../types/bracketEstimate";
+import {
   deleteSavedCustomFormat,
   loadSavedCustomFormats,
   saveCustomFormat,
@@ -373,6 +386,8 @@ export function HostSetup({
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
   const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [podAssignment, setPodAssignment] = useState<PodAssignment | null>(null);
+  const [podError, setPodError] = useState<string | null>(null);
 
   // ── Axis A: saved custom formats (client-persisted) ────────────────────
   // `savedCustomFormatId` is what identifies WHICH saved definition is active:
@@ -399,9 +414,6 @@ export function HostSetup({
     selectedFormat: formatConfig.format,
     selectedMatchType: effectiveMatchType,
   });
-  const defaultAiDeck = aiDeckCatalog.candidates[0]
-    ? { type: "DeckList" as const, data: expandParsedDeck(aiDeckCatalog.candidates[0].deck) }
-    : null;
   const aiSeatsSupported = !formatConfig.team_based && formatConfig.format !== "Planechase";
   const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
 
@@ -615,6 +627,7 @@ export function HostSetup({
     // the belt-and-braces guard for a programmatic form submit.
     if (isResolvingFormat) return;
     setIsSubmitting(true);
+    setPodError(null);
     // `finalConfig` is the submission payload — `max_players` here is the
     // user's chosen count, not the format ceiling. Do NOT mirror this
     // into the store: the store tracks the format's invariants (so the
@@ -654,6 +667,61 @@ export function HostSetup({
       aiSeats: effectiveAiSeats,
     });
     try {
+      let submittedAiSeats = effectiveAiSeats;
+      if (effectiveAiSeats.length > 0 && formatConfig.uses_commander) {
+        if (aiDeckCatalog.candidates.length === 0) {
+          submittedAiSeats = effectiveAiSeats.map((seat) => ({
+            ...seat,
+            deck: { type: "Random" as const },
+          }));
+          setPodAssignment(null);
+        } else {
+          const cedhMode = effectiveAiSeats.some((seat) => seat.difficulty === "CEDH");
+          const request: PodSelectionRequest = {
+            allowed: cedhMode ? ["cedh"] : [],
+            prefer: cedhMode ? "cedh" : null,
+            enforcement: cedhMode ? "hard_gate" : "advisory",
+            seats: effectiveAiSeats.length,
+            constraints: [...POD_SELECTION_CONSTRAINTS],
+            coverage_floor_pct: 0,
+            archetype: null,
+            seed: podSelectionSeed(),
+            occupied: [],
+          };
+          const outcome = await selectPod(
+            aiDeckCatalog.candidates.map(aiDeckCandidateToWire),
+            request,
+          );
+          if (outcome.kind === "card-data-unavailable") {
+            throw new Error(t("menu:gameProvider.podSelectionRefused.cardDataUnavailable"));
+          }
+          if (outcome.kind === "refused") {
+            throw new Error(podSelectionErrorMessage(t, outcome.error));
+          }
+          setPodAssignment(outcome.assignment);
+          submittedAiSeats = effectiveAiSeats.map((seat, index) => {
+            const assigned = outcome.assignment.seats[index];
+            const candidate = aiDeckCatalog.candidates.find(
+              (entry) => entry.id === assigned?.candidate_id,
+            );
+            if (!candidate) {
+              throw new Error(t("menu:gameProvider.podSelectionRefused.cardDataUnavailable"));
+            }
+            return {
+              ...seat,
+              deck: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
+            };
+          });
+        }
+      } else if (effectiveAiSeats.length > 0) {
+        const [firstCandidate] = aiDeckCatalog.candidates;
+        submittedAiSeats = effectiveAiSeats.map((seat) => ({
+          ...seat,
+          ...(firstCandidate
+            ? { deck: { type: "DeckList" as const, data: expandParsedDeck(firstCandidate.deck) } }
+            : {}),
+        }));
+      }
       const ok = await onHost(
         {
           displayName,
@@ -663,10 +731,7 @@ export function HostSetup({
           formatConfig: finalConfig,
           matchType: effectiveMatchType,
           loopDetection,
-          aiSeats: effectiveAiSeats.map((seat) => ({
-            ...seat,
-            ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
-          })),
+          aiSeats: submittedAiSeats,
           startWhenFull,
           ranked: false,
           roomName: resolvedRoomName,
@@ -678,8 +743,9 @@ export function HostSetup({
         isP2P ? null : selected,
       );
       if (ok !== false) return;
-    } catch {
+    } catch (error) {
       // The parent surfaces the specific failure as a toast/dialog.
+      setPodError(error instanceof Error ? error.message : String(error));
     }
     if (hostingStatus === "idle") {
       setIsSubmitting(false);
@@ -805,8 +871,7 @@ export function HostSetup({
     || customFormatHostUnavailable
     || isSubmitting
     || isResolvingFormat
-    || hostingStatus !== "idle"
-    || (effectiveAiSeats.length > 0 && !defaultAiDeck);
+    || hostingStatus !== "idle";
 
   return (
     <form
@@ -1229,6 +1294,38 @@ export function HostSetup({
                   );
                 })}
               </div>
+              {podAssignment && podAssignment.relaxations.length > 0 && (
+                <div className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100">
+                  <div className="mb-1 font-semibold">
+                    {t("menu:aiOpponent.podRelaxation.heading")}
+                  </div>
+                  {podAssignment.relaxations.map((relaxation, index) => {
+                    const key = podConstraintI18nKey(relaxation.relaxed);
+                    if (!key) return null;
+                    const seat = podAssignment.seats.find(
+                      (entry) => entry.seat_index === relaxation.seat_index,
+                    );
+                    const tier = seat?.tier ?? null;
+                    const translationKey =
+                      key === "bracketDistance" && tier === null
+                        ? "bracketDistanceNoTier"
+                        : key;
+                    return (
+                      <div key={`${relaxation.seat_index}-${index}`}>
+                        {t(`menu:aiOpponent.podRelaxation.${translationKey}`, {
+                          seat: relaxation.seat_index + 1,
+                          ...(tier === null ? {} : { tier: BRACKET_TIER_NUMERIC[tier] }),
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {podError && (
+                <div className="mt-3 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-100">
+                  {podError}
+                </div>
+              )}
             </div>
           )}
 

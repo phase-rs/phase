@@ -24,7 +24,9 @@ vi.mock("../bracketEstimate", () => ({
 /** Stub the bracket service so `resolveBracket` receives the given estimate. */
 function stubBracketEstimate(estimate: BracketEstimate | null): void {
   vi.mocked(estimateDeckBracket).mockResolvedValue(
-    estimate ? { kind: "estimate", estimate } : { kind: "no-commander" },
+    estimate
+      ? { kind: "estimate", estimate: { ...estimate, data_version: "test-1" } }
+      : { kind: "no-commander" },
   );
 }
 
@@ -246,6 +248,7 @@ describe("buildLegalAiDeckCatalog", () => {
 
     const candidate = catalog.candidates.find((c) => c.id === "saved:Tagged Commander");
     expect(candidate?.bracket).toBe(4);
+    expect(candidate?.bracketProvenance).toBe("declared");
   });
 
   it("falls back to the engine bracket estimate for untagged Commander decks", async () => {
@@ -263,6 +266,8 @@ describe("buildLegalAiDeckCatalog", () => {
 
     const candidate = catalog.candidates.find((c) => c.id === "saved:Estimated Commander");
     expect(candidate?.bracket).toBe(4); // "optimized" → 4
+    expect(candidate?.bracketProvenance).toBe("estimated");
+    expect(candidate?.bracketDataVersion).toBe("test-1");
   });
 
   it("leaves an untagged deck null when card data is unavailable", async () => {
@@ -296,8 +301,11 @@ describe("buildLegalAiDeckCatalog", () => {
     });
 
     const candidate = catalog.candidates.find((c) => c.id === "saved:Tagged Over Estimate");
-    // Human-declared bracket 2 wins; the cEDH (5) estimate is not consulted.
+    // Human-declared bracket 2 wins; the estimate supplies only the current
+    // bracket-list data version used to validate declaration provenance.
     expect(candidate?.bracket).toBe(2);
+    expect(candidate?.bracketProvenance).toBe("declared");
+    expect(candidate?.bracketDataVersion).toBe("test-1");
   });
 
   it("validates Commander precons through the engine's compatibility check (banned cards filtered)", async () => {
@@ -426,6 +434,7 @@ describe("bundled cEDH decks", () => {
 
   it("filterByBracket(5) surfaces the bundled cEDH demo deck through the legal AI catalog", async () => {
     vi.mocked(loadPreconDeckMap).mockResolvedValue(null);
+    stubBracketEstimate({ tier: "cedh" } as BracketEstimate);
 
     const catalog = await buildLegalAiDeckCatalog({
       selectedFormat: "Commander",
@@ -437,6 +446,8 @@ describe("bundled cEDH decks", () => {
     expect(demo).toBeDefined();
     expect(demo?.source.type).toBe("precon");
     expect(demo?.bracket).toBe(CEDH_BRACKET);
+    expect(demo?.bracketProvenance).toBe("declared");
+    expect(demo?.bracketDataVersion).toBe("test-1");
   });
 });
 
@@ -453,6 +464,8 @@ function makeCandidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckC
     coveragePct: null,
     archetype: null,
     bracket,
+    bracketProvenance: bracket === null ? null : "declared",
+    bracketDataVersion: bracket === null ? null : "test-1",
   };
 }
 
