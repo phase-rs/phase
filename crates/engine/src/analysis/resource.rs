@@ -9704,6 +9704,111 @@ mod tests {
         assert_eq!((paid_after_hojo(a), paid_after_hojo(b)), (0, 2));
     }
 
+    /// CR 611.3a + CR 701.27a: two first-activation definitions on ONE object
+    /// never mask each other. The object's front face carries active modifier A
+    /// (keyed to boast abilities), its back face dormant modifier B (Hojo's,
+    /// keyed to any activated ability). A tap activation targeting P0's creature
+    /// qualifies for B, not A: state B (which has that row) and state A (which
+    /// doesn't) must compare UNEQUAL, because once the object transforms the same
+    /// activation costs {0} in A and {2} in B (the production reach guard).
+    #[test]
+    fn two_first_activation_definitions_on_one_object_are_projected_separately() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::scenario::{GameRunner, GameScenario};
+        use crate::types::ability::TargetRef;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::{CardType, CoreType};
+        use crate::types::mana::{ManaColor, ManaUnit};
+        use crate::types::statics::StaticMode;
+        const HOJO: &str = "The first activated ability you activate during your turn that targets a creature you control costs {2} less to activate.";
+
+        let modifier_b =
+            crate::parser::oracle_static::parse_static_line(HOJO).expect("Hojo's line parses");
+        let mut modifier_a = modifier_b.clone();
+        let StaticMode::ReduceAbilityCost { keyword, .. } = &mut modifier_a.mode else {
+            panic!("reach guard: {:?}", modifier_a.mode);
+        };
+        *keyword = "boast".to_string();
+
+        let mut s = GameScenario::new_n_player(2, 7);
+        s.at_phase(Phase::PreCombatMain);
+        let own = s.add_creature(PlayerId(0), "Own", 1, 1).id();
+        let src = s
+            .add_artifact_from_oracle(PlayerId(0), "Tapper", "{2}: Tap target creature.")
+            .id();
+        let janus = s
+            .add_creature(PlayerId(0), "Janus Front", 2, 2)
+            .with_static_definition(modifier_a)
+            .id();
+        s.with_mana_pool(
+            PlayerId(0),
+            (0..10)
+                .map(|_| ManaUnit::new(ManaColor::Blue.into(), ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        let mut runner = s.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&janus)
+            .unwrap()
+            .back_face = Some(BackFaceData {
+            name: "Janus Back".to_string(),
+            power: Some(2),
+            toughness: Some(2),
+            card_types: CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            },
+            static_definitions: vec![modifier_b].into(),
+            ..Default::default()
+        });
+        let a = runner.state().clone();
+        let mut b = a.clone();
+        b.abilities_activated_this_turn_by_player.insert(
+            PlayerId(0),
+            im::Vector::from(vec![crate::game::casting::capture_activation_record_from(
+                &a,
+                PlayerId(0),
+                src,
+                None,
+                &[TargetRef::Object(own)],
+            )
+            .expect("the source exists")]),
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "the back face's modifier reads the row the front face's ignores (UNEQUAL)"
+        );
+
+        // Reach guard: transformed, the back face's modifier prices them apart.
+        let paid_after_transform = |state: GameState| {
+            let mut r = GameRunner::from_state(state);
+            crate::game::transform::transform_permanent(r.state_mut(), janus, &mut Vec::new())
+                .expect("the object transforms");
+            crate::game::layers::flush_layers(r.state_mut());
+            assert_eq!(r.state().objects[&janus].name, "Janus Back", "reach guard");
+            let before = r.state().players[0].mana_pool.total();
+            r.act(GameAction::ActivateAbility {
+                source_id: src,
+                ability_index: 0,
+            })
+            .expect("activation");
+            r.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(own)],
+            })
+            .expect("target");
+            while matches!(
+                r.state().waiting_for,
+                crate::types::game_state::WaitingFor::ManaPayment { .. }
+            ) {
+                r.act(GameAction::PassPriority).expect("pay");
+            }
+            before - r.state().players[0].mana_pool.total()
+        };
+        assert_eq!((paid_after_transform(a), paid_after_transform(b)), (0, 2));
+    }
+
     /// CR 602.5b: per-GAME ("Activate only once") gate preserved; sibling
     /// unrestricted ability projected out.
     #[test]

@@ -28457,18 +28457,24 @@ fn transient_reduce_ability_cost_present(state: &GameState) -> bool {
 /// CR 104.4b + CR 732.2a + CR 611.3a: the part of the activation journal a
 /// cost can observe, for a loop-equivalence projection. A "first … each turn"
 /// modifier (`frequency: OncePerTurn`) reads exactly one fact from the journal:
-/// the first row this turn that satisfies its gates, or that there is none. So
-/// that row is kept for each such modifier present, and every other row, which
-/// no cost reads, is dropped. Two positions on either side of the discount being
-/// spent then differ (so no certificate can repeat a one-time discount), while
-/// two positions after it keep the same row and still compare equal.
+/// the first row this turn that satisfies its gates, or that there is none.
 ///
-/// That narrowing is sound only for the modifiers in effect NOW. A dormant one
-/// (a Hojo in hand, on the stack, in a graveyard, on a back face, or on a
-/// permanent whose abilities don't currently function) reads the whole turn the
-/// moment it takes effect (CR 611.3a), so while any exists, every row is kept:
-/// two positions that differ only in earlier activations would otherwise
-/// compare equal and yet price the same later activation differently.
+/// So the projection keeps, for EVERY such definition that exists anywhere,
+/// that definition's own first qualifying row, and drops every other row. That
+/// covers modifiers in effect now and dormant ones alike (a Hojo in hand, on
+/// the stack, in a library or graveyard, on a back face, as a base static, or
+/// on a permanent whose abilities don't currently function), because a
+/// dormant one reads the whole turn the moment it takes effect (CR 611.3a).
+/// Each definition is judged on its own gates, so two definitions on one
+/// object never mask each other. Two positions on either side of a qualifying
+/// activation then differ, while rows no definition could read (an untap
+/// ability that targets nothing, with only Hojo around) are projected out and
+/// ordinary activation loops still compare equal.
+///
+/// Every gate is evaluable on a recorded row (the source and each target are
+/// snapshots, which `reduce_ability_cost_non_target_gates_admit` and
+/// `recorded_targets_match_filter` read), so no definition falls back to
+/// keeping every row.
 pub(crate) fn cost_observable_activation_journal(
     state: &GameState,
 ) -> HashMap<PlayerId, im::Vector<AbilityActivationRecord>> {
@@ -28476,12 +28482,10 @@ pub(crate) fn cost_observable_activation_journal(
         return HashMap::new();
     }
     let mut kept: Vec<&AbilityActivationRecord> = Vec::new();
-    let mut in_effect: HashSet<ObjectId> = HashSet::new();
     let mut keep_first = |reduce_mode: &StaticMode,
                           affected: Option<&TargetFilter>,
                           static_source_id: ObjectId,
-                          static_controller: PlayerId,
-                          ctx: &super::filter::FilterContext| {
+                          static_controller: PlayerId| {
         let StaticMode::ReduceAbilityCost {
             keyword,
             exemption,
@@ -28493,7 +28497,10 @@ pub(crate) fn cost_observable_activation_journal(
         else {
             return;
         };
-        in_effect.insert(static_source_id);
+        let ctx = super::filter::FilterContext::from_source_with_controller(
+            static_source_id,
+            static_controller,
+        );
         if let Some(row) = first_qualifying_activation_this_turn(
             state,
             keyword,
@@ -28503,62 +28510,44 @@ pub(crate) fn cost_observable_activation_journal(
             targets.as_ref(),
             static_source_id,
             static_controller,
-            ctx,
+            &ctx,
         ) {
             if !kept.iter().any(|seen| std::ptr::eq(*seen, row)) {
                 kept.push(row);
             }
         }
     };
-    if static_kind_present(state, StaticModeKind::ReduceAbilityCost) {
-        for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state)
-        {
-            let ctx = super::filter::FilterContext::from_source(state, static_source.id);
-            keep_first(
-                &def.mode,
-                def.affected.as_ref(),
-                static_source.id,
-                static_source.controller,
-                &ctx,
-            );
-        }
-    }
-    for tce in &state.transient_continuous_effects {
-        let ctx = super::filter::FilterContext::from_source_with_controller(
-            tce.source_id,
-            tce.controller,
-        );
-        for modification in &tce.modifications {
-            if let ContinuousModification::AddStaticMode { mode } = modification {
-                keep_first(
-                    mode,
-                    Some(&tce.affected),
-                    tce.source_id,
-                    tce.controller,
-                    &ctx,
-                );
+    for (id, obj) in state.objects.iter() {
+        let definitions = obj
+            .static_definitions
+            .iter_all()
+            .chain(obj.base_static_definitions.iter())
+            .chain(
+                obj.back_face
+                    .iter()
+                    .flat_map(|face| face.static_definitions.iter_all()),
+            )
+            .filter(|def| is_first_activation_modifier(&def.mode));
+        for def in definitions {
+            // CR 109.5: "you" is the static's controller. A dormant object's
+            // future controller isn't known: it is its current controller or,
+            // once it changes zones, usually its owner. Both are judged, and
+            // either one's first qualifying row is kept (over-keeping can only
+            // make positions compare unequal, never equal).
+            keep_first(&def.mode, def.affected.as_ref(), *id, obj.controller);
+            if obj.owner != obj.controller {
+                keep_first(&def.mode, def.affected.as_ref(), *id, obj.owner);
             }
         }
     }
-    // CR 611.3a: a dormant first-activation modifier will read every row.
-    let dormant = state.objects.iter().any(|(id, obj)| {
-        !in_effect.contains(id)
-            && obj
-                .static_definitions
-                .iter_all()
-                .chain(obj.base_static_definitions.iter())
-                .chain(
-                    obj.back_face
-                        .iter()
-                        .flat_map(|face| face.static_definitions.iter_all()),
-                )
-                .any(|def| is_first_activation_modifier(&def.mode))
-    });
-    if dormant {
-        return state
-            .abilities_activated_this_turn_by_player
-            .as_ref()
-            .clone();
+    // CR 611.2 + CR 608.2c: a duration-scoped modifier latches its installing
+    // controller.
+    for tce in &state.transient_continuous_effects {
+        for modification in &tce.modifications {
+            if let ContinuousModification::AddStaticMode { mode } = modification {
+                keep_first(mode, Some(&tce.affected), tce.source_id, tce.controller);
+            }
+        }
     }
     let mut journal: HashMap<PlayerId, im::Vector<AbilityActivationRecord>> = HashMap::new();
     for (player, rows) in state.abilities_activated_this_turn_by_player.iter() {
@@ -28574,7 +28563,7 @@ pub(crate) fn cost_observable_activation_journal(
     journal
 }
 
-/// CR 611.3a: a "first activated ability ? each turn" cost modifier, the one
+/// CR 611.3a: a "first activated ability … each turn" cost modifier, the one
 /// kind of modifier that reads the turn's activation journal.
 fn is_first_activation_modifier(mode: &StaticMode) -> bool {
     matches!(
