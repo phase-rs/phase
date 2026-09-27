@@ -11875,8 +11875,7 @@ pub(super) fn parse_imperative_family_ast(
     }
 
     // NOTE: when adding verbs here, also add them to CLAUSE_HEAD_VERBS in
-    // oracle_effect/gap_diagnosis.rs, which mirrors this dispatch table (and which the
-    // parser gap analyzer reads, so a verb missing there is a misclassified gap).
+    // oracle_effect/gap_diagnosis.rs, which mirrors this dispatch table.
     match first_word {
         // ── Unambiguous single-category verbs ──
 

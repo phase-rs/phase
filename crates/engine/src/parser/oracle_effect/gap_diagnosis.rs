@@ -815,8 +815,7 @@ fn bound_operand<'a>(operand: &'a str, bounds: &[&str]) -> &'a str {
 // C) Pre-dispatch verbs from parse_effect_clause and lower_imperative_clause
 //
 // (B) and (C) are CLAUSE_HEAD_VERBS below. This is the ONE definition in the workspace:
-// it lives beside the dispatcher it mirrors, and `game::gap_analysis` imports
-// `is_clause_head_verb` from here rather than keeping a second copy.
+// it lives beside the dispatcher it mirrors.
 //
 // NOTE: when adding verbs to parse_imperative_family_ast, also add them here.
 
