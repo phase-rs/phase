@@ -773,7 +773,7 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     });
   });
 
-  it("splits stacks by band membership (CR 702.22h)", () => {
+  it("splits stacks by band membership (CR 702.22c)", () => {
     // Isolate the band axis: three of blocker 100's legal targets share every
     // other axis (Player target, no requirement, no must-block/must-be-blocked,
     // no other blocker assigned) but differ only by band.
@@ -811,6 +811,86 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
       type: "DeclareBlockers",
       data: { assignments: [[100, 14]] },
     });
+  });
+
+  it("merges a band-mate into the same 'Blocked by' stack instead of showing it as a separate Unblocked stack (CR 702.22h)", () => {
+    // Attackers 14 and 15 share band 5 and both attack Player 0 (their
+    // DEFAULT_ATTACKERS target already), isolating the propagation axis.
+    const bandedAttackers: AttackerInfo[] = DEFAULT_ATTACKERS.map((attacker) =>
+      attacker.object_id === 14 || attacker.object_id === 15
+        ? { ...attacker, band_id: 5 }
+        : attacker,
+    );
+    const { container } = renderBoard(
+      blockersPrompt({
+        valid_block_targets: { 100: [14, 15], 101: [14, 15] },
+        block_requirements: {},
+        must_be_blocked_targets: {},
+      }),
+      bandedAttackers,
+    );
+
+    // Blocker 101 assigns the band (claims lowest-id member 14).
+    clickPermanent(container, 101);
+    fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
+    const bandStackFor101 = groupWhere((label) => label.includes("Band 1"));
+    fireEvent.click(within(bandStackFor101).getByRole("button", { name: "+1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Blockers (1)" }));
+
+    // The collapsed pile's blocked-count badge already counts BOTH band-mates
+    // here even though only 14 is directly assigned a blocker — 15 is blocked
+    // too via CR 702.22h band propagation.
+    expect(screen.getByText("blk 2")).toBeInTheDocument();
+
+    // Blocker 100's picker must show ONE stack covering both band-mates,
+    // labeled "Blocked by Runeclaw Bear" — never a second "Unblocked" stack
+    // for 15, which CR 702.22h also blocks the moment 14 is.
+    clickPermanent(container, 100);
+    expect(screen.getAllByRole("group")).toHaveLength(1);
+    const blockedBandGroup = groupWhere((label) => label.includes("Blocked by Runeclaw Bear"));
+    expect(blockedBandGroup.getAttribute("aria-label")).not.toContain("Unblocked");
+    expect(within(blockedBandGroup).getByText("0 / 2")).toBeInTheDocument();
+
+    fireEvent.click(within(blockedBandGroup).getByRole("button", { name: "All" }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirm Blockers/ }));
+    expect(dispatchAction).toHaveBeenLastCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: [[101, 14], [100, 14], [100, 15]] },
+    });
+  });
+
+  it("keeps a band's ordinal stable across different pending blockers instead of renumbering per picker (CR 702.22c)", () => {
+    const bandedAttackers: AttackerInfo[] = DEFAULT_ATTACKERS.map((attacker) => {
+      if (attacker.object_id === 14) return { ...attacker, band_id: 5 };
+      if (attacker.object_id === 16) return { ...attacker, band_id: 2, attack_target: { type: "Player", data: 0 } };
+      if (attacker.object_id === 17) return { ...attacker, band_id: null, attack_target: { type: "Player", data: 0 } };
+      return attacker;
+    });
+    const { container } = renderBoard(
+      blockersPrompt({
+        // Blocker 100 never sees band 2 (member 16) at all — only band 5.
+        valid_block_targets: { 100: [14, 17], 101: [14, 16, 17] },
+        block_requirements: {},
+        must_be_blocked_targets: {},
+      }),
+      bandedAttackers,
+    );
+
+    clickPermanent(container, 100);
+    fireEvent.click(screen.getByRole("button", { name: "Choose Scute Swarm token" }));
+    // Ordinals are assigned over every attacker in combat (ascending band id:
+    // 2 then 5), not just this picker's own stacks — so band 5 (member 14)
+    // reads "Band 2" even though blocker 100's picker has no "Band 1" stack.
+    const bandTwoFor100 = groupWhere((label) => label.includes("Band 2"));
+    expect(within(bandTwoFor100).getByText("0 / 1")).toBeInTheDocument();
+
+    clickPermanent(container, 101);
+    // Switching to blocker 101 (whose stacks add band 2, member 16) must not
+    // renumber band 5: it stays "Band 2".
+    const bandOneFor101 = groupWhere((label) => label.includes("Band 1"));
+    const bandTwoFor101 = groupWhere((label) => label.includes("Band 2"));
+    expect(within(bandOneFor101).getByText("0 / 1")).toBeInTheDocument();
+    expect(within(bandTwoFor101).getByText("0 / 1")).toBeInTheDocument();
   });
 
   it("offers no picker on the pile when the prompt belongs to another player", () => {

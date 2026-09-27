@@ -8,6 +8,7 @@ import {
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   attackTargetsForAttacker,
+  bandMateIdsByAttacker,
   blockTargetSelection,
   type BlockTargetStack,
   buildAttacks,
@@ -334,7 +335,7 @@ describe("partitionBlockTargets", () => {
     expect(forOtherBlocker[0]).toMatchObject({ ids: [11, 12], mustBeBlocked: false });
   });
 
-  it("splits by band membership (CR 702.22h), and does not split a bandless member from another bandless one", () => {
+  it("splits by band membership (CR 702.22c), and does not split a bandless member from another bandless one", () => {
     const stacks = partitionBlockTargets([11, 12, 13, 14], 100, {
       attackers: [
         attacker(11, P1, 1),
@@ -392,6 +393,56 @@ describe("partitionBlockTargets", () => {
 
     expect(stacks).toHaveLength(1);
     expect(stacks[0].ids).toEqual([11]);
+  });
+
+  it("propagates a blocker assigned to one band member onto its band-mate's otherBlockerIds, merging them into one stack (CR 702.22h)", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[101, new Set([14])]]);
+    const stacks = partitionBlockTargets([14, 15], 100, {
+      attackers: [attacker(14, P1, 5), attacker(15, P1, 5)],
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    // Without band propagation this would split into a {14} stack reporting
+    // otherBlockerIds [101] and a {15} stack wrongly reporting [] (unblocked).
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]).toMatchObject({ ids: [14, 15], otherBlockerIds: [101], bandId: 5 });
+  });
+
+  it("does not propagate a blocker assignment across bandless attackers", () => {
+    const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[101, new Set([14])]]);
+    const stacks = partitionBlockTargets([14, 15], 100, {
+      attackers: [attacker(14, P1, null), attacker(15, P1, null)],
+      blockerAssignments,
+      blockRequirements: undefined,
+      blockerConstraints: undefined,
+      mustBeBlockedTargets: undefined,
+    });
+
+    expect(stacks).toHaveLength(2);
+    expect(stacks.find((s) => s.ids.includes(14))).toMatchObject({ otherBlockerIds: [101] });
+    expect(stacks.find((s) => s.ids.includes(15))).toMatchObject({ otherBlockerIds: [] });
+  });
+});
+
+describe("bandMateIdsByAttacker", () => {
+  it("maps each banded attacker to every attacker sharing its band, including itself (CR 702.22c)", () => {
+    const map = bandMateIdsByAttacker([attacker(11, P1, 1), attacker(12, P1, 1), attacker(13, P1, 2)]);
+    expect(map.get(11)).toEqual(new Set([11, 12]));
+    expect(map.get(12)).toEqual(new Set([11, 12]));
+    expect(map.get(13)).toEqual(new Set([13]));
+  });
+
+  it("maps a bandless attacker to only itself", () => {
+    const map = bandMateIdsByAttacker([attacker(11, P1, null), attacker(12, P1)]);
+    expect(map.get(11)).toEqual(new Set([11]));
+    expect(map.get(12)).toEqual(new Set([12]));
+  });
+
+  it("returns an empty map for undefined attackers", () => {
+    expect(bandMateIdsByAttacker(undefined).size).toBe(0);
   });
 });
 

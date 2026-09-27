@@ -152,10 +152,10 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
-    // CR 509.1a: combat.rs::get_valid_block_targets keeps only attackers this
-    // defender's blockers may legally block, so the union of every value here
-    // is already seat-scoped — an attacker aimed at another opponent never
-    // appears in this player's own DeclareBlockers prompt.
+    // CR 509.1a: combat.rs::get_valid_block_targets_for_player keeps only
+    // attackers this defender's blockers may legally block, so the union of
+    // every value here is already seat-scoped — an attacker aimed at another
+    // opponent never appears in this player's own DeclareBlockers prompt.
     if (waitingFor?.type === "DeclareBlockers") {
       for (const attackerIds of Object.values(waitingFor.data.valid_block_targets)) {
         for (const objectId of attackerIds) {

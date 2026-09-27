@@ -4,7 +4,8 @@ interface BoardInteractionState {
   activatableObjectIds: Set<number>;
   /** Attackers this defender's blockers may legally block: the union of the
    *  current `DeclareBlockers` prompt's `valid_block_targets` values
-   *  (CR 509.1a; already seat-scoped by `combat.rs::get_valid_block_targets`).
+   *  (CR 509.1a; already seat-scoped by
+   *  `combat.rs::get_valid_block_targets_for_player`).
    *  Empty outside a `DeclareBlockers` prompt. */
   blockableAttackerIds: Set<number>;
   boardChoiceObjectIds: Set<number>;

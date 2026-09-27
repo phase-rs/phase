@@ -309,9 +309,11 @@ export interface BlockTargetStack {
   /** CR 509.1a: the attack target shared by every member of this stack. */
   attackTarget: AttackTarget;
   /** Other blockers (never the pending one) already assigned to every member
-   *  of this stack, ascending. A double block onto an already-blocked
-   *  attacker is a different choice than a fresh block (CR 702.111b menace
-   *  needs two or more on the SAME attacker). */
+   *  of this stack, ascending — including blockers assigned only to a
+   *  band-mate (CR 702.22h: a block on one band member blocks the rest of the
+   *  band too). A double block onto an already-blocked attacker is a
+   *  different choice than a fresh block (CR 702.111b menace needs two or
+   *  more on the SAME attacker). */
   otherBlockerIds: ObjectId[];
   /** CR 509.1b / CR 702.111b: the minimum-blocker count this stack's members
    *  require, 0 when none applies. */
@@ -322,13 +324,39 @@ export interface BlockTargetStack {
   /** CR 509.1c: every member of this stack carries a "must be blocked"
    *  static that the pending blocker's block would obey. */
   mustBeBlocked: boolean;
-  /** CR 702.22h: the band every member of this stack shares, or `null` when
+  /** CR 702.22c: the band every member of this stack shares, or `null` when
    *  none of them is banded. */
   bandId: number | null;
   /** Members of this stack already assigned to the pending blocker,
    *  ascending — kept in their stack rather than split out, so growing or
    *  shrinking the count can find them. */
   assignedIds: ObjectId[];
+}
+
+/**
+ * CR 702.22h: once one attacker in a band is blocked, every other attacker in
+ * the same band becomes blocked by that same blocker. Maps each attacker's
+ * object id to the full set of ids a block is shared with — every band-mate
+ * (including itself, from CR 702.22c band membership) for a banded attacker,
+ * or just itself when bandless — so callers can treat a blocker assignment on
+ * any band-mate as a block on the attacker itself.
+ */
+export function bandMateIdsByAttacker(
+  attackers: AttackerInfo[] | undefined,
+): Map<ObjectId, Set<ObjectId>> {
+  const idsByBand = new Map<number, ObjectId[]>();
+  for (const attacker of attackers ?? []) {
+    if (attacker.band_id == null) continue;
+    const mates = idsByBand.get(attacker.band_id);
+    if (mates) mates.push(attacker.object_id);
+    else idsByBand.set(attacker.band_id, [attacker.object_id]);
+  }
+  const result = new Map<ObjectId, Set<ObjectId>>();
+  for (const attacker of attackers ?? []) {
+    const mates = attacker.band_id != null ? idsByBand.get(attacker.band_id) : undefined;
+    result.set(attacker.object_id, new Set(mates ?? [attacker.object_id]));
+  }
+  return result;
 }
 
 /**
@@ -360,6 +388,7 @@ export function partitionBlockTargets(
     attackTargetById.set(attacker.object_id, attacker.attack_target);
     bandIdById.set(attacker.object_id, attacker.band_id ?? null);
   }
+  const bandMates = bandMateIdsByAttacker(attackers);
   const pendingConstraint = blockerConstraints?.[pendingBlocker];
   const mustBlockIds = new Set(
     pendingConstraint?.kind === "MustBlock" ? pendingConstraint.attackers ?? [] : [],
@@ -387,8 +416,17 @@ export function partitionBlockTargets(
     // and this stack cannot label the member, so it is dropped defensively
     // rather than guessing a target.
     if (!attackTarget) continue;
+    // CR 702.22h: a blocker assigned to any band-mate of `id` blocks `id`
+    // too, so band-mates that are blocked the same way merge into one stack
+    // instead of a "Blocked by ..." stack and a spurious "Unblocked" stack
+    // for the rest of the band.
+    const mates = bandMates.get(id) ?? new Set([id]);
     const otherBlockerIds = Array.from(blockerAssignments.entries())
-      .filter(([blockerId, attackerIds]) => blockerId !== pendingBlocker && attackerIds.has(id))
+      .filter(
+        ([blockerId, attackerIds]) =>
+          blockerId !== pendingBlocker
+          && Array.from(mates).some((mateId) => attackerIds.has(mateId)),
+      )
       .map(([blockerId]) => blockerId)
       .sort((a, b) => a - b);
     const minBlockers = blockRequirements?.[id]?.count ?? 0;

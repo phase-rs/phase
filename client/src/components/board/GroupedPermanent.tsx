@@ -27,7 +27,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { type BlockerAssignments, useUiStore } from "../../stores/uiStore.ts";
-import { blockTargetSelection, partitionBlockTargets } from "../../utils/combat.ts";
+import { bandMateIdsByAttacker, blockTargetSelection, partitionBlockTargets } from "../../utils/combat.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { PermanentCard } from "./PermanentCard.tsx";
 import { type GroupRenderMode, groupStaggerPx, type BattlefieldRowType } from "./groupRenderMode.ts";
@@ -209,12 +209,18 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   const selectedTapCount = group.ids.filter((id) => selectedCardIds.includes(id)).length;
   const assignedBlockerCount = group.ids.filter((id) => blockerAssignments.has(id)).length;
   const committedAttackerCount = group.ids.filter((id) => committedAttackerIds.has(id)).length;
+  const bandMates = useMemo(() => bandMateIdsByAttacker(combatAttackers), [combatAttackers]);
   // Members already assigned at least one blocker, so a defender can see block
-  // progress on a collapsed attacking pile without expanding it.
+  // progress on a collapsed attacking pile without expanding it. CR 702.22h: a
+  // block assigned only to a band-mate counts too, since the whole band
+  // becomes blocked with it.
   const blockedAttackerCount = combatMode === "blockers"
-    ? group.ids.filter((id) =>
-        Array.from(blockerAssignments.values()).some((attackerIds) => attackerIds.has(id)),
-      ).length
+    ? group.ids.filter((id) => {
+        const mates = bandMates.get(id) ?? new Set([id]);
+        return Array.from(blockerAssignments.values()).some((attackerIds) =>
+          Array.from(mates).some((mateId) => attackerIds.has(mateId)),
+        );
+      }).length
     : 0;
   const canOpenPicker = pickerContext != null;
 
@@ -785,15 +791,21 @@ function BlockTargetGroupControls({
     [eligibleIds, blockerId, combatAttackers, blockerAssignments, waitingFor],
   );
 
-  // CR 702.22h: label bands by a stable 1-based ordinal over the distinct
-  // band ids present here (ascending), so two stacks differing only by band
-  // read as "Band 1" / "Band 2" rather than the engine's internal id.
+  // CR 702.22c: label bands by a stable 1-based ordinal over the distinct
+  // band ids across every attacker in the current combat (ascending) — not
+  // just this picker's own stacks — so a band keeps the same number across
+  // different pending blockers and different piles instead of renumbering
+  // per picker.
   const bandOrdinals = useMemo(() => {
     const distinctBandIds = Array.from(
-      new Set(stacks.map((stack) => stack.bandId).filter((id): id is number => id !== null)),
+      new Set(
+        (combatAttackers ?? [])
+          .map((attacker) => attacker.band_id ?? null)
+          .filter((id): id is number => id !== null),
+      ),
     ).sort((a, b) => a - b);
     return new Map(distinctBandIds.map((id, index) => [id, index + 1]));
-  }, [stacks]);
+  }, [combatAttackers]);
 
   const blockerName = objects?.[blockerId]?.name ?? t("attackTargetPicker.objectFallback", { id: blockerId });
 

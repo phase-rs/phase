@@ -208,8 +208,8 @@ describe("GameBoard publishes the shared activation affordances to its consumers
     expect(probe.getAttribute("data-mana")).toBe("");
   });
 
-  // CR 509.1a: `combat.rs::get_valid_block_targets` keeps only attackers this
-  // defender's blockers may legally block, so the union of the prompt's
+  // CR 509.1a: `combat.rs::get_valid_block_targets_for_player` keeps only
+  // attackers this defender's blockers may legally block, so the union of the prompt's
   // `valid_block_targets` values is already seat-scoped. Attacker 999 is a
   // real `combat.attackers` entry (aimed at a different opponent) that
   // appears in no `valid_block_targets` value, so it must be absent from the
