@@ -20,6 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
+use engine::ai_deck_manifest::AiDeckManifest;
 use engine::ai_support::{
     activation_block_reasons_for_viewer as engine_activation_block_reasons_for_viewer,
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
@@ -98,6 +99,7 @@ type SharedState = Arc<Mutex<SessionManager>>;
 type SharedConnections =
     Arc<Mutex<HashMap<String, HashMap<PlayerId, mpsc::UnboundedSender<ServerMessage>>>>>;
 type SharedDb = Arc<CardDatabase>;
+type SharedAiDeckManifest = Arc<AiDeckManifest>;
 /// The lobby registry, wrapped in the WASM-safe [`Broker`]. LobbyOnly broker
 /// dispatch goes through `Broker::handle`/`on_disconnect`/`reap_expired`;
 /// Full-mode and draft lobby-listing operations call through
@@ -757,7 +759,7 @@ impl Default for Limits {
 /// are, and where a refusal gets counted. Threaded through the socket handlers
 /// rather than held in a global so tests can drive a handler at a small cap
 /// without perturbing the rest of the suite.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ServerContext {
     limits: Limits,
     /// Ordinal of this replica within its StatefulSet, from `--replica-ordinal`.
@@ -766,6 +768,18 @@ struct ServerContext {
     /// has no way to turn a label back into a number.
     replica_ordinal: Option<u32>,
     metrics: Arc<metrics::ServerMetrics>,
+    ai_deck_manifest: SharedAiDeckManifest,
+}
+
+impl Default for ServerContext {
+    fn default() -> Self {
+        Self {
+            limits: Limits::default(),
+            replica_ordinal: None,
+            metrics: Arc::new(metrics::ServerMetrics::default()),
+            ai_deck_manifest: Arc::new(AiDeckManifest::bundled().clone()),
+        }
+    }
 }
 
 // The lobby-only broker capacity cap (`MAX_LOBBY_ENTRIES`) now lives in
@@ -964,6 +978,33 @@ fn select_card_data_source(data_dir: &Path, dev_fixture: bool) -> Result<CardDat
         "card-data.json is missing from {}; startup data bootstrap did not provide it",
         data_dir.display()
     ))
+}
+
+fn load_ai_deck_manifest(data_dir: &Path) -> Result<AiDeckManifest, String> {
+    let override_path = data_dir.join("ai-commander-decks.json");
+    if override_path.is_file() {
+        let manifest = AiDeckManifest::from_json_path(&override_path).map_err(|error| {
+            format!(
+                "failed to load AI Commander deck manifest {}: {error}",
+                override_path.display()
+            )
+        })?;
+        info!(
+            path = %override_path.display(),
+            version = %manifest.version,
+            decks = manifest.decks.len(),
+            "AI Commander deck manifest loaded from data directory"
+        );
+        return Ok(manifest);
+    }
+
+    let manifest = AiDeckManifest::bundled().clone();
+    info!(
+        version = %manifest.version,
+        decks = manifest.decks.len(),
+        "bundled AI Commander deck manifest loaded"
+    );
+    Ok(manifest)
 }
 
 fn bootstrap_required(data_dir: &Path, dev_fixture: bool) -> bool {
@@ -2018,13 +2059,14 @@ async fn serve() {
         ServerMode::Full
     };
     info!(?mode, "server mode selected");
-    let server_context = ServerContext {
+    let mut server_context = ServerContext {
         limits: Limits {
             max_connections: cli.max_connections,
             max_games: cli.max_games,
         },
         replica_ordinal: cli.replica_ordinal,
         metrics: Arc::new(metrics::ServerMetrics::default()),
+        ai_deck_manifest: Arc::new(AiDeckManifest::bundled().clone()),
     };
     info!(
         max_connections = server_context.limits.max_connections,
@@ -2069,6 +2111,9 @@ async fn serve() {
     };
     info!(cards = card_db.card_count(), "card database loaded");
     let db: SharedDb = Arc::new(card_db);
+    let ai_deck_manifest: SharedAiDeckManifest =
+        Arc::new(load_ai_deck_manifest(data_path).unwrap_or_else(|message| fatal_startup(message)));
+    server_context.ai_deck_manifest = ai_deck_manifest;
 
     // Initialize SQLite persistence. `games_db` overrides the in-data-dir
     // default so the shell can keep saved games outside the per-version data
@@ -4860,25 +4905,123 @@ fn ai_seat_setups(
     pc: u8,
     format_config: Option<&engine::types::format::FormatConfig>,
     match_type: engine::types::match_config::MatchType,
+    seed: u64,
+    manifest: &AiDeckManifest,
 ) -> Result<Vec<server_core::session::AiSeatSetup>, String> {
+    use engine::game::bracket_estimate::CommanderBracketTier;
+    use phase_ai::pod_selection::{
+        commander_color_identity, select_pod, PodConstraint, PodSeatOccupant, PodSelectionRequest,
+        SeatAttribute, TierEnforcement, TierSet,
+    };
     use seat_reducer::types::DeckChoice;
 
-    let mut setups = Vec::new();
-    for seat in ai_seats {
-        if seat.seat_index == 0 || seat.seat_index >= pc {
+    let seats: Vec<_> = ai_seats
+        .iter()
+        .filter(|seat| seat.seat_index != 0 && seat.seat_index < pc)
+        .collect();
+    let commander_family = format_config.is_some_and(|config| config.uses_commander);
+    let mut effective_decks = Vec::with_capacity(seats.len());
+    let mut unresolved = Vec::new();
+
+    for (index, seat) in seats.iter().enumerate() {
+        let explicit = match &seat.deck {
+            Some(DeckChoice::DeckList(deck)) => Some(deck.as_ref().clone()),
+            Some(DeckChoice::Named(name)) => resolve_named_ai_deck(name, manifest),
+            Some(DeckChoice::Random) | None => seat
+                .deck_name
+                .as_deref()
+                .filter(|name| !name.eq_ignore_ascii_case("random"))
+                .and_then(|name| resolve_named_ai_deck(name, manifest)),
+        };
+
+        if let Some(deck) = explicit {
+            effective_decks.push(Some(deck));
             continue;
         }
-        let effective = match &seat.deck {
-            Some(DeckChoice::DeckList(deck)) => deck.as_ref().clone(),
-            Some(DeckChoice::Named(name)) => named_starter_or_random(name),
-            Some(DeckChoice::Random) | None => match &seat.deck_name {
-                Some(name) if name.eq_ignore_ascii_case("random") => {
-                    server_core::starter_decks::random_starter_deck()
-                }
-                Some(name) => named_starter_or_random(name),
-                None => server_core::starter_decks::random_starter_deck(),
-            },
+
+        let unresolved_name = match &seat.deck {
+            Some(DeckChoice::Named(name)) => Some(name.as_str()),
+            Some(DeckChoice::Random) | None => seat
+                .deck_name
+                .as_deref()
+                .filter(|name| !name.eq_ignore_ascii_case("random")),
+            Some(DeckChoice::DeckList(_)) => None,
         };
+        if let Some(name) = unresolved_name {
+            warn!(deck = %name, "unknown AI deck name, using random");
+        }
+        effective_decks.push(None);
+        unresolved.push(index);
+    }
+
+    if commander_family && !unresolved.is_empty() {
+        let candidates = ai_manifest_candidates(db, manifest);
+        let occupied = effective_decks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, deck)| deck.as_ref().map(|deck| (index, deck)))
+            .map(|(index, deck)| {
+                let deck_id = manifest_deck_id(manifest, deck)
+                    .unwrap_or_else(|| format!("explicit-seat-{}", seats[index].seat_index));
+                Ok(PodSeatOccupant {
+                    color_identity: commander_color_identity(db, &deck.commander, &deck_id)?,
+                    deck_id,
+                    commander: deck.commander.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, phase_ai::pod_selection::PodSelectionError>>()
+            .map_err(|error| format!("AI Commander pod selection failed: {error:?}"))?;
+        let cedh_only = seats
+            .iter()
+            .all(|seat| seat.difficulty == phase_ai::config::AiDifficulty::CEDH);
+        let allowed = if cedh_only {
+            TierSet::new(vec![CommanderBracketTier::Cedh])
+        } else {
+            TierSet::default()
+        };
+        let enforcement = if cedh_only {
+            TierEnforcement::HardGate
+        } else {
+            TierEnforcement::Advisory
+        };
+        let seat_count = u8::try_from(unresolved.len())
+            .map_err(|_| "too many unresolved AI seats for pod selection".to_string())?;
+        let request = PodSelectionRequest::new(
+            allowed,
+            None,
+            enforcement,
+            seat_count,
+            vec![
+                PodConstraint::Distinct(SeatAttribute::Deck),
+                PodConstraint::Distinct(SeatAttribute::Commander),
+                PodConstraint::Distinct(SeatAttribute::ColorIdentity),
+            ],
+            0,
+            None,
+            seed,
+        )
+        .with_occupied(occupied);
+        let assignment = select_pod(&candidates, &request, db)
+            .map_err(|error| format!("AI Commander pod selection failed: {error:?}"))?;
+
+        for (deck_index, pod_seat) in unresolved.iter().zip(&assignment.seats) {
+            let entry = manifest.find(&pod_seat.candidate_id).ok_or_else(|| {
+                format!(
+                    "AI Commander pod selected missing manifest deck `{}`",
+                    pod_seat.candidate_id
+                )
+            })?;
+            effective_decks[*deck_index] = Some(entry.to_deck_data());
+        }
+    } else {
+        for index in unresolved {
+            effective_decks[index] = Some(server_core::starter_decks::random_starter_deck());
+        }
+    }
+
+    let mut setups = Vec::with_capacity(seats.len());
+    for (seat, effective) in seats.into_iter().zip(effective_decks) {
+        let effective = effective.expect("every unresolved AI seat was assigned a deck");
         if let Some(fc) = format_config {
             if let Err(reasons) = validate_name_deck_for_format_full(
                 db,
@@ -4917,11 +5060,44 @@ fn ai_seat_setups(
     Ok(setups)
 }
 
-fn named_starter_or_random(name: &str) -> engine::starter_decks::DeckData {
-    server_core::starter_decks::find_starter_deck(name).unwrap_or_else(|| {
-        warn!(deck = %name, "unknown AI deck name, using random");
-        server_core::starter_decks::random_starter_deck()
-    })
+fn resolve_named_ai_deck(
+    name: &str,
+    manifest: &AiDeckManifest,
+) -> Option<engine::starter_decks::DeckData> {
+    server_core::starter_decks::find_starter_deck(name)
+        .or_else(|| manifest.find(name).map(|entry| entry.to_deck_data()))
+}
+
+fn manifest_deck_id(
+    manifest: &AiDeckManifest,
+    deck: &engine::starter_decks::DeckData,
+) -> Option<String> {
+    manifest
+        .commander_decks()
+        .find(|entry| entry.commander == deck.commander && entry.main_deck == deck.main_deck)
+        .map(|entry| entry.id.clone())
+}
+
+fn ai_manifest_candidates(
+    db: &CardDatabase,
+    manifest: &AiDeckManifest,
+) -> Vec<phase_ai::pod_selection::AiDeckCandidate> {
+    use phase_ai::pod_selection::{AiDeckCandidate, BracketLabel, LabelProvenance};
+
+    manifest
+        .commander_decks()
+        .map(|entry| AiDeckCandidate {
+            id: entry.id.clone(),
+            commander: entry.commander.clone(),
+            label: entry.declared.map(|tier| BracketLabel {
+                tier,
+                provenance: LabelProvenance::Declared,
+                data_version: db.bracket_lists_version().to_string(),
+            }),
+            coverage_pct: None,
+            archetype: None,
+        })
+        .collect()
 }
 
 /// Phases 1–2 of the `CreateGameWithSettings` full multiplayer path.
@@ -5773,6 +5949,9 @@ fn should_rearm_pick_timer(
 
 struct ServerDeckResolver<'a> {
     db: &'a CardDatabase,
+    manifest: &'a AiDeckManifest,
+    format_config: &'a engine::types::format::FormatConfig,
+    occupied: Vec<phase_ai::pod_selection::PodSeatOccupant>,
 }
 
 impl DeckResolver for ServerDeckResolver<'_> {
@@ -5781,9 +5960,12 @@ impl DeckResolver for ServerDeckResolver<'_> {
         choice: &DeckChoice,
     ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
         let deck = match choice {
+            DeckChoice::Random if self.format_config.uses_commander => {
+                first_unoccupied_commander_deck(self.manifest, &self.occupied)?
+            }
             DeckChoice::Random => server_core::starter_decks::random_starter_deck(),
-            DeckChoice::Named(name) => server_core::starter_decks::find_starter_deck(name)
-                .ok_or_else(|| format!("Starter deck not found: {name}"))?,
+            DeckChoice::Named(name) => resolve_named_ai_deck(name, self.manifest)
+                .ok_or_else(|| format!("AI deck not found: {name}"))?,
             DeckChoice::DeckList(deck) => deck.as_ref().clone(),
         };
         // The reducer stays at the name-only layer (see `DeckResolver` docs),
@@ -5809,6 +5991,53 @@ impl DeckResolver for ServerDeckResolver<'_> {
             combo_declaration: deck.combo_declaration,
         })
     }
+}
+
+fn first_unoccupied_commander_deck(
+    manifest: &AiDeckManifest,
+    occupied: &[phase_ai::pod_selection::PodSeatOccupant],
+) -> Result<engine::starter_decks::DeckData, String> {
+    manifest
+        .commander_decks()
+        .find(|entry| !occupied.iter().any(|seat| seat.deck_id == entry.id))
+        .map(|entry| entry.to_deck_data())
+        .ok_or_else(|| "AI Commander manifest has no unoccupied deck".to_string())
+}
+
+fn occupied_ai_seats(
+    db: &CardDatabase,
+    manifest: &AiDeckManifest,
+    seat_state: &seat_reducer::types::SeatState,
+) -> Result<Vec<phase_ai::pod_selection::PodSeatOccupant>, String> {
+    use phase_ai::pod_selection::{commander_color_identity, PodSeatOccupant};
+    use seat_reducer::types::SeatKind;
+
+    seat_state
+        .seats
+        .iter()
+        .enumerate()
+        .filter_map(|(seat_index, kind)| {
+            let SeatKind::Ai { deck, .. } = kind else {
+                return None;
+            };
+            let effective = match deck {
+                DeckChoice::DeckList(deck) => Some(deck.as_ref().clone()),
+                DeckChoice::Named(name) => resolve_named_ai_deck(name, manifest),
+                DeckChoice::Random => None,
+            }?;
+            Some((seat_index, effective))
+        })
+        .map(|(seat_index, effective)| {
+            let deck_id = manifest_deck_id(manifest, &effective)
+                .unwrap_or_else(|| format!("occupied-seat-{seat_index}"));
+            Ok(PodSeatOccupant {
+                color_identity: commander_color_identity(db, &effective.commander, &deck_id)
+                    .map_err(|error| format!("AI Commander pod selection failed: {error:?}"))?,
+                deck_id,
+                commander: effective.commander,
+            })
+        })
+        .collect()
 }
 
 async fn broadcast_game_started(
@@ -8127,12 +8356,19 @@ async fn handle_client_message(
                 }
             }
 
+            // No game state exists yet on this create path, so there is no
+            // session RNG seed to reuse. Generate exactly once here, pass it
+            // into the pure pod selector, and log it with the resolved seat
+            // indices so an operator can replay the selection inputs.
+            let ai_pod_seed = rand::random::<u64>();
             let ai_requests = match ai_seat_setups(
                 db,
                 &ai_seats,
                 pc,
                 format_config.as_ref(),
                 match_config.match_type,
+                ai_pod_seed,
+                &context.ai_deck_manifest,
             ) {
                 Ok(setups) => setups,
                 Err(reason) => {
@@ -8143,6 +8379,19 @@ async fn handle_client_message(
                     return;
                 }
             };
+            let candidate_ids = ai_requests
+                .iter()
+                .filter_map(|seat| match &seat.choice {
+                    DeckChoice::DeckList(deck) => manifest_deck_id(&context.ai_deck_manifest, deck),
+                    DeckChoice::Random | DeckChoice::Named(_) => None,
+                })
+                .collect::<Vec<_>>();
+            info!(
+                seed = ai_pod_seed,
+                seat_indices = ?ai_requests.iter().map(|seat| seat.seat_index).collect::<Vec<_>>(),
+                candidate_ids = ?candidate_ids,
+                "AI seat decks resolved"
+            );
 
             if !ai_requests.is_empty() && ai_requests.len() as u8 == pc - 1 {
                 // --- AI game path: create, start, and run initial AI actions ---
@@ -10141,12 +10390,25 @@ async fn handle_client_message(
                 let public_before = session.lobby_meta.as_ref().is_some_and(|meta| meta.public);
                 let mut seat_state = session.seat_state();
                 let delta_result = {
-                    let resolver = ServerDeckResolver { db: db.as_ref() };
-                    let ctx = ReducerCtx {
-                        platform: phase_ai::config::Platform::Native,
-                        deck_resolver: &resolver,
-                    };
-                    seat_reducer::apply(&mut seat_state, mutation, &ctx)
+                    match occupied_ai_seats(db, &context.ai_deck_manifest, &seat_state) {
+                        Ok(occupied) => {
+                            let format_config = seat_state.format.clone();
+                            let resolver = ServerDeckResolver {
+                                db: db.as_ref(),
+                                manifest: &context.ai_deck_manifest,
+                                format_config: &format_config,
+                                occupied,
+                            };
+                            let ctx = ReducerCtx {
+                                platform: phase_ai::config::Platform::Native,
+                                deck_resolver: &resolver,
+                            };
+                            seat_reducer::apply(&mut seat_state, mutation, &ctx)
+                        }
+                        Err(error) => {
+                            Err(seat_reducer::types::SeatError::DeckResolutionFailed(error))
+                        }
+                    }
                 };
                 let delta = match delta_result {
                     Ok(delta) => delta,
@@ -16081,8 +16343,15 @@ mod issue_4548_deadlock_tests {
 }
 
 #[cfg(test)]
-mod ai_seat_setup_tests {
+mod ai_seat_setups_tests {
+    use std::collections::BTreeMap;
+
+    use engine::ai_deck_manifest::AiDeckManifest;
     use engine::database::CardDatabase;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+    use engine::types::format::FormatConfig;
+    use engine::types::mana::ManaColor;
     use engine::types::match_config::MatchType;
     use phase_ai::config::AiDifficulty;
     use seat_reducer::types::DeckChoice;
@@ -16100,7 +16369,7 @@ mod ai_seat_setup_tests {
                         "name": name,
                         "mana_cost": { "type": "NoCost" },
                         "card_type": {
-                            "supertypes": [], "core_types": ["Land"], "subtypes": []
+                            "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": []
                         },
                         "power": null,
                         "toughness": null,
@@ -16111,7 +16380,8 @@ mod ai_seat_setup_tests {
                         "triggers": [],
                         "static_abilities": [],
                         "replacements": [],
-                        "keywords": []
+                        "keywords": [],
+                        "legalities": { "standard": "legal", "commander": "legal" }
                     }),
                 )
             })
@@ -16136,6 +16406,104 @@ mod ai_seat_setup_tests {
         }
     }
 
+    fn commander_fixture() -> (CardDatabase, AiDeckManifest) {
+        let commanders = [
+            ("Commander White", ManaColor::White),
+            ("Commander Blue", ManaColor::Blue),
+            ("Commander Black", ManaColor::Black),
+        ];
+        let mut entries = BTreeMap::new();
+        let forest = CardFace {
+            name: "Wastes".to_string(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: Vec::new(),
+            },
+            color_identity: Vec::new(),
+            ..CardFace::default()
+        };
+        let mut forest_json = serde_json::to_value(forest).expect("serialize Forest");
+        forest_json.as_object_mut().unwrap().insert(
+            "legalities".to_string(),
+            serde_json::json!({ "commander": "legal" }),
+        );
+        entries.insert("wastes".to_string(), forest_json);
+        for (name, color) in commanders {
+            let face = CardFace {
+                name: name.to_string(),
+                card_type: CardType {
+                    supertypes: vec![Supertype::Legendary],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: Vec::new(),
+                },
+                color_identity: vec![color],
+                ..CardFace::default()
+            };
+            let mut value = serde_json::to_value(face).expect("serialize commander");
+            value.as_object_mut().unwrap().insert(
+                "legalities".to_string(),
+                serde_json::json!({ "commander": "legal" }),
+            );
+            entries.insert(name.to_lowercase(), value);
+        }
+        let db = CardDatabase::from_json_str(&serde_json::to_string(&entries).unwrap())
+            .expect("synthetic Commander database parses");
+        let decks = commanders
+            .iter()
+            .enumerate()
+            .map(|(index, (commander, _))| {
+                serde_json::json!({
+                    "id": format!("deck-{}", index + 1),
+                    "name": format!("Deck {}", index + 1),
+                    "commander": [commander],
+                    "main_deck": vec!["Wastes"; 99],
+                    "declared": "core",
+                    "source": "test",
+                    "source_date": "2026-09-27"
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest = AiDeckManifest::from_json_str(
+            &serde_json::json!({ "version": "test", "decks": decks }).to_string(),
+        )
+        .expect("synthetic Commander manifest parses");
+        (db, manifest)
+    }
+
+    fn random_requests(count: u8) -> Vec<AiSeatRequest> {
+        (1..=count)
+            .map(|seat_index| AiSeatRequest {
+                seat_index,
+                difficulty: AiDifficulty::Easy,
+                deck_name: None,
+                deck: Some(DeckChoice::Random),
+            })
+            .collect()
+    }
+
+    fn selected_manifest_ids(
+        setups: &[server_core::session::AiSeatSetup],
+        manifest: &AiDeckManifest,
+    ) -> Vec<String> {
+        setups
+            .iter()
+            .map(|setup| {
+                let DeckChoice::DeckList(deck) = &setup.choice else {
+                    panic!("AI setup did not record its resolved deck list")
+                };
+                manifest
+                    .commander_decks()
+                    .find(|entry| {
+                        entry.commander == deck.commander && entry.main_deck == deck.main_deck
+                    })
+                    .expect("selected deck belongs to the manifest")
+                    .id
+                    .clone()
+            })
+            .collect()
+    }
+
     #[test]
     fn a_resolvable_ai_deck_is_set_up_with_the_choice_that_describes_it() {
         // The paired positive control for the refusal below, which a function
@@ -16148,6 +16516,8 @@ mod ai_seat_setup_tests {
             2,
             None,
             MatchType::Bo1,
+            1,
+            AiDeckManifest::bundled(),
         )
         .expect("a resolvable deck is accepted");
 
@@ -16174,6 +16544,8 @@ mod ai_seat_setup_tests {
             2,
             None,
             MatchType::Bo1,
+            1,
+            AiDeckManifest::bundled(),
         );
 
         // No setup is produced: the seat cannot be installed with a deck no
@@ -16194,6 +16566,8 @@ mod ai_seat_setup_tests {
             2,
             None,
             MatchType::Bo1,
+            1,
+            AiDeckManifest::bundled(),
         )
         .expect("a named starter deck resolves");
 
@@ -16202,6 +16576,114 @@ mod ai_seat_setup_tests {
             setups[0].choice,
             DeckChoice::DeckList(Box::new(starter)),
             "the recorded choice must be the deck the seat actually got, not `Random`"
+        );
+    }
+
+    #[test]
+    fn commander_lobby_random_seat_resolves_to_a_commander_deck() {
+        let (db, manifest) = commander_fixture();
+        let setups = ai_seat_setups(
+            &db,
+            &random_requests(3),
+            4,
+            Some(&FormatConfig::commander()),
+            MatchType::Bo1,
+            17,
+            &manifest,
+        )
+        .expect("a Commander pod resolves");
+
+        let ids = selected_manifest_ids(&setups, &manifest);
+        assert_eq!(setups.len(), 3);
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3
+        );
+        assert!(setups.iter().all(|setup| match &setup.choice {
+            DeckChoice::DeckList(deck) => !deck.commander.is_empty(),
+            DeckChoice::Random | DeckChoice::Named(_) => false,
+        }));
+    }
+
+    #[test]
+    fn non_commander_lobby_random_seat_is_unchanged() {
+        let names = server_core::starter_decks::STARTER_DECKS
+            .iter()
+            .flat_map(|deck| deck.main_deck.iter().map(|(name, _)| *name))
+            .collect::<Vec<_>>();
+        let db = db_with(&names);
+        let setups = ai_seat_setups(
+            &db,
+            &random_requests(1),
+            2,
+            Some(&FormatConfig::standard()),
+            MatchType::Bo1,
+            23,
+            AiDeckManifest::bundled(),
+        )
+        .expect("a Standard random seat keeps using a starter deck");
+
+        let DeckChoice::DeckList(deck) = &setups[0].choice else {
+            panic!("random starter was not recorded as a deck list")
+        };
+        assert_eq!(deck.main_deck.len(), 60);
+        assert!(deck.commander.is_empty());
+    }
+
+    #[test]
+    fn commander_lobby_pod_is_reproducible_from_its_seed() {
+        let (db, manifest) = commander_fixture();
+        let select = || {
+            ai_seat_setups(
+                &db,
+                &random_requests(3),
+                4,
+                Some(&FormatConfig::commander()),
+                MatchType::Bo1,
+                0x61_11,
+                &manifest,
+            )
+            .expect("Commander pod resolves")
+        };
+
+        assert_eq!(
+            selected_manifest_ids(&select(), &manifest),
+            selected_manifest_ids(&select(), &manifest)
+        );
+    }
+
+    #[test]
+    fn commander_lobby_explicit_seat_is_never_duplicated_by_selection() {
+        let (db, manifest) = commander_fixture();
+        let requests = vec![
+            AiSeatRequest {
+                seat_index: 1,
+                difficulty: AiDifficulty::Easy,
+                deck_name: None,
+                deck: Some(DeckChoice::Named("deck-1".to_string())),
+            },
+            random_requests(2)[1].clone(),
+            AiSeatRequest {
+                seat_index: 3,
+                ..random_requests(3)[2].clone()
+            },
+        ];
+        let setups = ai_seat_setups(
+            &db,
+            &requests,
+            4,
+            Some(&FormatConfig::commander()),
+            MatchType::Bo1,
+            91,
+            &manifest,
+        )
+        .expect("mixed explicit/automatic Commander pod resolves");
+
+        let ids = selected_manifest_ids(&setups, &manifest);
+        assert_eq!(ids.iter().filter(|id| id.as_str() == "deck-1").count(), 1);
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3
         );
     }
 }

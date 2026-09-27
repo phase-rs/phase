@@ -6,9 +6,9 @@ use engine::types::mana::ManaColor;
 use phase_ai::config::AiDifficulty;
 use phase_ai::deck_profile::DeckArchetype;
 use phase_ai::pod_selection::{
-    select_pod, AiDeckCandidate, BracketLabel, LabelProvenance, PodConstraint, PodSeatOccupant,
-    PodSelectionError, PodSelectionRequest, SeatAttribute, TierEnforcement, TierSet,
-    RELAXATION_ORDER,
+    commander_color_identity, select_pod, AiDeckCandidate, BracketLabel, LabelProvenance,
+    PodConstraint, PodSeatOccupant, PodSelectionError, PodSelectionRequest, SeatAttribute,
+    TierEnforcement, TierSet, RELAXATION_ORDER,
 };
 
 const VERSION: &str = "2026-02-09-wotc";
@@ -133,6 +133,32 @@ fn cedh_request(seats: u8) -> PodSelectionRequest {
         ],
         11,
     )
+}
+
+#[test]
+fn commander_color_identity_unions_partners_and_reports_unknown_names() {
+    let db = synthetic_db();
+    let commanders = vec![
+        "White Commander".to_string(),
+        "Grixis Commander".to_string(),
+    ];
+    assert_eq!(
+        commander_color_identity(&db, &commanders, "partner-deck").unwrap(),
+        vec![
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+        ]
+    );
+
+    assert_eq!(
+        commander_color_identity(&db, &["Missing Commander".to_string()], "partner-deck"),
+        Err(PodSelectionError::UnknownCommander {
+            candidate_id: "partner-deck".to_string(),
+            name: "Missing Commander".to_string(),
+        })
+    );
 }
 
 #[test]

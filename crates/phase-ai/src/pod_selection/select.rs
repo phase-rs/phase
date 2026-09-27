@@ -137,23 +137,7 @@ fn resolve_candidates<'a>(
     candidates
         .iter()
         .map(|candidate| {
-            let mut colors = Vec::new();
-            for name in &candidate.commander {
-                let face = db.get_face_by_name(name).ok_or_else(|| {
-                    PodSelectionError::UnknownCommander {
-                        candidate_id: candidate.id.clone(),
-                        name: name.clone(),
-                    }
-                })?;
-                // CR 903.4: a commander's color identity is the union of its mana cost, color indicator, characteristic-defining abilities, and rules-text mana symbols.
-                let identity = card_color_identity(face);
-                for color in ManaColor::ALL {
-                    if identity.contains(&color) && !colors.contains(&color) {
-                        colors.push(color);
-                    }
-                }
-            }
-            colors = canonical_colors(&colors);
+            let colors = commander_color_identity(db, &candidate.commander, &candidate.id)?;
 
             let provenance = candidate.label.as_ref().map(|label| {
                 if label.provenance == LabelProvenance::Declared
@@ -172,6 +156,33 @@ fn resolve_candidates<'a>(
             })
         })
         .collect()
+}
+
+/// Resolves the combined identity of one or more commanders in canonical WUBRG
+/// order. `candidate_id` is copied into [`PodSelectionError::UnknownCommander`]
+/// so callers retain precise diagnostics for either candidates or occupied seats.
+pub fn commander_color_identity(
+    db: &CardDatabase,
+    commander: &[String],
+    candidate_id: &str,
+) -> Result<Vec<ManaColor>, PodSelectionError> {
+    let mut colors = Vec::new();
+    for name in commander {
+        let face =
+            db.get_face_by_name(name)
+                .ok_or_else(|| PodSelectionError::UnknownCommander {
+                    candidate_id: candidate_id.to_string(),
+                    name: name.clone(),
+                })?;
+        // CR 903.4: A commander's color identity includes mana symbols, color indicators, and characteristic-defining abilities.
+        let identity = card_color_identity(face);
+        for color in ManaColor::ALL {
+            if identity.contains(&color) && !colors.contains(&color) {
+                colors.push(color);
+            }
+        }
+    }
+    Ok(canonical_colors(&colors))
 }
 
 fn available_distinct_decks(

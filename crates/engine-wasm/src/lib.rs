@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
@@ -63,6 +63,10 @@ use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
 use phase_ai::choose_action_with_session_diagnostic;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
+use phase_ai::pod_selection::{
+    select_pod, AiDeckCandidate, PodAssignment, PodConstraint, PodSeatOccupant, PodSelectionError,
+    PodSelectionRequest, TierEnforcement, TierSet,
+};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
 
 /// Enrich local diagnostic receipts with names already known to the engine.
@@ -1414,6 +1418,113 @@ fn estimate_bracket_inner(request: &BracketEstimateRequest) -> Option<BracketEst
     })
 }
 
+const COMMANDER_BRACKET_TIERS: [engine::game::bracket_estimate::CommanderBracketTier; 5] = [
+    engine::game::bracket_estimate::CommanderBracketTier::Exhibition,
+    engine::game::bracket_estimate::CommanderBracketTier::Core,
+    engine::game::bracket_estimate::CommanderBracketTier::Upgraded,
+    engine::game::bracket_estimate::CommanderBracketTier::Optimized,
+    engine::game::bracket_estimate::CommanderBracketTier::Cedh,
+];
+
+fn commander_bracket_tier_key(
+    tier: engine::game::bracket_estimate::CommanderBracketTier,
+) -> &'static str {
+    use engine::game::bracket_estimate::CommanderBracketTier;
+
+    match tier {
+        CommanderBracketTier::Exhibition => "exhibition",
+        CommanderBracketTier::Core => "core",
+        CommanderBracketTier::Upgraded => "upgraded",
+        CommanderBracketTier::Optimized => "optimized",
+        CommanderBracketTier::Cedh => "cedh",
+    }
+}
+
+fn bracket_difficulty_table() -> BTreeMap<&'static str, AiDifficulty> {
+    COMMANDER_BRACKET_TIERS
+        .into_iter()
+        .map(|tier| {
+            (
+                commander_bracket_tier_key(tier),
+                AiDifficulty::for_bracket(tier),
+            )
+        })
+        .collect()
+}
+
+/// Returns the engine-authored default AI rung for every Commander bracket.
+#[wasm_bindgen(js_name = getBracketDifficultyTable)]
+pub fn get_bracket_difficulty_table() -> Result<JsValue, JsError> {
+    Ok(to_js(&bracket_difficulty_table()))
+}
+
+/// WASM request DTO. JavaScript numbers exactly represent integers only through
+/// 2^53 - 1; callers must keep `seed` in that exact-integer range. The bridge
+/// follows the existing game-initialization convention and converts with
+/// `as u64` at the transport boundary.
+#[derive(Debug, Deserialize)]
+struct PodSelectionRequestDto {
+    allowed: TierSet,
+    prefer: Option<engine::game::bracket_estimate::CommanderBracketTier>,
+    enforcement: TierEnforcement,
+    seats: u8,
+    constraints: Vec<PodConstraint>,
+    coverage_floor_pct: u8,
+    archetype: Option<DeckArchetype>,
+    seed: f64,
+    #[serde(default)]
+    occupied: Vec<PodSeatOccupant>,
+}
+
+impl From<PodSelectionRequestDto> for PodSelectionRequest {
+    fn from(request: PodSelectionRequestDto) -> Self {
+        PodSelectionRequest::new(
+            request.allowed,
+            request.prefer,
+            request.enforcement,
+            request.seats,
+            request.constraints,
+            request.coverage_floor_pct,
+            request.archetype,
+            request.seed as u64,
+        )
+        .with_occupied(request.occupied)
+    }
+}
+
+/// Typed result sum returned by `selectAiPod`: success serializes as
+/// `{ "ok": PodAssignment }`, while selection failures serialize as
+/// `{ "err": PodSelectionError }`. A missing card database returns `null`.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SelectAiPodResult {
+    Ok(PodAssignment),
+    Err(PodSelectionError),
+}
+
+#[wasm_bindgen(js_name = selectAiPod)]
+pub fn select_ai_pod(candidates_js: JsValue, request_js: JsValue) -> Result<JsValue, JsError> {
+    let candidates: Vec<AiDeckCandidate> = serde_wasm_bindgen::from_value(candidates_js)
+        .map_err(|error| JsError::new(&format!("invalid AI pod candidates: {error}")))?;
+    let request: PodSelectionRequestDto = serde_wasm_bindgen::from_value(request_js)
+        .map_err(|error| JsError::new(&format!("invalid AI pod request: {error}")))?;
+    Ok(to_js(&select_ai_pod_inner(&candidates, &request.into())))
+}
+
+fn select_ai_pod_inner(
+    candidates: &[AiDeckCandidate],
+    request: &PodSelectionRequest,
+) -> Option<SelectAiPodResult> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref()?;
+        Some(match select_pod(candidates, request, db) {
+            Ok(assignment) => SelectAiPodResult::Ok(assignment),
+            Err(error) => SelectAiPodResult::Err(error),
+        })
+    })
+}
+
 /// Structural deck signals. Pure and stateless; reads `CARD_DB` without
 /// touching `GAME_STATE`. Returns `null` (via serde) when the deck has no
 /// commander or the card database is not loaded.
@@ -1432,6 +1543,104 @@ fn deck_signals_inner(deck: &PlayerDeckList) -> Option<DeckSignals> {
         let db = db.as_ref()?;
         deck_signals(deck, db)
     })
+}
+
+#[cfg(test)]
+mod ai_pod_export_tests {
+    use super::*;
+    use engine::game::bracket_estimate::CommanderBracketTier;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+    use engine::types::mana::ManaColor;
+    use phase_ai::pod_selection::{PodConstraint, SeatAttribute};
+
+    fn synthetic_db() -> CardDatabase {
+        let faces = [
+            ("White Commander", ManaColor::White),
+            ("Blue Commander", ManaColor::Blue),
+            ("Black Commander", ManaColor::Black),
+        ];
+        let entries = faces
+            .into_iter()
+            .map(|(name, color)| {
+                let face = CardFace {
+                    name: name.to_string(),
+                    card_type: CardType {
+                        supertypes: vec![Supertype::Legendary],
+                        core_types: vec![CoreType::Creature],
+                        subtypes: Vec::new(),
+                    },
+                    color_identity: vec![color],
+                    ..CardFace::default()
+                };
+                (name.to_lowercase(), serde_json::to_value(face).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>();
+        CardDatabase::from_json_str(&serde_json::to_string(&entries).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn get_bracket_difficulty_table_lists_every_tier() {
+        let table = bracket_difficulty_table();
+        assert_eq!(COMMANDER_BRACKET_TIERS.len(), 5);
+        assert_eq!(table.len(), COMMANDER_BRACKET_TIERS.len());
+        assert_eq!(table["exhibition"], AiDifficulty::Easy);
+        assert_eq!(table["core"], AiDifficulty::Medium);
+        assert_eq!(table["upgraded"], AiDifficulty::Hard);
+        assert_eq!(table["optimized"], AiDifficulty::VeryHard);
+        assert_eq!(table["cedh"], AiDifficulty::CEDH);
+        for tier in COMMANDER_BRACKET_TIERS {
+            let _: CommanderBracketTier = match tier {
+                CommanderBracketTier::Exhibition => CommanderBracketTier::Exhibition,
+                CommanderBracketTier::Core => CommanderBracketTier::Core,
+                CommanderBracketTier::Upgraded => CommanderBracketTier::Upgraded,
+                CommanderBracketTier::Optimized => CommanderBracketTier::Optimized,
+                CommanderBracketTier::Cedh => CommanderBracketTier::Cedh,
+            };
+        }
+    }
+
+    #[test]
+    fn select_ai_pod_inner_returns_a_pod_over_a_synthetic_db() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::new(synthetic_db())));
+        let candidates = ["White Commander", "Blue Commander", "Black Commander"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, commander)| AiDeckCandidate {
+                id: format!("deck-{index}"),
+                commander: vec![commander.to_string()],
+                label: None,
+                coverage_pct: None,
+                archetype: None,
+            })
+            .collect::<Vec<_>>();
+        let request = PodSelectionRequest::new(
+            TierSet::default(),
+            None,
+            TierEnforcement::Advisory,
+            2,
+            vec![
+                PodConstraint::Distinct(SeatAttribute::Deck),
+                PodConstraint::Distinct(SeatAttribute::Commander),
+                PodConstraint::Distinct(SeatAttribute::ColorIdentity),
+            ],
+            0,
+            None,
+            61_11,
+        );
+
+        let Some(SelectAiPodResult::Ok(assignment)) = select_ai_pod_inner(&candidates, &request)
+        else {
+            panic!("synthetic candidates should produce a pod")
+        };
+        assert_eq!(assignment.seats.len(), 2);
+        assert_ne!(
+            assignment.seats[0].candidate_id,
+            assignment.seats[1].candidate_id
+        );
+
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
 }
 
 /// Which client-side session is installing this game. Selects the

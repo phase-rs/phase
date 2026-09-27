@@ -7,7 +7,7 @@
 pub mod select;
 mod types;
 
-pub use select::{select_pod, RELAXATION_ORDER};
+pub use select::{commander_color_identity, select_pod, RELAXATION_ORDER};
 pub use types::{
     AiDeckCandidate, BracketLabel, LabelProvenance, PodAssignment, PodConstraint, PodRelaxation,
     PodSeat, PodSeatOccupant, PodSelectionError, PodSelectionRequest, SeatAttribute,

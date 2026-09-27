@@ -181,6 +181,11 @@ export function export_replay_log(): string;
 export function formatConfigForCustomRules(custom_rules: any): any;
 
 /**
+ * Returns the engine-authored default AI rung for every Commander bracket.
+ */
+export function getBracketDifficultyTable(): any;
+
+/**
  * Return the authoritative list of user-selectable formats as a typed array.
  * The frontend treats this as the single source of truth for rendering
  * format pickers, badges, and default configs — no hand-maintained mirrors.
@@ -573,6 +578,8 @@ export function resume_restored_game_state(): any;
  */
 export function search_cards_js(query: any): any;
 
+export function selectAiPod(candidates_js: any, request_js: any): any;
+
 /**
  * Set the multiplayer enforcement flag directly.
  *
@@ -665,6 +672,7 @@ export interface InitOutput {
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
+    readonly getBracketDifficultyTable: () => [number, number, number];
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -699,6 +707,7 @@ export interface InitOutput {
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
     readonly resume_restored_game_state: () => [number, number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
+    readonly selectAiPod: (a: any, b: any) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
