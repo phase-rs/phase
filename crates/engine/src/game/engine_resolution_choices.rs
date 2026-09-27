@@ -1824,11 +1824,10 @@ pub(super) fn handle_resolution_choice(
         let actor = super::turn_control::authorized_submitter_for_player(state, semantic_owner);
         let result = payment_transaction::apply_pending_action(state, actor, action)?;
         events.extend(result.events);
-        return Ok(ResolutionChoiceOutcome::ActionResult(ActionResult {
-            events: std::mem::take(events),
-            waiting_for: result.waiting_for,
-            log_entries: result.log_entries,
-        }));
+        return Ok(ResolutionChoiceOutcome::ActionResult(
+            ActionResult::applied(std::mem::take(events), result.waiting_for)
+                .with_log_entries(result.log_entries),
+        ));
     }
     let outcome = match (waiting_for, action) {
         // CR 608.2d: the resolving effect offers only its legal optional payment choices; CR 118.12: choosing a payable branch continues the payment whose success governs the reflexive "If you do" result.

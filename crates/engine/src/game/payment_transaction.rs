@@ -286,11 +286,10 @@ pub(crate) fn apply_pending_action(
                 transaction.resolving_trigger_context.as_ref(),
                 &mut continuation_events,
             )?;
-            Ok(ActionResult {
-                events: continuation_events,
-                waiting_for: state.waiting_for.clone(),
-                log_entries: Vec::new(),
-            })
+            Ok(ActionResult::applied(
+                continuation_events,
+                state.waiting_for.clone(),
+            ))
         }
         ReplayOutcome::Paused { shadow, .. } => {
             let waiting_for = shadow.waiting_for.clone();
@@ -301,11 +300,7 @@ pub(crate) fn apply_pending_action(
             projected.payment_transaction_replay = false;
             projected.payment_transaction_just_handled = false;
             *state = projected;
-            Ok(ActionResult {
-                events: Vec::new(),
-                waiting_for,
-                log_entries: Vec::new(),
-            })
+            Ok(ActionResult::applied(Vec::new(), waiting_for))
         }
         ReplayOutcome::Completed {
             mut shadow,
@@ -327,11 +322,7 @@ pub(crate) fn apply_pending_action(
             )?;
             let waiting_for = shadow.waiting_for.clone();
             *state = shadow;
-            Ok(ActionResult {
-                events,
-                waiting_for,
-                log_entries,
-            })
+            Ok(ActionResult::applied(events, waiting_for).with_log_entries(log_entries))
         }
     }
 }

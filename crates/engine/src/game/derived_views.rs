@@ -1141,19 +1141,18 @@ impl<'a> ClientGameStateRef<'a> {
     /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
     /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
-        let filtered_state =
-            viewer.map(|viewer| crate::game::visibility::filter_state_for_viewer(state, viewer));
-        let display_visible_object_ids = filtered_state.as_ref().map(|filtered| {
-            filtered
+        let filtered_state = match viewer {
+            Some(viewer) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+            None => crate::game::visibility::filter_state_for_unseated_viewer(state),
+        };
+        let display_visible_object_ids = Some(
+            filtered_state
                 .objects
                 .iter()
                 .filter_map(|(id, object)| object.display_visible_to_viewer.then_some(*id))
-                .collect()
-        });
-        let derived = match filtered_state.as_ref() {
-            Some(filtered) => derive_filtered_views(state, filtered, viewer),
-            None => derive_views(state, viewer),
-        };
+                .collect(),
+        );
+        let derived = derive_filtered_views(state, &filtered_state, viewer);
         Self {
             state,
             derived,
@@ -5423,6 +5422,21 @@ mod tests {
             "trigger context must not bypass multiplayer hidden-card filtering"
         );
         assert!(label.contains("Hidden Card"));
+
+        // CR 400.2 + CR 402.3: the viewer-less client envelope must derive
+        // trigger context from the same unseated projection as its state half.
+        let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, None))
+            .expect("serialize unseated client envelope");
+        let serialized = wire.to_string();
+        assert!(
+            !serialized.contains("Secret Card"),
+            "unseated client envelope must not reveal the library card"
+        );
+        let wire_label = wire["derived"]["stack_entry_details"]["900"]["trigger_context"][0]
+            ["label"]
+            .as_str()
+            .expect("serialized trigger context label");
+        assert!(wire_label.contains("Hidden Card"));
     }
 
     /// Wire-format round-trip: the JSON produced from `ClientGameStateRef`
