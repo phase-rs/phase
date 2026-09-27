@@ -744,7 +744,7 @@ pub fn quantity_is_cast_stable_for_pre_cast(expr: &QuantityExpr) -> bool {
 /// expression authority above.
 pub fn quantity_ref_is_cast_stable_for_pre_cast(qty: &QuantityRef) -> bool {
     match qty {
-        QuantityRef::StartingLifeTotal => true,
+        QuantityRef::StartingLifeTotal { .. } => true,
         QuantityRef::ObjectCount { filter } => target_filter_is_property_free_population(filter),
         _ => false,
     }
@@ -1490,8 +1490,8 @@ fn quantity_expr_is_source_context_previewable(
     match expr {
         QuantityExpr::Fixed { .. } => true,
         QuantityExpr::Ref {
-            qty: QuantityRef::StartingLifeTotal,
-        } => true,
+            qty: QuantityRef::StartingLifeTotal { player },
+        } => player_scope_is_source_context_previewable(player),
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => target_filter_is_source_context_free(filter),
@@ -1514,6 +1514,27 @@ fn quantity_expr_is_source_context_previewable(
             quantity_expr_is_source_context_previewable(state, max, controller, source_id)
                 && resolve_quantity(state, max, controller, source_id) == 0
         }
+    }
+}
+
+/// A source-only preview has its controller and source object, but no target,
+/// recipient, or per-player resolution iteration to bind a player reference.
+/// `SpecificPlayer` is duration-only and panics in the quantity resolver.
+pub(crate) fn player_scope_is_source_context_previewable(scope: &PlayerScope) -> bool {
+    match scope {
+        PlayerScope::Controller
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::SourceChosenPlayer => true,
+        PlayerScope::AllPlayers { exclude, .. } => exclude
+            .as_deref()
+            .is_none_or(player_scope_is_source_context_previewable),
+        PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SpecificPlayer { .. }
+        | PlayerScope::AnyTurn => false,
     }
 }
 
@@ -2091,7 +2112,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2433,7 +2454,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2744,7 +2765,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2998,7 +3019,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::StartingLifeTotal
+        | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -4515,13 +4536,22 @@ fn resolve_ref(
                 usize_to_i32_saturating(p.graveyard.len())
             })
         }
-        // CR 810.9a + CR 810.4: team total minus the (already team-correct, 30)
-        // starting life. Single controller bind — no double-count.
+        // CR 810.9a + CR 810.4 + CR 904.5: current shared-resource life
+        // (team total in 2HG, individual total elsewhere) minus the selected
+        // controller's rules starting total. Single controller bind — no
+        // double-count, and Archenemy's 40/20 baseline follows that controller.
         QuantityRef::LifeAboveStarting => player.map_or(0, |p| {
-            crate::game::players::team_life_total(state, p.id) - state.format_config.starting_life
+            crate::game::players::team_life_total(state, p.id)
+                - state.format_config.starting_life_total_for_player(p.id)
         }),
-        // CR 103.4: The format's starting life total.
-        QuantityRef::StartingLifeTotal => state.format_config.starting_life,
+        // CR 103.4 + CR 904.5: the rules starting total for the referenced
+        // player or players selected by `scope`, including the archenemy's
+        // 40-life baseline.
+        QuantityRef::StartingLifeTotal { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                state.format_config.starting_life_total_for_player(p.id)
+            })
+        }
         // CR 701.57a: the mana-value limit of the discover that fired the current
         // "whenever you discover" trigger (Curator of Sun's Creation, "the same
         // value"). 0 outside a discover-trigger context.
@@ -4569,9 +4599,10 @@ fn resolve_ref(
             })
             .map(u32_to_i32_saturating)
             .unwrap_or(0),
-        // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
+        // CR 119.3 + CR 800.4i: Life lost this turn, including departed players,
+        // scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
-            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
+            resolve_per_player_life_history(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_lost_this_turn)
             })
         }
@@ -5863,9 +5894,10 @@ fn resolve_ref(
         QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
             usize_to_i32_saturating(p.bending_types_this_turn.len())
         }),
-        // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
+        // CR 119.3 + CR 800.4i: Life gained this turn, including departed players,
+        // scoped via PlayerScope (Π-4).
         QuantityRef::LifeGainedThisTurn { player } => {
-            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
+            resolve_per_player_life_history(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_gained_this_turn)
             })
         }
@@ -8350,7 +8382,8 @@ where
             .map_or(0, &mut extract),
         // CR 104.3 + CR 104.5 + CR 800.4: a player who has left the game is
         // excluded from the aggregate population, same as
-        // `resolve_player_count`'s candidate loop — an eliminated player's
+        // `resolve_player_count`'s candidate loop (outside its life-history
+        // filters, `player_filter_reads_life_history`) — an eliminated player's
         // scalar must not inflate a `Max`/`Min`/`Sum` read over the
         // remaining, still-in-the-game players (Sokenzan Renegade: an
         // eliminated player's larger hand must not out-rank the live
@@ -8390,6 +8423,76 @@ where
             )
         }
     }
+}
+
+/// CR 119.3 + CR 800.4i: `resolve_per_player_scalar` for the life a player
+/// lost or gained this turn. That tally records actions already taken, which an
+/// effect can still find after the player left the game (CR 800.4i): the rulings on Neheb, the Eternal, Rakdos, Lord of Riots, Belbe,
+/// Corrupted Observer, Teysa, Opulent Oligarch and Kaito, Bane of Nightmares
+/// count an opponent's loss of life even after that opponent lost the game. So
+/// the `Opponent` and `AllPlayers` aggregates fold over departed players too;
+/// the single-player scopes are `resolve_per_player_scalar`'s. The player-count
+/// twin ("each opponent who lost life this turn") is
+/// `player_filter_reads_life_history`.
+fn resolve_per_player_life_history<F>(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    mut extract: F,
+) -> i32
+where
+    F: FnMut(&crate::types::player::Player) -> i32,
+{
+    match scope {
+        // CR 102.3: opponents are the players not on the controller's team, so
+        // a Two-Headed Giant teammate's life change never counts.
+        PlayerScope::Opponent { aggregate } => aggregate_over_players(
+            state
+                .players
+                .iter()
+                .filter(|p| crate::game::players::is_opponent(state, controller, p.id)),
+            *aggregate,
+            &mut extract,
+        ),
+        PlayerScope::AllPlayers { aggregate, exclude } => {
+            let excluded_id = exclude.as_deref().and_then(|ex| {
+                resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
+            });
+            aggregate_over_players(
+                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                *aggregate,
+                &mut extract,
+            )
+        }
+        // Single-player scopes name one player; whether that player is still
+        // in the game is `resolve_per_player_scalar`'s question.
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, extract)
+        }
+    }
+}
+
+/// CR 119.3 + CR 800.4i: "each opponent who lost / gained life this turn"
+/// counts a player who has since left the game, for the reason
+/// `resolve_per_player_life_history` gives (Belbe, Teysa and Kaito rulings).
+/// In the generic player loop, every other filter counts only players still in
+/// the game.
+fn player_filter_reads_life_history(filter: &PlayerFilter) -> bool {
+    matches!(
+        filter,
+        PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife
+    )
 }
 
 /// CR 101.4 + CR 608.2d: `resolve_per_player_scalar` for a scalar that some
@@ -8851,8 +8954,8 @@ pub(crate) fn resolve_player_count(
     ctx: QuantityContext,
 ) -> i32 {
     let source_id = ctx.source;
-    // CR 104.3: eliminated players are excluded from the generic player loop
-    // below (`!p.is_eliminated`), so count them on a dedicated path.
+    // CR 104.3: the generic player loop below excludes eliminated players
+    // (outside its life-history filters), so count them on a dedicated path.
     if matches!(filter, PlayerFilter::HasLostTheGame) {
         return usize_to_i32_saturating(state.players.iter().filter(|p| p.is_eliminated).count());
     }
@@ -8875,7 +8978,7 @@ pub(crate) fn resolve_player_count(
             .players
             .iter()
             .filter(|p| {
-                !p.is_eliminated
+                (!p.is_eliminated || player_filter_reads_life_history(filter))
                     && match filter {
                         PlayerFilter::Controller => p.id == controller,
                         PlayerFilter::Opponent => p.id != controller,
@@ -8890,11 +8993,15 @@ pub(crate) fn resolve_player_count(
                                 |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
                             )
                         }
+                        // CR 102.3: a Two-Headed Giant teammate is not an
+                        // opponent, whatever its life history.
                         PlayerFilter::OpponentLostLife => {
-                            p.id != controller && p.life_lost_this_turn > 0
+                            crate::game::players::is_opponent(state, controller, p.id)
+                                && p.life_lost_this_turn > 0
                         }
                         PlayerFilter::OpponentGainedLife => {
-                            p.id != controller && p.life_gained_this_turn > 0
+                            crate::game::players::is_opponent(state, controller, p.id)
+                                && p.life_gained_this_turn > 0
                         }
                         // Handled by the early return above; unreachable here.
                         PlayerFilter::HasLostTheGame => false,
@@ -9071,21 +9178,31 @@ pub(crate) fn resolve_player_count(
                         // candidates satisfying both the `relation` predicate and
                         // the per-candidate scalar comparison. Mirrors the arm in
                         // `effects::mod::matches_player_scope` (the two copies must
-                        // stay in sync). `attr` is read directly off `p`; `value`
-                        // is the controller-relative threshold, resolved once.
+                        // stay in sync). `attr` is read from candidate `p`; `value`
+                        // keeps the ability controller and binds `scoped_player`
+                        // to this candidate for candidate-relative operands.
                         PlayerFilter::PlayerAttribute {
                             relation,
                             attr,
                             comparator,
                             value,
                         } => {
-                            let threshold = resolve_quantity(state, value, controller, source_id);
                             crate::game::players::matches_relation(
                                 state, p.id, controller, *relation,
-                            ) && crate::game::effects::candidate_player_scalar_with_state(
-                                state, p, controller, attr,
-                            )
-                            .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                            ) && {
+                                let mut candidate_ctx = ctx.clone();
+                                candidate_ctx.scoped_player = Some(p.id);
+                                let threshold = resolve_quantity_with_ctx(
+                                    state,
+                                    value,
+                                    controller,
+                                    candidate_ctx,
+                                );
+                                crate::game::effects::candidate_player_scalar_with_state(
+                                    state, p, controller, attr,
+                                )
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                            }
                         }
                         // CR 608.2c + CR 608.2h + CR 109.4: "for each opponent
                         // who controlled a creature returned this way" — count
@@ -9167,6 +9284,7 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::events::{GameEvent, PlayerActionKind};
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         DamageRecord, ExileLink, ExileLinkKind, ManaSpentSourceSnapshot, ZoneChangeRecord,
     };
@@ -11818,6 +11936,124 @@ mod tests {
             25,
             "team total (55) minus starting life (30) = 25"
         );
+        assert_eq!(
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                PlayerId(0),
+                ObjectId(0),
+            ),
+            30,
+            "StartingLifeTotal reads the shared team baseline, not a per-seat half"
+        );
+    }
+
+    /// CR 103.4e + CR 904.5: OneVsMany starting-life references are bound to
+    /// the selected controller, so the same current life can be above the
+    /// hero baseline and below the archenemy baseline.
+    #[test]
+    fn starting_life_quantities_follow_archenemy_or_hero_controller() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 0);
+        state.players[0].life = 30;
+        state.players[1].life = 30;
+
+        let starting_total = QuantityExpr::Ref {
+            qty: QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            },
+        };
+        let life_above_starting = QuantityExpr::Ref {
+            qty: QuantityRef::LifeAboveStarting,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &starting_total, PlayerId(0), ObjectId(0)),
+            40,
+            "the archenemy's own ability context reads the 40-life baseline"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &starting_total, PlayerId(1), ObjectId(1)),
+            20,
+            "a hero's ability context reads the 20-life baseline"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &life_above_starting, PlayerId(0), ObjectId(0)),
+            -10,
+            "30 life is 10 below the archenemy's 40-life baseline"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &life_above_starting, PlayerId(1), ObjectId(1)),
+            10,
+            "30 life is 10 above a hero's 20-life baseline"
+        );
+    }
+
+    #[test]
+    fn starting_life_source_preview_requires_a_bound_player() {
+        let mut state = GameState::new(FormatConfig::archenemy(), 4, 0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let starting = |player| QuantityExpr::Ref {
+            qty: QuantityRef::StartingLifeTotal { player },
+        };
+
+        assert_eq!(
+            try_resolve_quantity_in_source_context(
+                &state,
+                &starting(PlayerScope::Controller),
+                PlayerId(0),
+                source,
+            ),
+            Some(40),
+        );
+        assert_eq!(
+            try_resolve_quantity_in_source_context(
+                &state,
+                &starting(PlayerScope::Controller),
+                PlayerId(1),
+                source,
+            ),
+            Some(20),
+        );
+        for unbound in [
+            PlayerScope::Target,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::RecipientController,
+            PlayerScope::ParentObjectTargetController,
+        ] {
+            assert_eq!(
+                try_resolve_quantity_in_source_context(
+                    &state,
+                    &starting(unbound),
+                    PlayerId(0),
+                    source,
+                ),
+                None,
+            );
+        }
+        for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
+            assert_eq!(
+                state.format_config.starting_life_total_for_player(id),
+                baseline
+            );
+            assert_eq!(
+                try_resolve_quantity_in_source_context(
+                    &state,
+                    &starting(PlayerScope::SpecificPlayer { id }),
+                    PlayerId(0),
+                    source,
+                ),
+                None,
+            );
+        }
     }
 
     /// CR 903.3d: CommanderManaValue resolves to the mana value of a commander

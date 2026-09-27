@@ -4262,6 +4262,66 @@ mod tests {
         deck
     }
 
+    #[test]
+    fn custom_cube_submission_keeps_its_configured_twenty_card_floor() {
+        let deck = std::iter::repeat_n("Forest".to_string(), 20).collect::<Vec<_>>();
+        let cube_session = |minimum| {
+            let mut session = deckbuilding_session(DraftKind::Premier);
+            session.config.source = DraftSource::Cube {
+                id: "custom-cube".to_string(),
+                name: "Twenty Card Cube".to_string(),
+            };
+            session.config.min_deck_size = minimum;
+            session
+        };
+
+        let mut accepted = cube_session(20);
+        let deltas = apply(
+            &mut accepted,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck: deck.clone(),
+                commanders: Vec::new(),
+            },
+            None,
+        )
+        .expect("the configured twenty-card Cube deck submits");
+        assert!(deltas.contains(&DraftDelta::DeckSubmitted { seat: 0 }));
+        assert_eq!(accepted.submitted_decks[&PlayerId(0)].main_deck, deck);
+
+        for (minimum, source) in [
+            (
+                21,
+                DraftSource::Cube {
+                    id: "custom-cube".to_string(),
+                    name: "Twenty Card Cube".to_string(),
+                },
+            ),
+            (40, DraftSource::single_set("TST")),
+        ] {
+            let mut session = cube_session(minimum);
+            session.config.source = source;
+            let err = apply(
+                &mut session,
+                DraftAction::SubmitDeck {
+                    seat: 0,
+                    main_deck: deck.clone(),
+                    commanders: Vec::new(),
+                },
+                None,
+            )
+            .expect_err("the session minimum must still be enforced");
+            let DraftError::ValidationFailed { errors } = err else {
+                panic!("expected ValidationFailed, got {err:?}");
+            };
+            assert!(errors.contains(&LimitedDeckError::TooFewCards {
+                actual: 20,
+                minimum
+            }));
+            assert!(session.submitted_decks.is_empty());
+        }
+    }
+
     /// VM row 9 — the PRODUCTION-PATH row for CR 903.3's floor.
     ///
     /// `validation.rs`'s rows enter at `validate_limited_deck` directly and so

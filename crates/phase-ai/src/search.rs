@@ -1838,10 +1838,11 @@ pub fn fallback_action(
         WaitingFor::RippleRevealChoice { .. } => Some(GameAction::RippleChoice {
             choice: engine::types::actions::CastChoice::Cast,
         }),
-        // CR 702.60a + CR 608.2d: Ripple bottom-order — submit the pile in its
+        // CR 702.60a + CR 608.2d: Ripple / reveal-until bottom-order — submit the pile in its
         // revealed order (any permutation is legal; order at the bottom of the
         // library carries no tactical weight).
-        WaitingFor::RippleBottomOrder { cards, .. } => Some(GameAction::SelectCards {
+        WaitingFor::RippleBottomOrder { cards, .. }
+        | WaitingFor::RevealUntilBottomOrder { cards, .. } => Some(GameAction::SelectCards {
             cards: cards.clone(),
         }),
         // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the

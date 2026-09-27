@@ -5,144 +5,9 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-26T00:00:00Z",
+  "updated": "2026-09-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
-    {
-      "name": "Izzet Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Flow State"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 1,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Academic Dispute"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 3,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 1,
-          "name": "Flow State"
-        },
-        {
-          "count": 3,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Experimental Synthesizer"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 1,
-          "name": "Octopus Form"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 2,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 2,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 2,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        }
-      ]
-    },
     {
       "name": "Golgari Midrange",
       "author": "MTGGoldfish",
@@ -287,6 +152,137 @@
         {
           "count": 2,
           "name": "Cruelclaw's Heist"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Prowess",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 3,
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 1,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Flow State"
+        },
+        {
+          "count": 4,
+          "name": "Academic Dispute"
+        },
+        {
+          "count": 3,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 3,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 2,
+          "name": "Screaming Nemesis"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Octopus Form"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 3,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Ral, Crackling Wit"
+        },
+        {
+          "count": 1,
+          "name": "Spider-Sense"
+        },
+        {
+          "count": 1,
+          "name": "Rending Volley"
+        },
+        {
+          "count": 2,
+          "name": "Scorching Shot"
         }
       ]
     },
@@ -744,112 +740,44 @@
       "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "U"
+        "U",
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Get Lost"
-        },
-        {
-          "count": 1,
-          "name": "Castle Ardenvale"
-        },
-        {
           "count": 2,
-          "name": "Change the Equation"
-        },
-        {
-          "count": 4,
-          "name": "Consult the Star Charts"
-        },
-        {
-          "count": 3,
-          "name": "Deserted Beach"
-        },
-        {
-          "count": 4,
-          "name": "Dovin's Veto"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
+          "name": "Island"
         },
         {
           "count": 2,
           "name": "Emeritus of Ideation"
         },
         {
-          "count": 2,
-          "name": "Plains"
+          "count": 4,
+          "name": "Consult the Star Charts"
         },
         {
           "count": 1,
           "name": "Fountainport"
         },
         {
-          "count": 1,
-          "name": "Get Lost"
-        },
-        {
           "count": 2,
-          "name": "Glacial Fortress"
-        },
-        {
-          "count": 2,
-          "name": "Hall of Storm Giants"
-        },
-        {
-          "count": 4,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 4,
-          "name": "Hengegate Pathway"
-        },
-        {
-          "count": 2,
-          "name": "Irrigated Farmland"
+          "name": "Beza, the Bounding Spring"
         },
         {
           "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "March of Otherworldly Light"
-        },
-        {
-          "count": 1,
-          "name": "Farewell"
-        },
-        {
-          "count": 1,
-          "name": "Narset, Parter of Veils"
+          "name": "Field of Ruin"
         },
         {
           "count": 4,
           "name": "No More Lies"
         },
         {
-          "count": 3,
-          "name": "Omen of the Sea"
-        },
-        {
           "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 2,
-          "name": "Petrified Hamlet"
-        },
-        {
-          "count": 2,
-          "name": "Island"
+          "name": "Narset, Parter of Veils"
         },
         {
           "count": 3,
@@ -857,6 +785,34 @@
         },
         {
           "count": 2,
+          "name": "Change the Equation"
+        },
+        {
+          "count": 4,
+          "name": "Temporary Lockdown"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 4,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Irrigated Farmland"
+        },
+        {
+          "count": 1,
           "name": "Field of Ruin"
         },
         {
@@ -865,19 +821,35 @@
         },
         {
           "count": 4,
-          "name": "Temporary Lockdown"
+          "name": "Dovin's Veto"
         },
         {
           "count": 1,
-          "name": "The Unagi of Kyoshi Island"
+          "name": "Castle Ardenvale"
+        },
+        {
+          "count": 4,
+          "name": "Hengegate Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Hall of Storm Giants"
+        },
+        {
+          "count": 3,
+          "name": "Deserted Beach"
         },
         {
           "count": 3,
           "name": "The Wandering Emperor"
         },
         {
-          "count": 1,
-          "name": "Ultima"
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Glacial Fortress"
         },
         {
           "count": 2,
@@ -885,41 +857,41 @@
         },
         {
           "count": 2,
-          "name": "Beza, the Bounding Spring"
+          "name": "Petrified Hamlet"
+        },
+        {
+          "count": 4,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 3,
+          "name": "Omen of the Sea"
+        },
+        {
+          "count": 1,
+          "name": "The Unagi of Kyoshi Island"
+        },
+        {
+          "count": 2,
+          "name": "Ultima"
         },
         {
           "count": 3,
           "name": "Meticulous Archive"
+        },
+        {
+          "count": 4,
+          "name": "Get Lost"
         }
       ],
       "sideboard": [
-        {
-          "count": 1,
-          "name": "Erode"
-        },
-        {
-          "count": 1,
-          "name": "Farewell"
-        },
-        {
-          "count": 2,
-          "name": "High Noon"
-        },
-        {
-          "count": 3,
-          "name": "Kutzil's Flanker"
-        },
-        {
-          "count": 2,
-          "name": "Narset's Reversal"
-        },
         {
           "count": 2,
           "name": "Rest in Peace"
         },
         {
-          "count": 1,
-          "name": "Three Steps Ahead"
+          "count": 2,
+          "name": "Narset's Reversal"
         },
         {
           "count": 1,
@@ -927,7 +899,27 @@
         },
         {
           "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
           "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 1,
+          "name": "Farewell"
+        },
+        {
+          "count": 1,
+          "name": "Three Steps Ahead"
+        },
+        {
+          "count": 3,
+          "name": "Kutzil's Flanker"
+        },
+        {
+          "count": 1,
+          "name": "Narset, Parter of Veils"
         }
       ]
     },

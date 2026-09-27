@@ -53748,7 +53748,7 @@ fn quistis_class_grant_forwards_any_type_mana_and_pays_off_color_full_cost() {
 /// opponent's (C's) graveyard card must NOT be castable.
 ///
 /// DISCRIMINATING: reverting the FINDING-4 owner-add in
-/// `try_parse_cast_target_from_graveyard_any_mana` drops `Owned{TriggeringPlayer}`
+/// `try_parse_cast_effect` drops `Owned{TriggeringPlayer}`
 /// from the parsed filter, so C's card ALSO matches and the final assertion
 /// fails — exactly the multiplayer over-cast the fix prevents.
 #[test]

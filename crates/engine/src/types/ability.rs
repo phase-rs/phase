@@ -18,13 +18,13 @@ use super::game_state::{
     TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{
-    CardId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
 };
-use super::phase::Phase;
+use super::phase::{Phase, PhaseGroup};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::proposed_event::AppliedReplacementKey;
 use super::replacements::ReplacementEvent;
@@ -5743,6 +5743,17 @@ pub enum DelayedTriggerCondition {
         )]
         binding: DelayedTriggerPlayerBinding,
     },
+    /// CR 603.7a + CR 500.6: "at the beginning of that combat" — names the phase
+    /// that the preceding instruction of the same resolution added (CR 500.8),
+    /// and fires when its step `phase` begins as that phase begins, never at
+    /// another occurrence of the same step. The parser emits `entry: None` (the
+    /// anaphor); `effects::delayed_trigger::resolve` binds it to the added
+    /// phase's `ExtraPhaseId`, or creates no trigger if no phase was added.
+    AtBeginningOfAddedPhase {
+        phase: Phase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<ExtraPhaseId>,
+    },
     /// "when [object] leaves the battlefield"
     WhenLeavesPlay {
         object_id: super::identifiers::ObjectId,
@@ -8876,8 +8887,16 @@ pub enum QuantityRef {
     /// Controller's life total minus the format's starting life total.
     /// Used for "N or more life more than your starting life total" conditions.
     LifeAboveStarting,
-    /// CR 103.4: The format's starting life total (20 for Standard, 40 for Commander, etc.).
-    StartingLifeTotal,
+    /// CR 103.4: The format's starting life total for `player` (20 for Standard,
+    /// 40 for Commander or Archenemy, etc.). Legacy serialized unit values
+    /// default to `Controller`.
+    StartingLifeTotal {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 701.57a: The mana-value limit `N` of the discover that fired the
     /// current "whenever you discover" trigger — read from
     /// `GameState::last_discover_value`. Curator of Sun's Creation: "discover
@@ -9779,6 +9798,7 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -9787,7 +9807,6 @@ impl QuantityRef {
             | QuantityRef::TokensCreatedThisTurn { player, .. }
             | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
             QuantityRef::LifeAboveStarting
-            | QuantityRef::StartingLifeTotal
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
             | QuantityRef::TriggeringScryBottomCount
@@ -10888,16 +10907,14 @@ pub enum PlayerFilter {
     /// CR 402.1 (hand) / CR 119.1 (life) / CR 122.1f (poison) / CR 404.1
     /// (graveyard): Each player satisfying `relation` whose scalar player
     /// attribute `attr`, read PER CANDIDATE PLAYER, satisfies `comparator`
-    /// against `value`. `attr` is the per-player-scalar `QuantityRef` subset
-    /// (`HandSize` / `LifeTotal` / `GraveyardSize` / `PlayerCounter`) — read
-    /// directly off the candidate `Player` at runtime, never via the
-    /// controller-scoped quantity resolver, so its embedded `PlayerScope` /
-    /// `CountScope` carries no game-state meaning here.
+    /// against `value`. `attr` uses the per-player scalar reader (which can
+    /// consult game state for team life or ledger-backed values), so its
+    /// embedded `PlayerScope` / `CountScope` does not choose another player.
     ///
     /// Covers "opponents who have N or more poison counters" (Glissa's
     /// Retriever) and "your opponents with N or more cards in hand"
-    /// (Wolfcaller's Howl). `value` is the controller-relative threshold,
-    /// resolved once per evaluation (candidate-independent).
+    /// (Wolfcaller's Howl). `value` keeps the ability controller and source,
+    /// while `ScopedPlayer` binds to each candidate during evaluation.
     ///
     /// `attr` and `value` are boxed to break the `QuantityExpr →
     /// QuantityRef::PlayerCount → PlayerFilter::PlayerAttribute →
@@ -15561,6 +15578,44 @@ impl StepSkipTarget {
     }
 }
 
+/// CR 500.8 + CR 500.9 + CR 500.10: where an added phase or step is inserted.
+/// `ThisStep` and `ThisPhase` are resolved when the effect resolves, against
+/// the step it resolves in; `FirstOfTurn`, against the steps begun this turn.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ExtraPhaseAnchor {
+    /// A fixed step, independent of where the effect resolves.
+    Step(Phase),
+    /// CR 500.9: "after this step" — the step in which the effect resolves.
+    ThisStep,
+    /// CR 500.8 + CR 500.10: "after this phase" — the final step of the phase in
+    /// which the effect resolves. `named` is the phase the text names, as the
+    /// CR 500.1 phases it may be: `None` for a bare "this phase"; for
+    /// "this main phase", both main phases (CR 505.1: "individually and
+    /// collectively known as the main phase"). If the effect resolves in a phase
+    /// outside `named`, there is no such phase to add after and nothing is added
+    /// (CR 500.8).
+    ThisPhase { named: Option<Vec<PhaseGroup>> },
+    /// CR 500.8 + CR 505.1a + CR 505.1b: "after the first combat phase this
+    /// turn" / "after the second main phase this turn" — the first phase of
+    /// this group this turn (every main phase after the first is a postcombat
+    /// main phase, so the second main phase is the first postcombat one). The
+    /// insert follows that phase's last step. If that phase has already ended
+    /// there is no such phase to add after, and nothing is added (World at War
+    /// and Swinging Ship rulings). The parser names only `Combat` and
+    /// `PostcombatMain`.
+    FirstOfTurn(PhaseGroup),
+}
+
+impl ExtraPhaseAnchor {
+    /// CR 505.1: "after this main phase".
+    pub fn this_main_phase() -> Self {
+        Self::ThisPhase {
+            named: Some(vec![PhaseGroup::PrecombatMain, PhaseGroup::PostcombatMain]),
+        }
+    }
+}
+
 /// CR 614.10 + CR 614.10a: How long a skip effect persists.
 ///
 /// CR 614.10: "Skip [something]" is a replacement effect equivalent to
@@ -16110,6 +16165,7 @@ pub enum DigRestOrder {
     #[default]
     Preserve,
     Random,
+    PlayerChoice,
 }
 
 impl DigRestOrder {
@@ -19244,6 +19300,12 @@ pub enum Effect {
         kept_destination: Zone,
         /// Where non-matching revealed cards go (Library bottom or Graveyard).
         rest_destination: Zone,
+        /// CR 401.4: The required placement order when revealed cards go to a
+        /// library. `PlayerChoice` lets their owner arrange them; `Preserve`
+        /// retains encounter order for legacy payloads; `Random` follows an
+        /// explicit randomization instruction.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
         /// CR 110.5b: The matching card enters the battlefield tapped.
         #[serde(
             default,
@@ -19635,11 +19697,14 @@ pub enum Effect {
     /// Splitter of Seconds' "that many additional upkeep steps" thread the
     /// triggering event amount through `QuantityRef::EventContextAmount`. Legacy
     /// callers and explicit "an additional" wording deserialize to a Fixed 1.
+    /// `after` is the CR 500.8/500.9/500.10 insertion point, resolved at
+    /// resolution time by `additional_phase::resolve`; `ThisStep`/`ThisPhase` are
+    /// relative to the step the effect resolves in.
     AdditionalPhase {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
         phase: Phase,
-        after: Phase,
+        after: ExtraPhaseAnchor,
         #[serde(default)]
         followed_by: Vec<Phase>,
         #[serde(default = "default_quantity_one")]
@@ -35154,6 +35219,32 @@ mod tests {
             serde_json::from_str::<QuantityRef>(r#"{"type":"DistinctColorsAmongPermanents"}"#)
                 .is_err(),
             "the population key must stay required under both tags",
+        );
+    }
+
+    #[test]
+    fn starting_life_total_scope_defaults_for_legacy_json_and_round_trips() {
+        let legacy: QuantityRef = serde_json::from_str(r#"{"type":"StartingLifeTotal"}"#)
+            .expect("legacy unit payload defaults to controller scope");
+        assert_eq!(
+            legacy,
+            QuantityRef::StartingLifeTotal {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("serializes legacy controller payload"),
+            r#"{"type":"StartingLifeTotal"}"#,
+            "controller scope must preserve the legacy serialized shape",
+        );
+
+        let scoped = QuantityRef::StartingLifeTotal {
+            player: PlayerScope::ScopedPlayer,
+        };
+        let json = serde_json::to_string(&scoped).expect("serializes scoped payload");
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).expect("scoped payload round-trips"),
+            scoped,
         );
     }
 

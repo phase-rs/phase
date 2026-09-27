@@ -8886,10 +8886,10 @@ struct PriorityPassPipelineOutcome {
     consumed_stack_entries: u32,
 }
 
-// Test-only reach signal for the production Cleanup-deferral seam. It is not
-// part of release consumers or serialized game state.
+// Test-only reach signal for the production phase-transition deferral seam. It
+// is not part of release consumers or serialized game state.
 #[cfg(test)]
-mod cleanup_deferred_probe {
+mod transition_deferred_probe {
     use std::cell::Cell;
 
     std::thread_local! {
@@ -8906,10 +8906,10 @@ mod cleanup_deferred_probe {
 }
 
 /// Consume the test-only signal that the production priority pipeline observed
-/// `cleanup_deferred`. This does not alter game state or release behavior.
+/// `transition_deferred`. This does not alter game state or release behavior.
 #[cfg(test)]
-pub fn take_cleanup_deferred_probe_for_test() -> bool {
-    cleanup_deferred_probe::take()
+pub fn take_transition_deferred_probe_for_test() -> bool {
+    transition_deferred_probe::take()
 }
 
 fn pass_priority_once_with_pipeline(
@@ -8932,6 +8932,7 @@ fn pass_priority_once_with_pipeline(
     state.pending_activations.clear();
 
     let stack_was_empty = state.stack.is_empty();
+    let phase_before_pass = state.phase;
     // PR-3 (Option C) Defect-1: capture the pre-pipeline stack frame for the
     // loop-shortcut window maintenance below. `stack_top_before` is the resolving
     // entry's id; a real resolution this beat replaces the top with a different id
@@ -8950,10 +8951,10 @@ fn pass_priority_once_with_pipeline(
         events,
         stack_resolution_limit,
     );
-    let cleanup_deferred = priority_outcome.cleanup_deferred;
+    let transition_deferred = priority_outcome.transition_deferred;
     #[cfg(test)]
-    if cleanup_deferred {
-        cleanup_deferred_probe::record();
+    if transition_deferred {
+        transition_deferred_probe::record();
     }
     sync_waiting_for(state, &priority_outcome.waiting_for);
 
@@ -8963,7 +8964,7 @@ fn pass_priority_once_with_pipeline(
     // stack, continuation, and pending-trigger predicates cover both the
     // Cleanup retry and non-Cleanup trigger-target selection errors.
     let needs_boundary_rollback = priority_outcome.consumed_stack_entries > 0
-        || cleanup_deferred
+        || transition_deferred
         || !state.stack.is_empty()
         || !state.deferred_triggers.is_empty()
         || !state.pending_trigger_event_batch.is_empty()
@@ -9019,19 +9020,42 @@ fn pass_priority_once_with_pipeline(
     sync_waiting_for(state, &wf);
 
     // The priority reducer deliberately returned the still-live Priority
-    // window when Cleanup wrapped with an unsettled carrier.  Once the shared
-    // continuation and post-action pipelines have completed, retry the same
-    // turn-interpreter unit exactly once.  Do not re-run cleanup while the
-    // carrier is still live or while the pipeline opened new stack work.
-    if cleanup_deferred
-        && state.phase == Phase::Cleanup
+    // window when a phase transition met an unsettled carrier: the cleanup
+    // step, or a leave that ends the turn (CR 500.1 + CR 500.8: the final step
+    // of a unit added after the cleanup step).  Once the shared continuation
+    // and post-action pipelines have completed, retry the same transition
+    // exactly once.  Do not retry while the carrier is still live or while the
+    // pipeline opened new stack work.
+    if transition_deferred
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.stack.is_empty()
         && !turns::phase_transition_requires_settlement(state)
     {
-        let waiting_for = turns::auto_advance(state, events);
-        sync_waiting_for(state, &waiting_for);
-        wf = waiting_for;
+        let retry_advances = if state.phase == Phase::Cleanup {
+            // CR 514.3a: a pass that deferred inside the cleanup step is the
+            // one after which "another cleanup step begins"; the retry runs
+            // that step. (A pass that deferred as it entered Cleanup from an
+            // earlier step retries the step whose begin its entry already
+            // recorded.) The priority reducer's Cleanup arm records the
+            // undeferred repeat.
+            if phase_before_pass == Phase::Cleanup {
+                turns::record_step_begin(state, Phase::Cleanup);
+            }
+            true
+        } else {
+            // CR 117.4: any other deferred step already ended; retry leaving
+            // it rather than beginning it again. The resolution is settled, so
+            // the leave commits.
+            match turns::advance_phase_once(state, events) {
+                turns::AdvancePhaseOnce::Deferred => false,
+                turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => true,
+            }
+        };
+        if retry_advances {
+            let waiting_for = turns::auto_advance(state, events);
+            sync_waiting_for(state, &waiting_for);
+            wf = waiting_for;
+        }
     }
 
     // PR-3 (Option C) CR 732.2a loop-shortcut window accumulation — relocated here
@@ -10381,6 +10405,7 @@ fn apply_action(
                 ..
             }
             | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
     ) {
         state.revealed_cards.clear();
     }
@@ -11515,6 +11540,19 @@ fn apply_non_priority_pass_action(
                     // CR 702.37c / CR 702.168b: Handle the "cast normally vs cast
                     // face down for {3}" choice for a Morph/Megamorph/Disguise card.
                     casting::handle_face_down_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::Surge => {
+                    // CR 702.117a: Handle the "cast normally vs cast for the surge
+                    // cost" choice.
+                    casting::handle_surge_cost_choice_with_payment_mode(
                         state,
                         *player,
                         *object_id,
@@ -15456,7 +15494,8 @@ fn apply_non_priority_pass_action(
         // fields") is FALSE at source: that function's body reads only
         // `ResourceVector::snapshot(&f.normalized)` and
         // `window_scope_from_cover_frames(..).phase_invariant`, and `phase_invariant` is
-        // `turn_number` + `phase` + `extra_phases.is_empty()`. Neither field is in it.
+        // `turn_number` + `phase` + `extra_phases.is_empty()` + `extra_phase_resume.is_empty()`.
+        // Neither field is in it.
         //
         // The consumer that DOES read them is BASIS A — the ring scans that call
         // `analysis::resource::loop_states_equal_modulo_resources(prior, state)` with `prior`
@@ -18229,6 +18268,9 @@ pub fn start_game_with_starting_player(
         state.seat_order.rotate_left(idx);
     }
     state.phase = Phase::Untap;
+    // CR 103.8 + CR 500.1: the first turn begins in its untap step, which game
+    // setup places directly rather than through the turn machine's step entry.
+    turns::record_step_begin(state, Phase::Untap);
 
     events.push(GameEvent::TurnStarted {
         player_id: starting_player,
@@ -18277,6 +18319,9 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     // so the starting player's own first turn must be counted here.
     state.players[starting_player.0 as usize].turns_taken += 1;
     state.phase = Phase::Untap;
+    // CR 103.8 + CR 500.1: the first turn begins in its untap step, which game
+    // setup places directly rather than through the turn machine's step entry.
+    turns::record_step_begin(state, Phase::Untap);
 
     events.push(GameEvent::TurnStarted {
         player_id: starting_player,
@@ -23812,8 +23857,9 @@ mod bounded_offer_conjunct_tests {
     /// a period seen twice: `frames` successive normalized snapshots, each mutated by `shape`.
     ///
     /// `2k + 1 = 3` frames at `k = 1` is the smallest ring `ring_delta_signature` will certify,
-    /// and every frame shares `turn_number` / `phase` / `extra_phases`, so the CR 703.1
-    /// turn-position conjunct passes and this fixture is not silently testing that instead.
+    /// and every frame shares `turn_number` / `phase` / `extra_phases` / `extra_phase_resume`,
+    /// so the CR 703.1 turn-position conjunct passes and this fixture is not silently testing
+    /// that instead.
     ///
     /// PARAMETERIZED BY SEAT COUNT rather than given a sibling: a row needing two drained seats
     /// at distinct lives (so the argmin is unique and no axis it reads is single-entry) differs
@@ -25391,17 +25437,19 @@ mod resolving_carrier_settle_tests {
     use super::{
         apply, resolving_carrier_parity_is_coherent, resolving_stack_entry_can_settle,
         settle_resolving_stack_entry_after_continuation_resume,
-        take_cleanup_deferred_probe_for_test,
+        take_transition_deferred_probe_for_test,
     };
+    use crate::game::zones::create_object;
     use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::actions::GameAction;
     use crate::types::events::GameEvent;
     use crate::types::game_state::{
-        GameState, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
+        GameState, InsertedPhaseResume, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
     };
-    use crate::types::identifiers::{ObjectId, TriggerFiring};
-    use crate::types::phase::Phase;
+    use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId, TriggerFiring};
+    use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     const SOURCE: ObjectId = ObjectId(60);
 
@@ -25606,12 +25654,12 @@ mod resolving_carrier_settle_tests {
 
         let starting_turn = state.turn_number;
         let starting_life = state.players[0].life;
-        let _ = take_cleanup_deferred_probe_for_test();
+        let _ = take_transition_deferred_probe_for_test();
         let result = apply(&mut state, PlayerId(0), GameAction::PassPriority)
             .expect("the final Cleanup pass must settle the continuation");
 
         assert!(
-            take_cleanup_deferred_probe_for_test(),
+            take_transition_deferred_probe_for_test(),
             "the production priority pipeline must observe Cleanup deferral before retrying the boundary"
         );
         assert_eq!(state.turn_number, starting_turn + 1);
@@ -25622,6 +25670,130 @@ mod resolving_carrier_settle_tests {
         assert!(state.resolution_stack.is_empty());
         assert!(state.resolving_stack_entry.is_none());
         assert!(state.resolving_trigger_firing.is_none());
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::TurnStarted { .. }))
+                .count(),
+            1,
+            "the settled continuation must cross exactly one turn boundary"
+        );
+    }
+
+    /// CR 514.3a: when every player passes on an empty stack in the cleanup
+    /// step, "another cleanup step begins". If a live carrier defers that pass,
+    /// the pipeline's retry runs the new cleanup step, so the retry counts it.
+    /// Nine cards in hand make the retried step stop at its discard prompt
+    /// (CR 514.1), before the turn wrap would clear the tally.
+    #[test]
+    fn deferred_cleanup_retry_counts_the_cleanup_step_it_begins() {
+        let mut state = GameState::new_two_player(0x9194);
+        state.phase = Phase::Cleanup;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 1;
+        for i in 0..9 {
+            create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Hand,
+            );
+        }
+        state.resolving_stack_entry = Some(carrier(triggered_kind()));
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        let gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            SOURCE,
+            PlayerId(0),
+        );
+        state.park_ability_continuation(PendingContinuation::new(Box::new(gain_life), &state));
+        let starting_turn = state.turn_number;
+
+        let _ = take_transition_deferred_probe_for_test();
+        apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("the final Cleanup pass must settle the continuation");
+
+        assert!(
+            take_transition_deferred_probe_for_test(),
+            "reach guard: the pass must take the deferred-Cleanup retry"
+        );
+        assert_eq!(state.turn_number, starting_turn);
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DiscardToHandSize {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert_eq!(state.steps_started_this_turn.count(Phase::Cleanup), 1);
+    }
+
+    /// CR 500.1 + CR 500.8 + CR 117.4: the end of combat step of a combat added
+    /// after the cleanup step is the turn's last step, so the final pass there
+    /// crosses the turn boundary. A live carrier defers that crossing; the
+    /// pipeline drains the continuation, then retries leaving the step without
+    /// beginning it again.
+    #[test]
+    fn final_pass_in_a_unit_added_after_cleanup_drains_the_carrier_before_turn_wrap() {
+        let mut state = GameState::new_two_player(0x9332);
+        state.phase = Phase::EndCombat;
+        state.extra_phase_resume = vec![InsertedPhaseResume {
+            anchor: Phase::Cleanup,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
+            entry: ExtraPhaseId::default(),
+        }];
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 1;
+
+        state.resolving_stack_entry = Some(carrier(triggered_kind()));
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        let gain_life = |amount| {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                SOURCE,
+                PlayerId(0),
+            )
+        };
+        let chain = gain_life(1).sub_ability(gain_life(1));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(chain), &state));
+
+        let starting_turn = state.turn_number;
+        let starting_life = state.players[0].life;
+        let _ = take_transition_deferred_probe_for_test();
+        let result = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("the final pass must settle the continuation");
+
+        assert!(
+            take_transition_deferred_probe_for_test(),
+            "reach guard: the pass must defer the turn boundary before retrying it"
+        );
+        assert_eq!(state.turn_number, starting_turn + 1);
+        assert_eq!(state.active_player, PlayerId(1));
+        assert_eq!(state.players[0].life, starting_life + 2);
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.extra_phase_resume.is_empty());
+        assert!(matches!(state.phase, Phase::Untap | Phase::Upkeep));
         assert_eq!(
             result
                 .events

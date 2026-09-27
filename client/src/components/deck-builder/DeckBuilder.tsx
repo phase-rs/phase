@@ -46,9 +46,7 @@ export function DeckBuilder({
     deck,
     searchResults,
     deckName,
-    setDeckName,
     bracket,
-    setBracket,
     savedDecks,
     justSaved,
     setJustSaved,
@@ -90,6 +88,9 @@ export function DeckBuilder({
     canIncrement,
     handleMoveCard,
     handleImport,
+    handleDeckNameChange,
+    handleFormatChange,
+    handleBracketChange,
     handleSave,
     handleClone,
     handleLoad,
@@ -232,11 +233,24 @@ export function DeckBuilder({
     [dirty, handleLoad],
   );
 
+  const pendingActionRef = useRef(pendingAction);
+  pendingActionRef.current = pendingAction;
+  // Invalidated on unmount so a save that finishes after the builder is gone
+  // (e.g. browser back navigating away while it waits) cannot still act.
+  useEffect(() => {
+    return () => {
+      pendingActionRef.current = null;
+    };
+  }, []);
+
   const confirmSaveThen = useCallback(async () => {
     const action = pendingAction;
-    await handleSave();
+    if (!action) return;
+    const outcome = await handleSave();
+    // Continue only if this is still the pending request and the editor still holds what was saved: either can change while the save waits.
+    if (outcome !== "saved" || pendingActionRef.current !== action) return;
     setPendingAction(null);
-    if (action) performAction(action);
+    performAction(action);
   }, [pendingAction, handleSave, performAction]);
 
   const confirmDiscardThen = useCallback(() => {
@@ -288,7 +302,7 @@ export function DeckBuilder({
       <DeckBuilderToolbar
         onBack={requestBack}
         deckName={deckName}
-        onDeckNameChange={setDeckName}
+        onDeckNameChange={handleDeckNameChange}
         justSaved={justSaved && !dirty}
         onClearJustSaved={() => setJustSaved(false)}
         onSave={handleSave}
@@ -297,7 +311,7 @@ export function DeckBuilder({
         savedDecks={savedDecks}
         onLoad={requestLoad}
         format={format}
-        onFormatChange={onFormatChange}
+        onFormatChange={handleFormatChange}
       />
 
       <DeckBuilderTabBar
@@ -520,7 +534,7 @@ export function DeckBuilder({
               isCommander={isCommander}
               estimate={estimate}
               manualBracket={bracket}
-              onBracketChange={setBracket}
+              onBracketChange={handleBracketChange}
               auditEmptyReason={auditEmptyReason}
               onCardClick={handleScrollToCard}
             />

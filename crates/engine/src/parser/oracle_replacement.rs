@@ -13264,6 +13264,30 @@ fn rewrite_draw_replacement_execute_referents(def: &mut AbilityDefinition, text:
     rewrite_exile_would_be_drawn_card_to_exile_top(def, text);
     rewrite_reveal_top_player_to_post_replacement_target(def);
     rewrite_replacement_event_recipient_to_post_replacement_target(def);
+    rewrite_draw_replacement_card_to_last_revealed(def);
+}
+
+/// CR 614.6 + CR 608.2c: in a draw-replacement chain, "put that card / put it
+/// into …" moves the card the replacement revealed or looked at (Zur's Weirding,
+/// Enduring Renewal, Underrealm Lich), so a card-movement `ParentTarget` binds
+/// to the reveal ledger. Only card-movement slots are rebound: a player-slot
+/// `ParentTarget` ("they draw a card", "they mill a card" — Chains of
+/// Mephistopheles) names the replaced draw's player and must stay a player
+/// referent.
+fn rewrite_draw_replacement_card_to_last_revealed(def: &mut AbilityDefinition) {
+    if let Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } =
+        &mut *def.effect
+    {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::LastRevealed;
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_draw_replacement_card_to_last_revealed(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_draw_replacement_card_to_last_revealed(else_branch);
+    }
 }
 
 /// CR 121.1 + CR 614.6: "that player exiles that card instead" (Uba Mask) —

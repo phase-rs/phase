@@ -36,10 +36,10 @@
  * that suite's recipe too — the buttons are gated on `onAnimationComplete` of
  * the title's spring, which never settles under happy-dom's rAF.
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { MotionGlobalConfig } from "framer-motion";
 
 import { GamePage } from "../GamePage";
@@ -89,8 +89,12 @@ const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
 
 // ── Mock heavy dependencies (mirrors GamePage.bracketViolation.test.tsx) ──────
 
+let capturedOnNoDeck: ((reason?: string) => void) | undefined;
 vi.mock("../../providers/GameProvider", () => ({
-  GameProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  GameProvider: ({ children, onNoDeck }: { children: React.ReactNode; onNoDeck?: (reason?: string) => void }) => {
+    capturedOnNoDeck = onNoDeck;
+    return <>{children}</>;
+  },
 }));
 
 vi.mock("../../game/sessionCleanup.ts", () => ({ clearPromptOverlayState: vi.fn() }));
@@ -382,5 +386,31 @@ describe("GamePage — draft-match teardown on Back to Draft", () => {
     expect(leaveSpy).not.toHaveBeenCalled();
     // The pod tournament is still standing — the next round can be paired.
     expect(useMultiplayerDraftStore.getState().matchPairing).not.toBeNull();
+  });
+});
+
+function DraftReturnState() {
+  const location = useLocation();
+  const state = location.state as { draftId?: string; draftStartError?: string } | null;
+  return <div data-testid="draft-return">{`${location.search}|${state?.draftId}|${state?.draftStartError}`}</div>;
+}
+
+describe("GamePage — solo draft failed start", () => {
+  afterEach(() => { cleanup(); });
+
+  it("routes the raw engine reason and exact run ID to Resume", async () => {
+    storeOverrides.gameState = null;
+    storeOverrides.waitingFor = null;
+    render(<MemoryRouter initialEntries={["/game/failed?mode=ai&source=draft&draftId=run-A"]}>
+      <Routes>
+        <Route path="/game/:id" element={<GamePage />} />
+        <Route path="/draft/quick" element={<DraftReturnState />} />
+      </Routes>
+    </MemoryRouter>);
+    expect(capturedOnNoDeck).toBeDefined();
+    act(() => capturedOnNoDeck!("Contract from Below requires ante"));
+    expect(await screen.findByTestId("draft-return")).toHaveTextContent(
+      "?resume=1|run-A|Contract from Below requires ante",
+    );
   });
 });

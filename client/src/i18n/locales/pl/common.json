@@ -423,5 +423,25 @@
       "no-turn": "Nie podano relay TURN",
       "aborted": "Żądanie anulowano"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Inna karta Phase jest zajęta. Zamknij inne karty Phase i spróbuj ponownie.",
+    "title": {
+      "save": "Nie udało się zapisać talii",
+      "clone": "Nie udało się sklonować talii",
+      "import": "Nie udało się zaimportować talii",
+      "delete": "Nie udało się usunąć talii",
+      "organize": "Nie udało się zaktualizować organizacji talii",
+      "updateFeeds": "Nie udało się zaktualizować kanałów talii",
+      "restore": "Nie udało się przywrócić kopii zapasowej",
+      "applyCloud": "Nie udało się zastosować talii z chmury",
+      "autosaveDraft": "Nie udało się automatycznie zapisać talii z draftu"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase nie mógł uzyskać dostępu do pamięci przeglądarki. Spróbuj ponownie za chwilę."
+  },
+  "savedDeckChanged": {
+    "description": "Ta talia zmieniła się, zanim Twoja akcja została wykonana, więc nic nie zostało zmienione. Sprawdź talię i spróbuj ponownie."
   }
 }

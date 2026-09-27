@@ -1091,7 +1091,11 @@ fn activation_restriction_applies(
                     gates,
                 )
         }
-        ActivationRestriction::AsInstant => true,
+        // CR 304.5 + CR 605.3a: This printed restriction limits mana activation to priority.
+        ActivationRestriction::AsInstant => {
+            matches!(state.waiting_for, crate::types::WaitingFor::Priority { player: holder } if holder == player)
+                && state.pending_cast.is_none()
+        }
         // CR 702.62a: "If you could begin to cast this card by putting it onto the
         // stack from your hand" — defer to the underlying card type's natural
         // cast timing. Instants activate any time priority is held; sorceries
@@ -1680,7 +1684,8 @@ pub(crate) fn evaluate_condition(
                 .count() as u32
                 >= *count
         }
-        // CR 602.5b: "Activate only if [player condition]" — count matching non-eliminated players.
+        // CR 602.5: "Activate only if [player condition]" — count matching non-eliminated
+        // players (departed ones too for the life-history filters, CR 800.4i).
         ParsedCondition::PlayerCountAtLeast { filter, minimum } => {
             crate::game::quantity::resolve_player_count(
                 state,

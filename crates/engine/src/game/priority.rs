@@ -41,23 +41,20 @@ pub fn handle_priority_pass(
 pub(crate) struct PriorityPassOutcome {
     pub(crate) waiting_for: WaitingFor,
     pub(crate) consumed_stack_entries: u32,
-    pub(crate) cleanup_deferred: bool,
+    /// A phase transition (the cleanup step, or a leave that ends the turn)
+    /// deferred until a live resolution settles; the engine pipeline settles
+    /// it and retries the transition once.
+    pub(crate) transition_deferred: bool,
 }
 
-/// Preserve the Cleanup settlement signal when automatic phase advancement
-/// reaches Cleanup from another phase. `auto_advance` intentionally exposes
-/// only its waiting state; a deferred Cleanup boundary returns the unchanged
-/// Priority window, so the caller must retain the settlement predicate for the
-/// engine pipeline's retry.
-fn auto_advance_with_cleanup_deferred(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> (WaitingFor, bool) {
-    let waiting_for = turns::auto_advance(state, events);
-    let cleanup_deferred = state.phase == Phase::Cleanup
-        && matches!(&waiting_for, WaitingFor::Priority { .. })
-        && turns::phase_transition_requires_settlement(state);
-    (waiting_for, cleanup_deferred)
+/// The pass leaves the step's priority window open while its phase transition
+/// waits for a live resolution to settle.
+fn deferred_transition_outcome(state: &GameState) -> PriorityPassOutcome {
+    PriorityPassOutcome {
+        waiting_for: state.waiting_for.clone(),
+        consumed_stack_entries: 0,
+        transition_deferred: true,
+    }
 }
 
 pub(crate) fn handle_priority_pass_with_limit(
@@ -89,14 +86,8 @@ pub(crate) fn handle_priority_pass_with_limit(
             // and typed continuation.  Returning the current Priority window
             // lets `engine::pass_priority_once_with_pipeline` perform that
             // settlement before asking the turn interpreter to retry.
-            if state.phase == crate::types::phase::Phase::Cleanup
-                && turns::phase_transition_requires_settlement(state)
-            {
-                return PriorityPassOutcome {
-                    waiting_for: state.waiting_for.clone(),
-                    consumed_stack_entries: 0,
-                    cleanup_deferred: true,
-                };
+            if state.phase == Phase::Cleanup && turns::phase_transition_requires_settlement(state) {
+                return deferred_transition_outcome(state);
             }
             // CR 510.4: The combat damage step's turn-based action runs in two
             // sub-steps when a first-strike/double-strike creature is present. If
@@ -117,12 +108,12 @@ pub(crate) fn handle_priority_pass_with_limit(
                     .as_ref()
                     .is_some_and(|c| !c.regular_damage_done);
             if combat_damage_incomplete {
-                let (waiting_for, cleanup_deferred) =
-                    auto_advance_with_cleanup_deferred(state, events);
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
                 PriorityPassOutcome {
                     waiting_for,
                     consumed_stack_entries: 0,
-                    cleanup_deferred,
+                    transition_deferred,
                 }
             } else if state.phase == crate::types::phase::Phase::Cleanup {
                 // CR 514.3a: Triggered abilities that triggered during the
@@ -135,25 +126,34 @@ pub(crate) fn handle_priority_pass_with_limit(
                 // returns `None` and advances normally (the until-EOT control
                 // TCE is already pruned, so no new loss event re-fires — the
                 // one-shot trigger is gone, guaranteeing termination).
-                let (waiting_for, cleanup_deferred) =
-                    auto_advance_with_cleanup_deferred(state, events);
+                // CR 514.3a: "another cleanup step begins", re-running the cleanup arm
+                // directly rather than through the turn machine's step entry.
+                turns::record_step_begin(state, crate::types::phase::Phase::Cleanup);
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
                 PriorityPassOutcome {
                     waiting_for,
                     consumed_stack_entries: 0,
-                    cleanup_deferred,
+                    transition_deferred,
                 }
             } else {
-                // CR 117.4: Empty stack — advance to next phase.
+                // CR 117.4: Empty stack — advance to next phase. CR 500.1 +
+                // CR 500.8: a leave that ends the turn (the final step of a
+                // unit added after the cleanup step) defers while a
+                // resolution is live; the step's priority window stays open
+                // for the engine pipeline's retry.
                 match turns::advance_phase_once(state, events) {
-                    turns::AdvancePhaseOnce::Deferred => {}
+                    turns::AdvancePhaseOnce::Deferred => {
+                        return deferred_transition_outcome(state);
+                    }
                     turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {}
                 }
-                let (waiting_for, cleanup_deferred) =
-                    auto_advance_with_cleanup_deferred(state, events);
+                let (waiting_for, transition_deferred) =
+                    turns::auto_advance_reporting_deferral(state, events);
                 PriorityPassOutcome {
                     waiting_for,
                     consumed_stack_entries: 0,
-                    cleanup_deferred,
+                    transition_deferred,
                 }
             }
         } else {
@@ -210,7 +210,7 @@ pub(crate) fn handle_priority_pass_with_limit(
             PriorityPassOutcome {
                 waiting_for,
                 consumed_stack_entries: consumed,
-                cleanup_deferred: false,
+                transition_deferred: false,
             }
         }
     } else {
@@ -228,7 +228,7 @@ pub(crate) fn handle_priority_pass_with_limit(
         PriorityPassOutcome {
             waiting_for: WaitingFor::Priority { player: next },
             consumed_stack_entries: 0,
-            cleanup_deferred: false,
+            transition_deferred: false,
         }
     }
 }
@@ -458,7 +458,7 @@ mod tests {
         let outcome =
             handle_priority_pass_with_limit(PlayerId(1), &mut state, &mut Vec::new(), None);
 
-        assert!(outcome.cleanup_deferred);
+        assert!(outcome.transition_deferred);
         assert_eq!(state.phase, Phase::Cleanup);
         assert!(matches!(
             outcome.waiting_for,
