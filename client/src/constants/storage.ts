@@ -492,8 +492,7 @@ export function saveBuilderDeck(
           // Clear instead of rebasing onto the other writer's bytes: rebasing made a later
           // rename-Save treat that snapshot as "unchanged" and move + overwrite the other
           // writer's deck the user never saw. Clearing makes the retry the "try again" toast
-          // asks for a first save (overwrite or recreate) instead, and leaves the rename rule
-          // unaffected by this refusal.
+          // asks for a first save (overwrite or recreate) instead.
           savedDeckRef.current = null;
         }
         throw new SavedDeckChangedError(nextName);

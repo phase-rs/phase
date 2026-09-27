@@ -2348,8 +2348,7 @@ describe("DeckBuilder", () => {
         expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P copy")).not.toBeNull(),
       );
       // Pins current behaviour: the refusal cleared savedDeckRef, so Clone's click-time folder
-      // lookup finds nothing and the copy lands unfiled, unlike a Clone of the same deck with
-      // no prior refusal (see "clones into the source's folder..." above, which lands in F).
+      // lookup finds nothing and the copy lands unfiled.
       expect(getDeckMeta("P copy")?.folderId).toBeUndefined();
       // The other writer's bytes at the old name are untouched by the Clone.
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
