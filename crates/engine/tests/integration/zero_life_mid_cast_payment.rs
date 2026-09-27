@@ -22,10 +22,11 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, ManaChoice, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
-use engine::types::zones::Zone;
+use engine::types::zones::{EtbTapState, Zone};
 
 const FUMAROLE: &str =
     "As an additional cost to cast this spell, pay 3 life.\nDestroy target creature and target land.";
@@ -556,4 +557,96 @@ fn replacement_choice_after_a_spell_cost_paid_the_last_life_stays_open() {
         "got {:?}",
         runner.state().waiting_for
     );
+}
+
+/// A `Moved` replacement sending a card headed to exile to the graveyard.
+/// Two of them compete, so CR 616.1 asks the affected card's controller to
+/// order them.
+fn redirect_exile_to_graveyard() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Exile)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Graveyard,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+}
+
+#[test]
+fn foretell_paid_with_the_last_life_finishes_before_the_player_loses() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 1);
+    let foretold = scenario
+        .add_spell_to_hand(P0, "Foretell Witness", false)
+        .with_mana_cost(ManaCost::generic(5))
+        .with_keyword(Keyword::Foretell(ManaCost::generic(3)))
+        .id();
+    for name in ["First Exile Redirect", "Second Exile Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_exile_to_graveyard());
+    }
+    scenario
+        .add_land_from_oracle(P0, "Mana Confluence", MANA_CONFLUENCE)
+        .id();
+    scenario.with_mana_pool(P0, pool(&[ManaType::Colorless]));
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&foretold].card_id;
+    runner
+        .act(GameAction::Foretell {
+            object_id: foretold,
+            card_id,
+        })
+        .expect("foretell pays {2}, the second with Mana Confluence's life");
+
+    // CR 116.2h: foretelling is a special action; the exile move's CR 616.1
+    // ordering choice is part of it, so no one has priority yet.
+    assert_eq!(runner.life(P0), 0);
+    assert!(!eliminated(&runner));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ),
+        "the exile move's replacement choice must stay open to P0, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let events = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("order the redirects")
+        .events;
+
+    // The special action completes (the card is redirected to the graveyard,
+    // so it is not foretold), then CR 104.3b + CR 704.5a end the game.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Graveyard,
+                ..
+            } if *object_id == foretold
+        )),
+        "the foretell move must finish before the loss: {events:?}"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(!runner.state().objects[&foretold].foretold);
+    assert!(eliminated(&runner));
+    assert!(p1_won(&runner), "got {:?}", runner.state().waiting_for);
 }

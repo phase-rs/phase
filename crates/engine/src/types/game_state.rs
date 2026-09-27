@@ -7368,16 +7368,17 @@ pub enum DeferredLifeCostResume {
 }
 
 impl DeferredLifeCostResume {
-    /// CR 601.2h + CR 602.2b: Whether the suspended payment belongs to casting a
-    /// spell or activating an ability, rather than to a resolution or a
-    /// special action. Exhaustive so a new owner has to be classified.
-    pub fn is_casting_or_activation_cost(&self) -> bool {
+    /// CR 601.2h + CR 602.2b + CR 116.2: Whether the suspended payment belongs
+    /// to casting a spell, activating an ability or performing a special
+    /// action, rather than to a resolution. Exhaustive so a new owner has to
+    /// be classified.
+    pub fn withholds_priority(&self) -> bool {
         match self {
             DeferredLifeCostResume::Cast { .. } => true,
             // A resolution-time "pay any amount of life" choice (CR 608.2).
             DeferredLifeCostResume::PayAmount { .. } => false,
-            // A resolution or special-action mana payment's Phyrexian life.
-            DeferredLifeCostResume::ManaRoot { .. } => false,
+            // A mana payment's Phyrexian life; its outer root names the owner.
+            DeferredLifeCostResume::ManaRoot { resume, .. } => resume.withholds_priority(),
         }
     }
 
@@ -7744,17 +7745,22 @@ pub enum PendingCostMoveResume {
 }
 
 impl PendingCostMoveResume {
-    /// CR 601.2h + CR 602.2b + CR 605.3b: Whether the paused cost move belongs
-    /// to casting a spell or activating an ability (a mana ability included),
-    /// rather than to a resolution, a replacement's own optional cost, or a
-    /// special action. Exhaustive so a new owner has to be classified.
-    pub fn is_casting_or_activation_cost(&self) -> bool {
+    /// CR 601.2h + CR 602.2b + CR 605.3b + CR 116.2h: Whether the paused cost
+    /// move belongs to casting a spell, activating an ability (a mana ability
+    /// included) or performing a special action, none of which gives a player
+    /// priority until it completes, rather than to a resolution or a
+    /// replacement's own optional cost. Exhaustive so a new owner has to be
+    /// classified.
+    pub fn withholds_priority(&self) -> bool {
         match self {
             PendingCostMoveResume::Cast { .. }
             | PendingCostMoveResume::DelveManaPayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
             | PendingCostMoveResume::ActivationMillPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. } => true,
+            // CR 116.2h: foretelling is a special action; its {2} is paid before
+            // its exile move, which can then pause on a replacement.
+            PendingCostMoveResume::Foretell { .. } => true,
             // Cast and activation payments keep their announcement; an
             // optional payment made during a resolution does not.
             PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.is_some(),
@@ -7771,8 +7777,6 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
-            // CR 116.2h: foretelling is a special action, not a cast.
-            PendingCostMoveResume::Foretell { .. } => false,
         }
     }
 }
@@ -8278,6 +8282,33 @@ pub enum ManaAbilityResume {
     FinalizePendingManaPayment {
         player: PlayerId,
     },
+}
+
+impl ManaAbilityResume {
+    /// CR 601.2h + CR 602.2b + CR 116.2: Whether the outer payment root this
+    /// resumes is a cast, activation or special action (no priority until it
+    /// completes) rather than a resolution. Exhaustive so a new root has to be
+    /// classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            // CR 601.2g-h: the outer spell or ability cost is still being paid.
+            ManaAbilityResume::ManaPayment { .. }
+            | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::PhyrexianCastPayment { .. }
+            | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
+            // CR 116.2g / 116.2b / 116.2c: companion to hand, turning a
+            // permanent face up, and paying to end an effect are special actions.
+            ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::TurnFaceUp { .. }
+            | ManaAbilityResume::EndContinuousEffect { .. } => true,
+            // CR 118.12 / CR 608.2: payments made while an ability resolves.
+            ManaAbilityResume::UnlessPayment { .. } | ManaAbilityResume::EffectPayCost { .. } => {
+                false
+            }
+            // No outer process: the mana ability itself returns to priority.
+            ManaAbilityResume::Priority => false,
+        }
+    }
 }
 
 /// CR 605.3b + CR 106.1a: A pre-resolved choice that short-circuits the normal
@@ -22794,11 +22825,12 @@ impl GameState {
     ///   at CR 601.2i): an inline cast carrier (`has_pending_cast`), or one
     ///   parked in the external `pending_cast` carrier behind a prompt that
     ///   doesn't carry it (Assist);
-    /// - **a cast or activation cost paused on a replacement** (CR 616.1): a
-    ///   cost move awaiting its replacement, a life payment whose replacement
-    ///   is still running its interactive effect, or a cost discard. Those
-    ///   prompts (`ReplacementChoice`, `ChooseOneOfBranch`, ...) are shared
-    ///   with resolutions, so the owner is read from the typed resume instead;
+    /// - **a cast, activation or special-action cost paused on a replacement**
+    ///   (CR 616.1; special actions per CR 116.2): a cost move awaiting its
+    ///   replacement, a life payment whose replacement is still running its
+    ///   interactive effect, or a cost discard. Those prompts
+    ///   (`ReplacementChoice`, `ChooseOneOfBranch`, ...) are shared with
+    ///   resolutions, so the owner is read from the typed resume instead;
     /// - **a mana ability's activation** (CR 605.3b), with priority or while
     ///   paying a cost;
     /// - **a triggered mana ability** (CR 605.4a), which "resolves immediately
@@ -22815,11 +22847,11 @@ impl GameState {
             || self
                 .pending_cost_move_resume
                 .as_ref()
-                .is_some_and(PendingCostMoveResume::is_casting_or_activation_cost)
+                .is_some_and(PendingCostMoveResume::withholds_priority)
             || self
                 .pending_deferred_life_cost_resume
                 .as_ref()
-                .is_some_and(DeferredLifeCostResume::is_casting_or_activation_cost)
+                .is_some_and(DeferredLifeCostResume::withholds_priority)
             // Both variants carry the cast being paid for.
             || self.pending_discard_for_cost.is_some()
             || self.waiting_for.is_mana_ability_continuation()
@@ -38252,7 +38284,7 @@ mod tests {
     /// own life payment keeps the resolution's #962 safety net; the same prompt
     /// during a cast's payment does not.
     #[test]
-    fn cost_owner_decides_casting_or_activating() {
+    fn cost_owner_decides_whether_priority_is_withheld() {
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
