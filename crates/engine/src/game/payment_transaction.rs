@@ -447,6 +447,15 @@ pub(crate) fn resolve_abandoned_continuation(
     )
 }
 
+/// Actions outside the staged payment boundary never enter its transcript.
+/// Keep this shared with restore validation: replay treats each transcript
+/// entry as already admitted, so persisted entries must obey the same split.
+pub(crate) fn is_outside_transaction(action: &GameAction) -> bool {
+    // CR 104.3a: concession bypasses every WaitingFor and reaches the canonical
+    // elimination authority, not a replayed payment choice.
+    action.is_submitter_scoped() || matches!(action, GameAction::Concede { .. })
+}
+
 /// Whether the transaction path should own this action. Actor-scoped display,
 /// debug/capability, concession, and unrelated global actions remain ordinary
 /// reducer actions while a payment prompt is open. For the remaining actions,
@@ -459,12 +468,7 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
     let Some(transaction) = state.payment_transaction.as_ref() else {
         return false;
     };
-    if action.is_submitter_scoped()
-        // CR 104.3a: concession bypasses every WaitingFor, so it must reach
-        // the canonical elimination authority instead of entering the payment
-        // transcript as if it were a payment choice.
-        || matches!(action, GameAction::Concede { .. })
-    {
+    if is_outside_transaction(action) {
         return false;
     }
     let semantic_owner = state
@@ -630,6 +634,74 @@ mod tests {
                 .into_game_state()
                 .expect_err("restore must reject an out-of-range payment owner");
             assert!(error.to_string().contains("payment transaction is invalid"));
+        }
+    }
+
+    #[test]
+    fn persisted_payment_transcript_rejects_out_of_band_actions_in_both_wire_shapes() {
+        let (mut state, root, card) = discard_exile_case();
+        let mut events = Vec::new();
+        effects::resolve_ability_chain(&mut state, &root, &mut events, 0)
+            .expect("the first payment choice pauses");
+        apply_pending_action(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![card] },
+        )
+        .expect("the admitted choice remains staged");
+        assert_eq!(
+            state
+                .payment_transaction
+                .as_ref()
+                .expect("payment remains staged")
+                .transcript
+                .len(),
+            1
+        );
+
+        for wire in [
+            serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+                .expect("raw snapshot serializes"),
+            serde_json::to_value(PersistedGameState::capture(state.clone()))
+                .expect("trusted snapshot serializes"),
+        ] {
+            let legitimate = serde_json::from_value::<PersistedGameState>(wire.clone())
+                .expect("legitimate wire decodes")
+                .into_game_state()
+                .expect("an admitted choice restores");
+            assert_eq!(
+                legitimate
+                    .payment_transaction
+                    .as_ref()
+                    .expect("transaction survives restore")
+                    .transcript[0]
+                    .action,
+                GameAction::SelectCards { cards: vec![card] }
+            );
+
+            let mut forged = wire;
+            let transaction = if forged.get("payment_transaction").is_some() {
+                &mut forged["payment_transaction"]
+            } else {
+                &mut forged["state"]["payment_transaction"]
+            };
+            transaction["transcript"] =
+                serde_json::to_value(vec![ResolutionPaymentTranscriptEntry {
+                    authenticated_actor: PlayerId(0),
+                    semantic_owner: PlayerId(0),
+                    action: GameAction::Concede {
+                        player_id: PlayerId(1),
+                    },
+                }])
+                .expect("forged action serializes");
+            let error = serde_json::from_value::<PersistedGameState>(forged)
+                .expect("the forged wire still decodes")
+                .into_game_state()
+                .expect_err("a concession cannot be a staged payment choice");
+            assert!(
+                error.to_string().contains("outside staged payment"),
+                "unexpected restore error: {error}"
+            );
         }
     }
 

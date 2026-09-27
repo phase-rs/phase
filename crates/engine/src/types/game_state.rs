@@ -12617,6 +12617,11 @@ impl GameState {
 
         validate_ability(&transaction.root, &valid)?;
         for (index, entry) in transaction.transcript.iter().enumerate() {
+            if crate::game::payment_transaction::is_outside_transaction(&entry.action) {
+                return Err(format!(
+                    "transcript[{index}] action is outside staged payment"
+                ));
+            }
             if !valid(entry.authenticated_actor) {
                 return Err(format!(
                     "transcript[{index}] authenticated actor {:?} is not a seat",
