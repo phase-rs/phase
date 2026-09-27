@@ -56,7 +56,7 @@ pub struct GapTally {
     /// Gaps in this category or family. A gap with several diagnoses here counts once.
     pub count: usize,
     pub cards_affected: usize,
-    /// Cards whose every gap is in this category or family.
+    /// Cards whose every gap is in this category or family and in no other.
     pub fixes_alone: usize,
     pub fixes_alone_cards: Vec<String>,
     pub affected_cards: Vec<String>,
@@ -600,17 +600,17 @@ mod tests {
             alone("Alpha", "if b"),
             alone("November", "if d"),
             alone("Mike", "if c"),
-            alone("Lima", "if a"),
+            alone("Lima", "if e"),
             unsupported(
                 "Echo",
                 vec![
-                    gap("Effect:unparsed_condition", vec![condition("if a")]),
+                    gap("Effect:unparsed_condition", vec![condition("if e")]),
                     gap("Effect:unknown", vec![]),
                 ],
             ),
         ]);
         let conditions = category(&analysis, GapClass::Parser(ClauseGapKind::Condition));
-        assert_eq!(family_keys(conditions), ["if b", "if a", "if c", "if d"]);
+        assert_eq!(family_keys(conditions), ["if b", "if e", "if c", "if d"]);
         assert_eq!(
             *family(conditions, "if b"),
             tally(2, &["Alpha", "Zulu"], &["Alpha", "Zulu"])

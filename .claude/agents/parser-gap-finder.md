@@ -107,7 +107,7 @@ Coverage: [current coverage %]
 
 | File | Purpose |
 |------|---------|
-| `crates/engine/src/parser/oracle_effect/imperative.rs` | Verb dispatch table (~line 1224) |
+| `crates/engine/src/parser/oracle_effect/imperative.rs` | Verb dispatch table (`parse_imperative_family_ast`) |
 | `crates/engine/src/parser/oracle_effect/mod.rs` | Pre-dispatch patterns, `parse_effect_clause` |
 | `crates/engine/src/parser/oracle_effect/subject.rs` | Subject stripping, `PREDICATE_VERBS`, `starts_with_subject_prefix` |
 | `crates/engine/src/parser/oracle_nom/primitives.rs` | Shared nom combinators (numbers, mana, colors, P/T, counters) |
