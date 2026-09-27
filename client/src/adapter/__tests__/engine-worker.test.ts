@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // The worker module's top level only assigns `self.onmessage` and declares
-// `cardDbLoaded`; every wasm import used by a request case is stubbed here so
-// the module can be imported against a fake `self` without a real WASM
-// module. `default` stands in for the wasm-bindgen `init` the worker's own
-// `init()` request case invokes.
+// `cardDbLoaded`; `canonicalCardNames` and `get_card_face_data` are stubbed
+// here so the module can be imported against a fake `self` without a real
+// WASM module. `default` stands in for the wasm-bindgen `init` the worker's
+// own `init()` request case invokes.
 const wasm = vi.hoisted(() => ({
   canonicalCardNames: vi.fn(),
   get_card_face_data: vi.fn(),

@@ -17,6 +17,7 @@ import {
   deleteFolder,
   getDeckMeta,
   listFolders,
+  notifySavedDeckRewritten,
   removeDeckMeta,
   removeSavedDeckData,
   setDeckFolder,
@@ -402,14 +403,11 @@ describe("DeckBuilder", () => {
       }
     });
 
-    it.each([1, 2, 3])("adopts a rewrite that lands k microtasks after a pending Load resolves (k=%i)", async (k) => {
+    it.each([1, 2, 3])("adopts a rewrite dispatched k microtasks after a pending Load resolves (k=%i)", async (k) => {
       const user = userEvent.setup();
-      localStorage.setItem(
-        STORAGE_KEY_PREFIX + "Old Deck",
-        JSON.stringify({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [], format: "Standard" }),
-      );
+      const initialRaw = JSON.stringify({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [], format: "Standard" });
+      localStorage.setItem(STORAGE_KEY_PREFIX + "Old Deck", initialRaw);
       localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
-      const spy = vi.spyOn(getSharedAdapter(), "canonicalCardNames").mockImplementation(mapRevival);
 
       let release!: (deck: { main: Array<{ name: string; count: number }>; sideboard: never[] }) => void;
       const held = new Promise((resolve) => {
@@ -417,41 +415,43 @@ describe("DeckBuilder", () => {
       });
       vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
 
-      try {
-        render(
-          <DeckBuilder
-            format="Standard"
-            onFormatChange={vi.fn()}
-            initialDeckName="Old Deck"
-            searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
-            onSearchFiltersChange={vi.fn()}
-            onResetSearch={vi.fn()}
-          />,
-        );
-        await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
+      render(
+        <DeckBuilder
+          format="Standard"
+          onFormatChange={vi.fn()}
+          initialDeckName="Old Deck"
+          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+          onSearchFiltersChange={vi.fn()}
+          onResetSearch={vi.fn()}
+        />,
+      );
+      await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
 
-        await act(async () => {
-          release({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [] });
-          // Let the released promise's `.then` chain (resolveCommander's await,
-          // then handleLoad's continuation) run `k` microtask turns before the
-          // rewrite event fires.
-          for (let i = 0; i < k; i++) await Promise.resolve();
-          await canonicalizeSavedDeckNames();
-        });
+      const rewrittenRaw = JSON.stringify({ main: [{ name: "Revival // Revenge", count: 4 }], sideboard: [], format: "Standard" });
+      await act(async () => {
+        release({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [] });
+        // Dispatch the rewrite directly at the k-th microtask turn after
+        // resolveCommander resolves, instead of going through
+        // canonicalizeSavedDeckNames (whose event only lands after handleLoad's
+        // continuation already assigned savedDeckRef, so it can't exercise this
+        // path). Measured against this suite: k=1,2,3 turn red if handleLoad's
+        // per-Load stopAdopting() is moved back onto `.finally(stopAdopting)` on
+        // the resolveCommander await; k=0 and k>=4 do not discriminate.
+        for (let i = 0; i < k; i++) await Promise.resolve();
+        localStorage.setItem(STORAGE_KEY_PREFIX + "Old Deck", rewrittenRaw);
+        notifySavedDeckRewritten(testSavedDeckTxn, { name: "Old Deck", previousRaw: initialRaw, raw: rewrittenRaw });
+      });
 
-        const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
-        await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
-        await user.clear(nameInput);
-        await user.type(nameInput, "Renamed Deck");
-        await user.click(screen.getByRole("button", { name: "Save" }));
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
+      await user.clear(nameInput);
+      await user.type(nameInput, "Renamed Deck");
+      await user.click(screen.getByRole("button", { name: "Save" }));
 
-        await waitFor(() => {
-          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck")).toBeNull();
-          expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
-        });
-      } finally {
-        spy.mockRestore();
-      }
+      await waitFor(() => {
+        expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck")).toBeNull();
+        expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
+      });
     });
   });
 

@@ -686,29 +686,31 @@ export function useDeckBuilder({
     const stopAdopting = onSavedDeckRewritten((rewrite) => {
       baseline = adoptSavedDeckRewrite(baseline, rewrite);
     });
-    const resolved = await resolveCommander(parsed);
-    const changedAfterLoad = editorChangedSince(captured);
-    if (changedAfterLoad.reloaded || changedAfterLoad.edited) {
+    try {
+      const resolved = await resolveCommander(parsed);
+      const changedAfterLoad = editorChangedSince(captured);
+      if (changedAfterLoad.reloaded || changedAfterLoad.edited) {
+        return;
+      }
+      const savedFormat = persisted.format
+        ? DECK_CONSTRUCTION_FORMATS.find(
+            (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
+          )?.format
+        : undefined;
+      applyDeckToEditor(resolved, savedFormat);
+      setActiveSurface("deck");
+      deckIdentityRevision.current += 1;
+      setDirty(false);
+      if (savedFormat) {
+        onFormatChange(savedFormat);
+      } else if (resolved.commander?.length) {
+        onFormatChange("Commander");
+      }
+      setDeckName(name);
+      savedDeckRef.current = baseline;
+    } finally {
       stopAdopting();
-      return;
     }
-    const savedFormat = persisted.format
-      ? DECK_CONSTRUCTION_FORMATS.find(
-          (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
-        )?.format
-      : undefined;
-    applyDeckToEditor(resolved, savedFormat);
-    setActiveSurface("deck");
-    deckIdentityRevision.current += 1;
-    setDirty(false);
-    if (savedFormat) {
-      onFormatChange(savedFormat);
-    } else if (resolved.commander?.length) {
-      onFormatChange("Commander");
-    }
-    setDeckName(name);
-    savedDeckRef.current = baseline;
-    stopAdopting();
     setBracket(loadSavedDeckBracket(name));
   }, [applyDeckToEditor, onFormatChange, captureEditor, editorChangedSince]);
 
