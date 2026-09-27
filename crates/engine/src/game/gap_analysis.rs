@@ -608,12 +608,23 @@ mod tests {
                     gap("Effect:unknown", vec![]),
                 ],
             ),
+            unsupported(
+                "Foxtrot",
+                vec![
+                    gap("Effect:unparsed_condition", vec![condition("if e")]),
+                    gap("Effect:unknown", vec![]),
+                ],
+            ),
         ]);
         let conditions = category(&analysis, GapClass::Parser(ClauseGapKind::Condition));
         assert_eq!(family_keys(conditions), ["if b", "if e", "if c", "if d"]);
         assert_eq!(
             *family(conditions, "if b"),
             tally(2, &["Alpha", "Zulu"], &["Alpha", "Zulu"])
+        );
+        assert_eq!(
+            *family(conditions, "if e"),
+            tally(3, &["Echo", "Foxtrot", "Lima"], &["Lima"])
         );
     }
 
