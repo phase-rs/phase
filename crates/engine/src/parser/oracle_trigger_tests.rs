@@ -129,6 +129,81 @@ fn gut_attack_trigger_sacrifice_is_a_scoped_type_union() {
     );
 }
 
+/// SHAPE — keep the real property-only alternative visible as unsupported.
+#[test]
+fn old_man_willow_token_rhs_remains_honestly_unsupported() {
+    let parsed = parse_oracle_text(
+        "Old Man Willow's power and toughness are each equal to the number of lands you control.\nWhenever Old Man Willow attacks, you may sacrifice another creature or a token. When you do, target creature an opponent controls gets -2/-2 until end of turn.",
+        "Old Man Willow",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Treefolk".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("Willow's attack trigger reaches the production parser");
+    assert_eq!(trigger.mode, TriggerMode::Attacks);
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let effects = trigger_chain_effects(trigger);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+                ..
+            } if name == "unparsed_verb_arguments"
+                && description == "sacrifice another creature or a token"
+        )),
+        "the complete unsupported sacrifice must stay visible: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Sacrifice { .. })),
+        "Willow must not claim a truncated creature-only sacrifice: {effects:?}"
+    );
+
+    // CR 608.2c: Gut's independently determined alternatives scope "another"
+    // to the creature leg, and both legal types remain in the instruction.
+    let supported = parse_oracle_text(
+        GUT_TRUE_SOUL_ZEALOT_ORACLE,
+        "Gut, True Soul Zealot",
+        &["Choose a background".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Goblin".to_string(), "Shaman".to_string()],
+    );
+    let control = supported.triggers.first().expect("Gut positive control");
+    assert_eq!(control.mode, TriggerMode::YouAttack);
+    let sacrifice = control.execute.as_deref().expect("Gut sacrifice control");
+    assert!(sacrifice.optional);
+    assert_no_unimplemented(sacrifice);
+    let Effect::Sacrifice {
+        target: TargetFilter::Or { filters },
+        count: QuantityExpr::Fixed { value: 1 },
+        ..
+    } = sacrifice.effect.as_ref()
+    else {
+        panic!("Gut must retain its complete supported sacrifice: {sacrifice:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for (leg, ty, properties) in [
+        (&filters[0], TypeFilter::Creature, vec![FilterProp::Another]),
+        (&filters[1], TypeFilter::Artifact, vec![]),
+    ] {
+        let TargetFilter::Typed(typed) = leg else {
+            panic!("expected typed Gut control leg: {leg:?}");
+        };
+        assert_eq!(typed.type_filters, vec![ty]);
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert_eq!(typed.properties, properties);
+    }
+    let token = sacrifice.sub_ability.as_deref().expect("Gut token control");
+    assert_eq!(token.condition, Some(AbilityCondition::effect_performed()));
+    assert!(matches!(token.effect.as_ref(), Effect::Token { .. }));
+}
+
 #[test]
 fn attack_trigger_refuses_truncated_third_sacrifice_type() {
     // A third independently determined type must remain visible as unsupported

@@ -470,9 +470,11 @@ pub(crate) fn fold_article_led_type_union(base: TargetFilter, rest: &str) -> (Ta
     // A right conjunct that carries no TYPE content is not treated as a union leg.
     // Deliberately stricter than `target_filter_has_meaningful_content`: a bare
     // "or a token" parses to `Typed{[], [Token]}`, which matches only tokens
-    // rather than every object, but it is a property-only leg the opt-in
-    // sacrifice grammar has no corpus instance of, so this bails rather than
-    // guessing. Widening to accept property-only legs needs its own measurement.
+    // rather than every object. Old Man Willow is a real property-only RHS
+    // instance, but this opt-in helper deliberately supports type-bearing RHS
+    // only. The sacrifice imperative must keep an unsupported token RHS red
+    // instead of discarding it. Accepting property-only legs needs its own
+    // measurement.
     let TargetFilter::Typed(ref right_typed) = right else {
         return (base, rest);
     };
