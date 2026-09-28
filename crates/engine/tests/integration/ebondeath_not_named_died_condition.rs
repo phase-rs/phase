@@ -456,7 +456,7 @@ fn not_named_under_your_control_reads_the_owner_after_a_stolen_death() {
     assert!(offered(&runner, revenant), "reach: own Hill Giant opens it");
 }
 
-/// CR 201.2a: names compare after Unicode lowercasing. With only Éowyn,
+/// CR 201.2a: objects sharing a name satisfy the Named filter. With only Éowyn,
 /// Shieldmaiden dead, a "not named Éowyn, Shieldmaiden" gate stays CLOSED. An
 /// ASCII-only compare would miss "É"/"é" and wrongly open it. Reach: a Hill
 /// Giant death opens it.
@@ -486,9 +486,9 @@ fn not_named_gate_compares_non_ascii_names() {
     );
 }
 
-/// CR 201.2a: the parser's whole-string lowercase form of ΟΣ ends in final
-/// sigma (ος). A character-by-character comparison yields οσ and would wrongly
-/// open a negated named death gate.
+/// CR 201.2a: objects sharing a name satisfy the Named filter. The parser's
+/// whole-string lowercase form of ΟΣ ends in final sigma (ος). A
+/// character-by-character comparison yields οσ and would wrongly open the gate.
 #[test]
 fn not_named_gate_compares_contextual_unicode_lowercase() {
     let mut scenario = GameScenario::new();

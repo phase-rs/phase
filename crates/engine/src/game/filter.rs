@@ -7950,10 +7950,11 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
         && obj.static_definitions.is_empty()
 }
 
-/// CR 201.2a: compare card names using the same string-level Unicode lowercase
-/// normalization as the Oracle parser. Character-by-character lowercasing
-/// misses contextual forms such as Greek final sigma, and inside `Not` that
-/// miss becomes a false "not named" match. Single authority for every
+/// CR 201.2a: objects with a common name have the same name. The Oracle parser
+/// stores names lowercased as whole strings, so compare using the same Unicode
+/// normalization. Character-by-character lowercasing misses contextual forms
+/// such as Greek final sigma, and inside `Not` that miss becomes a false "not
+/// named" match. Single authority for every
 /// `FilterProp::Named` arm (live object, spell-cast record, zone-change record).
 pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
     if a.is_ascii() && b.is_ascii() {
