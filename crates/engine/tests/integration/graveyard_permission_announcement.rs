@@ -1402,3 +1402,275 @@ fn an_alternative_cost_permission_authorizes_no_graveyard_cast() {
         );
     }
 }
+
+// --- Land plays from the graveyard -------------------------------------------
+
+fn land_permission(
+    frequency: CastFrequency,
+    play_mode: engine::types::ability::CardPlayMode,
+    affected: engine::types::ability::TypedFilter,
+) -> engine::types::ability::StaticDefinition {
+    engine::types::ability::StaticDefinition::new(
+        engine::types::statics::StaticMode::GraveyardCastPermission {
+            frequency,
+            play_mode,
+            graveyard_destination_replacement: None,
+            extra_cost: None,
+            enters_with_counter: None,
+            required_cast_keyword: None,
+        },
+    )
+    .affected(engine::types::ability::TargetFilter::Typed(affected))
+}
+
+/// A creature carrying `statics`, and a Forest in P0's graveyard.
+fn land_board(
+    statics: Vec<engine::types::ability::StaticDefinition>,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_creature(P0, "Land Permission Host", 1, 1);
+    for definition in statics {
+        builder.with_static_definition(definition);
+    }
+    let host = builder.id();
+    let forest = scenario.add_land_to_graveyard(P0, "Forest").id();
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    (runner, host, forest)
+}
+
+fn play_land(runner: &mut GameRunner, land: ObjectId) -> Result<WaitingFor, String> {
+    let card_id = runner.state().objects[&land].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .map(|result| result.waiting_for)
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn land_offered(runner: &GameRunner, land: ObjectId) -> bool {
+    engine::ai_support::legal_actions(runner.state())
+        .iter()
+        .any(
+            |action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == land),
+        )
+}
+
+/// Reach control: one once-per-turn Play grant plays the land and spends that
+/// source's slot.
+#[test]
+fn a_lone_bounded_play_grant_plays_the_land_and_spends_its_slot() {
+    use engine::types::ability::{CardPlayMode, TypedFilter};
+    let (mut runner, host, forest) = land_board(vec![land_permission(
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Play,
+        TypedFilter::land(),
+    )]);
+    assert!(land_offered(&runner, forest));
+    play_land(&mut runner, forest).expect("the land play is legal");
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Battlefield);
+    assert!(once_used(&runner, host));
+}
+
+/// CR 601.2a + CR 116.2a: two once-per-turn Play grants on one source share its
+/// per-turn slot, like two cast grants: the land is not offered through them
+/// and a direct `PlayLand` is refused.
+#[test]
+fn two_bounded_play_grants_on_one_source_play_no_land() {
+    use engine::types::ability::{CardPlayMode, TypedFilter};
+    let (mut runner, host, forest) = land_board(vec![
+        land_permission(
+            CastFrequency::OncePerTurn,
+            CardPlayMode::Play,
+            TypedFilter::land(),
+        ),
+        land_permission(
+            CastFrequency::OncePerTurn,
+            CardPlayMode::Play,
+            TypedFilter::land(),
+        ),
+    ]);
+    assert!(!land_offered(&runner, forest));
+    assert!(play_land(&mut runner, forest).is_err());
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Graveyard);
+    assert!(!once_used(&runner, host));
+}
+
+/// CR 110.4: a land played through a per-type Play grant (Muldrotha's shape)
+/// spends that grant's land slot, even when the same source first lists a
+/// once-per-turn grant that only casts creature spells: that grant didn't
+/// admit the land, and its slot stays free.
+#[test]
+fn a_land_spends_the_slot_of_the_grant_that_admitted_it() {
+    use engine::types::ability::{CardPlayMode, TypedFilter};
+    let (mut runner, host, forest) = land_board(vec![
+        land_permission(
+            CastFrequency::OncePerTurn,
+            CardPlayMode::Cast,
+            TypedFilter::creature(),
+        ),
+        land_permission(
+            CastFrequency::OncePerTurnPerPermanentType,
+            CardPlayMode::Play,
+            TypedFilter::permanent(),
+        ),
+    ]);
+    assert!(land_offered(&runner, forest));
+    play_land(&mut runner, forest).expect("the land play is legal");
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Battlefield);
+    assert_eq!(per_type_used(&runner), vec![(host, CoreType::Land)]);
+    assert!(
+        !once_used(&runner, host),
+        "the creature-cast grant didn't admit the land, so its slot stays free"
+    );
+}
+
+// --- Identical grants are distinct permissions -------------------------------
+
+/// Two identical unlimited grants printed on one creature. (The layer system
+/// merges an identical GRANTED static into one it already has, so identical
+/// grants coexist only as separate printed or transient definitions.)
+fn identical_grants_board() -> (GameRunner, ObjectId, ObjectId) {
+    let permission = creature_permission(CastFrequency::Unlimited, None, vec![]);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario
+        .add_creature(P0, "Permission Host", 1, 1)
+        .with_static_definition(permission.clone())
+        .with_static_definition(permission)
+        .id();
+    let bears = add_bears_to_graveyard(&mut scenario, "Grizzly Bears");
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    add_mana(&mut runner, ManaType::Green, 2);
+    (runner, host, bears)
+}
+
+fn printed_options_via(options: &[CastingVariantChoiceOption], source: ObjectId) -> Vec<usize> {
+    options
+        .iter()
+        .enumerate()
+        .filter(|(_, option)| {
+            method_of(option) == Some(Method::Printed)
+                && announcement(option).is_some_and(|a| a.permission.source == source)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// CR 601.2a + CR 601.2b: identical grants are still distinct effects, so the
+/// player announces one of them: two options, and each completes the cast.
+#[test]
+fn identical_grants_on_one_source_are_two_announcements() {
+    for pick in 0..2 {
+        let (mut runner, host, bears) = identical_grants_board();
+        let options = menu(&mut runner, bears, CastPaymentMode::Auto);
+        let via = printed_options_via(&options, host);
+        assert_eq!(via.len(), 2, "two grants, two announcements: {options:?}");
+        assert_ne!(
+            announcement(&options[via[0]]),
+            announcement(&options[via[1]])
+        );
+        runner
+            .act(GameAction::ChooseCastingVariant { index: via[pick] })
+            .expect("each announcement is castable");
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Stack);
+    }
+}
+
+/// The chosen grant ends while the menu is open (the host loses the second
+/// copy): that answer is refused before anything is paid, and the surviving
+/// grant's own answer still casts.
+#[test]
+fn an_announcement_whose_grant_ended_is_refused() {
+    let (mut runner, host, bears) = identical_grants_board();
+    let options = menu(&mut runner, bears, CastPaymentMode::Auto);
+    let via = printed_options_via(&options, host);
+    assert_eq!(via.len(), 2);
+    let second = *via
+        .iter()
+        .find(|&&index| {
+            announcement(&options[index]).is_some_and(|a| {
+                a.permission.grant
+                    == engine::types::game_state::PermissionGrant::Static { index: 1 }
+            })
+        })
+        .expect("the second copy is offered");
+    let first = *via.iter().find(|&&index| index != second).unwrap();
+    {
+        let obj = runner.state_mut().objects.get_mut(&host).unwrap();
+        let kept = obj.static_definitions.first().unwrap().clone();
+        obj.static_definitions.retain(|_| false);
+        obj.static_definitions.push(kept.clone());
+        obj.base_static_definitions = std::sync::Arc::new(vec![kept]);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert!(runner
+        .act(GameAction::ChooseCastingVariant { index: second })
+        .is_err());
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+    runner
+        .act(GameAction::ChooseCastingVariant { index: first })
+        .expect("the surviving grant's answer still casts");
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Stack);
+}
+
+// --- AI affordability judges Bestow on the bestowed form ---------------------
+
+/// CR 702.103b: a bestowed Boon Satyr is an Aura spell, so mana spendable only
+/// on Aura spells pays its bestow cost. With Muldrotha and Broodship there is
+/// no single exact cost, and the existential check must price the Bestow
+/// option as the Aura it is. Control: unrestricted mana.
+#[test]
+fn aura_only_mana_pays_an_announced_bestow() {
+    for aura_only in [true, false] {
+        let (mut runner, satyr) = satyr_board(true, true);
+        runner.state_mut().players[0].mana_pool = Default::default();
+        let restrictions = if aura_only {
+            vec![engine::types::mana::ManaRestriction::OnlyForSpellType(
+                "Aura".to_string(),
+            )]
+        } else {
+            vec![]
+        };
+        for _ in 0..5 {
+            runner.state_mut().players[0]
+                .mana_pool
+                .add(engine::types::mana::ManaUnit::new(
+                    ManaType::Green,
+                    ObjectId(0),
+                    false,
+                    restrictions.clone(),
+                ));
+        }
+        assert!(
+            engine::game::casting::current_casting_variant_choice_options(
+                runner.state(),
+                P0,
+                satyr
+            )
+            .iter()
+            .any(|option| method_of(option) == Some(Method::Bestow)),
+            "aura-only {aura_only}: the engine offers bestow"
+        );
+        assert!(
+            engine::game::casting::graveyard_cast_payable_by_some_option(
+                runner.state(),
+                P0,
+                satyr,
+                None
+            ),
+            "aura-only {aura_only}: some announced option is payable"
+        );
+        assert!(
+            engine::ai_support::validated_candidate_actions(runner.state())
+                .iter()
+                .any(|c| matches!(c.action, GameAction::CastSpell { object_id, .. } if object_id == satyr)),
+            "aura-only {aura_only}: the AI's validated candidates keep the cast"
+        );
+    }
+}

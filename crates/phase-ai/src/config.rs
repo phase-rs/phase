@@ -615,10 +615,6 @@ pub struct PolicyPenalties {
     /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
     #[serde(default = "default_graveyard_authority_finality_cost")]
     pub graveyard_authority_finality_cost: f64,
-    /// CR 601.2a + CR 601.2b: card-equivalent cost of an additional cost the announced permission charges (Exploration Broodship's land). Consumed by
-    /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
-    #[serde(default = "default_graveyard_authority_extra_cost")]
-    pub graveyard_authority_extra_cost: f64,
     /// CR 601.2a + CR 601.2b: card-equivalent cost of each other graveyard card the announced permission's per-turn slot could still admit this turn. Consumed by
     /// `GraveyardAuthorityPolicy`, which compares announcements of one method.
     #[serde(default = "default_graveyard_authority_slot_per_demand")]
@@ -757,7 +753,6 @@ impl Default for PolicyPenalties {
             discard_payoff_bonus: default_discard_payoff_bonus(),
             creature_type_presence_unit: default_creature_type_presence_unit(),
             graveyard_authority_finality_cost: default_graveyard_authority_finality_cost(),
-            graveyard_authority_extra_cost: default_graveyard_authority_extra_cost(),
             graveyard_authority_slot_per_demand: default_graveyard_authority_slot_per_demand(),
             graveyard_authority_slot_cap: default_graveyard_authority_slot_cap(),
             graveyard_authority_idle_slot: default_graveyard_authority_idle_slot(),
@@ -781,12 +776,6 @@ fn default_graveyard_types_progress() -> f64 {
 /// tuning artifact written before this field existed still deserializes.
 fn default_graveyard_authority_finality_cost() -> f64 {
     0.6
-}
-
-/// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
-/// tuning artifact written before this field existed still deserializes.
-fn default_graveyard_authority_extra_cost() -> f64 {
-    1.0
 }
 
 /// CR 601.2a + CR 601.2b. Shared by `Default` and `#[serde(default)]` so a
@@ -1310,10 +1299,6 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     ),
     (
         "graveyard_authority_finality_cost",
-        "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
-    ),
-    (
-        "graveyard_authority_extra_cost",
         "GraveyardAuthorityPolicy announcement weight; no paired-seed calibration yet: the duel suite rarely raises a multi-permission graveyard menu, so ai-gate carries little gradient for it",
     ),
     (

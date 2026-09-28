@@ -4893,8 +4893,11 @@ impl GraveyardPermissionSource<'_> {
 
     /// CR 601.2a: the grant's digest, compared by a menu answer so a grant whose
     /// definition changed between the menu and the answer is not taken for it.
+    /// Called only on `graveyard_permission_candidates`, which admits a grant
+    /// only when its digest can be taken.
     fn digest(&self) -> crate::types::game_state::GrantDigest {
         grant_digest(self.definition)
+            .expect("graveyard_permission_candidates admits only grants with a digest")
     }
 
     /// Whether this grant limits casts to one per turn (per source, or per
@@ -4905,14 +4908,18 @@ impl GraveyardPermissionSource<'_> {
 }
 
 /// A stable digest of a graveyard-cast permission grant's definition: 16 hex
-/// digits of a fixed-key hash over its serialized form.
-fn grant_digest(definition: &StaticDefinition) -> crate::types::game_state::GrantDigest {
+/// digits of a fixed-key hash over its serialized form. `None` when the
+/// definition can't be serialized: such a grant can't be told apart from a
+/// changed one, so it is never offered (it fails closed).
+fn grant_digest(definition: &StaticDefinition) -> Option<crate::types::game_state::GrantDigest> {
     use std::hash::{Hash, Hasher};
+    let serialized = serde_json::to_string(definition).ok()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(definition)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    crate::types::game_state::GrantDigest(format!("{:016x}", hasher.finish()))
+    serialized.hash(&mut hasher);
+    Some(crate::types::game_state::GrantDigest(format!(
+        "{:016x}",
+        hasher.finish()
+    )))
 }
 
 /// CR 601.2a + CR 113.6b + CR 118.9: An active battlefield permanent carrying
@@ -5476,18 +5483,13 @@ fn graveyard_permission_sources(
             play_mode_filter,
         ))
         .fold(Vec::new(), |mut sources, source| {
-            // Two unlimited grants with the same terms on one source (a copy of
-            // an ability granted twice) authorize a cast identically in every
-            // respect, so the player has nothing to announce between them: one
-            // stands for both. Bounded grants are never merged: each is its own
-            // once-per-turn permission (see `graveyard_permission_candidates`).
-            let duplicate = !source.is_bounded()
-                && sources.iter().any(|kept: &GraveyardPermissionSource<'_>| {
-                    kept.source_id == source.source_id
-                        && !kept.is_bounded()
-                        && kept.definition == source.definition
-                });
-            if !duplicate {
+            // CR 601.2a: one entry per grant. Two grants with the same terms are
+            // still two effects the player can announce, so only the same grant
+            // reached twice (the identical id) is merged.
+            if !sources
+                .iter()
+                .any(|kept: &GraveyardPermissionSource<'_>| kept.permission == source.permission)
+            {
                 sources.push(source);
             }
             sources
@@ -5740,6 +5742,7 @@ fn graveyard_permission_candidates(
     sources
         .iter()
         .filter(|source| !shares_bounded_slot(source))
+        .filter(|source| grant_digest(source.definition).is_some())
         .filter(|source| {
             // CR 604.2 + CR 110.4: Skip if this source's slot has already been used.
             if !frequency_slot_available(state, source.source_id, object_id, source.frequency) {
@@ -6484,41 +6487,99 @@ pub fn graveyard_lands_playable_by_permission(
         CardPlayMode::Play,
     ));
 
+    results.extend(
+        graveyard_land_play_grants(state, player)
+            .into_iter()
+            .map(|(land, source, _)| (land, source)),
+    );
+    results
+}
+
+/// CR 116.2a + CR 305.1 + CR 601.2a: every land in `player`'s graveyard a
+/// graveyard permission (`GraveyardCastPermission` with `play_mode: Play`) lets
+/// them play, with the source and the frequency of the grant that admits it,
+/// source-major.
+///
+/// A source whose Play grants admit the land two or more times, one of them
+/// once-per-turn, is skipped for that land: the per-turn ledger is keyed by
+/// source, so it can't tell which grant was used (the land twin of the cast
+/// side's shared-slot rule; see `graveyard_permission_candidates`). That board
+/// is unsupported and fails closed. Otherwise the admitting grant is unique,
+/// or every admitting grant is unlimited and spends nothing, so the frequency
+/// recorded for the play is the admitting grant's own, never another grant's
+/// on the same source.
+fn graveyard_land_play_grants(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
+    let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
+        return Vec::new();
+    };
     let sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Play));
+    let mut source_ids: Vec<ObjectId> = Vec::new();
     for source in &sources {
-        let ctx =
-            super::filter::FilterContext::from_source_with_controller(source.source_id, player);
-        for &gy_obj_id in &player_data.graveyard {
-            if let Some(obj) = state.objects.get(&gy_obj_id) {
-                // CR 305.1: Only lands can be "played" (non-land cards require "cast")
-                if !obj
-                    .card_types
+        if !source_ids.contains(&source.source_id) {
+            source_ids.push(source.source_id);
+        }
+    }
+    let mut grants = Vec::new();
+    for source_id in source_ids {
+        let ctx = super::filter::FilterContext::from_source_with_controller(source_id, player);
+        for &land in &player_data.graveyard {
+            // CR 305.1: only lands can be "played" (non-land cards are cast).
+            if !state.objects.get(&land).is_some_and(|obj| {
+                obj.card_types
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Land)
-                {
-                    continue;
-                }
-                // CR 604.2 + CR 110.4: Per-source frequency slot check; for
-                // `OncePerTurnPerPermanentType` (Muldrotha) the land slot is
-                // its own per-permanent-type entry.
-                if !frequency_slot_available(state, source.source_id, gy_obj_id, source.frequency) {
-                    continue;
-                }
-                // CR 109.4 + CR 108.4a: owner-scoped, as in the sibling
-                // consumers -- see `graveyard_permission_source`.
-                if super::filter::matches_target_filter_for_zone(
-                    state,
-                    gy_obj_id,
-                    Zone::Graveyard,
-                    source.filter,
-                    &ctx,
-                ) {
-                    results.push((gy_obj_id, source.source_id));
-                }
+            }) {
+                continue;
+            }
+            // CR 109.4 + CR 108.4a: owner-scoped, as in the sibling consumers --
+            // see `graveyard_permission_source`.
+            let admitting: Vec<_> = sources
+                .iter()
+                .filter(|source| {
+                    source.source_id == source_id
+                        && super::filter::matches_target_filter_for_zone(
+                            state,
+                            land,
+                            Zone::Graveyard,
+                            source.filter,
+                            &ctx,
+                        )
+                })
+                .collect();
+            let grant = match admitting.as_slice() {
+                [] => continue,
+                [only] => *only,
+                [first, ..] if admitting.iter().all(|grant| !grant.is_bounded()) => *first,
+                _ => continue,
+            };
+            // CR 604.2 + CR 110.4: per-source frequency slot; for
+            // `OncePerTurnPerPermanentType` (Muldrotha) the land slot is its own
+            // per-permanent-type entry.
+            if frequency_slot_available(state, source_id, land, grant.frequency) {
+                grants.push((land, source_id, grant.frequency));
             }
         }
     }
-    results
+    grants
+}
+
+/// CR 116.2a + CR 601.2a: the frequency of the graveyard Play grant on
+/// `source` that admits playing `land` (see `graveyard_land_play_grants`), or
+/// `None` when no such grant does (a `PlayFromExile` source, recorded by its
+/// own path).
+pub(crate) fn graveyard_land_play_frequency(
+    state: &GameState,
+    player: PlayerId,
+    land: ObjectId,
+    source: ObjectId,
+) -> Option<CastFrequency> {
+    graveyard_land_play_grants(state, player)
+        .into_iter()
+        .find(|(candidate, grant_source, _)| *candidate == land && *grant_source == source)
+        .map(|(_, _, frequency)| frequency)
 }
 
 /// The elected authority for a land play from exile. The object-attached and
@@ -7122,18 +7183,36 @@ pub fn graveyard_cast_payable_by_some_option(
     {
         return false;
     }
-    casting_variant_choice_set(state, player, object_id, probe)
-        .options
-        .iter()
-        .any(|option| {
-            option.authority.is_some()
-                && can_pay_cost_after_auto_tap_with_probe(
-                    state,
-                    player,
-                    object_id,
-                    &option.mana_cost,
-                    probe,
-                )
+    // Each option is judged on its own prepared cast, as it will be cast (for
+    // Bestow, the bestowed Aura, CR 702.103b), so a mana restriction that reads
+    // the spell's types sees the right ones.
+    casting_candidates(state, player, object_id)
+        .into_iter()
+        .filter(|candidate| candidate.announcement.is_some())
+        .any(|candidate| {
+            let Ok(option) = prepare_casting_variant_on_face(
+                state,
+                player,
+                object_id,
+                candidate.variant,
+                CastingVariantFace::Current,
+                CastingMode::Actual,
+                candidate.announcement.as_ref(),
+            ) else {
+                return false;
+            };
+            can_cast_prepared_now_with_probe(
+                &option.transformed_state,
+                player,
+                &option.prepared,
+                probe,
+            ) && can_pay_cost_after_auto_tap_with_probe(
+                &option.transformed_state,
+                player,
+                object_id,
+                &option.prepared.mana_cost,
+                probe,
+            )
         })
 }
 

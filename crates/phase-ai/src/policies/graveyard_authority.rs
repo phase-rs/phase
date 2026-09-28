@@ -14,7 +14,8 @@
 //! An option that another option of its method matches or beats on every
 //! commitment, and beats on one, is rejected. The rest are scored by what
 //! they give up, in card-equivalents (the `graveyard_authority_*` weights in
-//! `PolicyPenalties`): a finality counter, an extra cost, a spent slot per other
+//! `PolicyPenalties`, and `self_cost::real_self_cost` for an extra cost): a
+//! finality counter, an extra cost, a spent slot per other
 //! graveyard card it could still admit this turn (capped; a small idle cost when
 //! it would admit none), a destination rider.
 
@@ -74,8 +75,11 @@ impl Commitment {
             && mine.iter().zip(theirs.iter()).any(|(a, b)| a < b)
     }
 
-    /// What the option gives up, in card-equivalents (mana is the method's
-    /// shared cost and is compared only by dominance).
+    /// What the option gives up, in card-equivalents. Mana is not counted: the
+    /// options compared share one method and face, whose mana cost no graveyard
+    /// permission changes (one whose extra cost replaces the mana cost is
+    /// refused by the engine), so it is equal across them; dominance still
+    /// compares it.
     fn given_up(&self) -> f64 {
         self.extra + self.counter + self.slot + self.destination
     }
@@ -95,9 +99,12 @@ fn commitment(
         CastingVariant::Bestow => Method::Bestow,
         _ => return None,
     };
+    // The permission's additional cost, priced by the shared self-cost
+    // estimator (life per point, cards per discard, the permanent a sacrifice
+    // consumes), so a cheaper rider is preferred over a dearer one.
     let extra = match &authority.extra_cost {
         Some(extra) if extra.mode == CastCostMode::Additional => {
-            penalties.graveyard_authority_extra_cost
+            super::self_cost::real_self_cost(state, player, object_id, &extra.cost, penalties)
         }
         _ => 0.0,
     };
@@ -371,7 +378,7 @@ mod tests {
         let all = [
             c(
                 Method::Blitz,
-                weights().graveyard_authority_extra_cost,
+                1.0,
                 0.0,
                 weights().graveyard_authority_idle_slot,
             ),
@@ -386,7 +393,7 @@ mod tests {
         let all = [
             c(
                 Method::Blitz,
-                weights().graveyard_authority_extra_cost,
+                1.0,
                 0.0,
                 weights().graveyard_authority_idle_slot,
             ),
@@ -476,6 +483,87 @@ mod tests {
         assert_eq!(
             fallback_announcement(runner.state(), &weights(), &options),
             Some(action)
+        );
+    }
+
+    /// Two permissions whose extra costs differ only in amount (pay 10 life,
+    /// scanned first; pay 1 life, second): the AI announces the cheaper one.
+    #[test]
+    fn a_cheaper_extra_cost_is_announced_even_when_scanned_second() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::{
+            AbilityCost, CardPlayMode, QuantityExpr, StaticDefinition, TargetFilter, TypedFilter,
+        };
+        use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use engine::types::phase::Phase;
+        use engine::types::statics::{CastExtraCost, StaticMode};
+        let permission = |life| {
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: Some(CastExtraCost {
+                    cost: AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: life },
+                    },
+                    mode: CastCostMode::Additional,
+                }),
+                enters_with_counter: None,
+                required_cast_keyword: None,
+            })
+            .affected(TargetFilter::Typed(TypedFilter::creature()))
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Dear Permission", 1, 1)
+            .with_static_definition(permission(10));
+        let cheap = scenario
+            .add_creature(P0, "Cheap Permission", 1, 1)
+            .with_static_definition(permission(1))
+            .id();
+        let bears = scenario
+            .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let mut runner = scenario.build();
+        for _ in 0..2 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Green,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        let card_id = runner.state().objects[&bears].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bears,
+                card_id,
+                targets: vec![],
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("the cast starts");
+        let WaitingFor::CastingVariantChoice { options, .. } = runner.state().waiting_for.clone()
+        else {
+            panic!("two permissions ask for the announcement");
+        };
+        let cheap_index = options
+            .iter()
+            .position(|option| {
+                option
+                    .authority
+                    .as_ref()
+                    .is_some_and(|a| a.announcement.permission.source == cheap)
+            })
+            .expect("the cheap permission is offered");
+        assert!(cheap_index > 0, "the cheap permission is scanned second");
+        assert_eq!(
+            same_method_announcement(runner.state(), &weights(), P0),
+            Some(GameAction::ChooseCastingVariant { index: cheap_index })
         );
     }
 

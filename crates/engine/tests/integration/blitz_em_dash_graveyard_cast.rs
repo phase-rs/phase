@@ -251,21 +251,19 @@ fn unconstrained_graveyard_permission_still_offers_printed_cost_choice() {
         &["Enchantment".into()],
         &[],
     );
-    let unconstrained = enabler
-        .statics
-        .iter()
-        .find(|s| {
+    assert!(
+        enabler.statics.iter().any(|s| {
             format!("{s:?}").contains("GraveyardCastPermission")
                 && !format!("{s:?}").contains("HasKeywordKind")
-        })
-        .expect("an unconstrained GraveyardCastPermission must parse")
-        .clone();
+        }),
+        "an unconstrained GraveyardCastPermission must parse"
+    );
 
+    // The enchantment carries the statics its Oracle text parses to, so the
+    // permission is granted once.
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario
-        .add_enchantment_from_oracle(P0, "Advanced Floral Invocations", INVOCATIONS)
-        .with_static_definition(unconstrained);
+    scenario.add_enchantment_from_oracle(P0, "Advanced Floral Invocations", INVOCATIONS);
     let guardian = scenario
         .add_creature_to_graveyard(P0, "Caldaia Guardian", 4, 3)
         .with_mana_cost(ManaCost::Cost {
@@ -1944,15 +1942,15 @@ fn brokkos_in_graveyard(unconstrained: bool) -> (GameRunner, ObjectId) {
             &["Enchantment".into()],
             &[],
         );
-        let permission = enabler
-            .statics
-            .iter()
-            .find(|s| format!("{s:?}").contains("GraveyardCastPermission"))
-            .expect("an unconstrained GraveyardCastPermission must parse")
-            .clone();
-        scenario
-            .add_enchantment_from_oracle(P0, "Advanced Floral Invocations", FLORAL_INVOCATIONS)
-            .with_static_definition(permission);
+        assert!(
+            enabler
+                .statics
+                .iter()
+                .any(|s| format!("{s:?}").contains("GraveyardCastPermission")),
+            "an unconstrained GraveyardCastPermission must parse"
+        );
+        // The Oracle text's own statics grant the permission, once.
+        scenario.add_enchantment_from_oracle(P0, "Advanced Floral Invocations", FLORAL_INVOCATIONS);
     }
     let mut builder = scenario.add_creature_to_graveyard(P0, "Brokkos, Apex of Forever", 6, 6);
     builder.with_mana_cost(ManaCost::Cost {
