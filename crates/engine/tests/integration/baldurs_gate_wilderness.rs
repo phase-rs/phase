@@ -137,6 +137,165 @@ fn standard_venture_omits_the_wilderness() {
     assert!(!options.contains(&DungeonId::Undercity));
 }
 
+// ─── Venture topology ───────────────────────────────────────────────────
+
+fn choose_room_option_ids(runner: &GameRunner) -> Vec<u8> {
+    match runner.state().waiting_for.clone() {
+        WaitingFor::ChooseDungeonRoom { options, .. } => {
+            options.into_iter().map(|option| option.index).collect()
+        }
+        other => panic!("expected a ChooseDungeonRoom prompt, got {other:?}"),
+    }
+}
+
+fn current_room(runner: &GameRunner) -> Option<u8> {
+    runner
+        .state()
+        .dungeon_progress
+        .get(&P0)
+        .map(|progress| progress.current_room)
+}
+
+/// CR 309.5a: Crash Landing has three printed doors — Goblin Camp, Emerald
+/// Grove, AND Auntie's Teahouse. Steer down the rightmost one and confirm the
+/// single-exit room beyond auto-advances with no further prompt.
+#[test]
+fn wilderness_crash_landing_branches_three_ways() {
+    use engine::types::card_type::{CoreType, Supertype};
+
+    let mut scenario = experimental_scenario();
+    let plains = scenario.add_card_to_library_top(P0, "Plains");
+    scenario.add_card_to_library_top(P0, "Card C");
+    scenario.add_card_to_library_top(P0, "Card B");
+    scenario.add_card_to_library_top(P0, "Card A");
+    let mut runner = scenario.build();
+    let object = runner.state_mut().objects.get_mut(&plains).unwrap();
+    object.card_types.core_types.push(CoreType::Land);
+    object.card_types.supertypes.push(Supertype::Basic);
+    object.base_card_types = object.card_types.clone();
+
+    enter_room(&mut runner, 0);
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::SearchChoice { cards, .. } => {
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("take the found land");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+
+    resolve_venture(&mut runner, P0);
+    assert_eq!(
+        choose_room_option_ids(&runner),
+        vec![1, 2, 3],
+        "Crash Landing offers all three printed exits"
+    );
+    runner
+        .act(GameAction::ChooseDungeonRoom { room_index: 3 })
+        .expect("take the Auntie's Teahouse door");
+    assert_eq!(current_room(&runner), Some(3));
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::ScryChoice { cards, .. } => {
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("scry everything to the top");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+
+    // Auntie's Teahouse has one printed exit (Mountain Pass): no prompt.
+    resolve_venture(&mut runner, P0);
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseDungeonRoom { .. }
+        ),
+        "single-exit rooms auto-advance, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(current_room(&runner), Some(5));
+}
+
+/// CR 309.5a: Goblin Camp's only printed arrow goes to Defiled Temple — no
+/// branch prompt, no Auntie's Teahouse detour.
+#[test]
+fn wilderness_goblin_camp_has_a_single_exit() {
+    let scenario = experimental_scenario();
+    let mut runner = scenario.build();
+    position_marker(&mut runner, 1);
+
+    resolve_venture(&mut runner, P0);
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseDungeonRoom { .. }
+        ),
+        "Goblin Camp must not branch, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(current_room(&runner), Some(4));
+}
+
+/// CR 701.49c: the bottom row holds THREE terminal rooms. Venturing onward
+/// from any of them completes the Wilderness and offers a new dungeon.
+#[test]
+fn wilderness_bottom_row_rooms_each_complete_the_dungeon() {
+    for bottommost in [16, 17, 18] {
+        let scenario = experimental_scenario();
+        let mut runner = scenario.build();
+        position_marker(&mut runner, bottommost);
+
+        resolve_venture(&mut runner, P0);
+
+        let progress = runner.state().dungeon_progress.get(&P0).cloned();
+        assert_eq!(
+            progress.as_ref().and_then(|p| p.current_dungeon),
+            None,
+            "room {bottommost} completes the dungeon: no active dungeon remains"
+        );
+        assert!(
+            progress
+                .map(|p| p.completed.contains(&DungeonId::BaldursGateWilderness))
+                .unwrap_or(false),
+            "room {bottommost} records the Wilderness as completed"
+        );
+        // Fresh offer after completion: the engine re-offers the whole pool
+        // (see `venture_at_bottommost_completes_and_offers_new_dungeon`,
+        // which re-offers all 3 after completing Lost Mine). Experimental
+        // pool = AFR trio + Wilderness.
+        let options = choose_dungeon_option_ids(&runner);
+        assert_eq!(
+            options,
+            vec![
+                DungeonId::LostMineOfPhandelver,
+                DungeonId::DungeonOfTheMadMage,
+                DungeonId::TombOfAnnihilation,
+                DungeonId::BaldursGateWilderness,
+            ],
+            "room {bottommost} completion offers the full pool, got {options:?}"
+        );
+    }
+}
+
 #[test]
 fn experimental_initiative_offers_wilderness_or_undercity() {
     let scenario = experimental_scenario();
@@ -180,22 +339,25 @@ fn standard_initiative_still_auto_enters_undercity() {
 // ─── Room-by-room resolution ─────────────────────────────────────────────
 
 /// P0's parent room for each Wilderness room, chosen to exercise both the
-/// branch prompt and the auto-advance path across the suite.
+/// branch prompt and the auto-advance path across the suite. Every entry is a
+/// printed arrow (see the `next_rooms` table); the independent edge test in
+/// `dungeon.rs` pins the full graph separately, so this map cannot silently
+/// agree with a wrong table.
 fn parent_of(room: u8) -> u8 {
     match room {
-        1 | 2 => 0,
-        3 | 4 => 1,
-        5 => 2,
-        6 | 7 => 3,
-        8 => 4,
-        9 => 5,
-        10 | 11 => 6,
-        12 => 8,
-        13 | 14 => 10,
-        15 => 12,
-        16 => 13,
-        17 => 15,
-        18 => 16,
+        1..=3 => 0,
+        4 => 2,
+        5 => 3,
+        6 => 4,
+        7 | 8 => 5,
+        9 => 6,
+        10 => 8,
+        11 => 9,
+        12 | 13 => 10,
+        14 => 11,
+        15 => 13,
+        16 => 14,
+        17 | 18 => 15,
         _ => panic!("no parent for room {room}"),
     }
 }

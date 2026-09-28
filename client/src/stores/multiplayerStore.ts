@@ -22,7 +22,10 @@ import type {
   TournamentUpdateReply,
 } from "../adapter/types";
 import { AdapterError, AdapterErrorCode, isCustomGameFormat } from "../adapter/types";
-import { isFormatConfigShape } from "../adapter/format-config-shape";
+import {
+  isFormatConfigShape,
+  rehydrateExperimentalDungeons,
+} from "../adapter/format-config-shape";
 import { findSavedCustomFormat } from "../services/customFormats";
 import { AI_DIFFICULTIES } from "../constants/ai";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
@@ -2350,18 +2353,6 @@ export function normalizeRememberedHostConfig(
  *
  * Any failure degrades to `null`, exactly like every other unresolvable case.
  */
-/**
- * Fill a missing (or corrupt) `allow_experimental_dungeons` on a persisted
- * custom-format blob with the engine's default (`false`) before shape
- * validation. Returns the input untouched when there is nothing to fill, so
- * current saves pass through by reference.
- */
-function rehydrateExperimentalDungeons(value: unknown): unknown {
-  if (!isRecord(value)) return value;
-  if (typeof value.allow_experimental_dungeons === "boolean") return value;
-  return { ...value, allow_experimental_dungeons: false };
-}
-
 function normalizeCustomHostConfig(
   persisted: Record<string, unknown>,
   format: CustomGameFormat,

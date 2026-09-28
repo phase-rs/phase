@@ -1871,19 +1871,19 @@ static BALDURS_GATE_WILDERNESS: DungeonDefinition = DungeonDefinition {
     id: DungeonId::BaldursGateWilderness,
     name: "Baldur's Gate Wilderness",
     rooms: &[
-        // Row 1 (top)
-        // 0: Crash Landing → {Goblin Camp, Emerald Grove}
+        // Row 1 (top). Three doors: one over each second-row room.
+        // 0: Crash Landing → {Goblin Camp, Emerald Grove, Auntie's Teahouse}
         RoomDefinition {
             name: "Crash Landing",
             text: "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
-            next_rooms: &[1, 2],
+            next_rooms: &[1, 2, 3],
         },
         // Row 2
-        // 1: Goblin Camp → {Auntie's Teahouse, Defiled Temple}
+        // 1: Goblin Camp → {Defiled Temple}
         RoomDefinition {
             name: "Goblin Camp",
             text: "Create a Treasure token.",
-            next_rooms: &[3, 4],
+            next_rooms: &[4],
         },
         // 2: Emerald Grove → {Defiled Temple, Mountain Pass}
         RoomDefinition {
@@ -1891,102 +1891,103 @@ static BALDURS_GATE_WILDERNESS: DungeonDefinition = DungeonDefinition {
             text: "Create a 2/2 white Knight creature token.",
             next_rooms: &[4, 5],
         },
-        // Row 3
-        // 3: Auntie's Teahouse → {Ebonlake Grotto, Grymforge}
+        // 3: Auntie's Teahouse → {Mountain Pass}
         RoomDefinition {
             name: "Auntie's Teahouse",
             text: "Scry 3.",
-            next_rooms: &[6, 7],
+            next_rooms: &[5],
         },
-        // 4: Defiled Temple → {Grymforge, Githyanki Crèche}
+        // Row 3
+        // 4: Defiled Temple → {Ebonlake Grotto, Grymforge}
         RoomDefinition {
             name: "Defiled Temple",
             text: "You may sacrifice a permanent. If you do, draw a card.",
-            next_rooms: &[7, 8],
+            next_rooms: &[6, 7],
         },
-        // 5: Mountain Pass → {Githyanki Crèche, Last Light Inn}
+        // 5: Mountain Pass → {Grymforge, Githyanki Crèche}
         RoomDefinition {
             name: "Mountain Pass",
             text: "You may put a land card from your hand onto the battlefield.",
-            next_rooms: &[8, 9],
+            next_rooms: &[7, 8],
         },
-        // Row 4 (widest)
-        // 6: Ebonlake Grotto → {Reithwin Tollhouse, Moonrise Towers}
+        // Row 4
+        // 6: Ebonlake Grotto → {Last Light Inn}
         RoomDefinition {
             name: "Ebonlake Grotto",
             text: "Create two 1/1 blue Faerie Dragon creature tokens with flying.",
-            next_rooms: &[10, 11],
+            next_rooms: &[9],
         },
-        // 7: Grymforge → {Reithwin Tollhouse, Moonrise Towers}
+        // 7: Grymforge → {Last Light Inn, Reithwin Tollhouse}
         RoomDefinition {
             name: "Grymforge",
             text: "For each opponent, goad up to one target creature that player controls.",
-            next_rooms: &[10, 11],
+            next_rooms: &[9, 10],
         },
-        // 8: Githyanki Crèche → {Moonrise Towers, Gauntlet of Shar}
+        // 8: Githyanki Crèche → {Reithwin Tollhouse}
         RoomDefinition {
             name: "Githyanki Crèche",
             text: "Distribute three +1/+1 counters among up to three target creatures you control.",
-            next_rooms: &[11, 12],
+            next_rooms: &[10],
         },
+        // Row 5
         // 9: Last Light Inn → {Moonrise Towers, Gauntlet of Shar}
         RoomDefinition {
             name: "Last Light Inn",
             text: "Draw two cards.",
             next_rooms: &[11, 12],
         },
-        // Row 5
-        // 10: Reithwin Tollhouse → {Balthazar's Lab, Circus of the Last Days}
+        // 10: Reithwin Tollhouse → {Gauntlet of Shar, Balthazar's Lab}
         RoomDefinition {
             name: "Reithwin Tollhouse",
             text: "Roll 2d4 and create that many Treasure tokens.",
-            next_rooms: &[13, 14],
+            next_rooms: &[12, 13],
         },
-        // 11: Moonrise Towers → {Circus of the Last Days, Undercity Ruins}
+        // Row 6
+        // 11: Moonrise Towers → {Circus of the Last Days}
         RoomDefinition {
             name: "Moonrise Towers",
             text: "Instant and sorcery spells you cast this turn cost {3} less to cast.",
-            next_rooms: &[14, 15],
+            next_rooms: &[14],
         },
-        // 12: Gauntlet of Shar → {Undercity Ruins}
+        // 12: Gauntlet of Shar → {Circus of the Last Days, Undercity Ruins}
         RoomDefinition {
             name: "Gauntlet of Shar",
             text: "Each opponent loses 5 life.",
-            next_rooms: &[15],
+            next_rooms: &[14, 15],
         },
-        // Row 6
-        // 13: Balthazar's Lab → {Steel Watch Foundry}
+        // 13: Balthazar's Lab → {Undercity Ruins}
         RoomDefinition {
             name: "Balthazar's Lab",
             text: "Return up to two target creature cards from your graveyard to your hand.",
-            next_rooms: &[16],
+            next_rooms: &[15],
         },
+        // Row 7
         // 14: Circus of the Last Days → {Steel Watch Foundry, Ansur's Sanctum}
         RoomDefinition {
             name: "Circus of the Last Days",
             text: "Create a token that's a copy of one of your commanders, except it's not legendary.",
             next_rooms: &[16, 17],
         },
-        // 15: Undercity Ruins → {Ansur's Sanctum}
+        // 15: Undercity Ruins → {Ansur's Sanctum, Temple of Bhaal}
         RoomDefinition {
             name: "Undercity Ruins",
             text: "Create three 4/1 black Skeleton creature tokens with menace.",
-            next_rooms: &[17],
+            next_rooms: &[17, 18],
         },
-        // Row 7
-        // 16: Steel Watch Foundry → Temple of Bhaal
+        // Row 8 (bottom). Three terminal rooms; venturing onward from any of
+        // them completes the dungeon (CR 701.49c).
+        // 16: Steel Watch Foundry (bottommost)
         RoomDefinition {
             name: "Steel Watch Foundry",
             text: "You get an emblem with \"Creatures you control get +2/+2 and have trample.\"",
-            next_rooms: &[18],
+            next_rooms: &[],
         },
-        // 17: Ansur's Sanctum → Temple of Bhaal
+        // 17: Ansur's Sanctum (bottommost)
         RoomDefinition {
             name: "Ansur's Sanctum",
             text: "Reveal the top four cards of your library and put them into your hand. Each opponent loses life equal to those cards' total mana value.",
-            next_rooms: &[18],
+            next_rooms: &[],
         },
-        // Row 8 (bottom)
         // 18: Temple of Bhaal (bottommost)
         RoomDefinition {
             name: "Temple of Bhaal",
@@ -2223,6 +2224,51 @@ mod tests {
         assert_eq!(next_rooms(DungeonId::LostMineOfPhandelver, 3), &[6]);
         // Temple of Dumathoin has 0 exits (bottommost)
         assert!(next_rooms(DungeonId::LostMineOfPhandelver, 6).is_empty());
+    }
+
+    /// CR 309.5a: the Wilderness venture graph, transcribed independently from
+    /// the printed card's door arrows (tclb #0) — one entry per room, in room
+    /// order. This is the backstop against a table that is internally
+    /// consistent but topologically wrong: room tests navigate by parentage,
+    /// which agrees with whatever the table says, while this pins the table
+    /// itself to the cardboard. Three doors leave Crash Landing; Goblin Camp
+    /// has a single exit to Defiled Temple; the bottom row holds three
+    /// terminal rooms (16, 17, 18).
+    #[test]
+    fn wilderness_edges_match_the_printed_card() {
+        const EXPECTED: [&[u8]; 19] = [
+            &[1, 2, 3], // 0 Crash Landing
+            &[4],       // 1 Goblin Camp
+            &[4, 5],    // 2 Emerald Grove
+            &[5],       // 3 Auntie's Teahouse
+            &[6, 7],    // 4 Defiled Temple
+            &[7, 8],    // 5 Mountain Pass
+            &[9],       // 6 Ebonlake Grotto
+            &[9, 10],   // 7 Grymforge
+            &[10],      // 8 Githyanki Crèche
+            &[11, 12],  // 9 Last Light Inn
+            &[12, 13],  // 10 Reithwin Tollhouse
+            &[14],      // 11 Moonrise Towers
+            &[14, 15],  // 12 Gauntlet of Shar
+            &[15],      // 13 Balthazar's Lab
+            &[16, 17],  // 14 Circus of the Last Days
+            &[17, 18],  // 15 Undercity Ruins
+            &[],        // 16 Steel Watch Foundry
+            &[],        // 17 Ansur's Sanctum
+            &[],        // 18 Temple of Bhaal
+        ];
+        assert_eq!(
+            get_definition(DungeonId::BaldursGateWilderness).rooms.len(),
+            EXPECTED.len(),
+            "the card holds all 19 rooms"
+        );
+        for (index, expected) in EXPECTED.iter().enumerate() {
+            assert_eq!(
+                next_rooms(DungeonId::BaldursGateWilderness, index as u8),
+                *expected,
+                "room {index} exits disagree with the printed arrows"
+            );
+        }
     }
 
     /// Oracle fidelity: Lost Mine of Phandelver "Storeroom" is "Put a +1/+1

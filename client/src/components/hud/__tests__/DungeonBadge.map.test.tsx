@@ -104,24 +104,24 @@ function baldursGate(overrides: Partial<DungeonRoomView> = {}): DungeonRoomView 
       face_name: "Baldur's Gate Wilderness",
     },
     rooms: [
-      { index: 0, name: "Crash Landing", text: "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.", next_rooms: [1, 2], marker: { x_permille: 500, y_permille: 170 } },
-      { index: 1, name: "Goblin Camp", text: "Create a Treasure token.", next_rooms: [3, 4], marker: { x_permille: 210, y_permille: 253 } },
+      { index: 0, name: "Crash Landing", text: "Search your library for a basic land card, reveal it, put it into your hand, then shuffle.", next_rooms: [1, 2, 3], marker: { x_permille: 500, y_permille: 170 } },
+      { index: 1, name: "Goblin Camp", text: "Create a Treasure token.", next_rooms: [4], marker: { x_permille: 210, y_permille: 253 } },
       { index: 2, name: "Emerald Grove", text: "Create a 2/2 white Knight creature token.", next_rooms: [4, 5], marker: { x_permille: 500, y_permille: 253 } },
-      { index: 3, name: "Auntie's Teahouse", text: "Scry 3.", next_rooms: [6, 7], marker: { x_permille: 800, y_permille: 253 } },
-      { index: 4, name: "Defiled Temple", text: "You may sacrifice a permanent. If you do, draw a card.", next_rooms: [7, 8], marker: { x_permille: 295, y_permille: 336 } },
-      { index: 5, name: "Mountain Pass", text: "You may put a land card from your hand onto the battlefield.", next_rooms: [8, 9], marker: { x_permille: 730, y_permille: 336 } },
-      { index: 6, name: "Ebonlake Grotto", text: "Create two 1/1 blue Faerie Dragon creature tokens with flying.", next_rooms: [10, 11], marker: { x_permille: 210, y_permille: 440 } },
-      { index: 7, name: "Grymforge", text: "For each opponent, goad up to one target creature that player controls.", next_rooms: [10, 11], marker: { x_permille: 500, y_permille: 440 } },
-      { index: 8, name: "Githyanki Crèche", text: "Distribute three +1/+1 counters among up to three target creatures you control.", next_rooms: [11, 12], marker: { x_permille: 800, y_permille: 440 } },
+      { index: 3, name: "Auntie's Teahouse", text: "Scry 3.", next_rooms: [5], marker: { x_permille: 800, y_permille: 253 } },
+      { index: 4, name: "Defiled Temple", text: "You may sacrifice a permanent. If you do, draw a card.", next_rooms: [6, 7], marker: { x_permille: 295, y_permille: 336 } },
+      { index: 5, name: "Mountain Pass", text: "You may put a land card from your hand onto the battlefield.", next_rooms: [7, 8], marker: { x_permille: 730, y_permille: 336 } },
+      { index: 6, name: "Ebonlake Grotto", text: "Create two 1/1 blue Faerie Dragon creature tokens with flying.", next_rooms: [9], marker: { x_permille: 210, y_permille: 440 } },
+      { index: 7, name: "Grymforge", text: "For each opponent, goad up to one target creature that player controls.", next_rooms: [9, 10], marker: { x_permille: 500, y_permille: 440 } },
+      { index: 8, name: "Githyanki Crèche", text: "Distribute three +1/+1 counters among up to three target creatures you control.", next_rooms: [10], marker: { x_permille: 800, y_permille: 440 } },
       { index: 9, name: "Last Light Inn", text: "Draw two cards.", next_rooms: [11, 12], marker: { x_permille: 285, y_permille: 545 } },
-      { index: 10, name: "Reithwin Tollhouse", text: "Roll 2d4 and create that many Treasure tokens.", next_rooms: [13, 14], marker: { x_permille: 700, y_permille: 545 } },
-      { index: 11, name: "Moonrise Towers", text: "Instant and sorcery spells you cast this turn cost {3} less to cast.", next_rooms: [14, 15], marker: { x_permille: 210, y_permille: 622 } },
-      { index: 12, name: "Gauntlet of Shar", text: "Each opponent loses 5 life.", next_rooms: [15], marker: { x_permille: 500, y_permille: 622 } },
-      { index: 13, name: "Balthazar's Lab", text: "Return up to two target creature cards from your graveyard to your hand.", next_rooms: [16], marker: { x_permille: 800, y_permille: 622 } },
+      { index: 10, name: "Reithwin Tollhouse", text: "Roll 2d4 and create that many Treasure tokens.", next_rooms: [12, 13], marker: { x_permille: 700, y_permille: 545 } },
+      { index: 11, name: "Moonrise Towers", text: "Instant and sorcery spells you cast this turn cost {3} less to cast.", next_rooms: [14], marker: { x_permille: 210, y_permille: 622 } },
+      { index: 12, name: "Gauntlet of Shar", text: "Each opponent loses 5 life.", next_rooms: [14, 15], marker: { x_permille: 500, y_permille: 622 } },
+      { index: 13, name: "Balthazar's Lab", text: "Return up to two target creature cards from your graveyard to your hand.", next_rooms: [15], marker: { x_permille: 800, y_permille: 622 } },
       { index: 14, name: "Circus of the Last Days", text: "Create a token that's a copy of one of your commanders, except it's not legendary.", next_rooms: [16, 17], marker: { x_permille: 300, y_permille: 710 } },
-      { index: 15, name: "Undercity Ruins", text: "Create three 4/1 black Skeleton creature tokens with menace.", next_rooms: [17], marker: { x_permille: 715, y_permille: 710 } },
-      { index: 16, name: "Steel Watch Foundry", text: 'You get an emblem with "Creatures you control get +2/+2 and have trample."', next_rooms: [18], marker: { x_permille: 190, y_permille: 822 } },
-      { index: 17, name: "Ansur's Sanctum", text: "Reveal the top four cards of your library and put them into your hand. Each opponent loses life equal to those cards' total mana value.", next_rooms: [18], marker: { x_permille: 500, y_permille: 822 } },
+      { index: 15, name: "Undercity Ruins", text: "Create three 4/1 black Skeleton creature tokens with menace.", next_rooms: [17, 18], marker: { x_permille: 715, y_permille: 710 } },
+      { index: 16, name: "Steel Watch Foundry", text: 'You get an emblem with "Creatures you control get +2/+2 and have trample."', next_rooms: [], marker: { x_permille: 190, y_permille: 822 } },
+      { index: 17, name: "Ansur's Sanctum", text: "Reveal the top four cards of your library and put them into your hand. Each opponent loses life equal to those cards' total mana value.", next_rooms: [], marker: { x_permille: 500, y_permille: 822 } },
       { index: 18, name: "Temple of Bhaal", text: "Creatures your opponents control get -5/-5 until end of turn.", next_rooms: [], marker: { x_permille: 810, y_permille: 822 } },
     ],
     ...overrides,
@@ -284,18 +284,20 @@ describe("DungeonBadge map panel", () => {
     expect(marker).toHaveStyle({ left: "50%", top: "44%" });
   });
 
-  // CR 309.5a: Grymforge leads to Reithwin Tollhouse (10) and Moonrise Towers
-  // (11) — and nothing else on the 19-room card is marked.
+  // CR 309.5a: Grymforge leads to Last Light Inn (9) and Reithwin Tollhouse
+  // (10) — and nothing else on the 19-room card is marked.
   it("marks only the Wilderness rooms reachable from Grymforge", async () => {
     render(<DungeonBadge room={baldursGate()} />);
     fireEvent.mouseEnter(screen.getByRole("button", { name: /venturing in/i }));
     await screen.findByRole("dialog");
 
+    expect(screen.getByTitle("Last Light Inn")).toBeInTheDocument();
     expect(screen.getByTitle("Reithwin Tollhouse")).toBeInTheDocument();
-    expect(screen.getByTitle("Moonrise Towers")).toBeInTheDocument();
-    // Behind the marker, a sibling branch, and the far end of the card.
+    // Behind the marker, a sibling branch, the far end of the card — and
+    // Moonrise Towers, a row too far down to reach from here.
     expect(screen.queryByTitle("Ebonlake Grotto")).toBeNull();
     expect(screen.queryByTitle("Githyanki Crèche")).toBeNull();
+    expect(screen.queryByTitle("Moonrise Towers")).toBeNull();
     expect(screen.queryByTitle("Temple of Bhaal")).toBeNull();
   });
 

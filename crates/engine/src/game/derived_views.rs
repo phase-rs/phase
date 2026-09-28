@@ -3400,13 +3400,18 @@ mod tests {
             19,
             "the whole graph ships, not just the current room"
         );
-        // CR 309.5a: Grymforge (index 7) leads to Reithwin Tollhouse and
-        // Moonrise Towers.
+        // CR 309.5a: Grymforge (index 7) leads to Last Light Inn and
+        // Reithwin Tollhouse.
         let current = &room.rooms[7];
         assert_eq!(current.room.name, "Grymforge");
-        assert_eq!(current.next_rooms, vec![10, 11]);
-        // The card's single bottommost room has no outgoing arrows (CR 309.5).
-        assert!(room.rooms[18].next_rooms.is_empty());
+        assert_eq!(current.next_rooms, vec![9, 10]);
+        // The card's bottom row holds three terminal rooms (CR 309.5).
+        for bottommost in [16, 17, 18] {
+            assert!(
+                room.rooms[bottommost].next_rooms.is_empty(),
+                "room {bottommost} is terminal on the printed card"
+            );
+        }
         assert_eq!(room.rooms[18].room.name, "Temple of Bhaal");
         // Every room carries a marker inside the card face.
         for node in &room.rooms {

@@ -7,7 +7,10 @@ import type {
   PeerInfo,
 } from "../adapter/types";
 import { lobbyProtocolRequiredForFormat, type ServerInfo } from "../adapter/ws-adapter";
-import { isFormatConfigShape } from "../adapter/format-config-shape";
+import {
+  isFormatConfigShape,
+  rehydrateExperimentalDungeons,
+} from "../adapter/format-config-shape";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -36,7 +39,16 @@ function withValidatedFormatConfig<T extends { format_config?: FormatConfig | nu
   info: T,
 ): T {
   if (info.format_config == null) return info;
-  if (isFormatConfigShape(info.format_config)) return info;
+  // Frames minted before the experimental-dungeons axis lack the flag; the
+  // engine defaults it to false, so rehydrate it here — before the shape
+  // guard — rather than dropping the whole config to unknown. Same default
+  // the persisted-setup path applies (shared helper).
+  const rehydrated = rehydrateExperimentalDungeons(info.format_config);
+  if (isFormatConfigShape(rehydrated)) {
+    return rehydrated === info.format_config
+      ? info
+      : { ...info, format_config: rehydrated };
+  }
   console.warn(
     "[broker] dropping a malformed format_config from a lobby frame; "
       + "the room's format will be treated as unknown",
