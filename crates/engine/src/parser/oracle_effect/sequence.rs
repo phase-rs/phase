@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, map, map_opt, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, opt, recognize, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -29,8 +29,8 @@ use crate::types::ability::{
     EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody, FaceDownProfile, FilterProp,
     ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
     PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    ThisWayCause, TypeFilter, TypedFilter,
+    SpellStackToGraveyardReplacement, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -4683,8 +4683,17 @@ pub(super) fn apply_clause_continuation(
             }
             defs.push(change_zone);
         }
-        // Both bindings patch the reveal's card choice identically; the binding
-        // only steers the chain builder's consumer rules.
+        // CR 608.2c + CR 701.20a: the card choice a follow-up clause makes from a
+        // revealed hand. After a single-player reveal (or a partial per-player
+        // reveal) the choice refines that reveal (Kitesail Freebooter,
+        // Thoughtseize). After a per-player whole-hand reveal ("Each opponent
+        // reveals their hand."), that instruction completes for every player
+        // before the next begins, so the choice is the next instruction's own
+        // co-scoped step: a card-parking `RevealHand` over the same player that
+        // adds no new reveal (the hand is still revealed, CR 701.20a) and starts
+        // that instruction (`SequentialSibling`). The printed controller chooses
+        // (`reveal_hand::resolve`). The binding only steers the chain builder's
+        // consumer rules; both bindings lower the same way.
         ContinuationAst::RevealHandFilter {
             card_filter,
             choice_optional,
@@ -4693,21 +4702,48 @@ pub(super) fn apply_clause_continuation(
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            if let Effect::RevealHand {
+            let reveal_scope = previous.player_scope.clone();
+            let Effect::RevealHand {
+                target,
                 card_filter: existing,
                 choice_optional: existing_choice_optional,
+                count,
                 ..
             } = &mut *previous.effect
-            {
-                match card_filter {
-                    Some(filter) => *existing = filter,
-                    None if matches!(existing, TargetFilter::None) => {
-                        *existing = TargetFilter::Any;
-                    }
-                    None => {}
+            else {
+                return;
+            };
+            let card_filter = match card_filter {
+                Some(filter) => filter,
+                None if matches!(existing, TargetFilter::None) => TargetFilter::Any,
+                None => existing.clone(),
+            };
+            let choice_step = match (reveal_scope, &*count) {
+                (Some(scope), None) => {
+                    let mut choice = AbilityDefinition::new(
+                        kind,
+                        Effect::RevealHand {
+                            target: target.clone(),
+                            card_filter,
+                            count: None,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            choice_optional,
+                            reveal: false,
+                        },
+                    );
+                    choice.player_scope = Some(scope);
+                    choice.sub_link = SubAbilityLink::SequentialSibling;
+                    Some(choice)
                 }
-                *existing_choice_optional = choice_optional;
-            }
+                // A single-player reveal, or a per-player partial reveal whose
+                // revealed subset no later step can name: refine the reveal.
+                _ => {
+                    *existing = card_filter;
+                    *existing_choice_optional = choice_optional;
+                    None
+                }
+            };
+            defs.extend(choice_step);
         }
         ContinuationAst::ManaRestriction {
             restrictions: new_restrictions,
@@ -7688,13 +7724,20 @@ fn reveal_choice_is_optional(lower: &str) -> bool {
 /// this way", Fall; "for each blue instant card revealed this way", Sirocco) and
 /// conditions ("a card with the chosen name is revealed this way") carry no
 /// singular article + "card" + "revealed this way" run and are not matched.
+/// The description is recognized in place and read by `parse_type_phrase_folding`
+/// as printed.
 pub(super) fn parse_revealed_this_way_card_filter(lower: &str) -> Option<TargetFilter> {
-    let descriptor = nom_primitives::scan_at_word_boundaries(lower, |input| {
+    let description = nom_primitives::scan_at_word_boundaries(lower, |input| {
         let (input, _) =
             alt((tag::<_, _, OracleError<'_>>("a "), tag("an "), tag("one "))).parse(input)?;
-        let (input, descriptor) = alt((
+        // CR 608.2c: "card" alone, or a type phrase whose head noun is "card" —
+        // kept as the printed slice for the type-phrase authority below.
+        let (input, description) = alt((
             value(None, tag::<_, _, OracleError<'_>>("card")),
-            map(terminated(take_until(" card"), tag(" card")), Some),
+            map(
+                recognize(terminated(take_until(" card"), tag(" card"))),
+                Some,
+            ),
         ))
         .parse(input)?;
         let (input, _) = opt(alt((
@@ -7704,13 +7747,12 @@ pub(super) fn parse_revealed_this_way_card_filter(lower: &str) -> Option<TargetF
         )))
         .parse(input)?;
         let (input, _) = tag(" revealed this way").parse(input)?;
-        Ok((input, descriptor))
+        Ok((input, description))
     })?;
-    let filter = match descriptor {
+    let filter = match description {
         None => TargetFilter::Typed(TypedFilter::card()),
-        Some(descriptor) => {
-            let singular = format!("{descriptor} card");
-            let (filter, rem) = parse_type_phrase_folding(&singular);
+        Some(phrase) => {
+            let (filter, rem) = parse_type_phrase_folding(phrase);
             if !rem.trim().is_empty() {
                 return None;
             }
@@ -7741,6 +7783,13 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
     let lower = text.to_lowercase();
     let face_down_profile_spec =
         parse_theyre_face_down_profile(&lower).or_else(|| parse_its_face_down_profile(&lower));
+    // The object phrase of a "… revealed this way" consumer after a hand reveal,
+    // parsed once for the guarded arm below.
+    let revealed_this_way_card = if let Effect::RevealHand { .. } = previous_effect {
+        parse_revealed_this_way_card_filter(&lower)
+    } else {
+        None
+    };
 
     match previous_effect {
         Effect::ChooseAndSacrificeRest { .. } => parse_choose_and_sacrifice_rest_followup(&lower),
@@ -7789,16 +7838,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             })
         }
         // CR 608.2c + CR 701.20a: "<verb> a <type> card [they] revealed this way"
-        // acts on a card chosen from the revealed hand — the reveal parks the
-        // choice (typed card filter) and the consumer is re-bound to the chosen
-        // card by the chain builder.
-        Effect::RevealHand { .. } if parse_revealed_this_way_card_filter(&lower).is_some() => {
-            parse_revealed_this_way_card_filter(&lower).map(|card_filter| {
-                ContinuationAst::RevealHandFilter {
-                    card_filter: Some(card_filter),
-                    choice_optional: reveal_choice_is_optional(&lower),
-                    binding: RevealChoiceBinding::RevealedThisWay,
-                }
+        // acts on a card chosen from the revealed hand — `apply_clause_continuation`
+        // lowers the choice (typed card filter) onto a single-player reveal or, after
+        // a per-player reveal, as its own co-scoped step; the chain builder re-binds
+        // the consumer to the chosen card.
+        Effect::RevealHand { .. } if revealed_this_way_card.is_some() => {
+            revealed_this_way_card.map(|card_filter| ContinuationAst::RevealHandFilter {
+                card_filter: Some(card_filter),
+                choice_optional: reveal_choice_is_optional(&lower),
+                binding: RevealChoiceBinding::RevealedThisWay,
             })
         }
         Effect::Mana { .. } => {

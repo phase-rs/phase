@@ -34494,10 +34494,11 @@ enum ConsumerBinding {
 ///   `ParentTarget` — the chosen card.
 /// - After a per-player reveal (`reveal_scope == Some(S)`), the consumer must
 ///   carry exactly "For each <S>," as a `PlayerCount { S }` repeat and no scope
-///   of its own: the population is named twice, so the consumer runs inside the
-///   SAME per-player iteration (`player_scope: S`), never as a count. That is the
-///   only reading under which "they" and "revealed this way" have one referent
-///   per iteration.
+///   of its own: the population is named twice, so the consumer runs per player
+///   of S (`player_scope: S`) — co-scoped with the card choice that
+///   `apply_clause_continuation` lowers after the reveal pass — never as a count.
+///   That is the only reading under which "they" and "revealed this way" have
+///   one referent per iteration.
 /// - After an unscoped reveal, the consumer must carry no repeat.
 ///
 /// Anything else is `Declined` and left untouched (strict-failure posture).
@@ -41551,9 +41552,9 @@ pub(crate) fn parse_effect_chain_ir(
             .as_ref()
             .is_some_and(|continuation| continuation_absorbs_current(continuation, &clause.effect));
         // CR 608.2c: "a <type> card they revealed this way" is the card chosen
-        // from THIS iteration's revealed hand; "For each <the reveal's
-        // population>," re-scopes the instruction over that same iteration, not
-        // a count.
+        // from that player's revealed hand; "For each <the reveal's population>,"
+        // re-scopes the instruction over the same players — a second per-player
+        // pass after every reveal (CR 608.2c) — not a count.
         if !absorb_followup
             && matches!(
                 followup_continuation,

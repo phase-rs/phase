@@ -4,25 +4,23 @@
 //! exile a creature card they revealed this way until Valki leaves the
 //! battlefield."
 //! - CR 701.20a: each opponent's hand is revealed.
-//! - CR 608.2c + CR 608.2d + CR 109.5: for each opponent, Valki's controller
+//! - CR 608.2c: that instruction completes for every opponent before the next
+//!   begins; then, for each opponent (CR 101.4 APNAP order), Valki's controller
 //!   chooses one creature card that opponent revealed ("exile a creature card"
-//!   is an instruction to the controller), inside that opponent's iteration
-//!   (CR 101.4 APNAP order).
+//!   is an instruction to the controller, CR 608.2d + CR 109.5) and exiles it.
 //! - CR 610.3: the chosen cards return when Valki leaves the battlefield; CR 610.3b:
 //!   if Valki left before the ETB resolved, nothing is exiled.
 //!
 //! {X}: "Choose a creature card exiled with Valki with mana value X. Valki
 //! becomes a copy of that card."
 //! - CR 607.2a + CR 406.6: the pool is exactly the cards exiled with Valki.
-//! - CR 707.2: Valki becomes a copy of the chosen card; CR 707.4: a copying
-//!   permanent stays the same object, so the exile links persist.
+//! - CR 707.2: Valki becomes a copy of the chosen card; CR 400.7: becoming a
+//!   copy is not a zone change, so Valki stays the same object and the exile links persist.
 //!
 //! The "CR 610.3b: chain hand-off class regressions" section pins the fix Valki's
-//! bounced-in-response row depends on: the "until" latch recorded on the exile
+//! bounced-in-response test depends on: the "until" latch recorded on the exile
 //! node below a non-ChangeZone parent survives the parent→child hand-off
-//! (Kitesail Freebooter's hand reveal, Shire Shirriff's reflexive trigger). Those
-//! card tests live here because this change's scope does not include
-//! `until_source_leaves_cr610_3b.rs`.
+//! (Kitesail Freebooter's hand reveal, Shire Shirriff's reflexive trigger).
 
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, EffectKind, TargetRef};
@@ -220,7 +218,7 @@ fn choose_ability_index(runner: &GameRunner, valki: ObjectId) -> usize {
         .expect("Valki's {X} ability must be a ChooseFromZone")
 }
 
-// ── Row 1: ETB ─────────────────────────────────────────────────────────────
+// ── ETB ─────────────────────────────────────────────────────────────
 
 /// CR 701.20a + CR 608.2c + CR 608.2d + CR 109.5 + CR 101.4 + CR 610.3: one
 /// controller-chosen creature card per opponent, exiled until Valki leaves.
@@ -298,6 +296,39 @@ fn valki_etb_exiles_one_chosen_creature_card_per_opponent_until_valki_leaves() {
     assert!(runner.state().players[2].hand.contains(&p2_ogre));
 }
 
+/// CR 608.2c + CR 701.20a: "Each opponent reveals their hand" completes for every
+/// opponent before "For each opponent, exile …" begins — no card choice is
+/// offered until every opponent has revealed, and the choice pass reveals
+/// nothing again.
+#[test]
+fn valki_etb_reveals_every_opponents_hand_before_the_first_choice() {
+    let mut scenario = new_three_player();
+    let valki = add_valki(&mut scenario);
+    let p1_bear = add_hand_creature(&mut scenario, P1, "Opp Bear", 2, 2, 2);
+    let p2_ogre = add_hand_creature(&mut scenario, P2, "Opp Ogre", 3, 3, 3);
+    let mut runner = scenario.build();
+
+    let mut events = cast_valki(&mut runner, valki);
+    let (prompts, marks) =
+        answer_reveal_choices_with_marks(&mut runner, &mut events, |cards| cards[0]);
+
+    // Reach-guards: one prompt per opponent in APNAP order, chosen by Valki's
+    // controller from that opponent's creature cards, and both picks landed.
+    assert_eq!(prompts, vec![(P0, vec![p1_bear]), (P0, vec![p2_ogre])]);
+    assert_eq!(zone(&runner, p1_bear), Zone::Exile);
+    assert_eq!(zone(&runner, p2_ogre), Zone::Exile);
+    assert_eq!(until_leaves_links(&runner, valki).len(), 2);
+
+    // Every opponent's hand was revealed before the first choice was answered.
+    assert_eq!(
+        revealed_players(&events[..marks[0]]),
+        vec![P1, P2],
+        "both hands are revealed before the first card choice"
+    );
+    // No hand is revealed a second time over the whole resolution.
+    assert_eq!(revealed_players(&events), vec![P1, P2]);
+}
+
 /// The first opponent (APNAP) has no creature card: no prompt, nothing lost,
 /// and the other opponent's pick still lands.
 #[test]
@@ -337,12 +368,23 @@ fn valki_etb_later_opponent_without_creature_cards_after_paused_pick() {
     let p2_hand_before = hand_len(&runner, P2);
 
     let mut events = cast_valki(&mut runner, valki);
-    let prompts = answer_reveal_choices(&mut runner, &mut events, |_| p1_bear);
+    let (prompts, marks) = answer_reveal_choices_with_marks(&mut runner, &mut events, |_| p1_bear);
 
     assert_eq!(prompts, vec![(P0, vec![p1_bear])]);
     assert!(
         revealed_players(&events).contains(&P2),
         "reach-guard: P2's iteration ran"
+    );
+    assert!(
+        events[marks[0]..].iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Reveal,
+                source_id,
+                ..
+            } if *source_id == valki
+        )),
+        "reach-guard: P2's choice-pass iteration ran after P1's pick"
     );
     assert_eq!(zone(&runner, p1_bear), Zone::Exile);
     assert_eq!(until_leaves_links(&runner, valki).len(), 1);
@@ -366,24 +408,29 @@ fn valki_etb_later_opponent_with_empty_hand_after_paused_pick() {
     let (prompts, marks) = answer_reveal_choices_with_marks(&mut runner, &mut events, |_| p1_bear);
 
     assert_eq!(prompts, vec![(P0, vec![p1_bear])]);
-    // Reach-guard: both opponent iterations ran (one Reveal resolution each),
-    // so P2's empty-hand iteration was reached.
-    let reveal_resolutions = events
-        .iter()
-        .filter(|e| {
-            matches!(
-                e,
-                GameEvent::EffectResolved {
-                    kind: EffectKind::Reveal,
-                    source_id,
-                    ..
-                } if *source_id == valki
-            )
-        })
-        .count();
+    // Reach-guard: both passes ran for both opponents (one reveal-pass and one
+    // choice-pass Reveal resolution each), so P2's empty-hand choice was reached.
+    let is_valki_reveal_resolution = |e: &GameEvent| {
+        matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Reveal,
+                source_id,
+                ..
+            } if *source_id == valki
+        )
+    };
     assert_eq!(
-        reveal_resolutions, 2,
-        "reach-guard: one reveal per opponent"
+        events
+            .iter()
+            .filter(|e| is_valki_reveal_resolution(e))
+            .count(),
+        4,
+        "reach-guard: one reveal-pass and one choice-pass resolution per opponent"
+    );
+    assert!(
+        events[marks[0]..].iter().any(is_valki_reveal_resolution),
+        "reach-guard: P2's choice-pass iteration ran after P1's pick"
     );
     // After P1's pick: exactly one move of the pick (its own exile) and none
     // afterwards.
@@ -860,7 +907,7 @@ fn shire_shirriff_etb_sacrifice_exiles_target_until_it_leaves() {
     );
 }
 
-// ── Row 2: {X} ─────────────────────────────────────────────────────────────
+// ── {X} ─────────────────────────────────────────────────────────────
 
 struct XFixture {
     runner: GameRunner,
@@ -920,7 +967,7 @@ fn activate_x(runner: &mut GameRunner, valki: ObjectId, x: u32) -> Option<Vec<Ob
     }
 }
 
-/// CR 607.2a + CR 707.2 + CR 707.4 + CR 610.3: X=3 offers only the linked MV3
+/// CR 607.2a + CR 707.2 + CR 610.3: X=3 offers only the linked MV3
 /// creature card; Valki becomes a copy of it; the exile links persist.
 #[test]
 fn valki_x_becomes_copy_of_linked_exiled_card_with_mana_value_x() {
@@ -960,7 +1007,7 @@ fn valki_x_becomes_copy_of_linked_exiled_card_with_mana_value_x() {
         "the card stays in exile"
     );
     assert_eq!(zone(&runner, valki), Zone::Battlefield);
-    // CR 707.4 + A8: same object — both links persist.
+    // CR 400.7: becoming a copy is not a zone change — same object, so both links persist.
     let linked: Vec<_> = until_leaves_links(&runner, valki)
         .iter()
         .map(|l| l.exiled_id)
@@ -1051,7 +1098,7 @@ fn valki_x_stale_tracked_set_does_not_hide_linked_card() {
     assert!(!cards.contains(&unrelated));
 }
 
-// ── Row 4: the exported card data carries the same shapes ──────────────────
+// ── The exported card data carries the same shapes ──────────────────
 
 /// Every node of a chain, following `sub_ability` / `else_ability`.
 fn chain_effects(def: &engine::types::ability::AbilityDefinition) -> Vec<&Effect> {
@@ -1066,8 +1113,8 @@ fn chain_effects(def: &engine::types::ability::AbilityDefinition) -> Vec<&Effect
 }
 
 /// The real card-data export of Valki's face parses both abilities fully: the
-/// per-opponent reveal choice bound to a co-scoped `ParentTarget` exile (rows
-/// 1f/1n) and the linked-pile `{X}` choose (row 2e).
+/// reveal of every opponent's hand, the co-scoped per-opponent card choice whose
+/// `ParentTarget` exile consumes it, and the linked-pile `{X}` choose.
 #[test]
 fn valki_real_card_export_has_no_unimplemented() {
     use engine::game::scenario_db::GameScenarioDbExt;
@@ -1093,12 +1140,23 @@ fn valki_real_card_export_has_no_unimplemented() {
         &*etb.effect,
         Effect::RevealHand {
             target: TargetFilter::Controller,
-            card_filter: TargetFilter::Typed(_),
+            card_filter: TargetFilter::None,
             ..
         }
     ));
     assert_eq!(etb.player_scope, Some(PlayerFilter::Opponent));
-    let exile = etb.sub_ability.as_deref().expect("exile consumer");
+    let choice = etb.sub_ability.as_deref().expect("choice step");
+    assert!(matches!(
+        &*choice.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            card_filter: TargetFilter::Typed(_),
+            reveal: false,
+            ..
+        }
+    ));
+    assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
+    let exile = choice.sub_ability.as_deref().expect("exile consumer");
     assert!(matches!(
         &*exile.effect,
         Effect::ChangeZone {

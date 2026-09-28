@@ -11452,8 +11452,11 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!any_ability_has_unimplemented(&parsed));
         let etb = parsed.triggers[0].execute.as_deref().expect("Valki ETB");
         assert_eq!(etb.player_scope, Some(PlayerFilter::Opponent));
-        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&etb.effect));
-        let sub = etb.sub_ability.as_deref().expect("exile consumer");
+        assert!(!crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&etb.effect));
+        let choice = etb.sub_ability.as_deref().expect("choice step");
+        assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
+        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&choice.effect));
+        let sub = choice.sub_ability.as_deref().expect("exile consumer");
         assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
         assert_eq!(
             sub.effect.target_filter(),
@@ -11513,7 +11516,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         ));
     }
 
-    /// The charter's "body absent" twin: a scoped reveal with no co-scoped
+    /// "Body absent" twin: a scoped reveal with no co-scoped
     /// consumer does not represent the iteration.
     #[test]
     fn single_scoped_def_without_co_scoped_consumer_still_warns() {

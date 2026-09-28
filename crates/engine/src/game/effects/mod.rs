@@ -32422,6 +32422,93 @@ mod tests {
         assert!(matches!(tail.effect, Effect::ChangeZone { .. }));
     }
 
+    /// CR 608.2c — a non-choosing per-player reveal introduces no per-iteration
+    /// referent, so the next co-scoped instruction (the per-player card choice and
+    /// its `ParentTarget` consumer) detaches and fans out as its own pass after
+    /// every reveal; inside that pass the choice keeps its consumer (Valki, God of
+    /// Lies).
+    #[test]
+    fn split_player_scope_runs_the_choice_pass_after_every_reveal() {
+        let reveal_hand = |card_filter: TargetFilter, reveal: bool| Effect::RevealHand {
+            target: TargetFilter::Controller,
+            card_filter,
+            count: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            choice_optional: false,
+            reveal,
+        };
+        let mut reveal_pass = ResolvedAbility::new(
+            reveal_hand(TargetFilter::None, true),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        reveal_pass.player_scope = Some(PlayerFilter::Opponent);
+        let mut choice_pass = ResolvedAbility::new(
+            reveal_hand(TargetFilter::Typed(TypedFilter::creature()), false),
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        choice_pass.player_scope = Some(PlayerFilter::Opponent);
+        choice_pass.sub_link = SubAbilityLink::SequentialSibling;
+        let mut exile = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        exile.player_scope = Some(PlayerFilter::Opponent);
+        exile.sub_link = SubAbilityLink::SequentialSibling;
+        choice_pass.sub_ability = Some(Box::new(exile));
+        reveal_pass.sub_ability = Some(Box::new(choice_pass));
+
+        // The reveal pass: every opponent reveals; the choice pass is the tail.
+        let (scoped, tail) = split_player_scope_chain(&reveal_pass, &PlayerFilter::Opponent);
+        assert!(
+            scoped.sub_ability.is_none(),
+            "the reveal pass keeps no later instruction in its iteration"
+        );
+        let tail = tail.expect("the choice pass detaches as the tail");
+        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&tail.effect));
+        assert_eq!(
+            tail.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the detached choice pass fans out over the same opponents"
+        );
+        assert!(matches!(
+            tail.sub_ability.as_deref().map(|sub| &sub.effect),
+            Some(Effect::ChangeZone { .. })
+        ));
+
+        // The choice pass: the chosen card's consumer stays in its iteration.
+        let (scoped, tail) = split_player_scope_chain(&tail, &PlayerFilter::Opponent);
+        assert!(tail.is_none(), "the consumer stays in the choice iteration");
+        let kept = scoped
+            .sub_ability
+            .as_ref()
+            .expect("the ChangeZone stays attached to the choice");
+        assert!(matches!(kept.effect, Effect::ChangeZone { .. }));
+        assert_eq!(
+            kept.player_scope, None,
+            "the kept consumer's redundant player_scope is cleared"
+        );
+    }
+
     /// CR 610.3b + CR 608.2c — the parent→child hand-off keeps the child's own
     /// "until" latch. `check_exile_returns` records a specified event on the exact
     /// duration-bearing ChangeZone node (node-local, like the face-down marker);

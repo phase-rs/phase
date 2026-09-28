@@ -34202,14 +34202,21 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
     );
     assert_eq!(valki.mode, TriggerMode::ChangesZone);
     let exec = valki.execute.as_deref().expect("Valki ETB execute");
-    // Reach-guards: the U1 shape reached trigger lowering.
+    // Reach-guards: the verbatim two-instruction shape reached trigger lowering.
     assert!(
-        effect_parks_reveal_card_choice(&exec.effect),
-        "the root reveal parks the card choice: {:?}",
+        !effect_parks_reveal_card_choice(&exec.effect),
+        "the root reveal pass parks no card choice: {:?}",
         exec.effect
     );
     assert_eq!(exec.player_scope, Some(PlayerFilter::Opponent));
-    let sub = exec.sub_ability.as_deref().expect("the exile consumer");
+    let choice = exec.sub_ability.as_deref().expect("the choice step");
+    assert!(
+        effect_parks_reveal_card_choice(&choice.effect),
+        "the choice step parks the card choice: {:?}",
+        choice.effect
+    );
+    assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
+    let sub = choice.sub_ability.as_deref().expect("the exile consumer");
     assert_eq!(sub.duration, Some(Duration::UntilHostLeavesPlay));
     match &*sub.effect {
         Effect::ChangeZone {
