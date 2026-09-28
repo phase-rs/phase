@@ -305,6 +305,49 @@ export async function createFollowupMessage(
   );
 }
 
+/** Posts a message in a channel (or thread) with the bot token; returns its id. */
+async function createChannelMessage(botToken: string, channelId: string, body: unknown): Promise<string> {
+  const message = (await discordRequest(
+    "POST",
+    `${API}/channels/${channelId}/messages`,
+    body,
+    "createMessage",
+    { botToken },
+  )) as { id: string };
+  return message.id;
+}
+
+/** The channel-message operations the lobby mirror needs, authenticated with the bot token. */
+export interface MessageApi {
+  /** Posts `body` in `channelId`; returns the message id. Discord answers a
+   *  repeated `nonce` (≤ 25 chars) from the same author within a few minutes with
+   *  the message it already created, so a create whose response was lost is not
+   *  posted twice when retried. */
+  create(channelId: string, body: object, nonce: string): Promise<string>;
+  /** Replaces the message with `body`; "gone" when it no longer exists (e.g. a
+   *  moderator deleted it). */
+  edit(channelId: string, messageId: string, body: object): Promise<"edited" | "gone">;
+}
+
+export function botMessageApi(botToken: string): MessageApi {
+  return {
+    create(channelId, body, nonce) {
+      return createChannelMessage(botToken, channelId, { ...body, nonce, enforce_nonce: true });
+    },
+    async edit(channelId, messageId, body) {
+      // A successful edit answers the message, so only the allowed 404 is null.
+      const message = await discordRequest(
+        "PATCH",
+        `${API}/channels/${channelId}/messages/${messageId}`,
+        body,
+        "editMessage",
+        { botToken, allow: [404] },
+      );
+      return message === null ? "gone" : "edited";
+    },
+  };
+}
+
 /** Discord `ChannelType.PRIVATE_THREAD`. */
 const PRIVATE_THREAD = 12;
 /** Minutes of inactivity before Discord auto-archives a thread (one of 60, 1440,
@@ -345,7 +388,7 @@ export function botThreadApi(botToken: string): ThreadApi {
       );
     },
     async post(threadId, body) {
-      await discordRequest("POST", `${API}/channels/${threadId}/messages`, body, "createMessage", { botToken });
+      await createChannelMessage(botToken, threadId, body);
     },
     async close(threadId) {
       await discordRequest(

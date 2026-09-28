@@ -12115,15 +12115,22 @@ fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(
 /// before each option grew the room's printed name and room-ability text (CR 309.4b-c), so a save
 /// paused at either prompt cannot deserialize into the current shape.
 ///
+/// Protocol 81 / P2P 63: `DungeonPreview` gained the whole dungeon behind the choice — `card`,
+/// `rooms`, and `room_count` — so a save paused at `ChooseDungeon` between protocols 36 and 80
+/// carries options that are objects but lack those keys. Rebuilt wholesale from the option's
+/// `dungeon` key rather than patched in place, so the backfilled option equals what the engine
+/// emits at that position.
+///
 /// This migrates rather than rejects because the migration is TOTAL: the legacy scalars are
 /// exactly the keys into the static dungeon table. A `DungeonId` resolves its own topmost room
 /// (CR 309.4a) and a room index resolves that room's name and text, so the rebuilt preview equals
 /// what the engine emits at that position; `option_names` is dropped because `RoomPreview::name`
 /// carries it from the same authority. Rebuilt through `dungeon::dungeon_preview` /
 /// `dungeon::room_preview` rather than hand-written JSON, so it cannot drift from the shape the
-/// prompts emit. Idempotent: legacy options are scalars and current ones are objects, so a re-run
-/// matches nothing. An unknown `DungeonId` is a hard error — corrupt state, not a migratable
-/// shape.
+/// prompts emit. Idempotent: legacy options are scalars and current ones are objects, and
+/// protocol-70 objects lack `card`/`rooms`/`room_count` while current ones carry all three, so a
+/// re-run matches nothing. An unknown `DungeonId` is a hard error — corrupt state, not a
+/// migratable shape.
 fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Result<(), String> {
     use crate::game::dungeon::{dungeon_preview, room_preview, DungeonId};
     use std::str::FromStr;
@@ -12163,6 +12170,51 @@ fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Resu
                                 .iter()
                                 .map(|option| {
                                     let id = parse_dungeon(option, "options entry")?;
+                                    serde_json::to_value(dungeon_preview(id))
+                                        .map_err(|error| error.to_string())
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            data.insert("options".to_string(), serde_json::Value::Array(previews));
+                        }
+                        // Protocol 81: options are objects but predate the choice preview's
+                        // `card`/`rooms`/`room_count`. Runs after the scalar leg, which
+                        // rebuilds current-shape objects a re-run skips here.
+                        let needs_backfill = data
+                            .get("options")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|options| {
+                                options.iter().any(|option| {
+                                    option.as_object().is_some_and(|option| {
+                                        !option.contains_key("card")
+                                            || !option.contains_key("rooms")
+                                            || !option.contains_key("room_count")
+                                    })
+                                })
+                            });
+                        if needs_backfill {
+                            let options = data
+                                .get("options")
+                                .and_then(serde_json::Value::as_array)
+                                .expect("checked above")
+                                .clone();
+                            let previews = options
+                                .iter()
+                                .map(|option| {
+                                    let is_current = option.as_object().is_some_and(|option| {
+                                        option.contains_key("card")
+                                            && option.contains_key("rooms")
+                                            && option.contains_key("room_count")
+                                    });
+                                    if is_current {
+                                        return Ok(option.clone());
+                                    }
+                                    let id = parse_dungeon(
+                                        option.get("dungeon").ok_or_else(|| {
+                                            "protocol-70 dungeon option carries no dungeon key"
+                                                .to_string()
+                                        })?,
+                                        "options entry",
+                                    )?;
                                     serde_json::to_value(dungeon_preview(id))
                                         .map_err(|error| error.to_string())
                                 })
@@ -21799,6 +21851,10 @@ pub struct PostReplacementDrain {
     /// time. It is co-owned, not merely co-located. (The reading that it has an
     /// independent lifecycle comes from looking at the *instant* of the
     /// `combat_damage` clear rather than its *purpose*; that reading is wrong.)
+    ///
+    /// Since PR #9235, only the no-post-effect optional ACCEPT still clears (via
+    /// `abandon_active_post_replacement_drains`); a no-post-effect DECLINE
+    /// installs nothing and clears nothing (CR 614.6 + CR 616.1f).
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub applied: HashSet<AppliedReplacementKey>,
 
@@ -21841,11 +21897,20 @@ pub struct PostReplacementDrain {
 ///
 ///   * [`Self::KeepResident`] — `apply_single_replacement`'s stash: the *incoming*
 ///     continuation is discarded.
-///   * [`Self::Replace`] — the optional accept/decline path and the combat
-///     prevention riders: the *resident* continuation is overwritten.
+///   * [`Self::Replace`] — the optional accept/decline path when the chosen
+///     branch HAS a post-effect, and the combat prevention riders: the
+///     *resident* continuation is overwritten.
 ///
 /// Naming them is the point: today the policy is an accident of where the
 /// assignment happens to sit.
+///
+/// # A branch with no post-effect installs nothing
+///
+/// When the optional accept/decline path's chosen branch has no post-effect, no
+/// policy applies. On a DECLINE the resident drains are left untouched
+/// (CR 614.6 + CR 616.1f: a declined "may" replaces nothing, so an earlier
+/// replacement's rider on the same event still runs). On an ACCEPT they are
+/// still abandoned — the accept-side follow-up recorded on PR #9235.
 ///
 /// # What the `KeepResident` drop actually is — measured, not inferred
 ///
@@ -21868,7 +21933,11 @@ pub struct PostReplacementDrain {
 ///     exactly once, which is what CR 614.5 licenses — it grants one opportunity *per
 ///     event*, and there are two events. The applied-set dedup is fully wired
 ///     (`already_applied` gates candidate selection) and correctly declines to
-///     suppress here. Nothing is missing from this path.
+///     suppress here. Nothing is missing from this path. In that census both
+///     drops were sibling events; same-event collisions are also reachable (two
+///     Blood Scriveners; A → declined B → C) and lose a real rider, because the
+///     stack holds at most one Ready entry — the accept-side follow-up recorded
+///     on PR #9235.
 ///   * **The dropped continuation never runs — in either regime.** Dispatch counts are
 ///     identical with the drop and with the stack forced to nest: Wolverine dispatches
 ///     its continuation **zero** times ever (its heal is delivered by
@@ -21912,8 +21981,9 @@ pub enum ResidentDrainPolicy {
 
 /// CR 616.1g: the post-replacement continuations awaiting a drain.
 ///
-/// Depth is currently capped at one by [`ResidentDrainPolicy`] — this type
-/// reproduces the old single-slot behaviour exactly. It is a stack so that
+/// [`ResidentDrainPolicy`] keeps at most one Ready entry — this type reproduces
+/// the old single-slot behaviour exactly, except that a no-post-effect optional
+/// decline no longer clears it (PR #9235). It is a stack so that
 /// nesting can be turned on as an isolated, reviewable change rather than as a
 /// side effect of the bundling.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22134,7 +22204,10 @@ impl PostReplacementDrainStack {
         }
     }
 
-    /// CR 800.4a: abandon every pending continuation (player departure).
+    /// Abandon every pending continuation. Two callers: player departure via
+    /// `GameState::abandon_active_replacement_tails` (CR 800.4a), and the
+    /// no-post-effect optional ACCEPT via
+    /// `GameState::abandon_active_post_replacement_drains`.
     pub fn abandon_all(&mut self) {
         self.drains.clear();
     }
@@ -24469,6 +24542,10 @@ impl GameState {
 
     /// Clears only the exact active general post-replacement authority. This
     /// preserves any independent active child that may be resolving above it.
+    ///
+    /// Its only production caller is `continue_replacement_impl`'s
+    /// no-post-effect ACCEPT; the no-post-effect DECLINE deliberately does not
+    /// call it (CR 614.6 + CR 616.1f).
     pub fn abandon_active_post_replacement_drains(&mut self) {
         if let Some(drains) = self.active_post_replacement_drains_mut() {
             drains.abandon_all();
@@ -31745,6 +31822,91 @@ mod tests {
                     // Rebuilt from the static table, so it is not merely
                     // parseable — it equals what the engine emits today.
                     assert_eq!(options, &expected);
+                }
+                other => panic!("expected ChooseDungeon, got {other:?}"),
+            }
+        }
+    }
+
+    /// Rewrites a captured `ChooseDungeon` prompt back to its protocol-70 payload:
+    /// options are `DungeonPreview` objects but predate `card`/`rooms`/`room_count`.
+    fn strip_dungeon_preview_graph_fields(persisted: &mut serde_json::Value) {
+        let state = if persisted.get("state").is_some() {
+            persisted
+                .get_mut("state")
+                .expect("trusted fixture has an inner state")
+        } else {
+            persisted
+        };
+        let options = state
+            .get_mut("waiting_for")
+            .expect("fixture is paused at a prompt")
+            .get_mut("data")
+            .and_then(|data| data.get_mut("options"))
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("dungeon prompts carry options");
+        for option in options {
+            let option = option
+                .as_object_mut()
+                .expect("protocol-70 options are objects");
+            option.remove("card");
+            option.remove("rooms");
+            option.remove("room_count");
+        }
+    }
+
+    /// Protocol 81: a save paused at `ChooseDungeon` between protocols 36 and 80
+    /// carries options without the choice preview's `card`/`rooms`/`room_count`.
+    /// The migration must rebuild them from each option's `dungeon` key rather
+    /// than fail to deserialize, through BOTH persistence ingresses.
+    #[test]
+    fn protocol_70_choose_dungeon_prompt_backfills_through_both_envelopes() {
+        use crate::game::dungeon::{dungeon_preview, DungeonId};
+
+        let mut state = GameState::new_two_player(42);
+        let expected: Vec<_> = [
+            DungeonId::LostMineOfPhandelver,
+            DungeonId::DungeonOfTheMadMage,
+            DungeonId::TombOfAnnihilation,
+        ]
+        .into_iter()
+        .map(dungeon_preview)
+        .collect();
+        state.waiting_for = WaitingFor::ChooseDungeon {
+            player: PlayerId(0),
+            options: expected.clone(),
+        };
+
+        let mut raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("serialize raw fixture");
+        let mut trusted =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("serialize trusted");
+        strip_dungeon_preview_graph_fields(&mut raw);
+        strip_dungeon_preview_graph_fields(&mut trusted);
+        let restored = [
+            serde_json::from_value::<PersistedGameState>(raw)
+                .expect("raw protocol-70 dungeon prompt migrates")
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract"),
+            serde_json::from_value::<PersistedGameState>(trusted)
+                .expect("trusted protocol-70 dungeon prompt migrates")
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract"),
+        ];
+
+        for restored in restored {
+            match &restored.waiting_for {
+                WaitingFor::ChooseDungeon { player, options } => {
+                    assert_eq!(*player, PlayerId(0));
+                    // Rebuilt from the static table, so it is not merely
+                    // parseable — it equals what the engine emits today.
+                    assert_eq!(options, &expected);
+                    // The backfill is the point of the rebuild: every option
+                    // carries the whole dungeon behind its entry room.
+                    for option in options {
+                        assert_eq!(option.rooms.len(), option.room_count as usize);
+                        assert!(!option.card.oracle_id.is_empty());
+                    }
                 }
                 other => panic!("expected ChooseDungeon, got {other:?}"),
             }
