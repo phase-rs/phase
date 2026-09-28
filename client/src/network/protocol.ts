@@ -107,11 +107,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *
  * Bumps to date:
  *  66 — game_setup and state_update carry GameState, whose DeclareBlockers
- *       prompt can now carry must_be_blocked_targets (CR 509.1c) and
- *       block_capacities (CR 509.1a + CR 101.1). Both peers are browsers and
- *       neither validates the shape, so a v65 peer would take the new fields
- *       with no decode error; first contact rejects the skew instead. Bumped
- *       in lockstep with full-game protocol 84.
+ *       prompt can now carry block_capacities (CR 509.1a + CR 101.1). Both
+ *       peers are browsers and neither validates the shape, so a v65 peer
+ *       would take the new field with no decode error; first contact rejects
+ *       the skew instead. Bumped in lockstep with full-game protocol 84.
  *  65 — game_setup and state_update carry GameState, whose reduce-ability-cost
  *       statics can now carry a target restriction and a once-per-turn
  *       frequency, whose per-turn activation journal records each turn's

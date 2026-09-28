@@ -60,18 +60,14 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 84 — `WaitingFor::DeclareBlockers` gains `must_be_blocked_targets`
-///      (CR 509.1c): for each blocker, the attackers whose "must be blocked"
-///      static (`StaticMode::MustBeBlocked` / `MustBeBlockedByAll`) that
-///      blocker's block would obey. Also gains `block_capacities`
+/// 84 — `WaitingFor::DeclareBlockers` gains `block_capacities`
 ///      (CR 509.1a + CR 101.1): for each able blocker, its block limit —
-///      `null` for any number. Both fields are serde-additive
+///      `null` for any number. Serde-additive
 ///      (`#[serde(default, skip_serializing_if = "HashMap::is_empty")]`), but
-///      the client renders each map directly — the first to pick a specific
-///      pile member out of a collapsed token stack, the second as the pile
-///      stepper's ceiling; a v83 host would silently omit both fields. Full-game
-///      handshakes must refuse that capability mismatch, as in 60. Lobby
-///      messages are unchanged; P2P moves in lockstep (wire 66).
+///      the client bounds the pile stepper with it; a v83 host would silently
+///      omit it. Full-game handshakes must refuse that capability mismatch,
+///      as in 60. Lobby messages are unchanged; P2P moves in lockstep
+///      (wire 66).
 ///
 /// 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
 ///      Kopala): `StaticMode::ReduceAbilityCost` gains `targets` and

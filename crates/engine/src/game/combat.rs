@@ -3089,7 +3089,7 @@ fn validate_blockers_core(
                 .objects
                 .get(&blocker_id)
                 .ok_or_else(|| format!("Blocker {:?} not found during limit check", blocker_id))?;
-            // Find the best ExtraBlockers grant on this creature
+            // This creature's cumulative ExtraBlockers block limit.
             let max_allowed = extra_block_limit(state, blocker);
             if num_blocked > max_allowed {
                 return Err(format!(
@@ -7544,22 +7544,23 @@ fn ring_bearer_unblockable_by_greater_power(
 
 /// CR 509.1a + CR 101.1: A creature blocks one attacker unless an effect (a
 /// card's text overriding the CR 509.1a default) lets it block more.
-/// `ExtraBlockers { count: Some(n) }` raises the limit to `1 + n`;
-/// `count: None` lets it block any number, so there is no numeric ceiling.
-/// Multiple `ExtraBlockers` grants stack: the highest limit wins, and an
-/// unlimited grant wins over any numeric one. Single authority for both
-/// `extra_block_limit` (the declaration-validator's numeric form) and
-/// `block_capacities` (the prompt's display projection).
+/// `ExtraBlockers { count: Some(n) }` raises the limit by `n`; `count: None`
+/// lets it block any number, so there is no numeric ceiling. Multiple numeric
+/// grants are cumulative; an unlimited grant wins. High Ground's ruling: "High
+/// Ground's effect is cumulative. If you have a creature that can already
+/// block an additional creature, now it can block three creatures." Single
+/// authority for both `extra_block_limit` (the declaration-validator's
+/// numeric form) and `block_capacities` (the prompt's display projection).
 fn block_capacity(state: &GameState, blocker: &GameObject) -> Option<u32> {
-    let mut max: u32 = 1;
+    let mut total: u32 = 1;
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     for sd in super::functioning_abilities::active_static_definitions(state, blocker) {
         if let StaticMode::ExtraBlockers { count } = &sd.mode {
             let n = (*count)?; // None = any number
-            max = max.max(1 + n);
+            total = total.saturating_add(n);
         }
     }
-    Some(max)
+    Some(total)
 }
 
 /// The numeric form of [`block_capacity`] the declaration checks use:
@@ -17805,8 +17806,8 @@ mod tests {
     }
 
     /// CR 509.1a + CR 101.1: `block_capacity` is the single authority
-    /// `extra_block_limit` and `block_capacities` both read; these five rows
-    /// pin its `ExtraBlockers` arithmetic directly, independent of the
+    /// `extra_block_limit` and `block_capacities` both read; these rows pin
+    /// its `ExtraBlockers` arithmetic directly, independent of the
     /// declaration validator.
     #[test]
     fn block_capacity_with_no_grant_is_one() {
@@ -17859,7 +17860,7 @@ mod tests {
     }
 
     #[test]
-    fn block_capacity_stacks_multiple_numeric_grants_taking_the_highest() {
+    fn block_capacity_stacks_multiple_numeric_grants_cumulatively() {
         use crate::types::ability::StaticDefinition;
 
         let mut state = setup();
@@ -17873,7 +17874,7 @@ mod tests {
         }));
         assert_eq!(
             block_capacity(&state, state.objects.get(&blocker).unwrap()),
-            Some(3)
+            Some(4)
         );
     }
 

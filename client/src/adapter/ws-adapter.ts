@@ -210,14 +210,12 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 84 — WaitingFor.DeclareBlockers gains must_be_blocked_targets (CR 509.1c):
- *      the attackers whose "must be blocked" static a given blocker's block
- *      would obey; and block_capacities (CR 509.1a + CR 101.1): each able
- *      blocker's block limit, null for any number — see PROTOCOL_VERSION's
- *      own `/// 84` entry in crates/lobby-broker/src/protocol.rs. This client
- *      renders each map directly, one to reach a member of a collapsed token
- *      pile and the other as the pile stepper's ceiling; the exact-match
- *      version check at connect refuses a mismatched pairing.
+ * 84 — WaitingFor.DeclareBlockers gains block_capacities (CR 509.1a +
+ *      CR 101.1): each able blocker's block limit, null for any number — see
+ *      PROTOCOL_VERSION's own `/// 84` entry in
+ *      crates/lobby-broker/src/protocol.rs. This client renders the map
+ *      directly as the pile stepper's ceiling; the exact-match version check
+ *      at connect refuses a mismatched pairing.
  * 83 — CR 601.2c + CR 602.2b target-gated activation costs (Professor Hojo,
  *      Kopala): ReduceAbilityCost statics carry targets and frequency,
  *      GameState journals each turn's activations, and the activation cost

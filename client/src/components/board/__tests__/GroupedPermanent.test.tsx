@@ -567,8 +567,7 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
         valid_block_targets: { 100: [14, 15, 16, 17], 101: [11, 12, 13, 14, 15, 16, 17] },
         block_requirements: { 17: { count: 2 } },
         must_be_blocked_targets: { 100: [15], 101: [15] },
-        // 100 "Grizzly Bears" is an ordinary one-blocker creature; 101
-        // "Runeclaw Bear" may block two (implementation-review Finding B).
+        // 100 is an ordinary one-blocker creature; 101 may block two.
         block_capacities: { 100: 1, 101: 2 },
         ...overrides,
       },
@@ -922,7 +921,7 @@ describe("collapsed attacker pile blocker-assignment picker (integration)", () =
     expect(within(bandTwoFor101).getByText("0 / 1")).toBeInTheDocument();
   });
 
-  it("clamps 'All' to an ordinary blocker's published capacity (implementation-review Finding B)", () => {
+  it("clamps 'All' to an ordinary blocker's published capacity", () => {
     const { container } = renderBoard(
       blockersPrompt({ block_capacities: { 100: 1, 101: 1 } }),
     );

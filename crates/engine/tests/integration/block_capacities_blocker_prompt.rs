@@ -4,8 +4,9 @@
 //!
 //! Oracle text verified verbatim against `data/mtgjson/AtomicCards.json`:
 //! Foriysian Brigade ("This creature can block an additional creature each
-//! combat.") and Palace Guard ("This creature can block any number of
-//! creatures.").
+//! combat."), Palace Guard ("This creature can block any number of
+//! creatures."), and High Ground ("Each creature you control can block an
+//! additional creature each combat.").
 
 use engine::game::combat::{validate_blockers_for_player, AttackTarget};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -17,6 +18,7 @@ use std::collections::HashMap;
 
 const FORIYSIAN_BRIGADE: &str = "This creature can block an additional creature each combat.";
 const PALACE_GUARD: &str = "This creature can block any number of creatures.";
+const HIGH_GROUND: &str = "Each creature you control can block an additional creature each combat.";
 
 fn drive_to_declare_attackers(runner: &mut GameRunner) {
     for _ in 0..32 {
@@ -218,5 +220,72 @@ fn mid_prompt_refresh_recomputes_it() {
         after.get(&bear),
         Some(&Some(1)),
         "Bear's capacity is unaffected"
+    );
+}
+
+/// High Ground's own ruling: "High Ground's effect is cumulative. If you have
+/// a creature that can already block an additional creature, now it can
+/// block three creatures." With Foriysian Brigade's own grant plus High
+/// Ground's group grant, the Brigade's published capacity is 3 (1 base + 1 +
+/// 1), not 2 (highest-wins would stop at the higher single grant).
+#[test]
+fn high_ground_stacks_cumulatively_with_a_creatures_own_grant() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attackers: Vec<ObjectId> = (0..4)
+        .map(|_| scenario.add_creature(P0, "Insect", 1, 1).id())
+        .collect();
+    let brigade = scenario
+        .add_creature_from_oracle(P1, "Foriysian Brigade", 2, 4, FORIYSIAN_BRIGADE)
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "High Ground", HIGH_GROUND);
+
+    let mut runner = scenario.build();
+    drive_to_declare_attackers(&mut runner);
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: attackers
+                .iter()
+                .map(|id| (*id, AttackTarget::Player(P1)))
+                .collect(),
+            bands: vec![],
+        })
+        .expect("declaring attackers should succeed");
+    drive_to_declare_blockers(&mut runner);
+
+    let capacities = block_capacities(&runner);
+    assert_eq!(
+        capacities.get(&brigade),
+        Some(&Some(3)),
+        "Brigade's own grant and High Ground's group grant are cumulative, not highest-wins"
+    );
+
+    let s = runner.state();
+    assert!(
+        validate_blockers_for_player(
+            s,
+            P1,
+            &[
+                (brigade, attackers[0]),
+                (brigade, attackers[1]),
+                (brigade, attackers[2])
+            ]
+        )
+        .is_ok(),
+        "Brigade blocking 3 attackers is within its published cumulative capacity"
+    );
+    assert!(
+        validate_blockers_for_player(
+            s,
+            P1,
+            &[
+                (brigade, attackers[0]),
+                (brigade, attackers[1]),
+                (brigade, attackers[2]),
+                (brigade, attackers[3])
+            ]
+        )
+        .is_err(),
+        "Brigade blocking 4 attackers exceeds its published cumulative capacity"
     );
 }

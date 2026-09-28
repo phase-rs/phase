@@ -439,7 +439,7 @@ describe("partitionBlockTargets", () => {
     expect(stacks.find((s) => s.ids.includes(15))).toMatchObject({ otherBlockerIds: [] });
   });
 
-  it("holds a candidate through a band-mate the pending blocker already blocks OUTSIDE the candidate list, capped by capacity (implementation-review probe)", () => {
+  it("holds a candidate through a band-mate the pending blocker already blocks OUTSIDE the candidate list, capped by capacity", () => {
     const blockerAssignments = new Map<ObjectId, Set<ObjectId>>([[100, new Set([14])]]);
     const board = {
       attackers: [attacker(14, P1, 5), attacker(15, P1, 5), attacker(16, P1, 5)],
