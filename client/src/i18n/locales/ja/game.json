@@ -2316,6 +2316,8 @@
     "dontAskAgainForSameCard": "このゲームではこのカードのすべてのコピーにこの選択を使用"
   },
   "keywordDetail": {
+    "selfManaCost": "そのマナ・コスト",
+    "selfManaValue": "そのマナ総量",
     "manaCostReduced": "そのマナ・コストから{{reduction}}少ないコスト",
     "spliceOnto": "{{subtype}}へ {{cost}}"
   },

@@ -110,6 +110,7 @@ describe("getKeywordDetail", () => {
     expect(getKeywordDetail({ Ward: { type: "DiscardCard" } })).toBe("discard a card");
     expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 1, filter: { type: "Any" } } } })).toBe("sacrifice a permanent");
     expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 2, filter: { type: "Any" } } } })).toBe("sacrifice 2 permanents");
+    expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 1, filter: { type: "Typed", type_filters: ["Creature"] } } } })).toBe("");
     expect(getKeywordDetail({ Ward: { type: "Waterbend", data: { type: "Cost", shards: [], generic: 4 } } })).toBe("waterbend {4}");
   });
 
@@ -300,6 +301,18 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     expect(detailOf("Foretell", isType("SelfManaCostReduced"))).toBe(
       "Foretell its mana cost reduced by {2}",
     );
+  });
+
+  it("omits compound Ward detail when a filtered sacrifice leg cannot render", () => {
+    expect(getKeywordDisplayText({
+      Ward: {
+        type: "Compound",
+        data: [
+          { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } },
+          { type: "Sacrifice", data: { count: 1, filter: { type: "Typed", type_filters: ["Creature"] } } },
+        ],
+      },
+    })).toBe("Ward");
   });
 
   // CR 702.21a: every leg of a compound ward is paid, so the detail is all the

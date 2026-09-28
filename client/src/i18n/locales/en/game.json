@@ -2311,6 +2311,8 @@
     "dontAskAgainForSameCard": "Use this choice for every copy of this card this game"
   },
   "keywordDetail": {
+    "selfManaCost": "its mana cost",
+    "selfManaValue": "its mana value",
     "manaCostReduced": "its mana cost reduced by {{reduction}}",
     "spliceOnto": "onto {{subtype}} {{cost}}"
   },

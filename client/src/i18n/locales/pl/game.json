@@ -2273,6 +2273,8 @@
     "dontAskAgainForSameCard": "Użyj tego wyboru dla każdej kopii tej karty w tej grze"
   },
   "keywordDetail": {
+    "selfManaCost": "jego koszt many",
+    "selfManaValue": "jego wartość many",
     "manaCostReduced": "jego koszt many zmniejszony o {{reduction}}",
     "spliceOnto": "do {{subtype}} {{cost}}"
   },

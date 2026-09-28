@@ -328,9 +328,9 @@ export function formatKeywordManaCost(cost: ManaCost): string {
       return parts.join("") || "{0}";
     }
     case "SelfManaCost":
-      return "its mana cost";
+      return i18n.t("game:keywordDetail.selfManaCost");
     case "SelfManaValue":
-      return "its mana value";
+      return i18n.t("game:keywordDetail.selfManaValue");
     case "SelfManaCostReduced":
       return i18n.t("game:keywordDetail.manaCostReduced", { reduction: `{${cost.reduction}}` });
   }
@@ -498,7 +498,8 @@ function formatWard(val: unknown): string {
   if (w.type === "PayLife") return `pay ${w.data} life`;
   if (w.type === "DiscardCard") return "discard a card";
   if (w.type === "Sacrifice") {
-    const d = w.data as { count: number } | undefined;
+    const d = w.data as { count: number; filter: { type: string } } | undefined;
+    if (d?.filter.type !== "Any") return "";
     const n = d?.count ?? 1;
     return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
   }
