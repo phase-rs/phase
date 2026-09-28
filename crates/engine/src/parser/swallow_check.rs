@@ -214,7 +214,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_activate_limit(&cleaned, fragment, &scoped, &mut found);
         detect_duration_until_eot(&cleaned, fragment, &scoped, &evidence, &mut found);
         detect_optional_you_may(&cleaned, fragment, &scoped, &mut found);
-        detect_dynamic_qty(&cleaned, fragment, &evidence, &mut found);
+        detect_dynamic_qty(&cleaned, fragment, &scoped, &evidence, &mut found);
         detect_condition_if(&cleaned, fragment, &evidence, &scoped, &mut found);
         detect_condition_unless(&cleaned, fragment, &evidence, &mut found);
         detect_condition_as_long_as(&cleaned, fragment, &evidence, &scoped, &mut found);
@@ -2475,6 +2475,7 @@ fn dynamic_markers_are_all_recorded_unrecognized(
 fn detect_dynamic_qty(
     cleaned: &str,
     original: &str,
+    scoped: &ParsedAbilities,
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
@@ -2763,6 +2764,16 @@ fn detect_dynamic_qty(
             return;
         }
     }
+    // CR 608.2c: a per-player iteration carried by co-scoped `player_scope` + a
+    // `ParentTarget` consumer is represented, not a swallowed quantity.
+    if let Some(populations) = cleaned_for_each_is_only_player_iteration(cleaned, &markers) {
+        if populations
+            .iter()
+            .all(|pop| any_ability_has_co_scoped_parent_target_iteration(scoped, pop))
+        {
+            return;
+        }
+    }
     diagnostics.push(OracleDiagnostic::swallowed_clause(
         OracleSemanticFeature::DynamicQty.detector_label(),
         truncate(original, 140),
@@ -2951,6 +2962,90 @@ fn decline_iteration_prefix(input: &str) -> bool {
     ))
     .parse(input)
     .is_ok()
+}
+
+/// CR 608.2c: the population a "For each <population>," per-player iteration
+/// head names.
+fn player_iteration_head(input: &str) -> Option<PlayerFilter> {
+    alt((
+        value(
+            PlayerFilter::Opponent,
+            tag::<_, _, nom::error::Error<&str>>("for each opponent, "),
+        ),
+        value(PlayerFilter::All, tag("for each player, ")),
+    ))
+    .parse(input)
+    .ok()
+    .map(|(_, population)| population)
+}
+
+/// CR 608.2c: `Some(populations)` when the only dynamic marker this line raises
+/// is "for each " (per the shared `active_dynamic_markers` authority, so
+/// " twice " and every other marker are excluded) and every "for each "
+/// occurrence is a "For each <population>," per-player iteration head.
+fn cleaned_for_each_is_only_player_iteration(
+    cleaned: &str,
+    markers: &[&str],
+) -> Option<Vec<PlayerFilter>> {
+    if markers != ["for each "] {
+        return None;
+    }
+    cleaned
+        .match_indices("for each ") // allow-noncombinator: swallow detector marker scan on classified text
+        .map(|(idx, _)| player_iteration_head(&cleaned[idx..]))
+        .collect()
+}
+
+/// CR 608.2c: "For each <population>," realised as a per-player iteration — a
+/// def scoped to that population introduces a per-iteration object referent
+/// and its sub, co-scoped to the same population, consumes it through
+/// `ParentTarget`. A structural fact the parser produces only by binding the
+/// iteration, never implied by the "for each" text itself.
+fn def_tree_has_co_scoped_parent_target_iteration(
+    def: &AbilityDefinition,
+    pop: &PlayerFilter,
+) -> bool {
+    let here = def.player_scope.as_ref() == Some(pop)
+        && crate::game::effects::effect_introduces_per_iteration_referent(&def.effect)
+        && def.sub_ability.as_deref().is_some_and(|sub| {
+            sub.player_scope.as_ref() == Some(pop)
+                && matches!(sub.effect.target_filter(), Some(TargetFilter::ParentTarget))
+        });
+    if here {
+        return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_co_scoped_parent_target_iteration(effect, pop) {
+            return true;
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(|sub| def_tree_has_co_scoped_parent_target_iteration(sub, pop))
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(|branch| def_tree_has_co_scoped_parent_target_iteration(branch, pop))
+        || def
+            .mode_abilities
+            .iter()
+            .any(|mode| def_tree_has_co_scoped_parent_target_iteration(mode, pop))
+}
+
+fn any_ability_has_co_scoped_parent_target_iteration(
+    parsed: &ParsedAbilities,
+    pop: &PlayerFilter,
+) -> bool {
+    let walk = |def: &AbilityDefinition| def_tree_has_co_scoped_parent_target_iteration(def, pop);
+    parsed.abilities.iter().any(walk)
+        || parsed
+            .triggers
+            .iter()
+            .any(|t| t.execute.as_deref().is_some_and(walk))
+        || parsed
+            .replacements
+            .iter()
+            .any(|r| r.execute.as_deref().is_some_and(walk))
 }
 
 /// The counter-multiplier phrases whose ×2 is carried intrinsically by the
@@ -5813,7 +5908,11 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// definition in `crates/engine/src/parser/oracle.rs` (same pattern as
     /// `parsed_with_one_replacement_description` below).
     fn no_activation_limit_evidence() -> UnitEvidence {
-        UnitEvidence::of(&crate::parser::oracle::ParsedAbilities {
+        UnitEvidence::of(&no_activation_limit_abilities())
+    }
+
+    fn no_activation_limit_abilities() -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
             abilities: Vec::new(),
             triggers: Vec::new(),
             statics: Vec::new(),
@@ -5826,13 +5925,13 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             solve_condition: None,
             strive_cost: None,
             parse_warnings: Vec::new(),
-        })
+        }
     }
 
     /// Evidence with a `repeat_for` carrier but no activation-limit static. This
     /// distinguishes a real repeat-count parse from unsupported "rather than
     /// once" wording that must still be reported as dynamic quantity text.
-    fn repeat_for_without_activation_limit_evidence() -> UnitEvidence {
+    fn repeat_for_without_activation_limit_abilities() -> crate::parser::oracle::ParsedAbilities {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Draw {
@@ -5841,7 +5940,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             },
         );
         ability.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
-        UnitEvidence::of(&crate::parser::oracle::ParsedAbilities {
+        crate::parser::oracle::ParsedAbilities {
             abilities: vec![ability],
             triggers: Vec::new(),
             statics: Vec::new(),
@@ -5854,7 +5953,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             solve_condition: None,
             strive_cost: None,
             parse_warnings: Vec::new(),
-        })
+        }
     }
 
     fn has_swallowed_detector(
@@ -11247,9 +11346,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     fn dynamic_qty_flags_unbacked_rather_than_once_wording() {
         let cleaned = "creatures you control can forage twice during each of your turns rather \
                        than once.";
-        let evidence = no_activation_limit_evidence();
+        let parsed = no_activation_limit_abilities();
+        let evidence = UnitEvidence::of(&parsed);
         let mut found = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut found);
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut found);
         assert!(
             found.iter().any(|d| matches!(
                 d,
@@ -11267,9 +11367,10 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     fn dynamic_qty_flags_unbacked_rather_than_once_with_repeat_for() {
         let cleaned = "creatures you control can forage twice during each of your turns rather \
                        than once.";
-        let evidence = repeat_for_without_activation_limit_evidence();
+        let parsed = repeat_for_without_activation_limit_abilities();
+        let evidence = UnitEvidence::of(&parsed);
         let mut found = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut found);
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut found);
         assert!(
             found.iter().any(|d| matches!(
                 d,
@@ -11278,6 +11379,191 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             "repeat_for must not hide unbacked 'rather than once' wording"
         );
     }
+
+    // ── DynamicQty: co-scoped per-player iteration (CR 608.2c) ──────────
+
+    const VALKI_FULL: &str = "When Valki enters, each opponent reveals their hand. For each opponent, exile a creature card they revealed this way until Valki leaves the battlefield.\n{X}: Choose a creature card exiled with Valki with mana value X. Valki becomes a copy of that card.";
+
+    /// A scoped `RevealHand` that parks a creature-card choice, optionally with a
+    /// co-scoped `ChangeZone { target }` consumer.
+    fn scoped_reveal_choice(
+        reveal_scope: PlayerFilter,
+        consumer: Option<(PlayerFilter, TargetFilter)>,
+    ) -> AbilityDefinition {
+        let mut reveal = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RevealHand {
+                target: TargetFilter::Controller,
+                card_filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: true,
+            },
+        );
+        reveal.player_scope = Some(reveal_scope);
+        if let Some((consumer_scope, target)) = consumer {
+            let mut exile = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            );
+            exile.player_scope = Some(consumer_scope);
+            reveal.sub_ability = Some(Box::new(exile));
+        }
+        reveal
+    }
+
+    fn dynamic_qty_fires(cleaned: &str, abilities: Vec<AbilityDefinition>) -> bool {
+        let mut parsed = no_activation_limit_abilities();
+        parsed.abilities = abilities;
+        let evidence = UnitEvidence::of(&parsed);
+        let mut found = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &parsed, &evidence, &mut found);
+        found.iter().any(|d| {
+            matches!(d, OracleDiagnostic::SwallowedClause { detector, .. } if detector == "DynamicQty")
+        })
+    }
+
+    const CO_SCOPED_TEXT: &str = "each opponent reveals their hand. for each opponent, exile a \
+                                  creature card they revealed this way.";
+
+    /// CR 608.2c: Valki's "For each opponent," is bound as a per-opponent
+    /// iteration (co-scoped reveal choice + `ParentTarget` exile), not a count,
+    /// so it is represented and raises no `DynamicQty`.
+    #[test]
+    fn valki_verbatim_co_scoped_iteration_raises_no_dynamic_qty() {
+        let parsed = parse_named(VALKI_FULL, "Valki, God of Lies", &["Creature"]);
+        // Reach-guards: the unit is audited (no Unimplemented skip) and carries
+        // the co-scoped per-opponent shape.
+        assert!(!any_ability_has_unimplemented(&parsed));
+        let etb = parsed.triggers[0].execute.as_deref().expect("Valki ETB");
+        assert_eq!(etb.player_scope, Some(PlayerFilter::Opponent));
+        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&etb.effect));
+        let sub = etb.sub_ability.as_deref().expect("exile consumer");
+        assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+        assert_eq!(
+            sub.effect.target_filter(),
+            Some(&TargetFilter::ParentTarget)
+        );
+        // The text itself raises the expectation: with no evidence it fires.
+        assert!(dynamic_qty_fires(
+            "when valki enters, each opponent reveals their hand. for each opponent, exile a \
+             creature card they revealed this way until valki leaves the battlefield.",
+            vec![],
+        ));
+
+        assert!(
+            swallows_for(&parsed, "DynamicQty").is_empty(),
+            "{:#?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// Make an Example's "For each opponent, you choose one of their piles" is
+    /// not a co-scoped reveal iteration; it still raises exactly one `DynamicQty`.
+    #[test]
+    fn make_an_example_verbatim_still_raises_one_dynamic_qty() {
+        let parsed = parse_named(
+            "Each opponent separates the creatures they control into two piles. For each opponent, you choose one of their piles. Each opponent sacrifices the creatures in their chosen pile. (Piles can be empty.)",
+            "Make an Example",
+            &["Sorcery"],
+        );
+        assert_eq!(swallows_for(&parsed, "DynamicQty").len(), 1);
+    }
+
+    /// Breach the Multiverse's "For each player, choose …" has no co-scoped
+    /// referent consumer; it still raises exactly one `DynamicQty`.
+    #[test]
+    fn breach_the_multiverse_verbatim_still_raises_one_dynamic_qty() {
+        let parsed = parse_named(
+            "Each player mills ten cards. For each player, choose a creature or planeswalker card in that player's graveyard. Put those cards onto the battlefield under your control. Then each creature you control becomes a Phyrexian in addition to its other types.",
+            "Breach the Multiverse",
+            &["Sorcery"],
+        );
+        assert_eq!(swallows_for(&parsed, "DynamicQty").len(), 1);
+    }
+
+    /// Typed positive: the co-scoped pair represents the iteration.
+    #[test]
+    fn co_scoped_parent_target_iteration_is_represented() {
+        assert!(
+            dynamic_qty_fires(CO_SCOPED_TEXT, vec![]),
+            "reach: the text raises it"
+        );
+        assert!(!dynamic_qty_fires(
+            CO_SCOPED_TEXT,
+            vec![scoped_reveal_choice(
+                PlayerFilter::Opponent,
+                Some((PlayerFilter::Opponent, TargetFilter::ParentTarget)),
+            )],
+        ));
+    }
+
+    /// The charter's "body absent" twin: a scoped reveal with no co-scoped
+    /// consumer does not represent the iteration.
+    #[test]
+    fn single_scoped_def_without_co_scoped_consumer_still_warns() {
+        assert!(!dynamic_qty_fires(
+            CO_SCOPED_TEXT,
+            vec![scoped_reveal_choice(
+                PlayerFilter::Opponent,
+                Some((PlayerFilter::Opponent, TargetFilter::ParentTarget)),
+            )],
+        ));
+        assert!(dynamic_qty_fires(
+            CO_SCOPED_TEXT,
+            vec![scoped_reveal_choice(PlayerFilter::Opponent, None)],
+        ));
+    }
+
+    /// The iteration's population must be the one the text names.
+    #[test]
+    fn co_scoped_iteration_population_mismatch_still_warns() {
+        let pair = || {
+            vec![scoped_reveal_choice(
+                PlayerFilter::Opponent,
+                Some((PlayerFilter::Opponent, TargetFilter::ParentTarget)),
+            )]
+        };
+        assert!(!dynamic_qty_fires(CO_SCOPED_TEXT, pair()));
+        assert!(dynamic_qty_fires(
+            "each opponent reveals their hand. for each player, exile a creature card they \
+             revealed this way.",
+            pair(),
+        ));
+    }
+
+    /// Another dynamic marker on the line is not discharged by the iteration.
+    #[test]
+    fn co_scoped_iteration_with_extra_marker_still_warns() {
+        let pair = || {
+            vec![scoped_reveal_choice(
+                PlayerFilter::Opponent,
+                Some((PlayerFilter::Opponent, TargetFilter::ParentTarget)),
+            )]
+        };
+        assert!(!dynamic_qty_fires(CO_SCOPED_TEXT, pair()));
+        assert!(dynamic_qty_fires(
+            "each opponent reveals their hand. for each opponent, exile a creature card they \
+             revealed this way with mana value equal to its power.",
+            pair(),
+        ));
+    }
+
     // ── Detector P: DamageSubjectConjunction ────────────────────────────
 
     /// Run detector P over one line of Oracle text plus the AST that text parsed

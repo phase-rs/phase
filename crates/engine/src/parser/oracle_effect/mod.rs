@@ -26170,6 +26170,9 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Draw { target, .. }
         | Effect::Scry { target, .. }
         | Effect::Surveil { target, .. }
+        // CR 701.20a: whose hand is revealed is a player recipient — the clause
+        // subject when one is parsed.
+        | Effect::RevealHand { target, .. }
             if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
         {
             *target = subject_filter;
@@ -26358,7 +26361,6 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Transform { target, .. }
         // CR 710.4: same single-target-slot shape as `Transform`.
         | Effect::FlipPermanent { target, .. }
-        | Effect::RevealHand { target, .. }
         | Effect::TargetOnly { target, .. }
         | Effect::PreventDamage { target, .. }
         | Effect::Exploit { target, .. }
@@ -34400,6 +34402,114 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
     }
 }
 
+/// Who a reveal-choice consumer clause addresses (see
+/// [`reveal_choice_consumer_actor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumerActor {
+    /// The ability's controller: an imperative, or an instruction to "you".
+    Controller,
+    /// Any other player: a peeled per-player / opponent-may subject, a compound
+    /// distribution, or a printed non-"you" subject.
+    Other,
+}
+
+/// CR 608.2c + CR 109.5: single authority for "is this reveal-choice consumer
+/// instructed to the ability's controller". The controller follows the
+/// instructions (CR 608.2c) and "you" is the controller (CR 109.5); an
+/// imperative addresses the controller too. Any per-player subject the chunk
+/// peel already lifted (`player_scope` — printed, implicit, carried or
+/// pending —, `opponent_may_scope`, a compound distribution) addresses someone
+/// else. Otherwise the post-peel clause's own subject (split by the shared
+/// `find_predicate_start` authority) must be empty or exactly "you".
+fn reveal_choice_consumer_actor(
+    text: &str,
+    player_scope: Option<&PlayerFilter>,
+    opponent_may_scope: Option<&crate::types::ability::OpponentMayScope>,
+    is_distributed_chunk: bool,
+) -> ConsumerActor {
+    if player_scope.is_some() || opponent_may_scope.is_some() || is_distributed_chunk {
+        return ConsumerActor::Other;
+    }
+    let lower = text.to_lowercase();
+    // No predicate found → not a recognizable instruction.
+    let Some(start) = subject::find_predicate_start(&lower) else {
+        return ConsumerActor::Other;
+    };
+    let subject = lower[..start].trim();
+    if subject.is_empty()
+        || all_consuming(tag::<_, _, OracleError<'_>>("you"))
+            .parse(subject)
+            .is_ok()
+    {
+        ConsumerActor::Controller
+    } else {
+        ConsumerActor::Other
+    }
+}
+
+/// Outcome of [`bind_revealed_this_way_consumer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumerBinding {
+    Bound,
+    Declined,
+}
+
+/// CR 608.2c: bind a controller-instructed "<verb> a <type> card [they] revealed
+/// this way" consumer to the card chosen from the revealed hand.
+///
+/// - The consumer must be an origin-less zone move of a non-context object
+///   (`Effect::ChangeZone { origin: None, .. }`); its object becomes
+///   `ParentTarget` — the chosen card.
+/// - After a per-player reveal (`reveal_scope == Some(S)`), the consumer must
+///   carry exactly "For each <S>," as a `PlayerCount { S }` repeat and no scope
+///   of its own: the population is named twice, so the consumer runs inside the
+///   SAME per-player iteration (`player_scope: S`), never as a count. That is the
+///   only reading under which "they" and "revealed this way" have one referent
+///   per iteration.
+/// - After an unscoped reveal, the consumer must carry no repeat.
+///
+/// Anything else is `Declined` and left untouched (strict-failure posture).
+fn bind_revealed_this_way_consumer(
+    effect: &mut Effect,
+    repeat_for: &mut Option<QuantityExpr>,
+    player_scope: &mut Option<PlayerFilter>,
+    reveal_scope: Option<&PlayerFilter>,
+) -> ConsumerBinding {
+    let Effect::ChangeZone {
+        origin: None,
+        target,
+        ..
+    } = effect
+    else {
+        return ConsumerBinding::Declined;
+    };
+    if target.is_context_ref() {
+        return ConsumerBinding::Declined;
+    }
+    match reveal_scope {
+        Some(scope) => {
+            let repeats_same_population = matches!(
+                repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount { filter },
+                }) if filter == scope
+            );
+            if !repeats_same_population || player_scope.is_some() {
+                return ConsumerBinding::Declined;
+            }
+            *repeat_for = None;
+            *player_scope = Some(scope.clone());
+        }
+        None => {
+            if repeat_for.is_some() {
+                return ConsumerBinding::Declined;
+            }
+        }
+    }
+    *target = TargetFilter::ParentTarget;
+    ConsumerBinding::Bound
+}
+
 /// CR 401.1 + CR 608.2c: a distributive top-of-library exile names one library per player
 /// in scope, but `Effect::ExileTop` resolves exactly ONE library (`exile_top.rs` →
 /// `resolve_player_for_context_ref`). The distribution therefore rides on the ability's
@@ -40538,7 +40648,7 @@ pub(crate) fn parse_effect_chain_ir(
         // count-less "investigate for each … this way" (Declaration in Stone) into
         // this chunk's repeat count (→ `AbilityDefinition.repeat_for`). take() so
         // it is consumed within this chunk; a pre-existing repeat_for wins.
-        let repeat_for = repeat_for.or_else(|| ctx.pending_repeat_for.take());
+        let mut repeat_for = repeat_for.or_else(|| ctx.pending_repeat_for.take());
         // CR 109.5: Rebind recipient-bearing nodes inside a decline body so the
         // body's "you"/"that player" anaphors resolve relative to the surrounding
         // per-player iteration. The two walkers are parallel inverses:
@@ -41239,7 +41349,7 @@ pub(crate) fn parse_effect_chain_ir(
                 (Some(imperative::ShuffleRestClause::Imperative) | None, _) => {}
             }
         }
-        let followup_continuation = effective_prev_effect
+        let mut followup_continuation = effective_prev_effect
             .as_ref()
             .and_then(|eff| {
                 sequence::parse_followup_continuation_ast_with_search_destination(
@@ -41360,9 +41470,77 @@ pub(crate) fn parse_effect_chain_ir(
                     .any(|c| effect_installs_continuous_effect(&effective_effect_of(c)))
                     .then_some(ContinuationAst::EndEffectCost { cost })
             });
+        // CR 608.2c + CR 109.5: a reveal choice is the controller's only when the
+        // consuming instruction addresses the controller ("you" / imperative).
+        if let Some(ContinuationAst::RevealHandFilter { binding, .. }) = &followup_continuation {
+            let binding = *binding;
+            let reveal_is_player_scoped = non_absorbed
+                .first()
+                .is_some_and(|previous| previous.player_scope.is_some());
+            let gated = match binding {
+                RevealChoiceBinding::RevealedThisWay => true,
+                RevealChoiceBinding::FromIt => reveal_is_player_scoped,
+            };
+            if gated
+                && reveal_choice_consumer_actor(
+                    &text,
+                    player_scope.as_ref(),
+                    opponent_may_scope.as_ref(),
+                    is_distributed_chunk,
+                ) == ConsumerActor::Other
+            {
+                followup_continuation = None;
+                match binding {
+                    // CR 608.2c: "from it" names the reveal choice; declined, it
+                    // binds nothing, and the choice it describes belongs to a
+                    // player other than the controller, which `RevealHand` cannot
+                    // represent (it has no chooser). Honest gap — never a stray
+                    // card-parking reveal.
+                    RevealChoiceBinding::FromIt => {
+                        clause.effect =
+                            Effect::unimplemented("non_controller_reveal_choice", normalized_text);
+                    }
+                    // The consumer keeps its parsed effect (never a card-parking
+                    // reveal); the per-player rule below still guards it.
+                    RevealChoiceBinding::RevealedThisWay => {}
+                }
+            }
+        }
+        // CR 608.2c + CR 109.5: a clause that itself runs per player makes its own
+        // reveal choice as that player; the resolver's reveal chooser inside a
+        // player-scope iteration is the printed controller, so such a choice
+        // cannot be represented — honest gap.
+        if (player_scope.is_some() || opponent_may_scope.is_some() || is_distributed_chunk)
+            && crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&clause.effect)
+        {
+            clause.effect = Effect::unimplemented("non_controller_reveal_choice", normalized_text);
+        }
         let absorb_followup = followup_continuation
             .as_ref()
             .is_some_and(|continuation| continuation_absorbs_current(continuation, &clause.effect));
+        // CR 608.2c: "a <type> card they revealed this way" is the card chosen
+        // from THIS iteration's revealed hand; "For each <the reveal's
+        // population>," re-scopes the instruction over that same iteration, not
+        // a count.
+        if !absorb_followup
+            && matches!(
+                followup_continuation,
+                Some(ContinuationAst::RevealHandFilter {
+                    binding: RevealChoiceBinding::RevealedThisWay,
+                    ..
+                })
+            )
+            && bind_revealed_this_way_consumer(
+                &mut clause.effect,
+                &mut repeat_for,
+                &mut player_scope,
+                non_absorbed
+                    .first()
+                    .and_then(|previous| previous.player_scope.as_ref()),
+            ) == ConsumerBinding::Declined
+        {
+            followup_continuation = None;
+        }
 
         // Build a temporary def for intrinsic continuation detection and cascade check.
         // The intrinsic continuation parser needs the assembled effect to determine
@@ -41512,6 +41690,7 @@ pub(crate) fn parse_effect_chain_ir(
         if let Some(ContinuationAst::RevealHandFilter {
             card_filter,
             choice_optional: true,
+            ..
         }) = &mut followup_for_this
         {
             if matches!(

@@ -3386,6 +3386,11 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// which then re-emits a `ZoneChanged` event and loops the ETB trigger
 /// (CR 603.2g: triggers fire only when their specific event occurs — the
 /// trigger source must be the entering object).
+///
+/// A hand reveal that parks a card choice
+/// (`reveal_hand::effect_parks_reveal_card_choice`) also returns `true`: a later
+/// `ParentTarget` binds to the chosen revealed card, whatever player the reveal
+/// targets.
 fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // CR 608.2c + CR 603.2g: Effects that populate state.last_revealed_ids
     // introduce revealed objects. Sub-ability ParentTarget binds to those
@@ -3400,6 +3405,15 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
             | Effect::Clash
             | Effect::TurnFaceUp { .. }
     ) {
+        return true;
+    }
+    // CR 608.2c + CR 608.2d: a hand reveal that parks a card choice introduces the
+    // chosen revealed card as the referent of a later `ParentTarget` ("exile a
+    // creature card they revealed this way", "exile that card"), not the trigger
+    // event. Its player target (`Controller` / `ScopedPlayer` under a per-player
+    // scope, `TriggeringPlayer`, …) is not a chosen object filter, so the `Typed`
+    // test below cannot see it. Shares the resolver's card-parking authority.
+    if crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(effect) {
         return true;
     }
     fn is_chosen(filter: &TargetFilter) -> bool {

@@ -4683,9 +4683,12 @@ pub(super) fn apply_clause_continuation(
             }
             defs.push(change_zone);
         }
+        // Both bindings patch the reveal's card choice identically; the binding
+        // only steers the chain builder's consumer rules.
         ContinuationAst::RevealHandFilter {
             card_filter,
             choice_optional,
+            binding: _,
         } => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -7663,6 +7666,60 @@ fn parse_excess_damage_to_controller_rider(input: &str) -> OracleResult<'_, Opti
     Ok((input, source_keyword_condition))
 }
 
+/// CR 608.2d: a reveal-choice consumer phrased "[you] may choose/exile/discard"
+/// makes the post-reveal choice optional.
+fn reveal_choice_is_optional(lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("you may choose "),
+        tag("may choose "),
+        tag("you may exile "),
+        tag("may exile "),
+        tag("you may discard "),
+        tag("may discard "),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
+/// CR 608.2c + CR 701.20a: the object phrase of a clause that acts on a card
+/// chosen from a revealed hand — "a/an/one [<type>] card [they | that player |
+/// those players] revealed this way". Returns the chosen card's filter, or
+/// `None` when no such phrase is present. Mass forms ("each nonland card revealed
+/// this way", Fall; "for each blue instant card revealed this way", Sirocco) and
+/// conditions ("a card with the chosen name is revealed this way") carry no
+/// singular article + "card" + "revealed this way" run and are not matched.
+pub(super) fn parse_revealed_this_way_card_filter(lower: &str) -> Option<TargetFilter> {
+    let descriptor = nom_primitives::scan_at_word_boundaries(lower, |input| {
+        let (input, _) =
+            alt((tag::<_, _, OracleError<'_>>("a "), tag("an "), tag("one "))).parse(input)?;
+        let (input, descriptor) = alt((
+            value(None, tag::<_, _, OracleError<'_>>("card")),
+            map(terminated(take_until(" card"), tag(" card")), Some),
+        ))
+        .parse(input)?;
+        let (input, _) = opt(alt((
+            tag::<_, _, OracleError<'_>>(" they"),
+            tag(" that player"),
+            tag(" those players"),
+        )))
+        .parse(input)?;
+        let (input, _) = tag(" revealed this way").parse(input)?;
+        Ok((input, descriptor))
+    })?;
+    let filter = match descriptor {
+        None => TargetFilter::Typed(TypedFilter::card()),
+        Some(descriptor) => {
+            let singular = format!("{descriptor} card");
+            let (filter, rem) = parse_type_phrase_folding(&singular);
+            if !rem.trim().is_empty() {
+                return None;
+            }
+            filter
+        }
+    };
+    matches!(filter, TargetFilter::Typed(_)).then_some(filter)
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
@@ -7724,19 +7781,24 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             } else {
                 Some(super::parse_choose_filter_from_sentence(&lower, ctx))
             };
-            let choice_optional = alt((
-                tag::<_, _, OracleError<'_>>("you may choose "),
-                tag("may choose "),
-                tag("you may exile "),
-                tag("may exile "),
-                tag("you may discard "),
-                tag("may discard "),
-            ))
-            .parse(lower.as_str())
-            .is_ok();
+            let choice_optional = reveal_choice_is_optional(&lower);
             Some(ContinuationAst::RevealHandFilter {
                 card_filter,
                 choice_optional,
+                binding: RevealChoiceBinding::FromIt,
+            })
+        }
+        // CR 608.2c + CR 701.20a: "<verb> a <type> card [they] revealed this way"
+        // acts on a card chosen from the revealed hand — the reveal parks the
+        // choice (typed card filter) and the consumer is re-bound to the chosen
+        // card by the chain builder.
+        Effect::RevealHand { .. } if parse_revealed_this_way_card_filter(&lower).is_some() => {
+            parse_revealed_this_way_card_filter(&lower).map(|card_filter| {
+                ContinuationAst::RevealHandFilter {
+                    card_filter: Some(card_filter),
+                    choice_optional: reveal_choice_is_optional(&lower),
+                    binding: RevealChoiceBinding::RevealedThisWay,
+                }
             })
         }
         Effect::Mana { .. } => {

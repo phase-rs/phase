@@ -74082,3 +74082,536 @@ fn reveal_until_shared_card_qualifier_constrains_every_disjunct() {
     );
     assert!(plargg.properties.contains(&three_or_less), "{plargg:?}");
 }
+
+// ── Valki, God of Lies: per-player reveal choices (CR 608.2c / 608.2d / 701.20a) ──
+
+const VALKI_FULL: &str = "When Valki enters, each opponent reveals their hand. For each opponent, exile a creature card they revealed this way until Valki leaves the battlefield.\n{X}: Choose a creature card exiled with Valki with mana value X. Valki becomes a copy of that card.";
+const EACH_CHOOSES_FROM_IT: &str =
+    "Each player reveals their hand, then chooses a nonland card from it.";
+const EACH_DISCARDS_FROM_IT: &str =
+    "Each player reveals their hand, then discards a nonland card from it.";
+const YOU_CHOOSE_FROM_IT: &str =
+    "Each player reveals their hand. You choose a nonland card from it.";
+const EACH_REVEALS_TYPED: &str = "Each player reveals a creature card from their hand.";
+
+/// Every node of a chain: `def`, then recursively its `sub_ability`,
+/// `else_ability`, every `mode_abilities` entry and a `CreateDelayedTrigger`'s
+/// effect (the traversal of `swallow_check::def_tree_has_apnap_ordering`).
+fn chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut nodes = vec![def];
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        nodes.extend(chain_nodes(effect));
+    }
+    if let Some(sub) = def.sub_ability.as_deref() {
+        nodes.extend(chain_nodes(sub));
+    }
+    if let Some(branch) = def.else_ability.as_deref() {
+        nodes.extend(chain_nodes(branch));
+    }
+    for mode in &def.mode_abilities {
+        nodes.extend(chain_nodes(mode));
+    }
+    nodes
+}
+
+fn parks_reveal_choice(def: &AbilityDefinition) -> bool {
+    crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&def.effect)
+}
+
+fn non_controller_gaps(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    chain_nodes(root)
+        .into_iter()
+        .filter(|node| unimplemented_name(node) == Some("non_controller_reveal_choice"))
+        .collect()
+}
+
+fn parse_named_face(
+    text: &str,
+    name: &str,
+    types: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    parse_oracle_text(
+        text,
+        name,
+        &[],
+        &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
+        &[],
+    )
+}
+
+fn assert_json_eq<T: serde::Serialize>(value: &T, expected: &str, what: &str) {
+    let expected: serde_json::Value = serde_json::from_str(expected).expect("expected JSON");
+    assert_eq!(
+        serde_json::to_value(value).expect("serialize"),
+        expected,
+        "{what} must equal its base shape"
+    );
+}
+
+/// SHAPE (row 1f): the verbatim ETB is a per-opponent reveal whose card choice
+/// the co-scoped exile consumes through `ParentTarget` — not a count.
+#[test]
+fn valki_etb_shape_reveals_per_opponent_and_exiles_chosen_card() {
+    let parsed = parse_named_face(VALKI_FULL, "Valki, God of Lies", &["Creature"]);
+    let etb = parsed.triggers[0].execute.as_deref().expect("ETB execute");
+    assert!(chain_nodes(etb)
+        .iter()
+        .all(|node| unimplemented_name(node).is_none()));
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        ..
+    } = &*etb.effect
+    else {
+        panic!("expected RevealHand root, got {:?}", etb.effect);
+    };
+    assert_eq!(*target, TargetFilter::Controller);
+    assert_eq!(*card_filter, TargetFilter::Typed(TypedFilter::creature()));
+    assert_eq!(etb.player_scope, Some(PlayerFilter::Opponent));
+    let sub = etb.sub_ability.as_deref().expect("exile consumer");
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected ChangeZone consumer, got {:?}", sub.effect);
+    };
+    assert_eq!(*destination, Zone::Exile);
+    assert_eq!(*target, TargetFilter::ParentTarget);
+    assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+    assert_eq!(sub.repeat_for, None);
+    assert_eq!(sub.duration, Some(Duration::UntilHostLeavesPlay));
+}
+
+/// SHAPE (row 2e): "{X}: Choose a creature card exiled with Valki with mana
+/// value X. Valki becomes a copy of that card." — the linked pile (CR 607.2a)
+/// bounded by the announced X, then a copy of the chosen card (CR 707.2).
+#[test]
+fn valki_x_shape_choose_linked_creature_with_mana_value_x() {
+    let parsed = parse_named_face(VALKI_FULL, "Valki, God of Lies", &["Creature"]);
+    let ability = &parsed.abilities[0];
+    assert!(chain_nodes(ability)
+        .iter()
+        .all(|node| unimplemented_name(node).is_none()));
+    let Effect::ChooseFromZone {
+        zone,
+        zone_owner,
+        filter,
+        chooser,
+        candidate_source,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("expected ChooseFromZone, got {:?}", ability.effect);
+    };
+    assert_eq!(*zone, Zone::Exile);
+    assert_eq!(*zone_owner, ZoneOwner::AllOwners);
+    assert_eq!(
+        *chooser,
+        crate::types::ability::ZoneChoiceChooser::Controller
+    );
+    assert_eq!(
+        *candidate_source,
+        crate::types::ability::ZoneChoiceCandidateSource::Direct
+    );
+    assert_eq!(
+        *filter,
+        Some(TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        },
+                    },
+                }])),
+                TargetFilter::ExiledBySource,
+            ],
+        })
+    );
+    let copy = ability.sub_ability.as_deref().expect("BecomeCopy");
+    assert!(matches!(
+        &*copy.effect,
+        Effect::BecomeCopy {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+}
+
+/// Row 1g: My Wish Is Your Command's "choose a … card revealed this way" is one
+/// choice across every revealed hand with no matching per-player quantifier, so
+/// the binding declines and the scheme's choose/cast clause keeps its base
+/// shape; no reveal parks a card choice.
+#[test]
+fn my_wish_is_your_command_revealed_this_way_choice_is_declined() {
+    let parsed = parse_named_face(
+        "When you set this scheme in motion, each opponent reveals their hand. You may choose a noncreature, nonland card revealed this way and cast it without paying its mana cost.",
+        "My Wish Is Your Command",
+        &["Scheme"],
+    );
+    let root = parsed.triggers[0].execute.as_deref().expect("execute");
+    let nodes = chain_nodes(root);
+    assert!(nodes.len() >= 2, "reach-guard: the walk visited the chain");
+    assert!(matches!(
+        &*root.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            card_filter: TargetFilter::None,
+            ..
+        }
+    ));
+    assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
+    assert_json_eq(
+        root.sub_ability.as_deref().expect("choose/cast clause"),
+        r#"{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"choose a noncreature, nonland card revealed this way"},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"CastFromZone","target":{"type":"ParentTarget"},"without_paying_mana_cost":true,"mode":"Cast","driver":"DuringResolution"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"target_choice_timing":"Resolution","forward_result":false},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false,"sub_link":"SequentialSibling"}"#,
+        "My Wish Is Your Command's choose/cast clause",
+    );
+}
+
+/// Row 1g′: Noxious Vapors — the scoped player's own "chooses … from it" is not
+/// turned into a controller choice (neither follow-up arm claims it).
+#[test]
+fn noxious_vapors_scoped_player_choice_is_not_bound_to_controller() {
+    let parsed = parse_named_face(
+        "Each player reveals their hand, chooses one card of each color from it, then discards all other nonland cards.",
+        "Noxious Vapors",
+        &["Sorcery"],
+    );
+    let root = &parsed.abilities[0];
+    let nodes = chain_nodes(root);
+    assert!(nodes.len() >= 3, "reach-guard: the walk visited the chain");
+    assert!(matches!(
+        &*root.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+    assert_eq!(root.player_scope, Some(PlayerFilter::All));
+    assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
+    assert_eq!(
+        nodes[1].effect.unimplemented_description(),
+        Some("choose one card of each color from it")
+    );
+    assert!(unimplemented_name(nodes[2]).is_some());
+    assert!(non_controller_gaps(root).is_empty());
+}
+
+/// Row 1g″ (rule D): a "from it" continuation of a player-scoped reveal whose
+/// consumer addresses the scoped player is declined, and the consumer becomes an
+/// honest `non_controller_reveal_choice` gap — never a card-parking reveal the
+/// printed controller would choose from. The "you" twin keeps base absorption.
+#[test]
+fn scoped_reveal_from_it_choice_by_scoped_player_declines_to_a_gap() {
+    for (text, consumer) in [
+        (EACH_CHOOSES_FROM_IT, "chooses a nonland card from it"),
+        (EACH_DISCARDS_FROM_IT, "discards a nonland card from it"),
+    ] {
+        let root = parse_effect_chain(text, AbilityKind::Spell);
+        let nodes = chain_nodes(&root);
+        assert!(
+            nodes.len() >= 2,
+            "{text}: reach-guard: walk visited the chain"
+        );
+        assert!(matches!(
+            &*root.effect,
+            Effect::RevealHand {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+        assert_eq!(root.player_scope, Some(PlayerFilter::All));
+        // Reach-guard: the `FromIt` arm claims the consumer text, so the gate —
+        // not a missed arm — produced the decline.
+        assert!(matches!(
+            super::sequence::parse_followup_continuation_ast_with_search_destination(
+                consumer,
+                &root.effect,
+                &mut ParseContext::default(),
+                false,
+            ),
+            Some(ContinuationAst::RevealHandFilter {
+                binding: RevealChoiceBinding::FromIt,
+                ..
+            })
+        ));
+
+        assert!(
+            nodes.iter().all(|node| !parks_reveal_choice(node)),
+            "{text}: no node parks a reveal card choice: {root:#?}"
+        );
+        let described: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.effect.unimplemented_description() == Some(consumer))
+            .collect();
+        assert_eq!(described.len(), 1, "{text}: {root:#?}");
+        assert_eq!(
+            unimplemented_name(described[0]),
+            Some("non_controller_reveal_choice")
+        );
+        assert_eq!(described[0].player_scope, Some(PlayerFilter::All));
+    }
+
+    // Positive twin: the controller-addressed consumer absorbs exactly as at
+    // base, now with the printed controller as the chooser.
+    let root = parse_effect_chain(YOU_CHOOSE_FROM_IT, AbilityKind::Spell);
+    let nodes = chain_nodes(&root);
+    assert_eq!(nodes.len(), 1, "absorbed into the reveal");
+    assert!(nodes.iter().all(|node| unimplemented_name(node).is_none()));
+    assert_eq!(root.player_scope, Some(PlayerFilter::All));
+    assert!(parks_reveal_choice(&root));
+    assert!(matches!(
+        &*root.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+    let Effect::RevealHand { card_filter, .. } = &*root.effect else {
+        unreachable!();
+    };
+    assert_eq!(
+        *card_filter,
+        TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+        )
+    );
+}
+
+/// Row 1g‴ (rule I): a per-player clause's OWN reveal choice (the revealing
+/// player chooses what to reveal) becomes the honest gap; the unscoped twin and
+/// Biting-Palm Ninja's unscoped fused choice still park.
+#[test]
+fn per_player_own_reveal_choice_declines_to_a_gap() {
+    let root = parse_effect_chain(EACH_REVEALS_TYPED, AbilityKind::Spell);
+    let nodes = chain_nodes(&root);
+    assert!(!nodes.is_empty());
+    assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
+    let gaps = non_controller_gaps(&root);
+    assert_eq!(gaps.len(), 1, "{root:#?}");
+    assert_eq!(gaps[0].player_scope, Some(PlayerFilter::All));
+
+    // Paired positive: the same own-filter branch, unscoped, parks.
+    let unscoped = parse_effect_chain(
+        "Target opponent reveals a creature card from their hand.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(chain_nodes(&unscoped).len(), 1);
+    assert!(parks_reveal_choice(&unscoped));
+    assert!(matches!(
+        &*unscoped.effect,
+        Effect::RevealHand { card_filter, .. } if *card_filter == TargetFilter::Typed(TypedFilter::creature())
+    ));
+
+    // Biting-Palm Ninja: unscoped subject-bearing fused choice is unchanged.
+    let ninja = parse_named_face(
+        "Ninjutsu {2}{B}\nThis creature enters with a menace counter on it.\nWhenever this creature deals combat damage to a player, you may remove a menace counter from it. When you do, that player reveals their hand and you choose a nonland card from it. Exile that card.",
+        "Biting-Palm Ninja",
+        &["Creature"],
+    );
+    let execute = ninja.triggers[0].execute.as_deref().expect("execute");
+    let reveal = chain_nodes(execute)
+        .into_iter()
+        .find(|node| matches!(&*node.effect, Effect::RevealHand { .. }))
+        .expect("Ninja's reveal");
+    assert!(parks_reveal_choice(reveal));
+    assert_json_eq(
+        &*reveal.effect,
+        r#"{"type":"RevealHand","target":{"type":"TriggeringPlayer"},"card_filter":{"type":"Typed","type_filters":[{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true}"#,
+        "Biting-Palm Ninja's reveal",
+    );
+    assert!(non_controller_gaps(execute).is_empty());
+}
+
+/// Row 1h: a "revealed this way" consumer whose "For each <population>," names a
+/// different population than the reveal's scope is declined.
+#[test]
+fn revealed_this_way_population_mismatch_is_declined() {
+    let root = parse_effect_chain(
+        "Each opponent reveals their hand. For each player, exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let nodes = chain_nodes(&root);
+    assert!(nodes.len() >= 2, "reach-guard");
+    assert!(nodes.iter().all(|node| !parks_reveal_choice(node)));
+    assert!(non_controller_gaps(&root).is_empty());
+    let exile = nodes
+        .iter()
+        .find(|node| matches!(&*node.effect, Effect::ChangeZone { .. }))
+        .expect("exile clause");
+    // Declined: the consumer keeps its own parsed object and its own
+    // "For each player," population; it is never re-bound to the reveal's
+    // per-opponent iteration.
+    assert_eq!(
+        exile.effect.target_filter(),
+        Some(&TargetFilter::Typed(TypedFilter::creature()))
+    );
+    assert_eq!(exile.player_scope, Some(PlayerFilter::All));
+
+    // Paired positive: the matching population binds (the 1f shape).
+    let bound = parse_effect_chain(
+        "Each opponent reveals their hand. For each opponent, exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    assert!(parks_reveal_choice(&bound));
+    let sub = bound.sub_ability.as_deref().expect("consumer");
+    assert_eq!(
+        sub.effect.target_filter(),
+        Some(&TargetFilter::ParentTarget)
+    );
+    assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+    assert_eq!(sub.repeat_for, None);
+}
+
+/// Row 1h′: a consumer that names a non-controller actor ("they exile …") is
+/// declined by the consumer-actor gate.
+#[test]
+fn revealed_this_way_consumer_with_non_controller_subject_is_declined() {
+    let root = parse_effect_chain(
+        "Each opponent reveals their hand. For each opponent, they exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let nodes = chain_nodes(&root);
+    assert!(nodes.len() >= 2, "reach-guard: {root:#?}");
+    // Reach-guard: the `RevealedThisWay` arm claims the consumer text.
+    assert!(matches!(
+        super::sequence::parse_followup_continuation_ast_with_search_destination(
+            "they exile a creature card they revealed this way",
+            &root.effect,
+            &mut ParseContext::default(),
+            false,
+        ),
+        Some(ContinuationAst::RevealHandFilter {
+            binding: RevealChoiceBinding::RevealedThisWay,
+            ..
+        })
+    ));
+    assert!(
+        nodes.iter().all(|node| !parks_reveal_choice(node)),
+        "{root:#?}"
+    );
+    // No zone move was re-bound to the chosen card.
+    assert!(nodes
+        .iter()
+        .filter(|node| matches!(&*node.effect, Effect::ChangeZone { .. }))
+        .all(|node| node.effect.target_filter() != Some(&TargetFilter::ParentTarget)));
+}
+
+/// Row 1i: the unscoped building block — a single-player reveal followed by an
+/// imperative "exile a creature card they revealed this way" binds `ParentTarget`.
+#[test]
+fn revealed_this_way_consumer_binds_parent_target_for_single_reveal() {
+    let root = parse_effect_chain(
+        "Target opponent reveals their hand. Exile a creature card they revealed this way.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        ..
+    } = &*root.effect
+    else {
+        panic!("expected RevealHand, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    );
+    assert_eq!(*card_filter, TargetFilter::Typed(TypedFilter::creature()));
+    let sub = root.sub_ability.as_deref().expect("consumer");
+    assert!(matches!(
+        &*sub.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert_eq!(sub.player_scope, None);
+}
+
+/// Row 1j: mass "each … card revealed this way" (Fall) and the unscoped "from it"
+/// forms (Deep-Cavern Bat) are not claimed by the new arm.
+#[test]
+fn revealed_this_way_arm_ignores_mass_and_from_it_forms() {
+    let fall = parse_named_face(
+        "Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.",
+        "Fall",
+        &["Sorcery"],
+    );
+    assert_json_eq(
+        &fall.abilities[0],
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Player"},"card_filter":{"type":"None"},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"Unimplemented","name":"unparsed_verb_arguments","description":"discard each nonland card revealed this way"},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"duration":null,"description":"Target player reveals two cards at random from their hand, then discards each nonland card revealed this way.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        "Fall",
+    );
+
+    let bat = parse_named_face(
+        "Flying, lifelink\nWhen this creature enters, look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield.",
+        "Deep-Cavern Bat",
+        &["Creature"],
+    );
+    let execute = bat.triggers[0].execute.as_deref().expect("execute");
+    // Reach-guard: the existing "from it" arm fired.
+    assert!(matches!(
+        &*execute.effect,
+        Effect::RevealHand { card_filter, .. } if *card_filter != TargetFilter::None
+    ));
+    let sub = execute.sub_ability.as_deref().expect("exile");
+    assert!(matches!(
+        sub.effect.target_filter(),
+        Some(TargetFilter::Typed(_))
+    ));
+}
+
+/// Row 1j: the unscoped "from it" absorption (Kitesail Freebooter) is never
+/// gated — its ETB lowers exactly as at base.
+#[test]
+fn kitesail_freebooter_unscoped_from_it_choice_is_unchanged() {
+    let parsed = parse_named_face(
+        "Flying\nWhen this creature enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until this creature leaves the battlefield.",
+        "Kitesail Freebooter",
+        &["Creature"],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("execute");
+    assert!(parks_reveal_choice(execute));
+    assert_eq!(execute.player_scope, None);
+    assert!(non_controller_gaps(execute).is_empty());
+    assert_json_eq(
+        execute,
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"card_filter":{"type":"Typed","type_filters":[{"Non":"Creature"},{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"ParentTarget"},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":"UntilHostLeavesPlay","description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        "Kitesail Freebooter's ETB",
+    );
+}
+
+/// Row 1k: a bare "their hand" is the acting player's hand — rebound by a peeled
+/// per-player scope, and overridden by a declared or anaphoric subject.
+#[test]
+fn bare_their_hand_binds_scope_or_subject() {
+    let scoped = parse_effect_chain("Each opponent reveals their hand.", AbilityKind::Spell);
+    assert!(matches!(
+        &*scoped.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+    assert_eq!(scoped.player_scope, Some(PlayerFilter::Opponent));
+
+    let declared = parse_effect_chain("Target opponent reveals their hand.", AbilityKind::Spell);
+    assert!(matches!(
+        &*declared.effect,
+        Effect::RevealHand { target, .. }
+            if *target == TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    ));
+
+    let anaphoric = parse_effect_chain("That player reveals their hand.", AbilityKind::Spell);
+    assert!(matches!(
+        &*anaphoric.effect,
+        Effect::RevealHand {
+            target: TargetFilter::ParentTargetController,
+            ..
+        }
+    ));
+}

@@ -6213,6 +6213,22 @@ fn effect_introduces_per_player_object_referent(effect: &Effect) -> bool {
     matches!(effect, Effect::RevealTop { .. })
 }
 
+/// CR 608.2c + CR 701.20a: a per-iteration reveal choice introduces the chosen
+/// card as that iteration's object referent (chain targets), consumed by a
+/// co-scoped `ParentTarget` clause ("exile a creature card they revealed this
+/// way" — Valki, God of Lies).
+fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
+    reveal_hand::effect_parks_reveal_card_choice(effect)
+}
+
+/// CR 608.2c: single authority for "this clause introduces a per-iteration object
+/// referent" — consumed by the player-scope co-scope split and by the swallow
+/// audit's per-player-iteration evidence.
+pub(crate) fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
+    effect_introduces_per_player_object_referent(effect)
+        || effect_introduces_per_player_chosen_card_referent(effect)
+}
+
 /// CR 608.2c: True when an effect (or its quantity/target) reads the parent's
 /// per-player object referent anaphorically — a `Demonstrative`/`Anaphoric`
 /// object scope in a quantity, or a `ParentTarget`/`ParentTargetSlot` target.
@@ -6336,7 +6352,7 @@ fn detach_after_player_scope_local_chain(
     // `PreviousEffectAmount`, the greatest discarded table-wide) is NOT a
     // referent consumer, so it still runs as its own post-all-iterations loop.
     let referent_in_scope =
-        referent_introduced || effect_introduces_per_player_object_referent(&node.effect);
+        referent_introduced || effect_introduces_per_iteration_referent(&node.effect);
     let next_is_co_scoped_anaphoric_consumer = next.player_scope.as_ref() == Some(scope)
         && referent_in_scope
         && effect_consumes_parent_object_referent(&next.effect);
@@ -32321,6 +32337,78 @@ mod tests {
             vec![creature],
             "CR 611.2c: the published population is the later static's broadcast set"
         );
+    }
+
+    /// CR 608.2c + CR 701.20a — a per-iteration reveal CHOICE (a `RevealHand`
+    /// that parks a card choice) introduces the chosen card as that iteration's
+    /// referent, so a co-scoped `ParentTarget` consumer ("exile a creature card
+    /// they revealed this way" — Valki, God of Lies) stays inside the scoped
+    /// template. A reveal that parks no choice introduces no referent, so the same
+    /// child still detaches as the unscoped tail (unchanged behaviour).
+    #[test]
+    fn split_player_scope_keeps_reveal_choice_consumer_in_iteration() {
+        let make_chain = |card_filter: TargetFilter| {
+            let mut reveal = ResolvedAbility::new(
+                Effect::RevealHand {
+                    target: TargetFilter::Controller,
+                    card_filter,
+                    count: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    choice_optional: false,
+                    reveal: true,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            reveal.player_scope = Some(PlayerFilter::Opponent);
+            let mut exile = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            exile.player_scope = Some(PlayerFilter::Opponent);
+            reveal.sub_ability = Some(Box::new(exile));
+            reveal
+        };
+
+        let choice = make_chain(TargetFilter::Typed(TypedFilter::creature()));
+        let (scoped, tail) = split_player_scope_chain(&choice, &PlayerFilter::Opponent);
+        assert!(
+            tail.is_none(),
+            "the chosen-card consumer stays in the iteration"
+        );
+        let kept = scoped
+            .sub_ability
+            .as_ref()
+            .expect("the ChangeZone stays attached to the reveal");
+        assert!(matches!(kept.effect, Effect::ChangeZone { .. }));
+        assert!(
+            kept.player_scope.is_none(),
+            "the kept consumer's redundant player_scope is cleared so it does not re-loop"
+        );
+
+        // Positive twin: a reveal with no card choice introduces no referent.
+        let no_choice = make_chain(TargetFilter::None);
+        let (scoped, tail) = split_player_scope_chain(&no_choice, &PlayerFilter::Opponent);
+        assert!(scoped.sub_ability.is_none());
+        let tail = tail.expect("without a choice the consumer detaches as the tail");
+        assert!(matches!(tail.effect, Effect::ChangeZone { .. }));
     }
 
     /// CR 608.2c — building-block discriminator for the per-player reveal-anaphora

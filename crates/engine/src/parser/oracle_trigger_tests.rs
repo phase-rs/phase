@@ -34183,3 +34183,108 @@ fn split_graveyard_origin_owner_axes() {
         );
     }
 }
+
+/// CR 608.2c + CR 608.2d: a hand reveal that parks a card choice introduces the
+/// chosen revealed card as the referent of a later `ParentTarget`, so it is a
+/// chosen-object boundary for the event-source lift — whatever player the
+/// reveal targets (Valki's per-opponent reveal targets `Controller`, which the
+/// `Typed` chosen-filter arm cannot see). Without the boundary the lift rewrites
+/// Valki's "exile a creature card they revealed this way" to
+/// `TriggeringSource`, so Valki exiles itself and its ETB re-fires.
+#[test]
+fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lift() {
+    use crate::game::effects::reveal_hand::effect_parks_reveal_card_choice;
+
+    // (i) Valki, God of Lies — verbatim ETB.
+    let valki = parse_trigger_line(
+        "When Valki enters, each opponent reveals their hand. For each opponent, exile a creature card they revealed this way until Valki leaves the battlefield.",
+        "Valki, God of Lies",
+    );
+    assert_eq!(valki.mode, TriggerMode::ChangesZone);
+    let exec = valki.execute.as_deref().expect("Valki ETB execute");
+    // Reach-guards: the U1 shape reached trigger lowering.
+    assert!(
+        effect_parks_reveal_card_choice(&exec.effect),
+        "the root reveal parks the card choice: {:?}",
+        exec.effect
+    );
+    assert_eq!(exec.player_scope, Some(PlayerFilter::Opponent));
+    let sub = exec.sub_ability.as_deref().expect("the exile consumer");
+    assert_eq!(sub.duration, Some(Duration::UntilHostLeavesPlay));
+    match &*sub.effect {
+        Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } => {
+            assert_eq!(*destination, Zone::Exile);
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "the exile consumer keeps the chosen revealed card, not the trigger event"
+            );
+        }
+        other => panic!("expected the exile consumer, got {other:?}"),
+    }
+
+    // (ii) Reach-guard: the lift still runs where no card-parking reveal stops it.
+    let necroduality = parse_trigger_line(
+        "Whenever a nontoken Zombie you control enters, create a token that's a copy of that creature.",
+        "Necroduality",
+    );
+    assert!(matches!(
+        &*necroduality.execute.as_deref().expect("execute").effect,
+        Effect::CopyTokenOf {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ));
+
+    // (iii) Sibling pin where the new stop fires with no liftable consumer after
+    // it: Armored Kincaller lowers exactly as before.
+    let kincaller = parse_trigger_line(
+        "When this creature enters, you may reveal a Dinosaur card from your hand. If you do or if you control another Dinosaur, you gain 3 life.",
+        "Armored Kincaller",
+    );
+    let kincaller_exec = kincaller.execute.as_deref().expect("execute");
+    assert!(effect_parks_reveal_card_choice(&kincaller_exec.effect));
+    assert!(matches!(
+        &*kincaller_exec.effect,
+        Effect::RevealHand {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+    let base_kincaller: serde_json::Value = serde_json::from_str(
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Controller"},"card_filter":{"type":"Typed","type_filters":[{"Subtype":"Dinosaur"}],"controller":null,"properties":[]},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GainLife","amount":{"type":"Fixed","value":3}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"Or","conditions":[{"type":"EffectOutcome","signal":"OptionalEffectPerformed"},{"type":"QuantityCheck","lhs":{"type":"Ref","qty":{"type":"ObjectCount","filter":{"type":"Typed","type_filters":[{"Subtype":"Dinosaur"}],"controller":"You","properties":[{"type":"Another"},{"type":"InZone","zone":"Battlefield"}]}}},"comparator":"GE","rhs":{"type":"Fixed","value":1}}]},"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false}"#,
+    )
+    .expect("base Kincaller JSON");
+    assert_eq!(
+        serde_json::to_value(kincaller_exec).expect("serialize"),
+        base_kincaller,
+        "Armored Kincaller's lowered trigger is unchanged"
+    );
+
+    // (iv) Predicate units: the new arm keys on card-parking, not on "is a
+    // RevealHand".
+    let reveal = |card_filter: TargetFilter, choice_optional: bool| Effect::RevealHand {
+        target: TargetFilter::Controller,
+        card_filter,
+        count: None,
+        selection: CardSelectionMode::default(),
+        choice_optional,
+        reveal: true,
+    };
+    assert!(introduces_chosen_object_target(&reveal(
+        TargetFilter::Typed(TypedFilter::creature()),
+        false
+    )));
+    assert!(introduces_chosen_object_target(&reveal(
+        TargetFilter::None,
+        true
+    )));
+    assert!(!introduces_chosen_object_target(&reveal(
+        TargetFilter::None,
+        false
+    )));
+}
