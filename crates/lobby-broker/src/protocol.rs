@@ -765,6 +765,16 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 13 — `PairingView.report_gate` (broker → client, on `TournamentUpdate` and
+///      the `GetTournament` reply) gains a `ReportGate::Hosted` arm — the "a
+///      field's type changed" trigger, a serialized enum's value space growing.
+///      No broker emits `Hosted` yet: it is set only once server-authoritative
+///      hosting is wired (a later PR, which gates that behind its own
+///      `MIN_LOBBY_PROTOCOL_FOR_HOSTED_MATCH` client floor), so
+///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move — a pre-13 reader never
+///      receives the new arm today, and the browser mirror
+///      (`client/src/adapter/types.ts` `ReportGate`) adds it in lockstep so the
+///      wire union stays 1:1.
 /// 12 — `JoinTargetInfo` on [`LobbyServerMessage`] (broker → client) gains an
 ///      optional `draft_metadata`, the shape [`LobbyGame`] already carries —
 ///      the "a lobby field is added" trigger. [`MIN_SUPPORTED_LOBBY_PROTOCOL`]
@@ -1007,7 +1017,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 ///     that direction can reject — into one legible handshake refusal.
 /// 1 — Initial lobby-owned version, covering the `LobbyClientMessage` /
 ///     `LobbyServerMessage` variant sets, unchanged since #1880.
-pub const LOBBY_PROTOCOL_VERSION: u32 = 12;
+pub const LOBBY_PROTOCOL_VERSION: u32 = 13;
 
 /// Lowest [`LOBBY_PROTOCOL_VERSION`] a broker accepts from a client.
 ///
@@ -1918,7 +1928,7 @@ mod tests {
     /// rather than silently re-coupling the lobby to full-game churn.
     #[test]
     fn lobby_protocol_version_is_independent_of_the_full_game_one() {
-        assert_eq!(LOBBY_PROTOCOL_VERSION, 12);
+        assert_eq!(LOBBY_PROTOCOL_VERSION, 13);
         // Deliberately still 2, not 12: every lobby version past 2 keeps this
         // floor's guarantee — that a version-2 client can still parse every
         // frame it already understands. Individually: 3 is additive in both
@@ -2119,10 +2129,10 @@ mod tests {
     /// the chain so the tail stays pinned rather than re-pointed, and the name
     /// grows with it, by the same rule. Version 11 is the one true non-surface
     /// step: no field, no variant, moved ahead of new `GameFormat` variants;
-    /// see that constant's own `/// 11` entry. Version 12 extends the chain by
-    /// the same rule.
+    /// see that constant's own `/// 11` entry. Versions 12 and 13 extend the
+    /// chain by the same rule.
     #[test]
-    fn the_tournament_chain_spans_lobby_versions_four_through_twelve() {
+    fn the_tournament_chain_spans_lobby_versions_four_through_thirteen() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
@@ -2138,10 +2148,10 @@ mod tests {
         const PREEMPTIVE_FORMAT_LOBBY_VERSION: u32 = REQUESTED_ROOM_CODE_LOBBY_VERSION + 1;
         // Adds an optional field (`draft_metadata`) to a broker → client reply.
         const JOIN_TARGET_DRAFT_METADATA_LOBBY_VERSION: u32 = PREEMPTIVE_FORMAT_LOBBY_VERSION + 1;
-        assert_eq!(
-            LOBBY_PROTOCOL_VERSION,
-            JOIN_TARGET_DRAFT_METADATA_LOBBY_VERSION
-        );
+        // Adds a `Hosted` arm to `PairingView.report_gate` (a serialized enum's
+        // value space grows) — the "a field's type changed" trigger.
+        const HOSTED_MATCH_LOBBY_VERSION: u32 = JOIN_TARGET_DRAFT_METADATA_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, HOSTED_MATCH_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and
