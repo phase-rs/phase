@@ -3318,17 +3318,22 @@ mod tests {
         }
     }
 
-    /// `StateUpdate.events` can now carry the tagged `Melded` display event.
-    /// A v85 peer would silently omit the meld forge, so it must be refused
-    /// before receiving v86 event batches.
+    /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
+    /// serialized full-game state; a v88 peer would drop it silently and admit
+    /// a printed-cost graveyard cast the permission forbids, so it must be
+    /// refused before it receives v89 state. v89 also carries the announced
+    /// graveyard permission (CR 601.2a + CR 601.2b: the casting-menu option's
+    /// `authority`, the slot prompt's `permission`, the cast's latched terms).
+    /// The preceding v88 bump gave `WaitingFor::DeclareBlockers` its
+    /// `block_capacities` (CR 509.1a + CR 101.1).
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_86_for_melded_event() {
-        assert_eq!(PROTOCOL_VERSION, 86);
+    fn protocol_version_is_89_for_graveyard_cast_methods() {
+        assert_eq!(PROTOCOL_VERSION, 89);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3339,7 +3344,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_86_for_melded_event` stays
+    /// `protocol_version_is_89_for_graveyard_cast_methods` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

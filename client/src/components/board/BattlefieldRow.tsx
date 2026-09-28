@@ -85,7 +85,7 @@ export function BattlefieldRow({
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const isCompactHeight = useIsCompactHeight();
   const combatMode = useUiStore((s) => s.combatMode);
-  const { committedAttackerIds } = useBoardInteractionState();
+  const { blockableAttackerIds } = useBoardInteractionState();
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null);
   const [expandedGroupIds, setExpandedGroupIds] = useState<Set<number>>(() => new Set());
@@ -148,13 +148,13 @@ export function BattlefieldRow({
   let creatureWrap = false;
   const renderedGroups = groups.map((group) => {
     const manualExpanded = expandedGroupIds.has(group.ids[0]);
-    const containsCommittedAttackerDuringBlockers =
+    const containsBlockableAttackerDuringBlockers =
       rowType === "creatures"
       && combatMode === "blockers"
-      && group.ids.some((id) => committedAttackerIds.has(id));
+      && group.ids.some((id) => blockableAttackerIds.has(id));
     const renderMode = getGroupRenderMode(group, {
       manualExpanded,
-      containsCommittedAttackerDuringBlockers,
+      containsBlockableAttackerDuringBlockers,
     });
     return { group, manualExpanded, renderMode };
   });
@@ -281,7 +281,7 @@ export function BattlefieldRow({
           </span>
         </button>
       )}
-      {renderedGroups.map(({ group, manualExpanded }, index) => (
+      {renderedGroups.map(({ group, renderMode }, index) => (
         <Fragment key={group.ids[0]}>
           {index === dividerBeforeIndex && (
             <div aria-hidden className="mx-1 w-px self-stretch rounded bg-white/15" />
@@ -289,7 +289,7 @@ export function BattlefieldRow({
           <GroupedPermanentDisplay
             group={group}
             rowType={rowType}
-            manualExpanded={manualExpanded}
+            renderMode={renderMode}
             onExpand={() => {
               setExpandedGroupIds((previous) => {
                 const next = new Set(previous);

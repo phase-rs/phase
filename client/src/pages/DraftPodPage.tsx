@@ -1762,6 +1762,7 @@ function DraftPodPageContent() {
         // been cleared, so a damaged host record cannot steal a guest's route.
         const outcome = await resumeHostedPod({
           silent: entryMode === "auto",
+          entry: entryMode,
           routeToken,
           signal: controller.signal,
         });

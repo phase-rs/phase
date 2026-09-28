@@ -694,9 +694,9 @@ pub(crate) fn player_control_count_compares(
 /// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: Read scalar `attr` for one
 /// candidate player DIRECTLY off the candidate `Player` (NOT via the
 /// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
-/// reads each player's own hand size / life total / life lost / graveyard /
-/// player-counter rather than the controller's. Returns `None` for any
-/// non-scalar `QuantityRef`; the parser
+/// reads each player's own hand size / life total / life lost or gained /
+/// graveyard / player-counter rather than the controller's. Returns `None` for
+/// any non-scalar `QuantityRef`; the parser
 /// invariant guarantees only the scalar subset reaches here, and `None` fails
 /// the candidate predicate closed.
 pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
@@ -706,6 +706,12 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
         // CR 119.3: life lost this turn is tracked per candidate player.
         QuantityRef::LifeLostThisTurn { .. } => Some(u32_to_i32_saturating(p.life_lost_this_turn)),
+        // CR 119.3: life gained this turn is tracked per candidate player — the
+        // gained-direction sibling of the arm above, read by the all-players
+        // "for each player who gained life this turn" population.
+        QuantityRef::LifeGainedThisTurn { .. } => {
+            Some(u32_to_i32_saturating(p.life_gained_this_turn))
+        }
         // CR 404.1: cards in the candidate's graveyard.
         QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
         // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
@@ -3736,6 +3742,14 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             //      events exist — it would snapshot a permanent +0/+0.
             | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 608.2d + CR 608.2c: a Telling Time-class remainder split is a
+            // choice the effect offers, which "the player announces while
+            // applying the effect" (CR 608.2d) — a second, later pause in the
+            // SAME dig instruction, whose instructions are followed in the
+            // order written (CR 608.2c). Anything chained after the dig must
+            // wait for it, or the sub-ability would run while the remainder is
+            // still sitting undistributed.
+            | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
@@ -38839,6 +38853,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -39601,6 +39616,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,

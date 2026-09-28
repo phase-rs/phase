@@ -877,6 +877,12 @@ struct PreparedSpellCast {
     /// CancelCast (CR 601.2i) can return the object to its origin zone.
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    /// CR 601.2a + CR 601.2b: the graveyard permission this cast is announced
+    /// under, for a cast through one (printed cost, Blitz, Bestow). Stamped onto
+    /// the ability's context before any cost is paid
+    /// (`stamp_prepared_cast_context`); `AwaitingSlot` must first get its
+    /// per-type slot from `ChoosePermanentTypeSlot`.
+    graveyard_authority: Option<GraveyardAuthorityResolution>,
 }
 
 pub struct PriorityCastProbe {
@@ -1537,11 +1543,12 @@ fn graveyard_spell_objects_available_to_cast(
     player: PlayerId,
     graveyard: &im::Vector<ObjectId>,
 ) -> Vec<ObjectId> {
-    let permission_sources = if state.active_player == player {
-        graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
-    } else {
-        Vec::new()
-    };
+    // CR 601.3 + CR 702.8a + CR 117.1a: no blanket whose-turn gate here. A
+    // permission that says "during your turn" / "during each of your turns"
+    // carries `StaticCondition::DuringYourTurn`, which `graveyard_permission_sources`
+    // evaluates through `active_static_definitions`. One without turn words lets a
+    // Flash or instant card be cast from the graveyard on any turn.
+    let permission_sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Cast));
     let mut keyword_objects = Vec::new();
     let mut permission_objects = Vec::new();
     let mut timed_permission_objects = Vec::new();
@@ -1595,7 +1602,7 @@ fn graveyard_spell_objects_available_to_cast(
 
         // CR 601.2a + CR 604.3: Cards in graveyard castable via static
         // permission from a battlefield permanent (Lurrus, Karador, etc.).
-        // CR 117.1c: "Each of your turns" — only during controller's turn.
+        // Any whose-turn restriction is the permission's own condition.
         if graveyard_object_castable_by_permission_sources(
             state,
             player,
@@ -3744,9 +3751,10 @@ pub(crate) fn castable_from_current_zone(
                     && has_effective_graveyard_cast_keyword(state, obj.id, obj))
                     || has_graveyard_timed_alt_cost_permission(state, obj, player))
                     && normal_cost_route())
-                // CR 601.2a + CR 117.1c: Graveyard cast via static permission (Lurrus, etc.).
+                // CR 601.2a + CR 601.3: Graveyard cast via static permission
+                // (Lurrus, etc.). Whose turn it must be is the permission's own
+                // condition, not a blanket gate here.
                 || (obj.zone == Zone::Graveyard
-                    && state.active_player == player
                     && graveyard_permission_source(state, player, obj.id).is_some())
                 // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static
                 // permission (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card
@@ -3984,15 +3992,16 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_counter(
 // `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`.
 pub(super) fn selected_static_permission_enters_with_counter(
     state: &GameState,
+    player: PlayerId,
     casting_variant: &crate::types::game_state::CastingVariant,
 ) -> Option<crate::types::counter::CounterType> {
     use crate::types::game_state::CastingVariant;
-    let source = match casting_variant {
-        CastingVariant::GraveyardPermission { source, .. }
-        | CastingVariant::ExilePermission { source, .. } => *source,
+    let (source, from_graveyard) = match casting_variant {
+        CastingVariant::GraveyardPermission { source, .. } => (*source, true),
+        CastingVariant::ExilePermission { source, .. } => (*source, false),
         _ => return None,
     };
-    let source_obj = state.objects.get(&source)?;
+    let source_obj = state.objects.get(&source);
     fn permission_counter(def: &StaticDefinition) -> Option<crate::types::counter::CounterType> {
         match &def.mode {
             StaticMode::GraveyardCastPermission {
@@ -4009,8 +4018,10 @@ pub(super) fn selected_static_permission_enters_with_counter(
     // Existing path (unchanged for BB3 separate-battlefield-source cards): the
     // permission still functions in zone on a source that never left the
     // battlefield during the cast.
-    active_static_definitions(state, source_obj)
-        .find_map(permission_counter)
+    source_obj
+        .and_then(|source_obj| {
+            active_static_definitions(state, source_obj).find_map(permission_counter)
+        })
         // CR 601.3 + CR 607.1 + CR 113.6b: self-granting-permission fallback.
         // A self-granting source (Undead Sprinter — Gravecrawler shape) IS the
         // cast object, now on the Stack, so its Graveyard-scoped permission no
@@ -4023,10 +4034,28 @@ pub(super) fn selected_static_permission_enters_with_counter(
         // (Noctis / Leonardo / Intrepid) stay byte-identical. (CR 614.1c: the
         // rider is a replacement effect applied as the object enters.)
         .or_else(|| {
-            source_obj
-                .static_definitions
-                .iter_all()
-                .find_map(permission_counter)
+            source_obj.and_then(|source_obj| {
+                source_obj
+                    .static_definitions
+                    .iter_all()
+                    .find_map(permission_counter)
+            })
+        })
+        // CR 611.2a + CR 614.1c: a RESOLUTION-CREATED graveyard permission ("Until
+        // end of turn, you may ... cast spells from your graveyard") is not on any
+        // object's statics; it is a grant on a transient continuous effect keyed
+        // on the card that created it. Read the rider from that same transient
+        // source, the one the permission election saw. Additive: fires only when
+        // neither static path finds a rider. The creating object need not still
+        // exist: the effect outlives it (a copied spell ceases to exist as it
+        // leaves the stack, CR 707.10a), so this path doesn't look it up.
+        .or_else(|| {
+            if !from_graveyard {
+                return None;
+            }
+            transient_graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
+                .find(|candidate| candidate.source_id == source)
+                .and_then(|candidate| candidate.enters_with_counter.clone())
         })
 }
 
@@ -4831,6 +4860,11 @@ fn has_during_resolution_alt_cost_permission(
 #[derive(Clone, Copy)]
 struct GraveyardPermissionSource<'a> {
     source_id: ObjectId,
+    /// CR 601.2a: which grant this is: the source plus the grant on it, so two
+    /// grants from one source are two permissions the player can announce.
+    permission: crate::types::game_state::GraveyardPermissionId,
+    /// The grant's full definition, from which its digest is taken.
+    definition: &'a StaticDefinition,
     filter: &'a TargetFilter,
     frequency: CastFrequency,
     graveyard_destination_replacement: Option<Zone>,
@@ -4838,6 +4872,56 @@ struct GraveyardPermissionSource<'a> {
     /// static (Festival of Embers: additional pay-life). Borrowed from the static
     /// definition (kept `Copy` so the source struct stays `Copy`).
     extra_cost: &'a Option<crate::types::statics::CastExtraCost>,
+    /// CR 122.1 + CR 607.1: Optional "if you cast a spell this way, that creature
+    /// enters with a [counter] counter on it" rider (Leonardo, Noctis). Applied at
+    /// the `finalize_cast` seam by `selected_static_permission_enters_with_counter`;
+    /// carried here so permission selection can see every rider a choice brings.
+    enters_with_counter: &'a Option<crate::types::counter::CounterType>,
+    /// CR 118.9b: the casting method this permission requires ("using its
+    /// blitz ability"), or `None` when it leaves the method open, including the
+    /// printed cost.
+    required_cast_keyword: Option<KeywordKind>,
+}
+
+impl GraveyardPermissionSource<'_> {
+    /// CR 118.9b: can a cast made by `method` (`None` = the printed cost; else
+    /// the alternative cost's keyword, see `CastingVariant::cast_keyword`) be
+    /// authorized by this permission? A permission that requires a method
+    /// authorizes only that method.
+    fn admits_cast_method(&self, method: Option<KeywordKind>) -> bool {
+        self.required_cast_keyword
+            .is_none_or(|required| Some(required) == method)
+    }
+
+    /// CR 601.2a: the grant's digest, compared by a menu answer so a grant whose
+    /// definition changed between the menu and the answer is not taken for it.
+    /// Called only on `graveyard_permission_candidates`, which admits a grant
+    /// only when its digest can be taken.
+    fn digest(&self) -> crate::types::game_state::GrantDigest {
+        grant_digest(self.definition)
+            .expect("graveyard_permission_candidates admits only grants with a digest")
+    }
+
+    /// Whether this grant limits casts to one per turn (per source, or per
+    /// source and permanent type).
+    fn is_bounded(&self) -> bool {
+        self.frequency != CastFrequency::Unlimited
+    }
+}
+
+/// A stable digest of a graveyard-cast permission grant's definition: 16 hex
+/// digits of a fixed-key hash over its serialized form. `None` when the
+/// definition can't be serialized: such a grant can't be told apart from a
+/// changed one, so it is never offered (it fails closed).
+fn grant_digest(definition: &StaticDefinition) -> Option<crate::types::game_state::GrantDigest> {
+    use std::hash::{Hash, Hasher};
+    let serialized = serde_json::to_string(definition).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    Some(crate::types::game_state::GrantDigest(format!(
+        "{:016x}",
+        hasher.finish()
+    )))
 }
 
 /// CR 601.2a + CR 113.6b + CR 118.9: An active battlefield permanent carrying
@@ -5345,45 +5429,73 @@ fn graveyard_permission_sources(
                 Zone::Battlefield => obj.controller == player,
                 _ => obj.owner == player,
             };
-            if !source_belongs_to_player {
-                return None;
-            }
+            source_belongs_to_player.then_some(obj)
+        })
+        .flat_map(|obj| {
+            let source_id = obj.id;
             // The zone-of-function gate is now fully owned by
             // `active_static_definitions` (CR 113.6 / CR 113.6b), which also
             // correctly admits emblem-sourced graveyard-cast permissions —
             // the previously-inlined gate never exempted `is_emblem` unlike
             // every other command-zone consumer, an independent latent bug
             // now fixed as a side effect.
-            active_static_definitions(state, obj).find_map(|definition| match definition.mode {
-                StaticMode::GraveyardCastPermission {
-                    frequency,
-                    play_mode,
-                    graveyard_destination_replacement,
-                    ref extra_cost,
-                    // enters-with counter is read at the finalize_cast seam via
-                    // `selected_static_permission_enters_with_counter`, not here.
-                    ..
-                } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
-                    definition
-                        .affected
-                        .as_ref()
-                        .map(|filter| GraveyardPermissionSource {
-                            source_id,
-                            filter,
-                            frequency,
-                            graveyard_destination_replacement,
-                            extra_cost,
-                        })
-                }
-                _ => None,
-            })
+            //
+            // CR 601.2a: every functioning grant on the source is its own
+            // permission (identified by its position), so the player can
+            // announce any of them.
+            super::functioning_abilities::active_static_definitions_indexed(state, obj).filter_map(
+                move |(index, definition)| match definition.mode {
+                    StaticMode::GraveyardCastPermission {
+                        frequency,
+                        play_mode,
+                        graveyard_destination_replacement,
+                        ref extra_cost,
+                        // Applied at the finalize_cast seam from the cast's
+                        // latched terms; carried here so the menu shows it.
+                        ref enters_with_counter,
+                        required_cast_keyword,
+                    } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
+                        definition
+                            .affected
+                            .as_ref()
+                            .map(|filter| GraveyardPermissionSource {
+                                source_id,
+                                permission: crate::types::game_state::GraveyardPermissionId {
+                                    source: source_id,
+                                    grant: crate::types::game_state::PermissionGrant::Static {
+                                        index: index as u32,
+                                    },
+                                },
+                                definition,
+                                filter,
+                                frequency,
+                                graveyard_destination_replacement,
+                                extra_cost,
+                                enters_with_counter,
+                                required_cast_keyword,
+                            })
+                    }
+                    _ => None,
+                },
+            )
         })
         .chain(transient_graveyard_permission_sources(
             state,
             player,
             play_mode_filter,
         ))
-        .collect()
+        .fold(Vec::new(), |mut sources, source| {
+            // CR 601.2a: one entry per grant. Two grants with the same terms are
+            // still two effects the player can announce, so only the same grant
+            // reached twice (the identical id) is merged.
+            if !sources
+                .iter()
+                .any(|kept: &GraveyardPermissionSource<'_>| kept.permission == source.permission)
+            {
+                sources.push(source);
+            }
+            sources
+        })
 }
 
 /// CR 611.2a + CR 611.2c + CR 116.2a: the RESOLUTION-CREATED arm of
@@ -5451,39 +5563,148 @@ fn transient_graveyard_permission_sources(
             })
         })
         .flat_map(move |tce| {
-            tce.modifications.iter().filter_map(move |modification| {
-                let ContinuousModification::GrantStaticAbility { definition } = modification else {
-                    return None;
-                };
-                let StaticMode::GraveyardCastPermission {
-                    frequency,
-                    play_mode,
-                    graveyard_destination_replacement,
-                    ref extra_cost,
-                    ..
-                } = definition.mode
-                else {
-                    return None;
-                };
-                if !graveyard_permission_play_mode_matches(play_mode, play_mode_filter) {
-                    return None;
-                }
-                definition
-                    .affected
-                    .as_ref()
-                    .map(|filter| GraveyardPermissionSource {
-                        // CR 601.2a: the per-source frequency slots
-                        // (`graveyard_cast_permissions_used*`) are keyed on this id,
-                        // so a resolution-created grant keys on the card that
-                        // created it exactly as a battlefield permanent does.
-                        source_id: tce.source_id,
-                        filter,
+            tce.modifications.iter().enumerate().filter_map(
+                move |(modification_index, modification)| {
+                    let ContinuousModification::GrantStaticAbility { definition } = modification
+                    else {
+                        return None;
+                    };
+                    let StaticMode::GraveyardCastPermission {
                         frequency,
+                        play_mode,
                         graveyard_destination_replacement,
-                        extra_cost,
-                    })
-            })
+                        ref extra_cost,
+                        ref enters_with_counter,
+                        required_cast_keyword,
+                    } = definition.mode
+                    else {
+                        return None;
+                    };
+                    if !graveyard_permission_play_mode_matches(play_mode, play_mode_filter) {
+                        return None;
+                    }
+                    // CR 113.1b + CR 109.5: a permission granted to a PLAYER is
+                    // that player's ability, so its "you"/"your" mean the
+                    // grantee. Evaluate only holder-bound conditions; other
+                    // leaves fail closed rather than reading the grantor.
+                    if let Some(condition) = definition.condition.as_ref() {
+                        if !holder_bound_condition_is_modeled(condition)
+                            || !super::layers::evaluate_condition_with_context(
+                                state,
+                                condition,
+                                player,
+                                tce.source_id,
+                                super::layers::ConditionContext::ability_holder(player),
+                            )
+                        {
+                            return None;
+                        }
+                    }
+                    definition
+                        .affected
+                        .as_ref()
+                        .map(|filter| GraveyardPermissionSource {
+                            // CR 601.2a: the per-source frequency slots
+                            // (`graveyard_cast_permissions_used*`) are keyed on this id,
+                            // so a resolution-created grant keys on the card that
+                            // created it exactly as a battlefield permanent does.
+                            source_id: tce.source_id,
+                            permission: crate::types::game_state::GraveyardPermissionId {
+                                source: tce.source_id,
+                                grant: crate::types::game_state::PermissionGrant::Transient {
+                                    effect_id: tce.id,
+                                    modification: modification_index as u32,
+                                },
+                            },
+                            definition,
+                            filter,
+                            frequency,
+                            graveyard_destination_replacement,
+                            extra_cost,
+                            enters_with_counter,
+                            required_cast_keyword,
+                        })
+                },
+            )
         })
+}
+
+/// CR 113.1b + CR 109.5: true when every leaf of a player-granted permission's
+/// condition evaluates against the ability's HOLDER once
+/// `ConditionContext::ability_holder` is bound. Today that's only the whose-turn
+/// leaves (`layers::evaluate_condition_inner` reads `ability_holder` there) and
+/// boolean compositions of them.
+///
+/// Every other leaf reads the source object or a source-derived filter context.
+/// For example, `IsPresent` builds `FilterContext::from_source`, so "you control
+/// a Zombie" would count the GRANTING spell's controller's Zombies. Those leaves
+/// are refused (fail closed) rather than evaluated for the wrong player.
+/// Exhaustive with no wildcard, so a new `StaticCondition` variant must be
+/// classified here.
+fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::DuringYourTurn | StaticCondition::DuringOpponentsTurn => true,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().all(holder_bound_condition_is_modeled)
+        }
+        StaticCondition::Not { condition } => holder_bound_condition_is_modeled(condition),
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => false,
+    }
 }
 
 fn graveyard_permission_play_mode_matches(
@@ -5579,17 +5800,47 @@ fn graveyard_permission_source(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<GraveyardPermissionSource<'_>> {
+    graveyard_permission_candidates(state, player, object_id)
+        .into_iter()
+        .next()
+}
+
+/// CR 601.2a: Every permission grant that could authorize casting `object_id`
+/// from the graveyard right now, in source order, one per grant.
+///
+/// A source carrying two or more functioning BOUNDED grants (`OncePerTurn` /
+/// `OncePerTurnPerPermanentType`), whether printed or granted during the game,
+/// contributes none of them: the per-turn ledger is keyed by source, so it can't
+/// spend one grant's slot without the other's. Such a board is unsupported and
+/// fails closed (no printed card has it; coverage marks the shapes that can
+/// produce it). Its `Unlimited` grants are unaffected.
+fn graveyard_permission_candidates(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<GraveyardPermissionSource<'_>> {
     // CR 305.9: a land is played, never cast, whatever the permission says.
     if state
         .objects
         .get(&object_id)
         .is_some_and(|obj| !object_may_enter_cast_path(obj))
     {
-        return None;
+        return Vec::new();
     }
-    graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
-        .into_iter()
-        .find(|source| {
+    let sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Cast));
+    let shares_bounded_slot = |source: &GraveyardPermissionSource<'_>| {
+        source.is_bounded()
+            && sources
+                .iter()
+                .filter(|other| other.source_id == source.source_id && other.is_bounded())
+                .count()
+                > 1
+    };
+    sources
+        .iter()
+        .filter(|source| !shares_bounded_slot(source))
+        .filter(|source| grant_digest(source.definition).is_some())
+        .filter(|source| {
             // CR 604.2 + CR 110.4: Skip if this source's slot has already been used.
             if !frequency_slot_available(state, source.source_id, object_id, source.frequency) {
                 return false;
@@ -5613,58 +5864,420 @@ fn graveyard_permission_source(
                 ),
             )
         })
+        .copied()
+        .collect()
 }
 
-/// CR 601.2f: When `object_id` is castable from the graveyard via a
-/// `GraveyardCastPermission` static that carries an `extra_cost` rider (Festival
-/// of Embers' additional pay-life), return the rider. Consulted by the cast
-/// pipeline to route the additional `AbilityCost` through `pay_additional_cost`.
-pub(crate) fn graveyard_static_permission_extra_cost(
+/// CR 601.2a + CR 601.2b: the graveyard permission a cast is announced under,
+/// bound to one grant. `variant` is the `GraveyardPermission` authority that
+/// payment and finalization spend (its source, frequency, per-type slot and
+/// destination rider); `latch` fixes the grant's terms at announcement.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GraveyardCastAuthority {
+    pub(crate) variant: CastingVariant,
+    pub(crate) announcement: crate::types::game_state::AnnouncedGraveyardPermission,
+    pub(crate) latch: crate::types::game_state::GraveyardPermissionLatch,
+}
+
+impl GraveyardCastAuthority {
+    fn new(
+        source: &GraveyardPermissionSource<'_>,
+        slot_type: Option<crate::types::card_type::CoreType>,
+    ) -> Self {
+        Self {
+            variant: CastingVariant::GraveyardPermission {
+                source: source.source_id,
+                frequency: source.frequency,
+                slot_type,
+                graveyard_destination_replacement: source.graveyard_destination_replacement,
+            },
+            announcement: crate::types::game_state::AnnouncedGraveyardPermission {
+                permission: source.permission,
+                grant_digest: source.digest(),
+                slot_type,
+            },
+            latch: crate::types::game_state::GraveyardPermissionLatch {
+                permission: source.permission,
+                extra_cost: source.extra_cost.clone(),
+                enters_with_counter: source.enters_with_counter.clone(),
+            },
+        }
+    }
+
+    /// The menu projection: the announcement plus the terms the menu displays.
+    fn choice(&self) -> crate::types::game_state::CastAuthorityChoice {
+        let (frequency, graveyard_destination_replacement) = match self.variant {
+            CastingVariant::GraveyardPermission {
+                frequency,
+                graveyard_destination_replacement,
+                ..
+            } => (frequency, graveyard_destination_replacement),
+            _ => (CastFrequency::Unlimited, None),
+        };
+        crate::types::game_state::CastAuthorityChoice {
+            announcement: self.announcement.clone(),
+            extra_cost: self.latch.extra_cost.clone(),
+            enters_with_counter: self.latch.enters_with_counter.clone(),
+            frequency,
+            graveyard_destination_replacement,
+        }
+    }
+}
+
+/// CR 601.2a + CR 110.4: a resolved graveyard authority, or one whose per-type
+/// slot the printed-cost cast asks for next (Muldrotha and a multi-type card:
+/// "choose one as you play it").
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum GraveyardAuthorityResolution {
+    Complete(GraveyardCastAuthority),
+    /// Printed cost only: announced without a slot while more than one is
+    /// available. Its `authority.variant` has `slot_type: None`.
+    AwaitingSlot {
+        authority: GraveyardCastAuthority,
+        available: Vec<crate::types::card_type::CoreType>,
+    },
+}
+
+impl GraveyardAuthorityResolution {
+    pub(crate) fn authority(&self) -> &GraveyardCastAuthority {
+        match self {
+            Self::Complete(authority) | Self::AwaitingSlot { authority, .. } => authority,
+        }
+    }
+}
+
+/// Why a graveyard permission can't authorize a cast as announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraveyardAuthorityError {
+    /// No graveyard permission admits this card.
+    NoPermission,
+    /// Permissions admit the card, but none admits this casting method.
+    MethodNotAdmitted,
+    /// Several permissions could authorize the cast and none was announced.
+    Ambiguous,
+    /// The announced grant is gone or its definition changed.
+    Stale,
+    /// CR 118.9a: the grant is itself an alternative cost, so it can't
+    /// authorize a method that brings its own.
+    AlternativeRider,
+    /// CR 118.9: the grant's own alternative cost, which a graveyard cast
+    /// can't pay yet.
+    AlternativeCostUnsupported,
+    /// CR 601.2f: the grant's extra cost is a choice of costs, which a
+    /// graveyard cast can't pay yet.
+    ChoiceCostUnsupported,
+    /// A per-type permission with several slots, announced without one.
+    SlotRequired,
+    /// The announced slot is used, or isn't a type of the spell as cast.
+    SlotUnavailable,
+    /// The grant shares its source's per-turn slot with another bounded grant.
+    SharedSourceSlot,
+}
+
+impl From<GraveyardAuthorityError> for EngineError {
+    fn from(error: GraveyardAuthorityError) -> Self {
+        let message = match error {
+            GraveyardAuthorityError::NoPermission => {
+                "No graveyard permission allows casting this card"
+            }
+            GraveyardAuthorityError::MethodNotAdmitted => {
+                "This graveyard permission allows only its own casting method"
+            }
+            GraveyardAuthorityError::Ambiguous => {
+                "Several graveyard permissions allow this cast; announce which one you are using"
+            }
+            GraveyardAuthorityError::Stale => {
+                "The announced graveyard permission is no longer available"
+            }
+            GraveyardAuthorityError::AlternativeRider => {
+                "This graveyard permission is itself an alternative cost, so it can't be used \
+                 with another alternative cost"
+            }
+            GraveyardAuthorityError::AlternativeCostUnsupported => {
+                "Casting from the graveyard for this permission's alternative cost is unsupported"
+            }
+            GraveyardAuthorityError::ChoiceCostUnsupported => {
+                "Casting from the graveyard for this permission's choice of extra costs is \
+                 unsupported"
+            }
+            GraveyardAuthorityError::SlotRequired => {
+                "Choose which permanent type this graveyard permission is used for"
+            }
+            GraveyardAuthorityError::SlotUnavailable => {
+                "That permanent type can't be used for this graveyard permission"
+            }
+            GraveyardAuthorityError::SharedSourceSlot => {
+                "Two per-turn graveyard permissions share one source; casting through either \
+                 is unsupported"
+            }
+        };
+        EngineError::ActionNotAllowed(message.to_string())
+    }
+}
+
+/// CR 601.2a + CR 601.2b: the single authority for which graveyard permission
+/// a cast is announced under. `rider` is the card's own alternative cost when
+/// the cast is made for one (Blitz, Bestow; `None` for the printed cost), and
+/// `state` shows the spell as it will be cast (for Bestow, the bestowed Aura:
+/// CR 702.103b). Muldrotha's 2020-11-10 ruling: "If multiple effects allow you
+/// to play a card from your graveyard, you must announce which permission
+/// you're using as you begin to play the card."
+///
+/// - `Some(requested)` binds exactly that grant: it must still be on offer
+///   with the same definition (`digest`), admit the method (CR 118.9b), not be
+///   an alternative cost when the method brings its own (CR 118.9a), and, for
+///   a per-type permission (CR 110.4), name an available slot of the spell as
+///   cast. A printed-cost cast announced without a slot while several are
+///   available resolves to `AwaitingSlot`; a rider must announce it.
+/// - `None` succeeds only when exactly one grant could authorize the cast, the
+///   single-permission board: there is nothing to announce. Otherwise it is
+///   `Ambiguous`, and the cast goes through the announcement menu.
+///
+/// Never called for a graveyard route that is its own authority (Escape,
+/// Flashback, Retrace, Harmonize, Mayhem, Aftermath, Jump-start, Disturb, a
+/// timed alternative cost).
+fn resolve_graveyard_authority(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-) -> Option<crate::types::statics::CastExtraCost> {
-    graveyard_permission_source(state, player, object_id)
-        .and_then(|source| source.extra_cost.clone())
+    rider: Option<CastingVariant>,
+    requested: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
+) -> Result<GraveyardAuthorityResolution, GraveyardAuthorityError> {
+    let candidates = graveyard_permission_candidates(state, player, object_id);
+    if let Some(requested) = requested {
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.permission == requested.permission)
+        else {
+            return Err(
+                if graveyard_grant_shares_source_slot(state, player, requested.permission) {
+                    GraveyardAuthorityError::SharedSourceSlot
+                } else {
+                    GraveyardAuthorityError::Stale
+                },
+            );
+        };
+        if candidate.digest() != requested.grant_digest {
+            return Err(GraveyardAuthorityError::Stale);
+        }
+        return bind_graveyard_authority(state, object_id, candidate, rider, requested.slot_type);
+    }
+    let bound: Vec<_> = candidates
+        .iter()
+        .map(|candidate| bind_graveyard_authority(state, object_id, candidate, rider, None))
+        .collect();
+    let mut announceable = bound
+        .iter()
+        .filter(|result| matches!(result, Ok(_) | Err(GraveyardAuthorityError::SlotRequired)));
+    match (announceable.next(), announceable.next()) {
+        (Some(only), None) => only.clone(),
+        (Some(_), Some(_)) => Err(GraveyardAuthorityError::Ambiguous),
+        (None, _) => Err(bound
+            .into_iter()
+            .find_map(Result::err)
+            .unwrap_or(GraveyardAuthorityError::NoPermission)),
+    }
 }
 
-fn filter_has_keyword_kind_constraint(filter: &TargetFilter, kind: KeywordKind) -> bool {
-    match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|prop| matches!(prop, FilterProp::HasKeywordKind { value } if *value == kind)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .any(|inner| filter_has_keyword_kind_constraint(inner, kind)),
+/// CR 601.2a + CR 118.9 + CR 110.4: `candidate` as the authority for a cast by
+/// `rider` (`None` = the printed cost) with the announced `slot_type`.
+fn bind_graveyard_authority(
+    state: &GameState,
+    object_id: ObjectId,
+    candidate: &GraveyardPermissionSource<'_>,
+    rider: Option<CastingVariant>,
+    slot_type: Option<crate::types::card_type::CoreType>,
+) -> Result<GraveyardAuthorityResolution, GraveyardAuthorityError> {
+    // CR 118.9b: a permission that requires a method authorizes only that method.
+    if !candidate.admits_cast_method(rider.and_then(CastingVariant::cast_keyword)) {
+        return Err(GraveyardAuthorityError::MethodNotAdmitted);
+    }
+    // CR 118.9a: only one alternative cost can be applied to a spell, so a
+    // permission that is itself one can't carry a method that brings its own.
+    // A printed-cost cast through such a permission would pay that alternative
+    // instead of the mana cost, which the graveyard route doesn't implement
+    // (no printed card has the shape; coverage marks it): refused rather than
+    // charged the mana cost.
+    if candidate
+        .extra_cost
+        .as_ref()
+        .is_some_and(|extra| matches!(extra.mode, crate::types::statics::CastCostMode::Alternative))
+    {
+        return Err(if rider.is_some() {
+            GraveyardAuthorityError::AlternativeRider
+        } else {
+            GraveyardAuthorityError::AlternativeCostUnsupported
+        });
+    }
+    // CR 601.2f + CR 601.2h: an extra cost that is a choice (`OneOf`, at any
+    // depth inside a composite) can't be paid on this route: the required-cost
+    // flow splits its mana from the rest only for resolved costs. Refused here,
+    // before any option is built, so the menu never offers a cast payment
+    // then rejects (unsupported and fails closed; coverage marks the shape).
+    if candidate
+        .extra_cost
+        .as_ref()
+        .is_some_and(|extra| cost_contains_choice(&extra.cost))
+    {
+        return Err(GraveyardAuthorityError::ChoiceCostUnsupported);
+    }
+    if candidate.frequency != CastFrequency::OncePerTurnPerPermanentType {
+        return match slot_type {
+            None => Ok(GraveyardAuthorityResolution::Complete(
+                GraveyardCastAuthority::new(candidate, None),
+            )),
+            Some(_) => Err(GraveyardAuthorityError::SlotUnavailable),
+        };
+    }
+    // CR 110.4: the slots are the spell's permanent types as it will be cast,
+    // not yet used through this source this turn.
+    let slots = available_permanent_type_slots(state, candidate.source_id, object_id);
+    match (slot_type, slots.as_slice()) {
+        (Some(slot), _) if slots.contains(&slot) => Ok(GraveyardAuthorityResolution::Complete(
+            GraveyardCastAuthority::new(candidate, Some(slot)),
+        )),
+        (Some(_), _) | (None, []) => Err(GraveyardAuthorityError::SlotUnavailable),
+        (None, [only]) => Ok(GraveyardAuthorityResolution::Complete(
+            GraveyardCastAuthority::new(candidate, Some(*only)),
+        )),
+        (None, _) if rider.is_some() => Err(GraveyardAuthorityError::SlotRequired),
+        (None, _) => Ok(GraveyardAuthorityResolution::AwaitingSlot {
+            authority: GraveyardCastAuthority::new(candidate, None),
+            available: slots,
+        }),
+    }
+}
+
+/// Whether `cost` contains a choice of costs (`AbilityCost::OneOf`) anywhere
+/// inside its composites.
+pub(crate) fn cost_contains_choice(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::OneOf { .. } => true,
+        AbilityCost::Composite { costs } => costs.iter().any(cost_contains_choice),
         _ => false,
     }
 }
 
-fn has_graveyard_cast_permission_without_keyword_constraint(
+/// Every announcement a cast by `rider` could make for `object_id`: one per
+/// grant, and for a per-type permission one per available slot when the
+/// method is a rider (the slot is part of what a rider announces; a printed
+/// cast asks for it after the announcement).
+fn graveyard_authority_announcements(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-    kind: KeywordKind,
+    rider: Option<CastingVariant>,
+) -> Vec<GraveyardCastAuthority> {
+    let mut announcements = Vec::new();
+    for candidate in graveyard_permission_candidates(state, player, object_id) {
+        match bind_graveyard_authority(state, object_id, &candidate, rider, None) {
+            Ok(resolution) => announcements.push(resolution.authority().clone()),
+            Err(GraveyardAuthorityError::SlotRequired) => announcements.extend(
+                available_permanent_type_slots(state, candidate.source_id, object_id)
+                    .into_iter()
+                    .map(|slot| GraveyardCastAuthority::new(&candidate, Some(slot))),
+            ),
+            Err(_) => {}
+        }
+    }
+    announcements
+}
+
+/// CR 601.2a: is `permission` one of two or more functioning bounded grants on
+/// its source (see `graveyard_permission_candidates`)?
+fn graveyard_grant_shares_source_slot(
+    state: &GameState,
+    player: PlayerId,
+    permission: crate::types::game_state::GraveyardPermissionId,
 ) -> bool {
-    graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
+    let sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Cast));
+    sources
+        .iter()
+        .any(|source| source.permission == permission && source.is_bounded())
+        && sources
+            .iter()
+            .filter(|source| source.source_id == permission.source && source.is_bounded())
+            .count()
+            > 1
+}
+
+/// The announcement for a `GraveyardPermission` cast that names only its
+/// source (an older caller, or a variant built without the menu): the source's
+/// one grant that admits the printed cost, with the variant's slot.
+fn graveyard_announcement_for_named_source(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    source: ObjectId,
+    slot_type: Option<crate::types::card_type::CoreType>,
+) -> Option<crate::types::game_state::AnnouncedGraveyardPermission> {
+    let mut grants = graveyard_permission_candidates(state, player, object_id)
         .into_iter()
-        .any(|source| {
-            !filter_has_keyword_kind_constraint(source.filter, kind)
-                && frequency_slot_available(state, source.source_id, object_id, source.frequency)
-                // CR 109.4 + CR 108.4a: owner-scoped, as in the sibling
-                // consumers -- see `graveyard_permission_source`.
-                && super::filter::matches_target_filter_for_zone(
-                    state,
-                    object_id,
-                    Zone::Graveyard,
-                    source.filter,
-                    &super::filter::FilterContext::from_source_with_controller(
-                        source.source_id,
-                        player,
-                    ),
-                )
-        })
+        .filter(|candidate| candidate.source_id == source && candidate.admits_cast_method(None));
+    match (grants.next(), grants.next()) {
+        (Some(only), None) => Some(crate::types::game_state::AnnouncedGraveyardPermission {
+            permission: only.permission,
+            grant_digest: only.digest(),
+            slot_type,
+        }),
+        _ => None,
+    }
+}
+
+/// CR 601.2a + CR 118.9a: the `GraveyardPermission` authority for a graveyard
+/// cast made for the card's OWN alternative cost when the cast recorded none as
+/// it was announced (a cast begun before announcements were recorded): the
+/// unique permission that could authorize it, else none.
+pub(super) fn graveyard_rider_permission_authority(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Option<GraveyardCastAuthority> {
+    match resolve_graveyard_authority(state, player, object_id, Some(casting_variant), None) {
+        Ok(GraveyardAuthorityResolution::Complete(authority)) => Some(authority),
+        _ => None,
+    }
+}
+
+/// CR 601.2f: the extra-cost rider (Festival of Embers' additional pay-life;
+/// Exploration Broodship's land sacrifice) of the graveyard permission a cast
+/// that recorded no announcement commits to: the permission it names, or the
+/// unique one that could authorize it.
+pub(crate) fn graveyard_static_permission_extra_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Option<crate::types::statics::CastExtraCost> {
+    let rider = casting_variant
+        .is_independent_alternative_cost_rider()
+        .then_some(casting_variant);
+    let requested = match casting_variant {
+        CastingVariant::GraveyardPermission {
+            source, slot_type, ..
+        } => Some(graveyard_announcement_for_named_source(
+            state, player, object_id, source, slot_type,
+        )?),
+        _ => None,
+    };
+    resolve_graveyard_authority(state, player, object_id, rider, requested.as_ref())
+        .ok()
+        .and_then(|resolution| resolution.authority().latch.extra_cost.clone())
+}
+
+/// CR 601.2a + CR 118.9b: can the card be cast from the graveyard for its
+/// printed cost? Only when some permission that admits it leaves the casting
+/// method open (Muldrotha, Lurrus). A permission that requires a method
+/// (`required_cast_keyword`: Sabin, Master Monk) admits that method only.
+fn graveyard_printed_cast_allowed(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    graveyard_permission_candidates(state, player, object_id)
+        .iter()
+        .any(|candidate| candidate.admits_cast_method(None))
 }
 
 /// CR 401.5 + CR 118.9 + CR 601.2a: Find the (single) top card of `player`'s
@@ -6000,41 +6613,103 @@ pub fn graveyard_lands_playable_by_permission(
         CardPlayMode::Play,
     ));
 
+    results.extend(
+        graveyard_land_play_grants(state, player)
+            .into_iter()
+            .map(|(land, source, _)| (land, source)),
+    );
+    results
+}
+
+/// CR 116.2a + CR 305.1 + CR 601.2a: every land in `player`'s graveyard a
+/// graveyard permission (`GraveyardCastPermission` with `play_mode: Play`) lets
+/// them play, with the source and the frequency of the grant that admits it,
+/// source-major.
+///
+/// Only grants usable now (filter matches and per-turn slot available) are
+/// considered. Exactly one usable grant admits the land and its slot is spent.
+/// Two or more usable grants that are all unlimited admit it through the first,
+/// which changes no land-play frequency accounting (none spends a slot); their
+/// other terms can differ, and announcing which one a land play uses is a
+/// follow-up (the Muldrotha ruling covers multiple effects). Two or more usable
+/// grants with one once-per-turn are a real announcement (spend that slot or
+/// not) with no land-play prompt to make it, so the source is skipped for that
+/// land: unsupported and fails closed. The cast side asks instead (one menu
+/// option per grant; see `graveyard_permission_candidates`). So the frequency
+/// recorded for the play is always the admitting grant's own, never another
+/// grant's on the same source.
+fn graveyard_land_play_grants(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
+    let Some(player_data) = state.players.iter().find(|p| p.id == player) else {
+        return Vec::new();
+    };
     let sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Play));
+    let mut source_ids: Vec<ObjectId> = Vec::new();
     for source in &sources {
-        let ctx =
-            super::filter::FilterContext::from_source_with_controller(source.source_id, player);
-        for &gy_obj_id in &player_data.graveyard {
-            if let Some(obj) = state.objects.get(&gy_obj_id) {
-                // CR 305.1: Only lands can be "played" (non-land cards require "cast")
-                if !obj
-                    .card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land)
-                {
-                    continue;
-                }
-                // CR 604.2 + CR 110.4: Per-source frequency slot check; for
-                // `OncePerTurnPerPermanentType` (Muldrotha) the land slot is
-                // its own per-permanent-type entry.
-                if !frequency_slot_available(state, source.source_id, gy_obj_id, source.frequency) {
-                    continue;
-                }
-                // CR 109.4 + CR 108.4a: owner-scoped, as in the sibling
-                // consumers -- see `graveyard_permission_source`.
-                if super::filter::matches_target_filter_for_zone(
-                    state,
-                    gy_obj_id,
-                    Zone::Graveyard,
-                    source.filter,
-                    &ctx,
-                ) {
-                    results.push((gy_obj_id, source.source_id));
-                }
-            }
+        if !source_ids.contains(&source.source_id) {
+            source_ids.push(source.source_id);
         }
     }
-    results
+    let mut grants = Vec::new();
+    for source_id in source_ids {
+        let ctx = super::filter::FilterContext::from_source_with_controller(source_id, player);
+        for &land in &player_data.graveyard {
+            // CR 305.1: only lands can be "played" (non-land cards are cast).
+            if !state.objects.get(&land).is_some_and(|obj| {
+                obj.card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Land)
+            }) {
+                continue;
+            }
+            // CR 109.4 + CR 108.4a: owner-scoped, as in the sibling consumers --
+            // see `graveyard_permission_source`. CR 604.2 + CR 110.4: only a grant
+            // whose per-turn slot is still available admits the land now (for
+            // `OncePerTurnPerPermanentType`, Muldrotha, the land slot is its own
+            // per-permanent-type entry), so a spent bounded grant doesn't hide a
+            // usable unlimited one beside it.
+            let admitting: Vec<_> = sources
+                .iter()
+                .filter(|source| {
+                    source.source_id == source_id
+                        && frequency_slot_available(state, source_id, land, source.frequency)
+                        && super::filter::matches_target_filter_for_zone(
+                            state,
+                            land,
+                            Zone::Graveyard,
+                            source.filter,
+                            &ctx,
+                        )
+                })
+                .collect();
+            let grant = match admitting.as_slice() {
+                [] => continue,
+                [only] => *only,
+                [first, ..] if admitting.iter().all(|grant| !grant.is_bounded()) => *first,
+                _ => continue,
+            };
+            grants.push((land, source_id, grant.frequency));
+        }
+    }
+    grants
+}
+
+/// CR 116.2a + CR 601.2a: the frequency of the graveyard Play grant on
+/// `source` that admits playing `land` (see `graveyard_land_play_grants`), or
+/// `None` when no such grant does (a `PlayFromExile` source, recorded by its
+/// own path).
+pub(crate) fn graveyard_land_play_frequency(
+    state: &GameState,
+    player: PlayerId,
+    land: ObjectId,
+    source: ObjectId,
+) -> Option<CastFrequency> {
+    graveyard_land_play_grants(state, player)
+        .into_iter()
+        .find(|(candidate, grant_source, _)| *candidate == land && *grant_source == source)
+        .map(|(_, _, frequency)| frequency)
 }
 
 /// The elected authority for a land play from exile. The object-attached and
@@ -6574,6 +7249,103 @@ pub fn spell_cost_is_payable_from_pool(
     })
 }
 
+/// CR 601.2a + CR 110.4: how many OTHER cards in `player`'s graveyard the
+/// per-turn slot announced in `announcement` could still authorize this turn:
+/// the value a cast gives up by spending that slot now. `0` for an unlimited
+/// grant or one that is not on offer. An engine fact for AI consumers.
+pub fn graveyard_slot_demand(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    announcement: &crate::types::game_state::AnnouncedGraveyardPermission,
+) -> u32 {
+    let Some(grant) = graveyard_permission_candidates(state, player, object_id)
+        .into_iter()
+        .find(|candidate| candidate.permission == announcement.permission)
+    else {
+        return 0;
+    };
+    if !grant.is_bounded() {
+        return 0;
+    }
+    let Some(graveyard) = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| &p.graveyard)
+    else {
+        return 0;
+    };
+    graveyard
+        .iter()
+        .copied()
+        .filter(|&other| other != object_id)
+        .filter(|&other| {
+            graveyard_permission_candidates(state, player, other)
+                .iter()
+                .any(|candidate| candidate.permission == announcement.permission)
+                && announcement.slot_type.is_none_or(|slot| {
+                    state
+                        .objects
+                        .get(&other)
+                        .is_some_and(|obj| obj.card_types.core_types.contains(&slot))
+                })
+        })
+        .count() as u32
+}
+
+/// CR 601.2a + CR 601.2f: can some announced way to cast `object_id` from the
+/// graveyard be paid now with automatic mana payment? When several graveyard
+/// permissions could authorize the cast there is no single exact cost
+/// (`effective_spell_cost` is `None` until one is announced), so the cast is
+/// payable when any option of its announcement menu is. `false` off the
+/// graveyard, or with no option.
+pub fn graveyard_cast_payable_by_some_option(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    probe: Option<&PriorityCastProbe>,
+) -> bool {
+    if state
+        .objects
+        .get(&object_id)
+        .is_none_or(|obj| obj.zone != Zone::Graveyard)
+    {
+        return false;
+    }
+    // Each option is judged on its own prepared cast, as it will be cast (for
+    // Bestow, the bestowed Aura, CR 702.103b), so a mana restriction that reads
+    // the spell's types sees the right ones.
+    casting_candidates(state, player, object_id)
+        .into_iter()
+        .filter(|candidate| candidate.announcement.is_some())
+        .any(|candidate| {
+            let Ok(option) = prepare_casting_variant_on_face(
+                state,
+                player,
+                object_id,
+                candidate.variant,
+                CastingVariantFace::Current,
+                CastingMode::Actual,
+                candidate.announcement.as_ref(),
+            ) else {
+                return false;
+            };
+            can_cast_prepared_now_with_probe(
+                &option.transformed_state,
+                player,
+                &option.prepared,
+                probe,
+            ) && can_pay_cost_after_auto_tap_with_probe(
+                &option.transformed_state,
+                player,
+                object_id,
+                &option.prepared.mana_cost,
+                probe,
+            )
+        })
+}
+
 #[cfg(test)]
 mod pool_payability_tests {
     use std::sync::Arc;
@@ -7002,6 +7774,7 @@ fn prepare_casting_variant(
     object_id: ObjectId,
     variant: CastingVariant,
     mode: CastingMode,
+    announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
 ) -> Result<PreparedCastingVariant, EngineError> {
     let mut transformed_state = state.clone();
     match variant {
@@ -7078,7 +7851,7 @@ fn prepare_casting_variant(
         | CastingVariant::Fuse
         | CastingVariant::Surge => {}
     }
-    let prepared = prepare_spell_cast_with_variant_override_inner(
+    let prepared = prepare_spell_cast_announced(
         &transformed_state,
         player,
         object_id,
@@ -7086,6 +7859,7 @@ fn prepare_casting_variant(
         None,
         None,
         mode,
+        announcement,
     )?;
     Ok(PreparedCastingVariant {
         transformed_state,
@@ -7103,6 +7877,7 @@ fn prepare_casting_variant_on_face(
     variant: CastingVariant,
     face: CastingVariantFace,
     mode: CastingMode,
+    announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
 ) -> Result<PreparedCastingVariant, EngineError> {
     let fuse_pair = is_uncommitted_hand_fuse_pair(state, object_id);
     let valid = match face {
@@ -7145,9 +7920,9 @@ fn prepare_casting_variant_on_face(
             // object. Record it so a paused cast cannot re-open the prompt.
             object.cast_face_committed = true;
         }
-        prepare_casting_variant(&projected, player, object_id, variant, mode)
+        prepare_casting_variant(&projected, player, object_id, variant, mode, announcement)
     } else {
-        prepare_casting_variant(state, player, object_id, variant, mode)
+        prepare_casting_variant(state, player, object_id, variant, mode, announcement)
     }
 }
 
@@ -7172,12 +7947,16 @@ fn casting_variant_choice_set(
     object_id: ObjectId,
     probe: Option<&PriorityCastProbe>,
 ) -> CastingVariantChoiceSet {
-    let mut candidates = casting_variant_candidates(state, player, object_id);
+    let mut candidates = casting_candidates(state, player, object_id);
     candidates.dedup();
     let had_multiple_candidates = candidates.len() > 1;
     let mut options = Vec::new();
 
-    for variant in candidates {
+    for CastingCandidate {
+        variant,
+        announcement,
+    } in candidates
+    {
         let faces: &[CastingVariantFace] = if is_uncommitted_hand_fuse_pair(state, object_id) {
             match variant {
                 CastingVariant::Normal | CastingVariant::HandPermission { .. } => {
@@ -7201,6 +7980,7 @@ fn casting_variant_choice_set(
                 variant,
                 face,
                 CastingMode::Actual,
+                announcement.as_ref(),
             ) else {
                 continue;
             };
@@ -7212,17 +7992,82 @@ fn casting_variant_choice_set(
             ) {
                 continue;
             }
-            options.push(CastingVariantChoiceOption {
-                variant: candidate.prepared.casting_variant,
-                face,
-                mana_cost: candidate.prepared.mana_cost,
-            });
+            options.push(casting_variant_choice_option(player, &candidate, face));
         }
     }
 
     CastingVariantChoiceSet {
         options,
         had_multiple_candidates,
+    }
+}
+
+/// CR 601.2b + CR 601.2f-h: the menu entry for a prepared casting option: its
+/// method, face and mana cost, and the non-mana part of an alternative cost the
+/// option pays (Blitz's "Discard a card", Bestow's "Collect evidence 6"), read
+/// from the same authority payment charges (`alternative_cost_residual`), so the
+/// menu shows what the option will actually cost.
+fn casting_variant_choice_option(
+    player: PlayerId,
+    candidate: &PreparedCastingVariant,
+    face: CastingVariantFace,
+) -> CastingVariantChoiceOption {
+    CastingVariantChoiceOption {
+        variant: candidate.prepared.casting_variant,
+        face,
+        mana_cost: candidate.prepared.mana_cost.clone(),
+        additional_cost: casting_costs::alternative_cost_residual(
+            &candidate.transformed_state,
+            player,
+            candidate.prepared.object_id,
+            candidate.prepared.casting_variant,
+        )
+        .map(|cost| {
+            resolved_cost_for_display(
+                &candidate.transformed_state,
+                player,
+                candidate.prepared.object_id,
+                cost,
+            )
+        }),
+        authority: candidate
+            .prepared
+            .graveyard_authority
+            .as_ref()
+            .map(|resolution| resolution.authority().choice()),
+    }
+}
+
+/// CR 601.2f-h: an option's non-mana cost with each life amount the engine can
+/// already know resolved to the number paid ("pay life equal to its mana
+/// value" shows its value), so the menu displays the engine's figure and
+/// computes nothing. An amount that depends on a choice not made yet (an
+/// unannounced X, the spell's targets) keeps its expression, and the menu
+/// shows the unquantified cost instead of a made-up number.
+fn resolved_cost_for_display(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: AbilityCost,
+) -> AbilityCost {
+    match cost {
+        AbilityCost::PayLife { amount } => {
+            let amount = match amount {
+                QuantityExpr::Fixed { .. } => amount,
+                other => super::quantity::try_resolve_quantity_in_source_context(
+                    state, &other, player, object_id,
+                )
+                .map_or(other, |value| QuantityExpr::Fixed { value }),
+            };
+            AbilityCost::PayLife { amount }
+        }
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs
+                .into_iter()
+                .map(|cost| resolved_cost_for_display(state, player, object_id, cost))
+                .collect(),
+        },
+        other => other,
     }
 }
 
@@ -7265,6 +8110,7 @@ pub fn project_evoke_entry_state(
         object_id,
         CastingVariant::Evoke,
         CastingMode::Display,
+        None,
     )
     .ok()?;
     let mut events = Vec::new();
@@ -7291,15 +8137,58 @@ pub fn project_evoke_entry_state(
     Some(transformed_state)
 }
 
+/// One casting option before it is prepared: its method and, for a cast
+/// through a graveyard permission, the permission it is announced under
+/// (CR 601.2a + CR 601.2b).
+#[derive(Debug, Clone, PartialEq)]
+struct CastingCandidate {
+    variant: CastingVariant,
+    announcement: Option<crate::types::game_state::AnnouncedGraveyardPermission>,
+}
+
+impl CastingCandidate {
+    fn plain(variant: CastingVariant) -> Self {
+        Self {
+            variant,
+            announcement: None,
+        }
+    }
+
+    fn announced(
+        variant: CastingVariant,
+        announcement: crate::types::game_state::AnnouncedGraveyardPermission,
+    ) -> Self {
+        Self {
+            variant,
+            announcement: Some(announcement),
+        }
+    }
+}
+
 fn casting_variant_candidates(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
 ) -> Vec<CastingVariant> {
+    casting_candidates(state, player, object_id)
+        .into_iter()
+        .map(|candidate| candidate.variant)
+        .collect()
+}
+
+fn casting_candidates(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<CastingCandidate> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
     let mut candidates = Vec::new();
+    // The graveyard-permission options, announced, and where they go among the
+    // other candidates.
+    let mut graveyard_permission_options = Vec::new();
+    let mut graveyard_permission_index = 0;
 
     // CR 601.2b + CR 702.102b: NON-Fuse alternative-cost candidate discovery
     // (Dash/Evoke/Overload/Freerunning/Prowl/Surge/Emerge/Blitz/Spectacle below)
@@ -7346,25 +8235,42 @@ fn casting_variant_candidates(
         if super::keywords::effective_disturb_cost(state, object_id).is_some() {
             candidates.push(CastingVariant::Disturb);
         }
-        if let Some(source) = graveyard_permission_source(state, player, object_id) {
-            let slot_type = if source.frequency == CastFrequency::OncePerTurnPerPermanentType {
-                let slots = available_permanent_type_slots(state, source.source_id, object_id);
-                if slots.len() == 1 {
-                    Some(slots[0])
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            candidates.push(CastingVariant::GraveyardPermission {
-                source: source.source_id,
-                frequency: source.frequency,
-                slot_type,
-                graveyard_destination_replacement: source.graveyard_destination_replacement,
-            });
+        // CR 601.2a + CR 601.2b + CR 118.9b: a graveyard permission contributes
+        // one option per casting method it authorizes and per permission that
+        // authorizes it: the player announces which permission they are using
+        // (Muldrotha, 2020-11-10 ruling). The printed-cost options are the
+        // permissions that leave the method open (`GraveyardPermission`); a
+        // "using its blitz ability" permission never yields one. The card's own
+        // Blitz / Bestow casts from the graveyard are their own options, one per
+        // permission that admits the method (and per slot for a per-type one).
+        //
+        // When the choice is only the printed cost against one alternative
+        // under the same one permission, the alternative is not added as a
+        // second option: the cast handler's two-way `AlternativeCastChoice`
+        // makes that choice and shows the alternative's non-mana cost. The
+        // printed option then stands for both, and castability judges it by
+        // either route (`graveyard_permission_option_folds_rider`).
+        let printed: Vec<_> = graveyard_authority_announcements(state, player, object_id, None)
+            .into_iter()
+            .map(|authority| CastingCandidate::announced(authority.variant, authority.announcement))
+            .collect();
+        let riders = graveyard_rider_candidates(state, player, object_id, obj);
+        let timed_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
+        let fold_rider = match (printed.as_slice(), riders.as_slice()) {
+            ([printed], [rider]) => {
+                candidates.is_empty()
+                    && !timed_alt_cost
+                    && printed.announcement.as_ref().map(|a| a.permission)
+                        == rider.announcement.as_ref().map(|a| a.permission)
+            }
+            _ => false,
+        };
+        graveyard_permission_index = candidates.len();
+        graveyard_permission_options.extend(printed);
+        if !fold_rider {
+            graveyard_permission_options.extend(riders);
         }
-        if has_graveyard_timed_alt_cost_permission(state, obj, player) {
+        if timed_alt_cost {
             candidates.push(CastingVariant::Normal);
         }
     }
@@ -7528,12 +8434,22 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Dash);
     }
 
-    // CR 702.152a: Blitz is an opt-in alternative cost from hand; surface it as a
-    // candidate so the gate offers it (and so it is reachable when the printed
-    // cost is unaffordable). Read the *effective* spell keywords so a Blitz cost
-    // granted by a static (CR 604.1) is honored, not just printed Blitz.
+    // CR 702.152a: "Blitz [cost]" means "You may cast this card by paying [cost]
+    // rather than its mana cost" — an opt-in alternative cost (CR 118.9). Surface
+    // it as a candidate so the gate offers it (and so it is reachable when the
+    // printed cost is unaffordable). Read the *effective* spell keywords so a
+    // Blitz cost granted by a static (CR 604.1) is honored, not just printed Blitz.
     // CR 702.152b: only one Blitz may be applied to a spell, so the dedup-by-kind
     // `effective_spell_keywords` is the correct (single-instance) collector here.
+    //
+    // The zone gate here is HAND-ONLY, mirroring Bestow/Mutate/Warp. Blitz itself
+    // carries no zone restriction, but a graveyard blitz (Sabin, Master Monk /
+    // Tenacious Underdog: "You may cast this card from your graveyard using its
+    // blitz ability.") is its own candidate, one per permission that admits it
+    // (`graveyard_rider_candidates`, above), priced by the Blitz offer under that
+    // permission (`blitz_offer`). Pushing Blitz as
+    // a second candidate here would surface a spurious two-option prompt whose
+    // printed-cost option that permission never granted (CR 118.9a).
     if obj.zone == Zone::Hand
         && effective_spell_keywords(state, player, object_id)
             .iter()
@@ -7615,19 +8531,17 @@ fn casting_variant_candidates(
                 candidates.push(CastingVariant::Warp);
             }
             // CR 702.103a + CR 303.4a: Bestow — offered only when the bestow keyword
-            // is present AND a legal creature target exists (parity with the Bestow
-            // offer block's `has_legal_creature_target` gate).
+            // is present AND the bestowed Aura has a legal target, judged on the
+            // bestowed form by the bestow offer's own authority
+            // (`bestowed_aura_targets`, CR 702.103b).
             if effective_keywords
                 .iter()
                 .any(|k| matches!(k, crate::types::keywords::Keyword::Bestow(_)))
+                && bestowed_form(state, object_id).is_some_and(|bestowed| {
+                    !bestowed_aura_targets(&bestowed, player, object_id).is_empty()
+                })
             {
-                let creature_filter =
-                    TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
-                if !targeting::find_legal_targets(state, &creature_filter, player, object_id)
-                    .is_empty()
-                {
-                    candidates.push(CastingVariant::Bestow);
-                }
+                candidates.push(CastingVariant::Bestow);
             }
             // CR 702.140a: Mutate — keyword present AND a legal "non-Human creature
             // you own" merge target exists (parity with the Mutate offer block).
@@ -7701,6 +8615,13 @@ fn casting_variant_candidates(
         }
     }
 
+    let mut candidates: Vec<CastingCandidate> = candidates
+        .into_iter()
+        .map(CastingCandidate::plain)
+        .collect();
+    let rest = candidates.split_off(graveyard_permission_index.min(candidates.len()));
+    candidates.extend(graveyard_permission_options);
+    candidates.extend(rest);
     candidates
 }
 
@@ -7712,6 +8633,33 @@ fn prepare_spell_cast_with_variant_override_inner(
     latched_alt_cost: Option<crate::types::mana::ManaCost>,
     casting_permission_index_override: Option<CastingPermissionIndex>,
     mode: CastingMode,
+) -> Result<PreparedSpellCast, EngineError> {
+    prepare_spell_cast_announced(
+        state,
+        player,
+        object_id,
+        variant_override,
+        latched_alt_cost,
+        casting_permission_index_override,
+        mode,
+        None,
+    )
+}
+
+/// `prepare_spell_cast_with_variant_override_inner` for a cast announced under
+/// a specific graveyard permission (CR 601.2a + CR 601.2b; see
+/// `resolve_graveyard_authority`). `None` announces none: a sole usable
+/// permission is still found, and several are refused as ambiguous.
+#[allow(clippy::too_many_arguments)]
+fn prepare_spell_cast_announced(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant_override: Option<CastingVariant>,
+    latched_alt_cost: Option<crate::types::mana::ManaCost>,
+    casting_permission_index_override: Option<CastingPermissionIndex>,
+    mode: CastingMode,
+    announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
 ) -> Result<PreparedSpellCast, EngineError> {
     let obj = state
         .objects
@@ -7737,12 +8685,10 @@ fn prepare_spell_cast_with_variant_override_inner(
             KeywordKind::Escape,
         );
     let has_mayhem = mayhem_castable_from_graveyard(state, player, object_id);
-    // CR 601.2a + CR 117.1c: Graveyard cast via static permission (Lurrus, etc.).
-    let graveyard_permission_src = if obj.zone == Zone::Graveyard && state.active_player == player {
-        graveyard_permission_source(state, player, object_id)
-    } else {
-        None
-    };
+    // CR 601.2a + CR 601.3: A graveyard grant's own condition controls whose
+    // turn permits the cast. The exact permission is resolved once the casting
+    // method is known (see `graveyard_authority`).
+    let graveyard_permission_route = obj.zone == Zone::Graveyard;
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
     let has_hand_alt_cost = has_hand_alt_cost_permission(state, obj, player);
     // CR 608.2g: A free-cast window (Invoke Calamity) or targeted
@@ -7829,6 +8775,15 @@ fn prepare_spell_cast_with_variant_override_inner(
         ));
     }
 
+    // CR 601.2a: an announcement naming a grant that shares its source's
+    // per-turn slot with another bounded grant is refused as unsupported (such
+    // grants are never offered; see `graveyard_permission_candidates`).
+    if let Some(announced) = announcement.filter(|_| graveyard_permission_route) {
+        if graveyard_grant_shares_source_slot(state, player, announced.permission) {
+            return Err(GraveyardAuthorityError::SharedSourceSlot.into());
+        }
+    }
+
     // The ADMISSION decision itself lives in `castable_from_current_zone`; the bindings
     // above are kept because the cost paths below consume them, so those predicates are
     // evaluated twice and the decision exists once.
@@ -7837,6 +8792,30 @@ fn prepare_spell_cast_with_variant_override_inner(
             "Card is not in a castable zone".to_string(),
         ));
     }
+
+    // CR 601.2a + CR 601.2b + CR 110.4: a graveyard cast for the card's own
+    // alternative cost commits to the permission announced for it (or the only
+    // one that could authorize it), refused here, before any cost is paid, when
+    // that permission can't be used: gone, restricted to another method, or a
+    // per-type permission with no slot announced (Boon Satyr bestowed under
+    // Encroaching Mycosynth: artifact AND enchantment). The Bestow handler
+    // reverts its Aura form when this errors.
+    let rider_graveyard_authority =
+        match variant_override.filter(|variant| variant.is_independent_alternative_cost_rider()) {
+            Some(rider)
+                if graveyard_permission_route
+                    && graveyard_permission_source(state, player, object_id).is_some() =>
+            {
+                Some(resolve_graveyard_authority(
+                    state,
+                    player,
+                    object_id,
+                    Some(rider),
+                    announcement,
+                )?)
+            }
+            _ => None,
+        };
 
     // CR 601.3 + CR 101.2 + CR 109.5: "Can't" beats "can" — check CantCastFrom statics.
     // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
@@ -8041,20 +9020,32 @@ fn prepare_spell_cast_with_variant_override_inner(
         None
     };
 
-    // CR 702.152a: Blitz — when casting from hand with Keyword::Blitz, the blitz
-    // mana cost replaces the printed cost (opt-in via `variant_override`). Read
-    // the *effective* spell keywords so a Blitz cost granted by a static
+    // CR 702.152a: Blitz — when casting with Keyword::Blitz, the blitz mana
+    // sub-cost replaces the printed cost (opt-in via `variant_override`) and any
+    // non-mana residual ("Discard a card") is routed through
+    // `pay_additional_cost` by the Blitz branch in `casting_costs.rs`. Read the
+    // *effective* spell keywords so a Blitz cost granted by a static
     // (CR 604.1) is honored; CR 702.152b makes Blitz single-instance, so the
     // dedup-by-kind collector is correct.
-    let blitz_cost = if obj.zone == Zone::Hand {
+    // CR 702.152a + CR 601.2a: announced from the hand, or from the graveyard
+    // under the permission resolved for this Blitz cast above.
+    let blitz_cost = if obj.zone == Zone::Hand
+        || (obj.zone == Zone::Graveyard && rider_graveyard_authority.is_some())
+    {
         effective_spell_keywords_for(state, player, object_id, is_fuse_variant)
             .iter()
             .find_map(|k| match k {
-                crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
+                crate::types::keywords::Keyword::Blitz(cost) => {
+                    Some(split_blitz_cost_components(cost))
+                }
                 _ => None,
             })
     } else {
         None
+    };
+    let (blitz_cost, blitz_non_mana_cost) = match blitz_cost {
+        Some((mana, non_mana)) => (mana, non_mana),
+        None => (None, None),
     };
 
     // CR 702.137a: Spectacle — when casting from hand with Keyword::Spectacle, the
@@ -8189,6 +9180,10 @@ fn prepare_spell_cast_with_variant_override_inner(
             .iter()
             .any(|p| matches!(p, crate::types::ability::CastingPermission::Foretold { .. }));
 
+    // CR 601.2a + CR 601.2b: a cast that names no method from the graveyard
+    // falls back to a graveyard permission last, after every keyword route that
+    // is its own authority. Resolved only when reached (see below).
+    let mut default_graveyard_authority = None;
     let casting_variant = variant_override.unwrap_or_else(|| {
         if is_suspend_cast {
             CastingVariant::Suspend
@@ -8218,33 +9213,68 @@ fn prepare_spell_cast_with_variant_override_inner(
             CastingVariant::JumpStart
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
-        } else if let Some(source) = graveyard_permission_src {
-            // CR 110.4: For OncePerTurnPerPermanentType permissions, auto-pick
-            // the slot when only one is available. When multiple slots are
-            // available (multi-type card), leave `None` — the engine will
-            // prompt the player to choose via `ChoosePermanentTypeSlot`.
-            let slot_type = if source.frequency == CastFrequency::OncePerTurnPerPermanentType {
-                let slots = available_permanent_type_slots(state, source.source_id, object_id);
-                if slots.len() == 1 {
-                    Some(slots[0])
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            CastingVariant::GraveyardPermission {
-                source: source.source_id,
-                frequency: source.frequency,
-                slot_type,
-                graveyard_destination_replacement: source.graveyard_destination_replacement,
-            }
+        } else if let Some(resolution) = graveyard_permission_route
+            .then(|| resolve_graveyard_authority(state, player, object_id, None, announcement))
+            .filter(|resolution| resolution != &Err(GraveyardAuthorityError::NoPermission))
+        {
+            let variant = resolution
+                .as_ref()
+                .map_or(CastingVariant::Normal, |resolution| {
+                    resolution.authority().variant
+                });
+            default_graveyard_authority = Some(resolution);
+            variant
         } else if warp_cost.is_some() {
             CastingVariant::Warp
         } else {
             CastingVariant::Normal
         }
     });
+    // CR 601.2a + CR 601.2b + CR 118.9b: the graveyard permission this cast is
+    // announced under. A `GraveyardPermission` cast is a printed-cost cast
+    // committed to that permission: a stale or hand-built option naming a grant
+    // that is gone, changed, or restricted to another casting method ("using its
+    // blitz ability") is refused here, before any cost is paid. Only the
+    // permission-backed routes resolve one; Escape, Flashback and the other
+    // graveyard keywords are their own authority.
+    let graveyard_authority = match (default_graveyard_authority, casting_variant) {
+        (Some(resolution), _) => Some(resolution?),
+        (
+            None,
+            CastingVariant::GraveyardPermission {
+                source, slot_type, ..
+            },
+        ) if obj.zone == Zone::Graveyard => {
+            let named;
+            let requested = match announcement {
+                Some(announced) => Some(announced),
+                None => {
+                    named = graveyard_announcement_for_named_source(
+                        state, player, object_id, source, slot_type,
+                    )
+                    .ok_or(GraveyardAuthorityError::MethodNotAdmitted)?;
+                    Some(&named)
+                }
+            };
+            let resolution =
+                resolve_graveyard_authority(state, player, object_id, None, requested)?;
+            if resolution.authority().announcement.permission.source != source {
+                return Err(GraveyardAuthorityError::Stale.into());
+            }
+            Some(resolution)
+        }
+        (None, _) => rider_graveyard_authority,
+    };
+    // The printed-cost variant carries the resolved slot (a sole available
+    // slot is filled in without asking).
+    let casting_variant = match &graveyard_authority {
+        Some(resolution)
+            if matches!(casting_variant, CastingVariant::GraveyardPermission { .. }) =>
+        {
+            resolution.authority().variant
+        }
+        _ => casting_variant,
+    };
     // CR 702.96a + CR 604.1: read the overload cost from effective keywords so a
     // granted Overload (CastWithKeyword) substitutes its cost, mirroring the
     // Evoke/Emerge effective-keyword cost reads below.
@@ -8615,12 +9645,21 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
-    // CR 702.152a: substitute the blitz mana cost only on the blitz path (opt-in).
+    // CR 702.152a: substitute the blitz mana sub-cost only on the blitz path (opt-in).
     let effective_blitz_cost_for_path = if casting_variant == CastingVariant::Blitz {
         blitz_cost
     } else {
         None
     };
+    // CR 702.152a + CR 601.2h: Mirror of `pure_non_mana_bestow` for Blitz. A
+    // hypothetical blitz cost that is entirely non-mana would zero the mana cost
+    // so the residual is routed through the additional-cost path. Both shipping
+    // em-dash blitz cards pair a mana sub-cost with their residual, so this stays
+    // `false` for them; the axis is kept symmetric with the other compound
+    // alternative costs.
+    let pure_non_mana_blitz = casting_variant == CastingVariant::Blitz
+        && blitz_non_mana_cost.is_some()
+        && effective_blitz_cost_for_path.is_none();
     // CR 702.137a: substitute the spectacle mana cost only on the spectacle path.
     let effective_spectacle_cost_for_path = if casting_variant == CastingVariant::Spectacle {
         spectacle_cost
@@ -8661,6 +9700,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         || pure_non_mana_flashback
         || pure_non_mana_evoke
         || pure_non_mana_bestow
+        || pure_non_mana_blitz
         || casting_variant == CastingVariant::Plot
     {
         crate::types::mana::ManaCost::NoCost
@@ -8916,6 +9956,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         cast_timing_permission,
         origin_zone,
         payment_mode: CastPaymentMode::Auto,
+        graveyard_authority,
     })
 }
 
@@ -13612,7 +14653,7 @@ pub fn handle_bestow_cost_choice_with_payment_mode(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
-    _card_id: CardId,
+    card_id: CardId,
     decision: crate::types::actions::AlternativeCastDecision,
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
@@ -13655,7 +14696,17 @@ pub fn handle_bestow_cost_choice_with_payment_mode(
         prepared.payment_mode = payment_mode;
         return continue_with_prepared(state, player, prepared, events);
     }
-    continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+    // CR 110.4: the printed creature cast may come from the graveyard (Muldrotha
+    // beside a bestow card), so it takes the same permanent-type slot choice as
+    // any other printed graveyard cast — an enchantment creature has two.
+    continue_graveyard_cast_with_slot_choice(
+        state,
+        player,
+        object_id,
+        card_id,
+        payment_mode,
+        events,
+    )
 }
 
 /// CR 702.140a: Public entry-point for the Mutate cost choice (auto payment mode).
@@ -14045,7 +15096,7 @@ pub fn handle_blitz_cost_choice_with_payment_mode(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
-    _card_id: CardId,
+    card_id: CardId,
     decision: crate::types::actions::AlternativeCastDecision,
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
@@ -14065,7 +15116,17 @@ pub fn handle_blitz_cost_choice_with_payment_mode(
         prepared.payment_mode = payment_mode;
         return continue_with_prepared(state, player, prepared, events);
     }
-    continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+    // CR 110.4: the printed-cost cast may come from the graveyard (an
+    // unconstrained permission beside a blitz card), so it takes the same
+    // permanent-type slot choice as any other printed graveyard cast.
+    continue_graveyard_cast_with_slot_choice(
+        state,
+        player,
+        object_id,
+        card_id,
+        payment_mode,
+        events,
+    )
 }
 
 /// CR 702.137a: Resolve the player's Spectacle cost choice. Mirrors
@@ -14160,6 +15221,7 @@ pub fn handle_surge_cost_choice_with_payment_mode(
                 object_id,
                 option.variant,
                 option.face,
+                None,
                 payment_mode,
                 events,
             )
@@ -14181,6 +15243,9 @@ fn continue_cast_from_prepared(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut prepared = prepare_spell_cast(state, player, object_id)?;
+    if let Some(prompt) = graveyard_slot_prompt(player, &prepared, payment_mode) {
+        return Ok(prompt);
+    }
     if prepared.casting_variant == CastingVariant::Disturb {
         return continue_cast_with_alternative_spell_face(
             state,
@@ -14441,12 +15506,14 @@ fn restore_face_down_cast_object(state: &mut GameState, object_id: ObjectId) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn continue_cast_with_variant(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     variant: CastingVariant,
     face: CastingVariantFace,
+    announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -14457,8 +15524,40 @@ fn continue_cast_with_variant(
         variant,
         face,
         CastingMode::Actual,
+        announcement,
     )?;
     continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
+}
+
+/// CR 110.4 + CR 601.2a: a printed-cost cast announced under a per-type
+/// graveyard permission (Muldrotha) with several slots available asks which
+/// permanent type it is cast as ("choose one as you play it") before it
+/// goes on: the prompt carries the announced permission, so the answer is
+/// bound to it.
+fn graveyard_slot_prompt(
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    payment_mode: CastPaymentMode,
+) -> Option<WaitingFor> {
+    let Some(GraveyardAuthorityResolution::AwaitingSlot {
+        authority,
+        available,
+    }) = &prepared.graveyard_authority
+    else {
+        return None;
+    };
+    let CastingVariant::GraveyardPermission { source, .. } = authority.variant else {
+        return None;
+    };
+    Some(WaitingFor::ChoosePermanentTypeSlot {
+        player,
+        object_id: prepared.object_id,
+        card_id: prepared.card_id,
+        source,
+        payment_mode,
+        available_slots: available.clone(),
+        permission: Some(authority.announcement.clone()),
+    })
 }
 
 fn continue_with_prepared_casting_variant(
@@ -14468,28 +15567,8 @@ fn continue_with_prepared_casting_variant(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if let CastingVariant::GraveyardPermission {
-        source,
-        frequency: CastFrequency::OncePerTurnPerPermanentType,
-        slot_type: None,
-        ..
-    } = candidate.prepared.casting_variant
-    {
-        let slots = available_permanent_type_slots(
-            &candidate.transformed_state,
-            source,
-            candidate.prepared.object_id,
-        );
-        if slots.len() > 1 {
-            return Ok(WaitingFor::ChoosePermanentTypeSlot {
-                player,
-                object_id: candidate.prepared.object_id,
-                card_id: candidate.prepared.card_id,
-                source,
-                payment_mode,
-                available_slots: slots,
-            });
-        }
+    if let Some(prompt) = graveyard_slot_prompt(player, &candidate.prepared, payment_mode) {
+        return Ok(prompt);
     }
 
     let PreparedCastingVariant {
@@ -14545,6 +15624,20 @@ pub fn handle_casting_variant_choice_with_payment_mode(
     let option = options
         .get(index)
         .ok_or_else(|| EngineError::InvalidAction("Invalid cast variant choice".to_string()))?;
+    let candidate = prepare_casting_variant_on_face(
+        state,
+        player,
+        object_id,
+        option.variant,
+        option.face,
+        CastingMode::Actual,
+        option
+            .authority
+            .as_ref()
+            .map(|authority| &authority.announcement),
+    )?;
+    // CR 601.2a: prepared first, so an announcement the resolver refuses
+    // (a stale or shared-slot grant) says why.
     if !casting_variant_choice_set(state, player, object_id, None)
         .options
         .iter()
@@ -14554,19 +15647,7 @@ pub fn handle_casting_variant_choice_with_payment_mode(
             "Chosen cast variant is no longer legal".to_string(),
         ));
     }
-    let candidate = prepare_casting_variant_on_face(
-        state,
-        player,
-        object_id,
-        option.variant,
-        option.face,
-        CastingMode::Actual,
-    )?;
-    let fresh = CastingVariantChoiceOption {
-        variant: candidate.prepared.casting_variant,
-        face: option.face,
-        mana_cost: candidate.prepared.mana_cost.clone(),
-    };
+    let fresh = casting_variant_choice_option(player, &candidate, option.face);
     if fresh != *option
         || !can_cast_prepared_now_with_probe(
             &candidate.transformed_state,
@@ -15491,6 +16572,22 @@ pub fn handle_cast_spell(
     )
 }
 
+/// CR 601.2b + CR 118.9d: can an alternative cost's mana part be paid, counting a
+/// matching Defiler's optional reduction? CR 118.9d applies cost reductions to
+/// the alternative cost being paid, and a Defiler's "you may pay 2 life ... cost
+/// {C} less" is one of them, so an alternative cost affordable only with it is
+/// still on offer. Mirrors the castability check in `can_cast_prepared_now`.
+fn alternative_cost_mana_affordable(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    mana: &ManaCost,
+) -> bool {
+    can_pay_cost_after_auto_tap(state, player, object_id, mana)
+        || casting_costs::defiler_reduced_cost(state, player, object_id, mana)
+            .is_some_and(|reduced| can_pay_cost_after_auto_tap(state, player, object_id, &reduced))
+}
+
 fn normal_cast_choice_cost_and_affordability(
     state: &GameState,
     player: PlayerId,
@@ -15595,9 +16692,9 @@ fn evoke_cast_choice_eligibility(
         apply_cost_modifiers_to_base(state, player, object_id, mana_cost.clone())
             .unwrap_or_else(|| mana_cost.clone())
     });
-    let evoke_mana_affordable = alternative_cost
-        .as_ref()
-        .is_none_or(|mana_cost| can_pay_cost_after_auto_tap(state, player, object_id, mana_cost));
+    let evoke_mana_affordable = alternative_cost.as_ref().is_none_or(|mana_cost| {
+        alternative_cost_mana_affordable(state, player, object_id, mana_cost)
+    });
     let evoke_non_mana_affordable = evoke_non_mana_part
         .as_ref()
         .is_none_or(|cost| cost.is_payable(state, player, object_id));
@@ -15753,6 +16850,10 @@ pub fn handle_cast_spell_with_payment_mode(
                 object_id,
                 option.variant,
                 option.face,
+                option
+                    .authority
+                    .as_ref()
+                    .map(|authority| &authority.announcement),
                 payment_mode,
                 events,
             );
@@ -15787,6 +16888,7 @@ pub fn handle_cast_spell_with_payment_mode(
             object_id,
             option.variant,
             option.face,
+            None,
             payment_mode,
             events,
         );
@@ -15830,6 +16932,7 @@ pub fn handle_cast_spell_with_payment_mode(
             object_id,
             variant,
             face,
+            None,
             payment_mode,
             events,
         );
@@ -16010,7 +17113,7 @@ pub fn handle_cast_spell_with_payment_mode(
                 let normal_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let dash_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &dash_eff);
+                    alternative_cost_mana_affordable(state, player, object_id, &dash_eff);
                 if normal_affordable && dash_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
@@ -16040,59 +17143,75 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 702.152a + CR 118.9: Blitz — opt-in pure-mana alternative cost. When a
-    // hand card has Keyword::Blitz and both the printed and blitz costs are
-    // affordable, present the choice; auto-route when only blitz is payable.
+    // CR 702.152a + CR 118.9: Blitz — opt-in alternative cost. When the card has
+    // Keyword::Blitz and both the printed and blitz costs are affordable, present
+    // the choice; auto-route when only blitz is payable.
+    // CR 702.152a + CR 601.2a: offered from the hand by default and from the
+    // GRAVEYARD when a permission lets the card be cast from there (Sabin, Master
+    // Monk / Tenacious Underdog: "You may cast this card from your graveyard using
+    // its blitz ability."). From the graveyard the permission grants only the
+    // blitz cast, so there is no printed-cost branch to compare against and the
+    // blitz path is taken directly. Mirrors the Bestow zone gate.
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand {
-            // CR 604.1: honor a Blitz cost granted by a static, not only printed
-            // Blitz. CR 702.152b makes Blitz single-instance, so the dedup-by-kind
-            // `effective_spell_keywords` collector is correct here.
-            if let Some(blitz_cost) = effective_spell_keywords(state, player, object_id)
-                .iter()
-                .find_map(|k| match k {
-                    crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
-                    _ => None,
-                })
-            {
-                // CR 601.2f: affordability and displayed costs reflect active
-                // cost modifiers, applied to both the printed and blitz costs.
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
-                let blitz_eff =
-                    apply_cost_modifiers_to_base(state, player, object_id, blitz_cost.clone())
-                        .unwrap_or(blitz_cost);
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
-                let blitz_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &blitz_eff);
-                if normal_affordable && blitz_affordable {
-                    return Ok(WaitingFor::AlternativeCastChoice {
-                        player,
-                        object_id,
-                        card_id,
-                        payment_mode,
-                        keyword: crate::types::game_state::AlternativeCastKeyword::Blitz,
-                        normal_cost,
-                        alternative_cost: Some(blitz_eff),
-                        alternative_additional_cost: None,
-                        alternative_additional_cost_description: None,
-                    });
-                }
-                if !normal_affordable && blitz_affordable {
-                    return handle_blitz_cost_choice_with_payment_mode(
-                        state,
-                        player,
-                        object_id,
-                        card_id,
-                        crate::types::actions::AlternativeCastDecision::Alternative,
-                        payment_mode,
-                        events,
-                    );
-                }
-                // Otherwise (normal-only or neither): fall through to normal cast.
+        if let Some(BlitzOffer {
+            mana: blitz_mana_eff,
+            residual: blitz_non_mana_part,
+            affordable: blitz_affordable,
+        }) = blitz_offer(state, player, object_id, obj, OfferRoute::Unannounced)
+        {
+            let normal_cost =
+                apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                    .unwrap_or_else(|| obj.mana_cost.clone());
+            // CR 601.2a: whether the PRINTED-cost cast is on offer at all.
+            // From hand it always is. From the graveyard it is only on offer
+            // when some permission authorizes an unconstrained cast (e.g.
+            // Muldrotha / Lurrus). A "using its blitz ability" permission
+            // (Sabin, Master Monk / Tenacious Underdog) does NOT: it grants
+            // the blitz cast only.
+            let from_hand = obj.zone == Zone::Hand;
+            let printed_cost_cast_allowed =
+                from_hand || graveyard_printed_cast_allowed(state, player, object_id);
+            // CR 118.9b: alternative costs are optional, so whenever BOTH the
+            // printed and blitz casts are legal and affordable the player must
+            // get the choice — including from the graveyard under an
+            // unconstrained permission.
+            let normal_affordable = printed_cost_cast_allowed
+                && can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+            if normal_affordable && blitz_affordable {
+                return Ok(WaitingFor::AlternativeCastChoice {
+                    player,
+                    object_id,
+                    card_id,
+                    payment_mode,
+                    keyword: crate::types::game_state::AlternativeCastKeyword::Blitz,
+                    normal_cost,
+                    alternative_cost: blitz_mana_eff,
+                    alternative_additional_cost: blitz_non_mana_part,
+                    alternative_additional_cost_description: None,
+                });
             }
+            if !normal_affordable && blitz_affordable {
+                return handle_blitz_cost_choice_with_payment_mode(
+                    state,
+                    player,
+                    object_id,
+                    card_id,
+                    crate::types::actions::AlternativeCastDecision::Alternative,
+                    payment_mode,
+                    events,
+                );
+            }
+            // CR 601.2a + CR 118.9b: a "using its blitz ability" permission
+            // authorizes ONLY the blitz cast. When blitz is unaffordable and
+            // no *separate* permission grants an unconstrained graveyard cast,
+            // refuse rather than falling through to a printed-cost graveyard
+            // cast the permission never granted. Mirrors the Bestow guard.
+            if !printed_cost_cast_allowed {
+                return Err(EngineError::InvalidAction(
+                    "No legal blitz cast from graveyard".to_string(),
+                ));
+            }
+            // Otherwise (normal-only or neither): fall through to normal cast.
         }
     }
 
@@ -16386,106 +17505,66 @@ pub fn handle_cast_spell_with_payment_mode(
     // a residual non-mana sub-cost (Collect evidence) carried as the additional
     // cost, paid via `pay_additional_cost` — mirrors the Evoke non-mana split.
     if let Some(obj) = state.objects.get(&object_id) {
-        let bestow_zone_ok = obj.zone == Zone::Hand
-            || (obj.zone == Zone::Graveyard
-                && graveyard_permission_source(state, player, object_id).is_some());
-        if bestow_zone_ok {
-            // CR 702.103a + CR 604.1: read bestow from effective keywords so a
-            // bestow cost granted by a static is honored, not just printed bestow.
-            if let Some(bestow_cost) = effective_spell_keywords(state, player, object_id)
-                .iter()
-                .find_map(|k| match k {
-                    crate::types::keywords::Keyword::Bestow(cost) => Some(cost.clone()),
-                    _ => None,
-                })
-            {
-                // CR 702.103a + CR 303.4a: bestow turns the spell into an Aura
-                // requiring a legal target. If no creature is legally enchantable,
-                // bestow can't be chosen — fall through (to the creature cast from
-                // hand, or to the graveyard-permission creature cast).
-                let creature_filter =
-                    TargetFilter::Typed(crate::types::ability::TypedFilter::creature());
-                let has_legal_creature_target =
-                    !targeting::find_legal_targets(state, &creature_filter, player, object_id)
-                        .is_empty();
-                // CR 601.2f-h + CR 118.9d: split the (possibly compound) bestow
-                // cost into its mana sub-cost and Collect-evidence residual, then
-                // apply active cost modifiers to the mana sub-cost.
-                let (bestow_mana_part, bestow_non_mana_part) =
-                    split_bestow_cost_components(&bestow_cost);
-                let bestow_mana_eff = bestow_mana_part.as_ref().map(|m| {
-                    apply_cost_modifiers_to_base(state, player, object_id, m.clone())
-                        .unwrap_or_else(|| m.clone())
+        if let Some(BestowOffer {
+            mana: bestow_mana_eff,
+            residual: bestow_non_mana_part,
+            offerable: bestow_offerable,
+        }) = bestow_offer(state, player, object_id, obj, OfferRoute::Unannounced)
+        {
+            // CR 601.2a: whether the PRINTED creature cast is on offer at all.
+            // From hand it always is. From the graveyard only when some
+            // permission authorizes an unconstrained cast (Muldrotha). Detective's
+            // Phoenix's own "using its bestow ability" rider grants the bestow
+            // cast only. Bestow twin of the Blitz block's gate.
+            let from_hand = obj.zone == Zone::Hand;
+            let printed_cost_cast_allowed =
+                from_hand || graveyard_printed_cast_allowed(state, player, object_id);
+            let (normal_cost, normal_cost_affordable) =
+                normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
+            let normal_affordable = printed_cost_cast_allowed && normal_cost_affordable;
+            // CR 118.9b + CR 702.103a: bestow is an optional alternative cost,
+            // so whenever both the printed and bestow casts are legal and
+            // affordable the player gets the choice — from the graveyard too.
+            if normal_affordable && bestow_offerable {
+                return Ok(WaitingFor::AlternativeCastChoice {
+                    player,
+                    object_id,
+                    card_id,
+                    payment_mode,
+                    keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
+                    normal_cost,
+                    alternative_cost: bestow_mana_eff,
+                    alternative_additional_cost: bestow_non_mana_part,
+                    alternative_additional_cost_description: None,
                 });
-                let bestow_mana_affordable = match &bestow_mana_eff {
-                    Some(m) => can_pay_cost_after_auto_tap(state, player, object_id, m),
-                    // CR 118.3: a zero mana cost is always payable.
-                    None => true,
-                };
-                // CR 118.3 + CR 601.2h: the non-mana residual (Collect evidence)
-                // must be independently payable for the bestow option to surface.
-                let bestow_non_mana_affordable = match &bestow_non_mana_part {
-                    Some(ab_cost) => ab_cost.is_payable(state, player, object_id),
-                    None => true,
-                };
-                let bestow_affordable = bestow_mana_affordable && bestow_non_mana_affordable;
-                // CR 601.2a: from the graveyard the "normal" creature cast is the
-                // graveyard-permission cast (handled by the variant pipeline). From
-                // the hand it's the printed creature cost. Compute the printed-cost
-                // affordability only when casting from hand — a graveyard bestow
-                // always routes through the bestow path (the permission grants the
-                // cast; there is no separate hand-cost branch to compare against).
-                let from_hand = obj.zone == Zone::Hand;
-                let (normal_cost, normal_affordable) = if from_hand {
-                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj)
-                } else {
-                    (obj.mana_cost.clone(), false)
-                };
-                if from_hand && has_legal_creature_target && normal_affordable && bestow_affordable
-                {
-                    return Ok(WaitingFor::AlternativeCastChoice {
-                        player,
-                        object_id,
-                        card_id,
-                        payment_mode,
-                        keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
-                        normal_cost,
-                        alternative_cost: bestow_mana_eff,
-                        alternative_additional_cost: bestow_non_mana_part,
-                        alternative_additional_cost_description: None,
-                    });
-                }
-                if has_legal_creature_target && bestow_affordable {
-                    // Bestow is the only viable path here: from hand the printed
-                    // cost is unaffordable; from the graveyard the permission only
-                    // grants the bestow cast. Proceed via the bestow path.
-                    return handle_bestow_cost_choice_with_payment_mode(
-                        state,
-                        player,
-                        object_id,
-                        card_id,
-                        crate::types::actions::AlternativeCastDecision::Alternative,
-                        payment_mode,
-                        events,
-                    );
-                }
-                if !from_hand
-                    && !has_graveyard_cast_permission_without_keyword_constraint(
-                        state,
-                        player,
-                        object_id,
-                        KeywordKind::Bestow,
-                    )
-                {
-                    return Err(EngineError::InvalidAction(
-                        "No legal bestow cast from graveyard".to_string(),
-                    ));
-                }
-                // Otherwise (no legal target / unaffordable bestow): fall through
-                // to the normal / graveyard-permission cast path. The graveyard
-                // case is only legal when a separate permission grants a normal
-                // cast, not merely a "using bestow" rider.
             }
+            if bestow_offerable {
+                // Bestow is the only viable path here: from hand the printed
+                // cost is unaffordable; from the graveyard no permission
+                // authorizes the printed cast. Proceed via the bestow path.
+                return handle_bestow_cost_choice_with_payment_mode(
+                    state,
+                    player,
+                    object_id,
+                    card_id,
+                    crate::types::actions::AlternativeCastDecision::Alternative,
+                    payment_mode,
+                    events,
+                );
+            }
+            // CR 601.2a + CR 118.9b: a "using its bestow ability" permission
+            // authorizes ONLY the bestow cast. When bestow can't be cast and no
+            // separate permission grants an unconstrained graveyard cast,
+            // refuse rather than fall through to a printed cast the permission
+            // never granted.
+            if !printed_cost_cast_allowed {
+                return Err(EngineError::InvalidAction(
+                    "No legal bestow cast from graveyard".to_string(),
+                ));
+            }
+            // Otherwise (no legal target / bestow unaffordable / no usable
+            // permission for bestow): fall through to the printed cast and its
+            // permanent-type slot choice.
         }
     }
 
@@ -16784,26 +17863,46 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 110.4: For graveyard spells via OncePerTurnPerPermanentType, prompt
-    // the player to choose which permanent type slot to consume when the card
-    // has multiple available slots (multi-type permanents like Artifact Creature).
+    continue_graveyard_cast_with_slot_choice(
+        state,
+        player,
+        object_id,
+        card_id,
+        payment_mode,
+        events,
+    )
+}
+
+/// CR 110.4 + CR 601.2a: continue a cast at its ordinary (printed-cost) path.
+/// Shared by the end of the cast-offer flow and by the "Normal" branch of the
+/// Blitz and Bestow choices, which also cast for the printed cost from the
+/// graveyard. There the cast is announced under the only permission that
+/// could authorize it (several would have been a menu), and a per-type one
+/// (Muldrotha) with several slots available then asks for the permanent type
+/// (`continue_cast_from_prepared`). From any other zone it just continues the
+/// cast.
+fn continue_graveyard_cast_with_slot_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Graveyard {
-            if let Some(source) = graveyard_permission_source(state, player, object_id)
-                .filter(|source| source.frequency == CastFrequency::OncePerTurnPerPermanentType)
-            {
-                let slots = available_permanent_type_slots(state, source.source_id, object_id);
-                if slots.len() > 1 {
-                    return Ok(WaitingFor::ChoosePermanentTypeSlot {
-                        player,
-                        object_id,
-                        card_id,
-                        source: source.source_id,
-                        payment_mode,
-                        available_slots: slots,
-                    });
-                }
-            }
+        // CR 601.2a + CR 118.9a: this is the printed-cost path. A card admitted
+        // to it only by graveyard permissions restricted to a casting method
+        // ("using its mutate ability": Brokkos, Apex of Forever) can't be cast
+        // this way, the same verdict legal-action castability reaches.
+        if obj.zone == Zone::Graveyard
+            && graveyard_permission_source(state, player, object_id).is_some()
+            && !has_effective_graveyard_cast_keyword(state, object_id, obj)
+            && !has_graveyard_timed_alt_cost_permission(state, obj, player)
+            && !graveyard_printed_cast_allowed(state, player, object_id)
+        {
+            return Err(EngineError::InvalidAction(
+                "No graveyard permission allows casting this card for its mana cost".to_string(),
+            ));
         }
     }
 
@@ -16813,6 +17912,7 @@ pub fn handle_cast_spell_with_payment_mode(
 /// CR 110.4: Handle player's permanent type slot choice for a multi-type
 /// graveyard cast via OncePerTurnPerPermanentType. Re-enters the casting
 /// pipeline with the chosen slot injected into `CastingVariant`.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_permanent_type_slot_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -16820,6 +17920,7 @@ pub fn handle_permanent_type_slot_choice(
     card_id: CardId,
     source: ObjectId,
     slot: crate::types::card_type::CoreType,
+    permission: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     handle_permanent_type_slot_choice_with_payment_mode(
@@ -16829,11 +17930,18 @@ pub fn handle_permanent_type_slot_choice(
         card_id,
         source,
         slot,
+        permission,
         CastPaymentMode::Auto,
         events,
     )
 }
 
+/// CR 110.4 + CR 601.2a: the slot answer is bound to the permission the cast
+/// was announced under (`permission`, carried by the prompt): the cast is
+/// prepared again for exactly that grant, digest and slot, and refused before
+/// any cost is paid if any of them no longer holds (a slot spent since the
+/// prompt, a grant that changed). A prompt saved before announcements were
+/// carried (`None`) names only its source, whose one printed-cost grant is used.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_permanent_type_slot_choice_with_payment_mode(
     state: &mut GameState,
@@ -16842,13 +17950,21 @@ pub fn handle_permanent_type_slot_choice_with_payment_mode(
     _card_id: CardId,
     source: ObjectId,
     slot: crate::types::card_type::CoreType,
+    permission: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let graveyard_destination_replacement = graveyard_permission_source(state, player, object_id)
-        .filter(|permission| permission.source_id == source)
-        .and_then(|permission| permission.graveyard_destination_replacement);
-    let mut prepared = prepare_spell_cast_with_variant_override(
+    let announcement = match permission {
+        Some(announced) if announced.permission.source != source => {
+            return Err(GraveyardAuthorityError::Stale.into());
+        }
+        Some(announced) => Some(crate::types::game_state::AnnouncedGraveyardPermission {
+            slot_type: Some(slot),
+            ..announced.clone()
+        }),
+        None => None,
+    };
+    let mut prepared = prepare_spell_cast_announced(
         state,
         player,
         object_id,
@@ -16856,11 +17972,46 @@ pub fn handle_permanent_type_slot_choice_with_payment_mode(
             source,
             frequency: CastFrequency::OncePerTurnPerPermanentType,
             slot_type: Some(slot),
-            graveyard_destination_replacement,
+            graveyard_destination_replacement: None,
         }),
+        None,
+        None,
+        CastingMode::Actual,
+        announcement.as_ref(),
     )?;
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
+}
+
+/// CR 601.2a + CR 601.2b: record the graveyard permission a cast is announced
+/// under on its ability's context: the `GraveyardPermission` authority that
+/// finalization spends, and the latch whose terms payment charges and
+/// resolution applies (CR 601.2f-h + CR 614.1c), so neither re-elects a
+/// permission once costs begin.
+fn stamp_graveyard_authority(ability: &mut ResolvedAbility, authority: &GraveyardCastAuthority) {
+    ability.context.graveyard_permission_authority = Some(authority.variant);
+    ability.context.graveyard_permission_latch = Some(authority.latch.clone());
+}
+
+/// `stamp_graveyard_authority` for a prepared cast, at each site that builds
+/// the ability the cast carries into payment (the modal placeholder, the
+/// resolved or Aura ability, the no-ability placeholder).
+fn stamp_prepared_cast_context(prepared: &PreparedSpellCast, ability: &mut ResolvedAbility) {
+    if let Some(GraveyardAuthorityResolution::Complete(authority)) = &prepared.graveyard_authority {
+        stamp_graveyard_authority(ability, authority);
+    }
+}
+
+/// CR 110.4 + CR 601.2a: a prepared cast whose per-type slot is still to be
+/// announced (`AwaitingSlot`) can't be announced or paid; the slot prompt
+/// must answer first. Refused before the spell moves or any cost is paid.
+fn ensure_graveyard_slot_announced(prepared: &PreparedSpellCast) -> Result<(), EngineError> {
+    match prepared.graveyard_authority {
+        Some(GraveyardAuthorityResolution::AwaitingSlot { .. }) => Err(
+            EngineError::ActionNotAllowed("graveyard permission slot not announced".to_string()),
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// CR 601.2a: Announce the spell by pushing a placeholder `StackEntry` onto
@@ -16923,6 +18074,9 @@ fn continue_with_prepared(
     // via the Enchant keyword) or mutating creature spells (CR 702.140a: a vanilla
     // creature cast for its mutate cost still targets a non-Human creature you
     // own), both of which need the target-attachment path below.
+    // CR 601.2a + CR 110.4: a cast still waiting for its per-type slot never
+    // reaches announcement or payment.
+    ensure_graveyard_slot_announced(&prepared)?;
     if prepared.ability_def.is_none() {
         let obj = state.objects.get(&prepared.object_id);
         let is_aura = obj
@@ -16946,12 +18100,13 @@ fn continue_with_prepared(
     let mut resolved = if let Some(ref ability_def) = prepared.ability_def {
         // CR 601.2c: The player announcing a spell with modes chooses the mode(s).
         if let Some(ref modal_choice) = prepared.modal {
-            let placeholder = ResolvedAbility::new(
+            let mut placeholder = ResolvedAbility::new(
                 *ability_def.effect.clone(),
                 Vec::new(),
                 prepared.object_id,
                 player,
             );
+            stamp_prepared_cast_context(&prepared, &mut placeholder);
             if modal_requires_additional_cost_declaration(modal_choice) {
                 return casting_costs::begin_modal_additional_cost_declaration(
                     state,
@@ -17056,6 +18211,7 @@ fn continue_with_prepared(
     // announce-locked X ("where X is <count> as you cast this spell") is measured here,
     // once, and published onto the object's single X channel — every target count, damage
     // division, and resolution-time amount below then reads the SAME locked number.
+    stamp_prepared_cast_context(&prepared, &mut resolved);
     super::ability_utils::publish_announced_x(state, &mut resolved, player, prepared.object_id);
 
     // 5. Handle targeting -- ensure layers evaluated before target legality
@@ -17745,7 +18901,7 @@ fn continue_with_no_ability(
     // The PendingCast infrastructure requires a ResolvedAbility; it carries no
     // meaningful effect and will be discarded (pushed as `ability: None`) when
     // finalize_cast_to_stack detects no Spell-kind AbilityDefinition on the object.
-    let placeholder = ResolvedAbility::new(
+    let mut placeholder = ResolvedAbility::new(
         Effect::Unimplemented {
             name: String::new(),
             description: None,
@@ -17754,6 +18910,7 @@ fn continue_with_no_ability(
         prepared.object_id,
         player,
     );
+    stamp_prepared_cast_context(&prepared, &mut placeholder);
     if prepared.casting_variant == CastingVariant::Emerge {
         return begin_emerge_cost_before_targets(
             state,
@@ -18779,9 +19936,11 @@ fn can_cast_prepared_now_with_probe(
             .and_then(|source| {
                 exile_static_permission_extra_cost(state, player, prepared.object_id, source)
             }),
-            Some(Zone::Graveyard) => {
-                graveyard_static_permission_extra_cost(state, player, prepared.object_id)
-            }
+            // CR 601.2a: the rider of the permission this cast is announced under.
+            Some(Zone::Graveyard) => prepared
+                .graveyard_authority
+                .as_ref()
+                .and_then(|resolution| resolution.authority().latch.extra_cost.clone()),
             _ => None,
         };
         if let Some(extra) = static_extra {
@@ -18856,6 +20015,25 @@ fn can_cast_prepared_now_with_probe(
         }
     }
 
+    // CR 601.2b + CR 118.9: the card's own Blitz / Bestow option from the
+    // graveyard is castable exactly when the cast handler's offer for it is,
+    // priced under the permission this option is announced under: one
+    // authority for the menu, the single-option auto-route and the handler.
+    if let Some(castable) = graveyard_rider_option_castable(
+        state,
+        player,
+        obj,
+        prepared.casting_variant,
+        prepared
+            .graveyard_authority
+            .as_ref()
+            .map(GraveyardAuthorityResolution::authority),
+    ) {
+        return castable
+            && (prepared.modal.is_some()
+                || spell_has_legal_targets_with_probe(state, obj.id, player, probe));
+    }
+
     // CR 702.172: Spree spells must afford at least one mode to be castable.
     // CR 117.1d + CR 601.2g: Use the feasibility predicate so non-tap mana
     // abilities (Sacrifice / Discard / PayLife) the controller could activate
@@ -18906,6 +20084,21 @@ fn can_cast_prepared_now_with_probe(
     let creature_face_ok = targets_ok && mana_payable;
 
     if creature_face_ok {
+        return true;
+    }
+
+    // CR 601.2a + CR 601.2f: when the graveyard's printed-cost option also
+    // stands for the card's one Blitz / Bestow alternative (no separate option
+    // was added; the cast handler's two-way choice makes it), that option is
+    // castable by either route, judged by the same offer the handler reads.
+    if targets_ok
+        && matches!(
+            prepared.casting_variant,
+            CastingVariant::GraveyardPermission { .. }
+        )
+        && graveyard_permission_option_folds_rider(state, player, obj.id)
+        && graveyard_alternative_cost_castable(state, player, obj)
+    {
         return true;
     }
 
@@ -22874,6 +24067,444 @@ pub(super) fn split_bestow_cost_components(
     match bestow {
         BestowCost::Mana(mana) => (Some(mana.clone()), None),
         BestowCost::NonMana(ab) => split_alt_cost_components(ab),
+    }
+}
+
+/// CR 601.2a + CR 601.2b: which authority an alternative-cost offer is judged
+/// under.
+#[derive(Clone, Copy)]
+enum OfferRoute<'a> {
+    /// The cast handler's own offer: from the hand, or from the graveyard under
+    /// the only permission that could authorize the method (the two-way
+    /// printed-vs-alternative prompt, which exists only when there is one).
+    Unannounced,
+    /// From the graveyard under this announced permission (a menu option).
+    Graveyard(&'a GraveyardCastAuthority),
+}
+
+impl<'a> OfferRoute<'a> {
+    /// CR 702.152a + CR 702.103a + CR 601.2a: the graveyard authority the
+    /// offer is priced under, or `Err` when the method can't be announced from
+    /// the object's zone. `Ok(None)` is a cast from the hand. `state` is the
+    /// spell as it will be cast (for Bestow, the bestowed Aura).
+    fn authority(
+        self,
+        state: &GameState,
+        player: PlayerId,
+        object_id: ObjectId,
+        obj: &GameObject,
+        rider: CastingVariant,
+    ) -> Result<Option<std::borrow::Cow<'a, GraveyardCastAuthority>>, ()> {
+        match (self, obj.zone) {
+            (OfferRoute::Unannounced, Zone::Hand) => Ok(None),
+            (OfferRoute::Unannounced, Zone::Graveyard) => {
+                match resolve_graveyard_authority(state, player, object_id, Some(rider), None) {
+                    Ok(GraveyardAuthorityResolution::Complete(authority)) => {
+                        Ok(Some(std::borrow::Cow::Owned(authority)))
+                    }
+                    _ => Err(()),
+                }
+            }
+            (OfferRoute::Graveyard(authority), Zone::Graveyard) => {
+                Ok(Some(std::borrow::Cow::Borrowed(authority)))
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+/// CR 702.103b: a scratch copy of `state` with `object_id` in its bestowed
+/// form, through the same `apply_bestow_aura_form` the bestow handler applies
+/// before preparing the cast. The bestow offer reads targets, cost modifiers and
+/// permissions from it, so it judges the spell that will actually be cast.
+fn bestowed_form(state: &GameState, object_id: ObjectId) -> Option<GameState> {
+    let mut bestowed = state.clone();
+    apply_bestow_aura_form(bestowed.objects.get_mut(&object_id)?);
+    Some(bestowed)
+}
+
+/// CR 702.103b + CR 303.4a: the legal targets for a bestowed Aura's enchant
+/// ability, read from `bestowed` (see `bestowed_form`) exactly as the cast
+/// enumerates them (the Aura branch of `continue_with_prepared`). The single
+/// authority for bestow's target existence, shared by the bestow offer and the
+/// N-way casting menu. A bestowed spell is an Aura, not a creature, so
+/// protection from creatures doesn't stop it (CR 702.16b).
+fn bestowed_aura_targets(
+    bestowed: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<TargetRef> {
+    bestowed
+        .objects
+        .get(&object_id)
+        .and_then(|obj| {
+            // allow-raw-authority: read the Enchant payload applied to this bestowed form, matching continue_with_prepared.
+            obj.keywords.iter().find_map(|keyword| match keyword {
+                Keyword::Enchant(filter) => Some(filter.clone()),
+                _ => None,
+            })
+        })
+        .map(|filter| targeting::find_legal_targets(bestowed, &filter, player, object_id))
+        .unwrap_or_default()
+}
+
+/// A Blitz cast on offer for this object: its effective mana sub-cost, its
+/// non-mana residual, and whether both are payable now.
+struct BlitzOffer {
+    mana: Option<crate::types::mana::ManaCost>,
+    residual: Option<AbilityCost>,
+    affordable: bool,
+}
+
+/// CR 702.152a + CR 601.2f-h + CR 118.9d: the Blitz alternative this object can
+/// be cast for from its current zone under `route`, or `None` when it has no
+/// Blitz or the zone doesn't allow it. Blitz is announced from wherever the
+/// card can legally be cast: the hand, or the graveyard under a
+/// `GraveyardCastPermission` that admits it ("You may cast this card from your
+/// graveyard using its blitz ability." — Sabin, Master Monk). The single
+/// authority for the Blitz offer, read by the cast handler and by legal-action
+/// castability so the two can't disagree.
+fn blitz_offer(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    obj: &GameObject,
+    route: OfferRoute<'_>,
+) -> Option<BlitzOffer> {
+    let authority = route
+        .authority(state, player, object_id, obj, CastingVariant::Blitz)
+        .ok()?;
+    // CR 604.1: honor a Blitz cost granted by a static, not only printed Blitz.
+    // CR 702.152b makes Blitz single-instance, so the dedup-by-kind
+    // `effective_spell_keywords` collector is correct here.
+    let blitz_cost = effective_spell_keywords(state, player, object_id)
+        .iter()
+        .find_map(|k| match k {
+            crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
+            _ => None,
+        })?;
+    // CR 601.2f-h + CR 118.9d: split the (possibly compound) blitz cost into its
+    // mana sub-cost and non-mana residual ("Discard a card" / "Pay 2 life"), then
+    // apply active cost modifiers to the mana sub-cost only — CR 118.9d applies
+    // modifiers to the alternative cost that is actually being paid.
+    let (mana_part, residual) = split_blitz_cost_components(&blitz_cost);
+    let mana = mana_part
+        .map(|m| apply_cost_modifiers_to_base(state, player, object_id, m.clone()).unwrap_or(m));
+    // CR 601.2c: a creature spell cast for its blitz cost has no targets, so
+    // its total is priced against the one empty target assignment.
+    let affordable = alternative_cost_offer_payable(
+        state,
+        player,
+        object_id,
+        CastingVariant::Blitz,
+        authority.as_deref(),
+        &mana,
+        &residual,
+        &[Vec::new()],
+    );
+    Some(BlitzOffer {
+        mana,
+        residual,
+        affordable,
+    })
+}
+
+/// A Bestow cast on offer for this object: its effective mana sub-cost, its
+/// non-mana residual, and whether bestow can be chosen now.
+struct BestowOffer {
+    mana: Option<crate::types::mana::ManaCost>,
+    residual: Option<AbilityCost>,
+    offerable: bool,
+}
+
+/// CR 702.103a + CR 601.2f-h + CR 118.9d: the Bestow alternative this object can
+/// be cast for from its current zone under `route`, or `None` when it has no
+/// Bestow or the zone doesn't allow it. `offerable` also requires a legal
+/// creature to enchant. From the graveyard the authority is judged on the
+/// BESTOWED form, the spell as it will be cast (CR 702.103b): an Aura
+/// enchantment, and under Encroaching Mycosynth an artifact too, so Muldrotha
+/// offers a slot for each type. The single authority for the Bestow offer,
+/// read by the cast handler and by legal-action castability so the two can't
+/// disagree.
+fn bestow_offer(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    obj: &GameObject,
+    route: OfferRoute<'_>,
+) -> Option<BestowOffer> {
+    if !matches!(obj.zone, Zone::Hand | Zone::Graveyard) {
+        return None;
+    }
+    // CR 702.103a + CR 604.1: read bestow from effective keywords so a bestow
+    // cost granted by a static is honored, not just printed bestow.
+    let bestow_cost = effective_spell_keywords(state, player, object_id)
+        .iter()
+        .find_map(|k| match k {
+            crate::types::keywords::Keyword::Bestow(cost) => Some(cost.clone()),
+            _ => None,
+        })?;
+    // CR 702.103b: the offer judges the spell as it will be cast, the bestowed
+    // Aura, not the creature card: an Aura isn't a creature, so protection from
+    // creatures doesn't stop it from targeting (CR 702.16b), and a "creature
+    // spells" cost modifier doesn't apply to it.
+    let bestowed = bestowed_form(state, object_id)?;
+    let authority = route
+        .authority(&bestowed, player, object_id, obj, CastingVariant::Bestow)
+        .ok()?;
+    // CR 702.103a + CR 303.4a: the bestowed Aura requires a legal target for
+    // its enchant ability (see `bestowed_aura_targets`). If none exists, bestow
+    // can't be chosen.
+    let legal_aura_targets = bestowed_aura_targets(&bestowed, player, object_id);
+    // CR 601.2f-h + CR 118.9d: split the (possibly compound) bestow cost into its
+    // mana sub-cost and Collect-evidence residual, then apply active cost
+    // modifiers to the mana sub-cost.
+    let (mana_part, residual) = split_bestow_cost_components(&bestow_cost);
+    let mana = mana_part.as_ref().map(|m| {
+        apply_cost_modifiers_to_base(&bestowed, player, object_id, m.clone())
+            .unwrap_or_else(|| m.clone())
+    });
+    // CR 601.2c + CR 601.2f-h: bestow is on offer when its total is payable for
+    // at least one legal Aura target: a tax that depends on the target (Terror
+    // of the Peaks) is priced against each candidate. The committed target is
+    // priced again by payment once it is chosen.
+    let target_assignments: Vec<Vec<TargetRef>> = legal_aura_targets
+        .into_iter()
+        .map(|target| vec![target])
+        .collect();
+    let offerable = alternative_cost_offer_payable(
+        &bestowed,
+        player,
+        object_id,
+        CastingVariant::Bestow,
+        authority.as_deref(),
+        &mana,
+        &residual,
+        &target_assignments,
+    );
+    Some(BestowOffer {
+        mana,
+        residual,
+        offerable,
+    })
+}
+
+/// CR 118.3 + CR 601.2h: an alternative cost is on offer only when its mana
+/// sub-cost AND its non-mana residual are each payable now; otherwise the offer
+/// would promise a cost the player can't complete.
+///
+/// CR 601.2c + CR 601.2f: the required costs a cast commits to come from
+/// `committed_required_cast_cost` (the object's required additional cost merged
+/// with every imposed cost, as payment merges them), priced against a target
+/// assignment: an imposed tax can depend on the spell's targets (Terror of the
+/// Peaks). `target_assignments` lists the candidate assignments, one empty
+/// assignment for a spell with no targets, and the offer holds when at least
+/// one is payable. Payment prices the committed targets again once chosen.
+///
+/// CR 601.2a + CR 601.2f: a graveyard cast is priced under `authority`, the
+/// permission it is announced under, so that permission's extra cost
+/// (Exploration Broodship's land) joins the imposed costs, and no other
+/// permission's does.
+///
+/// CR 601.2h + CR 119.4: the life the assignment commits (the residual's plus
+/// the required costs') must be payable together, and a Defiler's reduction is
+/// credited to the mana only when its life is payable alongside that, the same
+/// eligibility the Defiler payment prompt applies
+/// (`committed_life_besides_defiler`).
+#[allow(clippy::too_many_arguments)]
+fn alternative_cost_offer_payable(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant: CastingVariant,
+    authority: Option<&GraveyardCastAuthority>,
+    mana: &Option<crate::types::mana::ManaCost>,
+    residual: &Option<AbilityCost>,
+    target_assignments: &[Vec<TargetRef>],
+) -> bool {
+    if !residual
+        .as_ref()
+        .is_none_or(|cost| cost.is_payable(state, player, object_id))
+    {
+        return false;
+    }
+    // CR 601.2b + CR 601.2h: a cast whose object carries its own REQUIRED
+    // additional cost pays that cost's declaration before the Defiler prompt,
+    // and that declaration can't see a Defiler's reduction, so the payment
+    // pipeline can't complete a cast that needs the reduction. The offer then
+    // doesn't credit it either: offer and payment agree (an honest gap for that
+    // combination, which no printed card has) rather than offering a cast that
+    // payment refuses.
+    let defiler_creditable = !state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| matches!(obj.additional_cost, Some(AdditionalCost::Required(_))));
+    target_assignments.iter().any(|targets| {
+        let mut pricing = ResolvedAbility::new(Effect::NoOp, targets.clone(), object_id, player);
+        if let Some(authority) = authority {
+            stamp_graveyard_authority(&mut pricing, authority);
+        }
+        let imposed = casting_costs::committed_required_cast_cost(
+            state, player, object_id, &pricing, variant, None,
+        );
+        let committed_life = casting_costs::committed_life_besides_defiler(
+            state,
+            player,
+            object_id,
+            residual.as_ref(),
+            imposed.as_ref(),
+        );
+        super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
+            // CR 601.2h: each required cost's own resource (a sacrifice, a
+            // discard) must be available too, by the check payment's
+            // required-cost flow applies; the combined life is priced above.
+            && imposed
+                .as_ref()
+                .is_none_or(|cost| cost.is_payable(state, player, object_id))
+            // CR 118.3: a zero mana cost is always payable.
+            && mana.as_ref().is_none_or(|m| {
+                can_pay_cost_after_auto_tap(state, player, object_id, m)
+                    || (defiler_creditable
+                        && casting_costs::defiler_reduced_cost_alongside(
+                            state,
+                            player,
+                            object_id,
+                            m,
+                            committed_life,
+                        )
+                        .is_some_and(|reduced| {
+                            can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+                        }))
+            })
+    })
+}
+
+/// CR 601.2a + CR 601.2f + CR 118.9: the single graveyard-permission casting
+/// candidate is prepared against the printed cost, but the cast handler also
+/// takes it for the card's own Blitz or Bestow cost from the graveyard. It is
+/// castable when that alternative is on offer and payable, judged by the same
+/// offers the handler reads.
+fn graveyard_alternative_cost_castable(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+) -> bool {
+    if obj.zone != Zone::Graveyard {
+        return false;
+    }
+    blitz_offer(state, player, obj.id, obj, OfferRoute::Unannounced)
+        .is_some_and(|offer| offer.affordable)
+        || bestow_offer(state, player, obj.id, obj, OfferRoute::Unannounced)
+            .is_some_and(|offer| offer.offerable)
+}
+
+/// CR 601.2a + CR 601.2b + CR 118.9b: the card's own alternative-cost casts
+/// from the graveyard, one casting option per method and announcement: Blitz
+/// and Bestow, each under every permission that admits the method (for a
+/// per-type permission, once per slot of the spell as it will be cast; see
+/// `graveyard_authority_announcements`). Whether each is payable is
+/// castability's question, judged by the offer under that announcement.
+fn graveyard_rider_candidates(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    obj: &GameObject,
+) -> Vec<CastingCandidate> {
+    let keywords = effective_spell_keywords(state, player, object_id);
+    let has = |kind: KeywordKind| keywords.iter().any(|keyword| keyword.kind() == kind);
+    let mut riders = Vec::new();
+    if obj.zone != Zone::Graveyard {
+        return riders;
+    }
+    if has(KeywordKind::Blitz) {
+        riders.extend(
+            graveyard_authority_announcements(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Blitz),
+            )
+            .into_iter()
+            .map(|authority| {
+                CastingCandidate::announced(CastingVariant::Blitz, authority.announcement)
+            }),
+        );
+    }
+    if has(KeywordKind::Bestow) {
+        if let Some(bestowed) = bestowed_form(state, object_id) {
+            riders.extend(
+                graveyard_authority_announcements(
+                    &bestowed,
+                    player,
+                    object_id,
+                    Some(CastingVariant::Bestow),
+                )
+                .into_iter()
+                .map(|authority| {
+                    CastingCandidate::announced(CastingVariant::Bestow, authority.announcement)
+                }),
+            );
+        }
+    }
+    riders
+}
+
+/// CR 601.2b: is the graveyard's printed-cost option also standing for the
+/// card's one alternative (see the fold in `casting_variant_candidates`)? True
+/// when no Blitz / Bestow option was added beside it, so the cast handler's
+/// two-way `AlternativeCastChoice` makes that choice.
+fn graveyard_permission_option_folds_rider(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    !casting_variant_candidates(state, player, object_id)
+        .iter()
+        .any(|variant| matches!(variant, CastingVariant::Blitz | CastingVariant::Bestow))
+}
+
+/// CR 601.2f + CR 118.9: castability of the card's own Blitz / Bestow option
+/// from the graveyard is the offer the cast handler reads, under the
+/// permission the option is announced under (`authority`, from the prepared
+/// cast): mana with any Defiler reduction and its combined life, the non-mana
+/// residual and that permission's extra cost, and for Bestow a creature to
+/// enchant. `None` for any other variant or zone.
+fn graveyard_rider_option_castable(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    variant: CastingVariant,
+    authority: Option<&GraveyardCastAuthority>,
+) -> Option<bool> {
+    if obj.zone != Zone::Graveyard {
+        return None;
+    }
+    let route = authority.map(OfferRoute::Graveyard);
+    match variant {
+        CastingVariant::Blitz => Some(route.is_some_and(|route| {
+            blitz_offer(state, player, obj.id, obj, route).is_some_and(|offer| offer.affordable)
+        })),
+        CastingVariant::Bestow => Some(route.is_some_and(|route| {
+            bestow_offer(state, player, obj.id, obj, route).is_some_and(|offer| offer.offerable)
+        })),
+        _ => None,
+    }
+}
+
+/// CR 702.152a + CR 601.2f-h: Blitz twin of `split_bestow_cost_components`.
+/// `BlitzCost::Mana` is the SNC printed shape (pure mana, "Blitz {1}{R}");
+/// `NonMana(...)` is the em-dash compound ("Blitz—{2}{R}{R}, Discard a card." on
+/// Sabin, Master Monk; "Blitz—{2}{B}{B}, Pay 2 life." on Tenacious Underdog) and
+/// delegates to the shared `split_alt_cost_components` walker, which extracts the
+/// mana sub-cost for the normal mana flow (CR 601.2g) and returns the residual
+/// (discard / pay life) for `pay_additional_cost` (CR 601.2h).
+pub(super) fn split_blitz_cost_components(
+    blitz: &crate::types::keywords::BlitzCost,
+) -> (Option<crate::types::mana::ManaCost>, Option<AbilityCost>) {
+    use crate::types::keywords::BlitzCost;
+    match blitz {
+        BlitzCost::Mana(mana) => (Some(mana.clone()), None),
+        BlitzCost::NonMana(ab) => split_alt_cost_components(ab),
     }
 }
 

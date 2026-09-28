@@ -302,11 +302,9 @@
     "joinErrorCantJoinTitle": "Nie można dołączyć do tego pokoju",
     "titleLobby": "Dołącz do stołu lub załóż własny.",
     "titleHostSetup": "Skonfiguruj swój stół.",
-    "titleDraftLobby": "Grupa draftu",
     "titleDeckSelect": "Wybierz talię.",
     "descriptionLobby": "Przeglądaj dostępne stoły, dołączaj za pomocą kodu lub załóż nowy mecz.",
     "descriptionHostSetup": "Dostosuj format, prywatność i czas przed otwarciem pokoju.",
-    "descriptionDraftLobby": "Oczekiwanie na graczy dołączających do grupy draftu.",
     "descriptionDeckSelectFormat": "Wybierz talię dla formatu {{format}}.",
     "descriptionDeckSelect": "Wybierz talię, którą chcesz wystawić online.",
     "offlineUnavailableTitle": "Tryb wieloosobowy jest niedostępny offline.",
@@ -333,15 +331,6 @@
     "updateFailedTitle": "Nie udało się zaktualizować automatycznie",
     "updateFailedMessage": "Odśwież, aby pobrać najnowszą wersję, lub kontynuuj na tej. Gracze z różnymi wersjami nie mogą dołączyć do tej samej gry.",
     "continueAnyway": "Kontynuuj mimo to"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Grupa draftu",
-    "connecting": "Łączenie z grupą draftu...",
-    "connectionFailed": "Połączenie nie powiodło się.",
-    "playersJoined": "Dołączyło {{joined}}/{{total}} graczy",
-    "seat": "Miejsce {{number}}",
-    "draftInProgress": "Trwa draft. Widok draftu otworzy się automatycznie.",
-    "leaveDraft": "Opuść draft"
   },
   "deckLegalityChip": {
     "checking": "Sprawdzanie talii pod kątem formatu {{format}}…",

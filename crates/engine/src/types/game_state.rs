@@ -17,12 +17,12 @@ use super::ability::{
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator,
     ContinuousModification, ControlWindow, CopiableValues, CopyChooseScope, CopyScale,
     CopyTargetPurpose, CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition,
-    DigRestOrder, Duration, EffectKind, FaceDownProfile, GameRestriction, KeywordAction,
-    KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
-    ResolvedAbility, SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint,
-    StackAbilityKind, StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef,
-    ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    DigRestOrder, DigRestSplitScope, Duration, EffectKind, FaceDownProfile, GameRestriction,
+    KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource,
+    QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchOrderingHint,
+    SearchSelectionConstraint, StackAbilityKind, StaticCondition, TapCreaturesSelectionMode,
+    TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -6294,6 +6294,14 @@ pub enum BatchCompletion {
         /// Reveal-until uses the serde-default Preserve value.
         #[serde(default)]
         rest_order: DigRestOrder,
+        /// CR 401.2 + CR 701.20e: Telling Time-class remainder split, carried
+        /// from `DigChoice` through the kept delivery so the routing decision
+        /// survives an arbitrary number of replacement re-parks. Consumed
+        /// exactly once, by the `DigDeliveryStage::Kept` arm, which swaps the
+        /// uniform rest-pile route for a `DigRestSplitChoice` pause. `None` on
+        /// every reveal-until and every non-splitting dig.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<usize>,
         /// CR 701.20b: reveal markers to clear once the cards have moved (the
         /// kept card plus the misses).
         clear_markers: Vec<ObjectId>,
@@ -9630,6 +9638,80 @@ pub struct CastingVariantChoiceOption {
     /// serde default: old paused menus cannot safely select a face by index.
     pub face: CastingVariantFace,
     pub mana_cost: ManaCost,
+    /// CR 601.2f-h: the non-mana part of an alternative cost this option pays
+    /// ("Discard a card" for a Blitz option), shown beside its mana cost.
+    /// `None` when the option pays mana only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_cost: Option<crate::types::ability::AbilityCost>,
+    /// CR 601.2a + CR 601.2b: the graveyard permission this option casts
+    /// under, announced with the option. `Some` for every cast from the
+    /// graveyard authorized by a graveyard-cast permission (printed cost,
+    /// Blitz, Bestow); `None` for every other option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<CastAuthorityChoice>,
+}
+
+/// CR 601.2a: which graveyard-cast permission grant authorizes a cast: the
+/// permission's source plus the grant on it, so two grants from one source are
+/// two permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GraveyardPermissionId {
+    pub source: ObjectId,
+    pub grant: PermissionGrant,
+}
+
+/// Where a graveyard-cast permission grant lives on its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PermissionGrant {
+    /// The definition's position in the source object's `static_definitions`.
+    Static { index: u32 },
+    /// The `GrantStaticAbility` at `modification` in the transient continuous
+    /// effect `effect_id` (a resolution-created grant: Yawgmoth's Will).
+    Transient { effect_id: u64, modification: u32 },
+}
+
+/// An opaque digest of a grant's full definition, compared only for equality,
+/// so a menu answer bound to a grant whose definition changed is refused.
+/// Serialized as a hex string so JavaScript peers keep all 64 bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GrantDigest(pub String);
+
+/// CR 601.2a + CR 601.2b: what the player announced for a graveyard-permission
+/// cast: the grant, its digest, and the per-type slot (CR 110.4, Muldrotha)
+/// when one has been chosen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncedGraveyardPermission {
+    pub permission: GraveyardPermissionId,
+    pub grant_digest: GrantDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_type: Option<super::card_type::CoreType>,
+}
+
+/// CR 601.2f + CR 601.2h + CR 614.1c: a graveyard permission's terms as they
+/// were when the cast was announced. The cast pays and applies these even if
+/// the permission's source leaves or loses the ability during casting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraveyardPermissionLatch {
+    pub permission: GraveyardPermissionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_cost: Option<crate::types::statics::CastExtraCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_with_counter: Option<crate::types::counter::CounterType>,
+}
+
+/// The engine-authored authority of a graveyard casting option: the
+/// announcement it commits to plus the permission's terms, for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastAuthorityChoice {
+    pub announcement: AnnouncedGraveyardPermission,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_cost: Option<crate::types::statics::CastExtraCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_with_counter: Option<crate::types::counter::CounterType>,
+    pub frequency: crate::types::statics::CastFrequency,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graveyard_destination_replacement: Option<Zone>,
 }
 
 /// CR 118.3 + CR 601.2b + CR 605.3b: Identifies the specific action to take
@@ -13400,6 +13482,18 @@ pub enum WaitingFor {
             deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
         )]
         must_be_blocked_targets: HashMap<ObjectId, Vec<ObjectId>>,
+        /// CR 509.1a + CR 101.1: per creature able to block, how many
+        /// attackers it may block — `None` for any number. Display-only —
+        /// computed by `combat::block_capacity`; the declaration validator's
+        /// own authority is `combat::extra_block_limit`, the same function's
+        /// numeric form.
+        #[serde(
+            default,
+            skip_serializing_if = "HashMap::is_empty",
+            serialize_with = "crate::types::deterministic_serde::hash_map",
+            deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
+        )]
+        block_capacities: HashMap<ObjectId, Option<u32>>,
     },
     /// CR 502.3: During the untap step, the active player may choose not to
     /// untap permanents with "You may choose not to untap..." static abilities.
@@ -13729,6 +13823,20 @@ pub enum WaitingFor {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class remainder
+        /// split. `Some(n)` routes the unkept pile into a follow-up
+        /// `DigRestSplitChoice` that puts exactly `n` of it on top of the
+        /// library and the remainder on the bottom, instead of moving the
+        /// whole pile uniformly to `rest_destination`.
+        ///
+        /// Already resolved from `Effect::Dig.rest_split_top_count`
+        /// (a `QuantityExpr`) at dig-resolution time, mirroring how this state
+        /// carries a resolved `keep_count: usize` for the effect's
+        /// `keep_count_expr: Option<QuantityExpr>`. CR 608.2c fixes the value
+        /// as the effect is applied, and the later completion site has no
+        /// `ResolvedAbility` to resolve an expression against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<usize>,
         /// CR 400.5 + CR 608.2c: Ordering instruction for a library rest pile.
         #[serde(default)]
         rest_order: DigRestOrder,
@@ -13743,6 +13851,96 @@ pub enum WaitingFor {
         /// attacking rather than being declared as attackers.
         #[serde(default)]
         enters_attacking: bool,
+    },
+    /// CR 401.2 + CR 701.20e + CR 608.2c: After a `DigChoice`'s keep-selection
+    /// has been routed to its destination, a Telling Time-class dig partitions
+    /// the FIXED remainder pile between the top and the bottom of the SAME
+    /// library ("...one on top of your library, and one on the bottom of your
+    /// library"). CR 401.2 makes top and bottom the only two positions such an
+    /// instruction can name, so this variant's single axis of choice is
+    /// `LibraryPosition` within one already-fixed `Zone::Library` destination.
+    ///
+    /// Distinct from its two neighbours: `DigChoice` chooses a SUBSET to send
+    /// to one destination zone, and `SearchPartitionChoice` splits a set
+    /// between two different `Zone`s. Neither can express "same zone, two
+    /// positions", which is why this is a sibling rather than a parameter of
+    /// either.
+    DigRestSplitChoice {
+        /// The player this prompt is addressed to — the single acting player
+        /// for the decision `scope` names.
+        ///
+        /// For [`DigRestSplitScope::PartitionAndOrder`] and
+        /// [`DigRestSplitScope::PartitionOnly`] that is the dig's CHOOSER, the
+        /// player who looked at the cards and whom CR 608.2d gives the
+        /// partition to (CR 701.20e — the remainder is known only to them).
+        /// For [`DigRestSplitScope::OrderOnly`] it is `library_owner`, because
+        /// CR 401.4 gives the arrangement of a 2+ card pile to the owner of
+        /// those cards rather than to whoever the effect chose for.
+        player: PlayerId,
+        /// Owner of the library the pile is placed back into, and therefore
+        /// the CR 401.4 arranging authority for each resulting pile.
+        library_owner: PlayerId,
+        /// The fixed rest pile. Every id here ends up in `Zone::Library`; what
+        /// is undecided is each card's `LibraryPosition` (Top or Bottom) AND
+        /// the order of the cards within each position (CR 401.4).
+        ///
+        /// The response is `GameAction::SelectCards` carrying a full
+        /// PERMUTATION of this list — the same contract `RippleBottomOrder`
+        /// uses for its own "in any order" pile — not a subset. The first
+        /// `top_count` entries go on top, topmost first; the rest go to the
+        /// bottom in the submitted order. One payload therefore answers both
+        /// the CR 608.2d partition choice and the CR 401.4 arrangement of each
+        /// resulting pile.
+        cards: Vec<ObjectId>,
+        /// How many of the submitted arrangement's leading entries go on top;
+        /// the remainder go to the bottom. Exact, not "up to" — Telling Time's
+        /// split is forced. Already resolved against game state and clamped to
+        /// `0..=cards.len()` at park time, so a client never has to interpret a
+        /// `QuantityExpr`.
+        ///
+        /// May legally be `0` or `cards.len()`: a DEGENERATE partition still
+        /// parks this prompt whenever `cards.len() >= 2`, because CR 401.4
+        /// gives the owner the order of the 2+ cards landing in that single
+        /// position even though which-goes-where was never in question. Only a
+        /// pile of fewer than two cards skips the prompt entirely.
+        top_count: usize,
+        /// How many of the arrangement's TRAILING entries go to the bottom —
+        /// always `cards.len() - top_count`, computed once here by the engine.
+        ///
+        /// Redundant with `cards.len()` and `top_count` on purpose: the client
+        /// is a display layer and must not compute game quantities, so the
+        /// "and N on the bottom" half of the prompt's own description is
+        /// engine-supplied rather than derived in the modal. Both halves are
+        /// written by [`Self::new_dig_rest_split`], which is the only
+        /// constructor allowed to set them, so the two cannot drift.
+        #[serde(default)]
+        bottom_count: usize,
+        /// CR 608.2d vs CR 401.4: which of the split's two decisions this
+        /// prompt carries, and therefore whether `player` is the chooser or the
+        /// library's owner. See [`DigRestSplitScope`].
+        #[serde(default)]
+        scope: DigRestSplitScope,
+        source_id: Option<ObjectId>,
+        /// The deferred dig tail (reveal-marker cleanup, tracked-set publish,
+        /// continuation wiring, priority drain) carried verbatim across this
+        /// player pause and handed straight back to the zone pipeline as the
+        /// split batch's completion.
+        ///
+        /// Carried whole rather than re-derived from scalars because it is the
+        /// same typed `BatchCompletion` carrier the dig already threads through
+        /// `RevealRestPile` for exactly this purpose — rebuilding its fourteen
+        /// fields at the resume site would fork that tail into a second copy
+        /// that could drift. Engine-internal bookkeeping, not player
+        /// information: `game/visibility.rs` strips it from every client view.
+        ///
+        /// `Option` ONLY because that stripping needs a way to say "redacted";
+        /// a genuine pending split always carries one. The resolver therefore
+        /// treats `None` as an invalid state and rejects the submission BEFORE
+        /// moving any card, rather than completing the move and dropping the
+        /// dig's reveal-marker cleanup and tracked-set publication on the
+        /// floor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion: Option<Box<BatchCompletion>>,
     },
     SurveilChoice {
         player: PlayerId,
@@ -14431,6 +14629,11 @@ pub enum WaitingFor {
         #[serde(default)]
         payment_mode: CastPaymentMode,
         available_slots: Vec<super::card_type::CoreType>,
+        /// CR 601.2a: the graveyard permission grant the player announced for
+        /// this printed-cost cast, carried so the slot answer re-prepares that
+        /// exact grant. `None` only for a land play (CR 305.1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission: Option<AnnouncedGraveyardPermission>,
     },
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
@@ -15947,6 +16150,46 @@ pub enum NoActor {
 }
 
 impl WaitingFor {
+    /// CR 401.4 + CR 608.2d: the single constructor for
+    /// [`WaitingFor::DigRestSplitChoice`].
+    ///
+    /// Owns the two invariants a caller could otherwise get wrong:
+    ///
+    /// * `top_count` is clamped to the pile, and `bottom_count` is derived from
+    ///   the SAME clamped value, so the prompt's two halves always sum to
+    ///   `cards.len()` (the client displays both and derives neither);
+    /// * `player` is the acting authority implied by `scope` — the chooser for
+    ///   a partition prompt, and the library's OWNER for a CR 401.4
+    ///   arrangement prompt, which is the whole point of the `scope` axis.
+    pub fn new_dig_rest_split(
+        chooser: PlayerId,
+        library_owner: PlayerId,
+        cards: Vec<ObjectId>,
+        top_count: usize,
+        scope: DigRestSplitScope,
+        source_id: Option<ObjectId>,
+        completion: Option<Box<BatchCompletion>>,
+    ) -> Self {
+        let top_count = top_count.min(cards.len());
+        let bottom_count = cards.len() - top_count;
+        let player = match scope {
+            DigRestSplitScope::PartitionAndOrder | DigRestSplitScope::PartitionOnly => chooser,
+            // CR 401.4: "the owner of those cards may arrange them in any
+            // order" — not the player the effect gave the partition to.
+            DigRestSplitScope::OrderOnly => library_owner,
+        };
+        WaitingFor::DigRestSplitChoice {
+            player,
+            library_owner,
+            cards,
+            top_count,
+            bottom_count,
+            scope,
+            source_id,
+            completion,
+        }
+    }
+
     /// Canonical stable variant name (engine-owned labeler).
     ///
     /// Exhaustive over every `WaitingFor` variant — no wildcard fallback, so the
@@ -15994,6 +16237,7 @@ impl WaitingFor {
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DieKeepChoice { .. } => "DieKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
+            WaitingFor::DigRestSplitChoice { .. } => "DigRestSplitChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
@@ -16157,6 +16401,7 @@ impl WaitingFor {
             | WaitingFor::CoinFlipKeepChoice { player, .. }
             | WaitingFor::DieKeepChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }
+            | WaitingFor::DigRestSplitChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
             | WaitingFor::SearchChoice { player, .. }
@@ -16509,6 +16754,7 @@ impl WaitingFor {
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
+            | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
@@ -16777,8 +17023,15 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
-                // CR 702.60a + CR 401.4: the bottom-order response is a
-                // permutation of the offered pile, verified by `apply()`.
+                // CR 401.2 + CR 401.4: the split response names which cards go
+                // on top, and when two or more do, their owner may arrange
+                // them in any order — a free permutation the combination
+                // enumerator does not list, so `apply()` is the real validator
+                // (it enforces the exact count, uniqueness, and membership).
+                | WaitingFor::DigRestSplitChoice { .. }
+                // CR 702.60a: the Ripple bottom-order response is a free
+                // permutation of the offered pile — the candidate enumerator
+                // only lists {identity}, so `apply()` is the real validator.
                 | WaitingFor::RippleBottomOrder { .. }
                 | WaitingFor::RevealUntilBottomOrder { .. }
         )
@@ -17708,6 +17961,58 @@ pub enum CastingVariant {
 impl CastingVariant {
     pub fn is_normal(&self) -> bool {
         *self == CastingVariant::Normal
+    }
+
+    /// CR 118.9b: the keyword that names this casting method, matched against
+    /// a permission that requires one ("You may cast this card from your
+    /// graveyard using its blitz ability."). `None` when no keyword names the
+    /// method: the printed cost and the permission routes, and the keyword
+    /// methods `KeywordKind` has no discriminant for. A permission that requires
+    /// a method admits a cast only when this is `Some` of that keyword.
+    pub fn cast_keyword(self) -> Option<crate::types::keywords::KeywordKind> {
+        use crate::types::keywords::KeywordKind;
+        match self {
+            CastingVariant::Warp => Some(KeywordKind::Warp),
+            CastingVariant::Escape => Some(KeywordKind::Escape),
+            CastingVariant::Retrace => Some(KeywordKind::Retrace),
+            CastingVariant::Harmonize => Some(KeywordKind::Harmonize),
+            CastingVariant::Mayhem => Some(KeywordKind::Mayhem),
+            CastingVariant::Flashback => Some(KeywordKind::Flashback),
+            CastingVariant::Aftermath => Some(KeywordKind::Aftermath),
+            CastingVariant::Disturb => Some(KeywordKind::Disturb),
+            CastingVariant::Sneak { .. } => Some(KeywordKind::Sneak),
+            CastingVariant::Miracle => Some(KeywordKind::Miracle),
+            CastingVariant::Madness => Some(KeywordKind::Madness),
+            CastingVariant::Dash => Some(KeywordKind::Dash),
+            CastingVariant::Blitz => Some(KeywordKind::Blitz),
+            CastingVariant::Suspend => Some(KeywordKind::Suspend),
+            CastingVariant::Plot => Some(KeywordKind::Plot),
+            CastingVariant::Foretell => Some(KeywordKind::Foretell),
+            CastingVariant::Bestow => Some(KeywordKind::Bestow),
+            CastingVariant::Awaken => Some(KeywordKind::Awaken),
+            CastingVariant::Cleave => Some(KeywordKind::Cleave),
+            CastingVariant::MoreThanMeetsTheEye => Some(KeywordKind::MoreThanMeetsTheEye),
+            CastingVariant::Mutate => Some(KeywordKind::Mutate),
+            CastingVariant::Freerunning => Some(KeywordKind::Freerunning),
+            CastingVariant::JumpStart => Some(KeywordKind::JumpStart),
+            CastingVariant::Fuse => Some(KeywordKind::Fuse),
+            CastingVariant::Normal
+            | CastingVariant::Adventure
+            | CastingVariant::Omen
+            | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::HandPermission { .. }
+            | CastingVariant::ExilePermission { .. }
+            | CastingVariant::WebSlinging { .. }
+            | CastingVariant::Evoke
+            | CastingVariant::Emerge
+            | CastingVariant::Spectacle
+            | CastingVariant::Overload
+            | CastingVariant::Impending
+            | CastingVariant::Prototype
+            | CastingVariant::Prowl
+            | CastingVariant::Surge
+            | CastingVariant::FaceDown => None,
+        }
     }
 
     /// CR 601.2a: The `ObjectId` of the `StaticMode::ExileCastPermission` source
@@ -29653,6 +29958,7 @@ mod forced_cascade_window_tests {
                     block_requirements: Default::default(),
                     blocker_constraints: Default::default(),
                     must_be_blocked_targets: Default::default(),
+                    block_capacities: Default::default(),
                 },
             ),
             (
@@ -38399,6 +38705,7 @@ mod tests {
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
             must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::GameOver {
             winner: Some(PlayerId(0)),
@@ -38448,11 +38755,21 @@ mod tests {
             selectable_cards: vec![ObjectId(1)],
             kept_destination: None,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
             enters_attacking: false,
         }));
+        variants.push(Box::new(WaitingFor::new_dig_rest_split(
+            PlayerId(0),
+            PlayerId(0),
+            vec![ObjectId(1), ObjectId(2)],
+            1,
+            DigRestSplitScope::PartitionAndOrder,
+            None,
+            None,
+        )));
         variants.push(Box::new(WaitingFor::SurveilChoice {
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
@@ -38687,7 +39004,7 @@ mod tests {
             outcomes: Vec::new(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 40);
+        assert_eq!(variants.len(), 41);
     }
 
     #[test]

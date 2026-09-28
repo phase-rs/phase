@@ -1,6 +1,6 @@
 # PR preparation and handoff
 
-Read this after [SKILL.md](SKILL.md) Step 7 when the task includes opening a PR. Local-only implementation does not synchronize a remote.
+Read this after [SKILL.md](SKILL.md) Step 7 when you will ship the run or open a PR. Local-only implementation does not synchronize a remote.
 
 ## Prepare the completed work for a PR
 
@@ -12,6 +12,10 @@ Perform this handoff after the pipeline completes and before the caller's final 
 4. Hand the resulting commit and complete PR diff to the caller's ordinary final `review-engine-impl` and Gate A (§5–6 of [AI-CONTRIBUTOR.md](../../../docs/AI-CONTRIBUTOR.md#5-validate-the-review-actually-happened-and-was-addressed)). Do not substitute checkpoint-mode or phase-only review for this full-head review. The reviewer tags its findings as `review-engine-impl` directs for engine-implementer reviews, and this loop is bounded like any other review loop by the [run limits](SKILL.md#run-limits). A round without `behavior` findings closes as SKILL.md Step 6 closes one: after a second consecutive such round, apply its comment-only corrections and list its remaining `text` findings as residuals. Delegate any fixes to a scoped worker and commit them, then repeat the required checks and final review for the new commit against the same fetched base. A comment-only correction the final review returns is applied by the orchestrator under [Step 6's class and proof](SKILL.md#step-6--review-the-immutable-candidate) instead of by a worker; the required checks, the final review and Gate A then repeat at the correction commit as for any new commit. Do not refetch in that loop: later upstream movement does not restart this preparation.
 
 Keep earlier accepted checkpoints and phase-chain evidence intact. If synchronization changes the branch head, use the historical/current-head handoff below; do not relabel old results as verification of the new code or introduce more SHA fields. This can require repeating checks when synchronization changes code. A later deliberate merge or rebase invalidates the current-head evidence again.
+
+## Ship through the merge queue
+
+When a maintainer, someone who can push to `phase-rs/phase` (`gh api repos/phase-rs/phase --jq .permissions.push` prints `true`), invoked this run directly, ship it with [`/ship-commits`](../ship-commits/SKILL.md) unless the task says local-only. Push permission alone is not consent: a run spawned by another skill, workflow or agent ships only when its task asks. Give it `BASE_SHA..CANDIDATE_SHA`; for a chartered run, the run's base to the last accepted phase. Its cherry-pick onto a fresh `origin/main` in a ship worktree replaces steps 1–2 above. Before it pushes, run steps 3–4 in that worktree at the cherry-picked head, which becomes the PR head, and add the handoff block below to the PR body. A cherry-pick conflict stops the ship; report it. Contributors, who cannot push there, open a PR from their fork as above when the task asks for one.
 
 ## Post-acceptance PR handoff (non-gating)
 

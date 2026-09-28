@@ -60,6 +60,30 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 89 — CR 118.9b graveyard permissions that require a casting method ("You
+///      may cast this card from your graveyard using its blitz ability.":
+///      Sabin, Master Monk; Tenacious Underdog; Detective's Phoenix):
+///      `StaticMode::GraveyardCastPermission` gains `required_cast_keyword`,
+///      no longer carried as a card-filter `HasKeywordKind`, and
+///      `CastingVariantChoiceOption` gains `additional_cost`. A v88 peer
+///      would drop the method silently and admit a printed-cost cast the
+///      permission forbids. CR 601.2a + CR 601.2b: the same bump carries the
+///      announced graveyard permission: `CastingVariantChoiceOption` gains
+///      `authority`, `SpellContext` gains `graveyard_permission_latch`, and
+///      `WaitingFor::ChoosePermanentTypeSlot` gains `permission`. Full-game
+///      peers and P2P move in lockstep (wire 71); lobby messages are unchanged.
+/// 88 — `WaitingFor::DeclareBlockers` gains `block_capacities`
+///      (CR 509.1a + CR 101.1): for each able blocker, its block limit —
+///      `null` for any number. Serde-additive
+///      (`#[serde(default, skip_serializing_if = "HashMap::is_empty")]`), but
+///      the client bounds the pile stepper with it; a v87 host would silently
+///      omit it. Full-game handshakes must refuse that capability mismatch,
+///      as in 60. Lobby messages are unchanged; P2P moves in lockstep
+///      (wire 70).
+/// 87 — `WaitingFor::DigRestSplitChoice` and `Effect::Dig.rest_split_top_count`
+///      extend serialized game state for Telling Time-class rest piles. A v86
+///      peer cannot represent the split choice; full-game and P2P peers move
+///      in lockstep (wire 69). Lobby messages are unchanged.
 /// 86 — `GameEvent::Melded` is a new tagged variant in full-game event frames.
 ///      A v85 client cannot present the meld sequence from a v86 server, so
 ///      full-game and P2P peers move in lockstep (wire 68). Lobby messages are
@@ -714,7 +738,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 86;
+pub const PROTOCOL_VERSION: u32 = 89;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1930,12 +1954,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 86);
+        assert_eq!(PROTOCOL_VERSION, 89);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 85);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 88);
     }
 
     #[test]

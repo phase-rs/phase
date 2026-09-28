@@ -223,6 +223,7 @@ fn scenario_blocks_lethal_attack_when_a_block_exists() {
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
             must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -355,6 +356,7 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
             must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 

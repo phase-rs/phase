@@ -2,9 +2,8 @@ import type { GameFormat } from "../adapter/types";
 import { parseWebSocketUrl } from "../config/multiplayerServer";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
 
-/** Views available on the multiplayer page. "draft-lobby" shows the
- *  multiplayer draft pod lobby after hosting or joining a draft. */
-export type MultiplayerView = "lobby" | "host-setup" | "deck-select" | "draft-lobby";
+/** Views available on the multiplayer page. */
+export type MultiplayerView = "lobby" | "host-setup" | "deck-select";
 
 export type LiveCheck =
   | { status: "idle" }

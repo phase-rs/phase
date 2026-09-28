@@ -1911,6 +1911,15 @@ pub(crate) fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<S
     )
 }
 
+/// CR 118.9b: the casting methods a "using its <keyword> ability" graveyard
+/// permission can be honored with, because the engine casts them from the
+/// graveyard: Blitz (Sabin, Master Monk; Tenacious Underdog) and Bestow
+/// (Detective's Phoenix). Warp, Sneak and Mutate have no graveyard cast route,
+/// so a permission requiring them is declined rather than modeled.
+fn graveyard_cast_method_is_modeled(kind: KeywordKind) -> bool {
+    matches!(kind, KeywordKind::Blitz | KeywordKind::Bestow)
+}
+
 /// Handles three patterns, each with an optional alt-cost rider:
 /// 1. "Once during each of your turns, you may cast [filter] from your graveyard[ rider]." (Lurrus, Karador)
 /// 2. "You may play [filter] from your graveyard[ rider]." (Crucible of Worlds, Icetill Explorer)
@@ -1919,8 +1928,10 @@ pub(crate) fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<S
 /// Rider grammar (both possessive and number-insensitive):
 ///   " using " alt("its" | "their") " " <keyword_name> " " alt("ability" | "abilities")
 ///
-/// When present, the rider injects `FilterProp::HasKeywordKind { value: kind }` into the
-/// returned `affected: TargetFilter`, so eligibility is gated on that granted keyword.
+/// When present, the rider becomes the permission's typed
+/// `required_cast_keyword` (CR 118.9b); `affected` keeps only the card
+/// selection. A rider naming a method with no graveyard cast route in the
+/// engine, or an unrecognized " using ..." rider, declines the permission.
 /// CR 604.2 + CR 118.9: static continuous effect granting permission to cast via an
 /// alternative cost associated with the named keyword.
 pub(crate) fn try_parse_graveyard_cast_permission(
@@ -1958,11 +1969,22 @@ pub(crate) fn try_parse_graveyard_cast_permission(
             "during each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard",
         )
     });
-    if muldrotha_alt.is_some() {
+    if let Some(remainder) = muldrotha_alt {
+        // CR 601.3: the fixed lead must END the sentence. Any gate or rider
+        // after it ("… from your graveyard if you control a Zombie.") isn't
+        // modelled here, and the populated turn condition would otherwise hide
+        // the swallowed-clause diagnostic, so decline (honest Unimplemented).
+        if !is_punctuation_only(remainder) {
+            return None;
+        }
         // Affected filter: any permanent (CR 110.4 — artifact, battle,
         // creature, enchantment, land, planeswalker). The downstream slot
         // picker enforces the per-permanent-type per-turn limit.
         let affected = TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent));
+        // CR 102.1 + CR 601.3: "During each of your turns" limits the grant to
+        // turns its controller is the active player. The frequency only caps the
+        // count per turn; the turn restriction rides the condition, which every
+        // offer/admission/prepare consumer reads through `active_static_definitions`.
         return Some(
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
@@ -1970,8 +1992,10 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
             })
             .affected(affected)
+            .condition(StaticCondition::DuringYourTurn)
             .description(text.to_string()),
         );
     }
@@ -2060,25 +2084,25 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // cycle's windowed form from the only branch that builds the two-part
     // `Or[Land, Card]` filter. See the hoisted site for the measurement.
 
-    // CR 117.1c: Optional "during your turn, " timing qualifier (Festival of
-    // Embers). When present, the permission is gated to the source controller's
-    // turn via a `ParsedCondition::IsYourTurn` static condition
-    // (`evaluate_condition` → `state.active_player == controller`), the
-    // rules-correct enforcement at CR 102.1 — not silently dropped.
-    let (lower, your_turn_only) = match nom_tag_lower(lower, lower, "during your turn, ") {
+    // CR 102.1 + CR 601.3: Optional "during your turn, " timing qualifier
+    // (Festival of Embers). When present, the permission is gated to the source
+    // controller's turn via `StaticCondition::DuringYourTurn` — not silently
+    // dropped.
+    let (lower, during_your_turn_head) = match nom_tag_lower(lower, lower, "during your turn, ") {
         Some(r) => (r, true),
         None => (lower, false),
     };
 
-    // Determine pattern and extract the rest after the prefix
-    let (rest, frequency, play_mode) = if let Some(r) = nom_tag_lower(
+    // Determine pattern and extract the rest after the prefix. The third flag
+    // records whether the lead itself names "each of your turns" (CR 102.1).
+    let (rest, frequency, play_mode, each_of_your_turns) = if let Some(r) = nom_tag_lower(
         lower,
         lower,
         "once during each of your turns, you may cast ",
     ) {
-        (r, CastFrequency::OncePerTurn, CardPlayMode::Cast)
+        (r, CastFrequency::OncePerTurn, CardPlayMode::Cast, true)
     } else if let Some(r) = nom_tag_lower(lower, lower, "you may play ") {
-        (r, CastFrequency::Unlimited, CardPlayMode::Play)
+        (r, CastFrequency::Unlimited, CardPlayMode::Play, false)
     } else {
         let r = nom_tag_lower(lower, lower, "you may cast ")?;
         // Only match if a graveyard anchor follows — avoid catching other "you
@@ -2088,8 +2112,12 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         {
             return None;
         }
-        (r, CastFrequency::Unlimited, CardPlayMode::Cast)
+        (r, CastFrequency::Unlimited, CardPlayMode::Cast, false)
     };
+    // CR 102.1 + CR 601.3: "during your turn" and "(once) during each of your
+    // turns" both limit the grant to turns its controller is the active
+    // player. The frequency only caps the count per turn.
+    let your_turn_only = during_your_turn_head || each_of_your_turns;
 
     let (filter_text, trailing, pool_props) = split_graveyard_permission_anchor(rest)?;
 
@@ -2125,8 +2153,26 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // Parse optional alt-cost rider from the text after "from your graveyard".
     // Thread its remainder so the final strict-consumption check below sees
     // exactly the text no modeled rider consumed.
-    let (trailing, rider_kind) = match parse_alt_cost_rider(trailing) {
-        Ok((rest, kind)) => (rest, Some(kind)),
+    //
+    // CR 118.9b: "An effect that allows you to cast a spell may require a
+    // certain alternative cost to be paid." The rider is the permission's
+    // required casting method, carried typed on the permission (not as a card
+    // selector in `affected`). A method the engine can't cast from the
+    // graveyard (warp: Timeline Culler; sneak: Ninja Teen; mutate: Brokkos,
+    // Apex of Forever) declines the whole permission, so it stays an honest
+    // gap rather than a permission whose only legal cast doesn't exist. A
+    // " using ..." rider that isn't recognized declines too, so an unknown
+    // method never becomes an unrestricted permission.
+    let (trailing, required_cast_keyword) = match parse_alt_cost_rider(trailing) {
+        Ok((rest, kind)) if graveyard_cast_method_is_modeled(kind) => (rest, Some(kind)),
+        Ok(_) => return None,
+        Err(_)
+            if tag::<_, _, OracleError<'_>>(" using ")
+                .parse(trailing)
+                .is_ok() =>
+        {
+            return None;
+        }
         Err(_) => (trailing, None),
     };
     // CR 614.1a + CR 607.1: peel the linked stack-exit destination sentence
@@ -2161,32 +2207,42 @@ pub(crate) fn try_parse_graveyard_cast_permission(
             }),
         ),
     };
-    // CR 601.2a + CR 607.1: when the line carries a recognized CR 614.1a
-    // destination rider, everything before it must have been consumed by the
-    // modeled riders above — an unrecognized sentence (e.g. "It gains haste.")
-    // must decline rather than be emitted as an absent rider. Destination-free
-    // permissions keep their existing tail handling (the unmodeled
-    // alternative-cost rider class stays the plan's §8 deferral).
-    //
     // `.trim()` (not `.is_empty()`): a two-sentence "if X. If you do, Y."
     // permission leaves a whitespace-only residual (Undead Sprinter) that must
     // still be treated as fully consumed so the gate condition is not re-dropped.
-    // A condition whose parse leaves semantic text is dropped exactly as before
-    // (its residual still feeds the destination-rider check below).
+    //
+    // CR 601.3: a gate that is printed ("if …" / "as long as …") but not fully
+    // modelled declines the WHOLE permission. Emitting it with no condition
+    // would make the card castable from the graveyard unconditionally (strictly
+    // more permissive than printed). Declining leaves the line an honest
+    // unsupported gap. Measured over the export: only Risen Executioner's "if
+    // you pay {1} more …" cost-shaped gate moves.
+    let gate_present = alt((
+        tag::<_, _, OracleError<'_>>(" as long as "),
+        tag::<_, _, OracleError<'_>>(" if "),
+    ))
+    .parse(trailing)
+    .is_ok();
     let (condition, residual) = match parse_graveyard_permission_condition(trailing) {
         Ok((rest, condition)) if rest.trim().is_empty() => (Some(condition), rest),
-        Ok((rest, _)) => (None, rest),
+        Ok(_) => return None,
+        Err(_) if gate_present => return None,
         Err(_) => (None, trailing),
     };
-    if graveyard_destination_replacement.is_some() && !is_punctuation_only(residual) {
+    // CR 601.3 + CR 607.1: once the modelled lead, anchor, riders and gate are
+    // consumed, the rest of the line must be punctuation only. Any other residual
+    // is an unmodelled gate ("… unless you control a Zombie") or linked rider
+    // ("If you cast a spell this way, that artifact enters tapped." — Edgar,
+    // Master Machinist; "If you do, it perpetually becomes …" — Mischievous
+    // Lookout). Emitting the permission without it would be strictly more
+    // permissive than printed. And a populated turn-restriction condition would
+    // discharge the swallowed-clause expectation that used to flag the residual.
+    // So decline, and the line falls through to an honest Unimplemented.
+    if !is_punctuation_only(residual) {
         return None;
     }
 
-    let affected = if let Some(kind) = rider_kind {
-        inject_keyword_kind_filter_prop(filter, kind)
-    } else {
-        filter
-    };
+    let affected = filter;
     // CR 400.7 + CR 604.2: the pool provenance the anchor stated ("cards in
     // your graveyard that were put there from … this turn") narrows WHICH
     // graveyard cards the permission offers. It rides `affected`, which
@@ -2201,15 +2257,22 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         graveyard_destination_replacement,
         extra_cost,
         enters_with_counter,
+        required_cast_keyword,
     })
     .affected(affected)
     .description(text.to_string());
+    // CR 102.1 + CR 601.3: the lead's turn restriction and a parsed gate both
+    // hold; neither may displace the other.
+    let condition = match (condition, your_turn_only) {
+        (Some(gate), true) => Some(StaticCondition::And {
+            conditions: vec![StaticCondition::DuringYourTurn, gate],
+        }),
+        (Some(gate), false) => Some(gate),
+        (None, true) => Some(StaticCondition::DuringYourTurn),
+        (None, false) => None,
+    };
     if let Some(condition) = condition {
         def = def.condition(condition);
-    } else if your_turn_only {
-        // CR 102.1 + CR 117.1c: gate the permission to the source controller's
-        // turn (Festival of Embers' "During your turn, ...").
-        def = def.condition(StaticCondition::DuringYourTurn);
     }
     if self_ref_permission {
         def = def.active_zones(vec![Zone::Graveyard]);
@@ -2340,9 +2403,8 @@ fn read_graveyard_pool_qualifier(after: &str) -> GraveyardPoolQualifier {
 }
 
 /// CR 604.2: AND-combine extra properties onto a permission's `affected`
-/// filter. Prop-vector generalization of [`inject_keyword_kind_filter_prop`],
-/// which folds exactly one property; both keep the same `Typed`-in-place /
-/// `And`-wrap shape so a `Typed` filter stays a `Typed` filter.
+/// filter, keeping the `Typed`-in-place / `And`-wrap shape so a `Typed` filter
+/// stays a `Typed` filter.
 fn inject_filter_props(filter: TargetFilter, props: Vec<FilterProp>) -> TargetFilter {
     if props.is_empty() {
         return filter;
@@ -2622,12 +2684,17 @@ fn try_parse_disjunctive_graveyard_cast_permission(
     // CR 601.2a: Frequency prefix. Only the once-per-turn lead is a real printed
     // shape for this disjunctive form today; accept both the canonical wording
     // and the shorter "once each turn" synonym via the file-wide `or_else` chain.
-    let rest = nom_tag_lower(
+    // CR 102.1 + CR 601.3: "during each of your turns" restricts the grant to
+    // its controller's turns; "once each turn" does not name whose turn.
+    let (rest, your_turn_only) = nom_tag_lower(
         lower,
         lower,
         "once during each of your turns, you may play ",
     )
-    .or_else(|| nom_tag_lower(lower, lower, "once each turn, you may play "))?;
+    .map(|rest| (rest, true))
+    .or_else(|| {
+        nom_tag_lower(lower, lower, "once each turn, you may play ").map(|rest| (rest, false))
+    })?;
     if nom_primitives::scan_contains(rest, "if you do, it gains") {
         return None;
     }
@@ -2706,20 +2773,24 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         }
     };
 
-    Some(
-        StaticDefinition::new(StaticMode::GraveyardCastPermission {
-            frequency: CastFrequency::OncePerTurn,
-            // CR 305.1: `Play` covers both the land-play and spell-cast branches.
-            play_mode: CardPlayMode::Play,
-            // Stack-exit redirect is wrong for the granted leave-battlefield
-            // rider (see doc comment); leave it unset.
-            graveyard_destination_replacement: None,
-            extra_cost: None,
-            enters_with_counter: None,
-        })
-        .affected(affected)
-        .description(text.to_string()),
-    )
+    let def = StaticDefinition::new(StaticMode::GraveyardCastPermission {
+        frequency: CastFrequency::OncePerTurn,
+        // CR 305.1: `Play` covers both the land-play and spell-cast branches.
+        play_mode: CardPlayMode::Play,
+        // Stack-exit redirect is wrong for the granted leave-battlefield
+        // rider (see doc comment); leave it unset.
+        graveyard_destination_replacement: None,
+        extra_cost: None,
+        enters_with_counter: None,
+        required_cast_keyword: None,
+    })
+    .affected(affected)
+    .description(text.to_string());
+    Some(if your_turn_only {
+        def.condition(StaticCondition::DuringYourTurn)
+    } else {
+        def
+    })
 }
 
 /// CR 305.1 + CR 601.2a + CR 114.4: Parse unlimited combined graveyard
@@ -2757,6 +2828,7 @@ fn try_parse_unlimited_combined_graveyard_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            required_cast_keyword: None,
         })
         .affected(affected)
         .description(text.to_string()),

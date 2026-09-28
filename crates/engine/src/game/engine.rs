@@ -31,7 +31,7 @@ use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
 };
-use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::statics::CastFrequency;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
@@ -10539,6 +10539,12 @@ fn apply_action(
         WaitingFor::RevealChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 701.20a + CR 608.2c: a revealed card "remains revealed for as
+            // long as necessary to complete the parts of the effect that card
+            // is relevant to", and a reveal-dig's remainder split is a later
+            // pause in the SAME instruction — so its cards stay public across
+            // it exactly as they do across the keep selection above.
+            | WaitingFor::DigRestSplitChoice { .. }
             // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
             // both the opponent's partition step and the controller's pile
             // choice — the cards remain public while both players interact.
@@ -11755,6 +11761,7 @@ fn apply_non_priority_pass_action(
                 source,
                 payment_mode,
                 available_slots,
+                permission,
             },
             GameAction::ChoosePermanentTypeSlot { slot },
         ) => {
@@ -11775,6 +11782,7 @@ fn apply_non_priority_pass_action(
                     *card_id,
                     *source,
                     slot,
+                    permission.as_ref(),
                     *payment_mode,
                     &mut events,
                 )?
@@ -16531,24 +16539,18 @@ pub(super) fn begin_pending_trigger_target_selection(
 ///   non-stack play-land path; the picker reads the live used-set so concurrent
 ///   frequency-bounded permissions are handled correctly.
 /// - `Unlimited` (Crucible-of-Worlds-with-no-rider): no tracking.
+///
+/// CR 601.2a: the frequency spent is that of the grant that admitted the land
+/// (`casting::graveyard_land_play_frequency`, captured before the move), never
+/// another graveyard grant on the same source.
 fn record_graveyard_play_permission(
     state: &mut GameState,
-    source: Option<ObjectId>,
+    grant: Option<(ObjectId, Option<CastFrequency>)>,
     played_object: ObjectId,
 ) {
-    let Some(source_id) = source else {
+    let Some((source_id, frequency)) = grant else {
         return;
     };
-    let Some(obj) = state.objects.get(&source_id) else {
-        return;
-    };
-    let frequency =
-        super::functioning_abilities::active_static_definitions(state, obj).find_map(|s| {
-            match s.mode {
-                StaticMode::GraveyardCastPermission { frequency, .. } => Some(frequency),
-                _ => None,
-            }
-        });
     match frequency {
         Some(crate::types::statics::CastFrequency::OncePerTurn) => {
             crate::game::ledger::consume_once_per_turn_permission(
@@ -16673,14 +16675,14 @@ fn finalize_committed_land_play(
     player: PlayerId,
     object_id: ObjectId,
     origin_zone: Zone,
-    graveyard_permission_source: Option<ObjectId>,
+    graveyard_permission_grant: Option<(ObjectId, Option<CastFrequency>)>,
     exile_play_authorization: Option<casting::ExileLandPlayAuthorization>,
     library_permission_source: Option<(ObjectId, CastFrequency)>,
     events: &mut Vec<GameEvent>,
 ) {
     state.lands_played_this_turn += 1;
     record_land_played_from_zone(state, player, object_id, origin_zone);
-    record_graveyard_play_permission(state, graveyard_permission_source, object_id);
+    record_graveyard_play_permission(state, graveyard_permission_grant, object_id);
     record_exile_play_permission(state, exile_play_authorization);
     if let Some((source_id, frequency)) = library_permission_source {
         record_top_of_library_land_permission(state, source_id, frequency);
@@ -16852,6 +16854,15 @@ fn handle_play_land(
             .find(|(obj_id, _)| *obj_id == object_id)
             .map(|(_, source_id)| *source_id);
     let in_graveyard_with_permission = gy_permission_source.is_some();
+    // CR 601.2a + CR 110.4: the frequency of the grant that admitted the land,
+    // captured before the land leaves the graveyard; it decides the slot prompt
+    // and the ledger the play spends.
+    let gy_permission_grant = gy_permission_source.map(|source| {
+        (
+            source,
+            super::casting::graveyard_land_play_frequency(state, player, object_id, source),
+        )
+    });
 
     // CR 401.5 + CR 305.1: Check top of library for
     // `TopOfLibraryCastPermission { play_mode: Play }` (Future Sight,
@@ -16927,21 +16938,10 @@ fn handle_play_land(
     // prompt the player to choose which permanent type slot to consume. Skip
     // if a slot was already chosen (pending_permanent_type_slot is set).
     if in_graveyard_with_permission && state.pending_permanent_type_slot.is_none() {
-        if let Some(source) = gy_permission_source {
-            if let Some(src_obj) = state.objects.get(&source) {
-                let is_per_type = super::functioning_abilities::active_static_definitions(
-                    state, src_obj,
-                )
-                .any(|s| {
-                    matches!(
-                        s.mode,
-                        StaticMode::GraveyardCastPermission {
-                            frequency:
-                                crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
-                            ..
-                        }
-                    )
-                });
+        if let Some((source, frequency)) = gy_permission_grant {
+            {
+                let is_per_type = frequency
+                    == Some(crate::types::statics::CastFrequency::OncePerTurnPerPermanentType);
                 if is_per_type {
                     let slots =
                         super::casting::available_permanent_type_slots(state, source, object_id);
@@ -16953,6 +16953,7 @@ fn handle_play_land(
                             source,
                             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                             available_slots: slots,
+                            permission: None,
                         });
                     }
                 }
@@ -17131,7 +17132,7 @@ fn handle_play_land(
                             player,
                             object_id,
                             origin_zone,
-                            gy_permission_source,
+                            gy_permission_grant,
                             exile_play_authorization,
                             library_permission_src,
                             events,
@@ -17180,7 +17181,7 @@ fn handle_play_land(
                     player,
                     object_id,
                     origin_zone,
-                    gy_permission_source,
+                    gy_permission_grant,
                     exile_play_authorization,
                     library_permission_src,
                     events,
@@ -17214,7 +17215,7 @@ fn handle_play_land(
                 player,
                 object_id,
                 origin_zone,
-                gy_permission_source,
+                gy_permission_grant,
                 exile_play_authorization,
                 library_permission_src,
                 events,
@@ -17235,7 +17236,7 @@ fn handle_play_land(
         player,
         object_id,
         origin_zone,
-        gy_permission_source,
+        gy_permission_grant,
         exile_play_authorization,
         library_permission_src,
         events,

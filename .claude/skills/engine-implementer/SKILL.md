@@ -151,7 +151,7 @@ If the executor returns "stop and return" items (plan contradicts current code, 
 
 ### Step 4 — Checkpoint the candidate
 
-The checkpoint is the candidate commit, and it is the orchestrator's to make — never the executor's. Stage each approved path by explicit pathspec: never `git add -A`, and never commit without a pathspec, because the shared index can sweep in another agent's staged files. Before staging, confirm no pre-existing change overlaps an approved path; if attribution is ambiguous, stop and return rather than unstage, sweep in, or overwrite another agent's work. Commit, then confirm `git -C "$IMPLEMENTATION_WORKTREE" rev-parse HEAD` equals the `CANDIDATE_SHA` you recorded, and that `START_SHA..CANDIDATE_SHA` contains only the intended paths. Never measure an uncommitted tree or use a moving `HEAD` as the candidate. Verify `HEAD` is attached before any explicitly requested push, never pipe `git push` into `tail`/`head`, and never push unless asked.
+The checkpoint is the candidate commit, and it is the orchestrator's to make — never the executor's. Stage each approved path by explicit pathspec: never `git add -A`, and never commit without a pathspec, because the shared index can sweep in another agent's staged files. Before staging, confirm no pre-existing change overlaps an approved path; if attribution is ambiguous, stop and return rather than unstage, sweep in, or overwrite another agent's work. Commit, then confirm `git -C "$IMPLEMENTATION_WORKTREE" rev-parse HEAD` equals the `CANDIDATE_SHA` you recorded, and that `START_SHA..CANDIDATE_SHA` contains only the intended paths. Never measure an uncommitted tree or use a moving `HEAD` as the candidate. Verify `HEAD` is attached before any push, never pipe `git push` into `tail`/`head`, and push only through Step 7's ship or when asked.
 
 If the change touches the parser, find out whether it moves parser output: dispatch a fresh executor in measurement-only mode against the base and candidate projection worktrees, which builds the tooling on each side, generates card data from each against the same pinned data root, and diffs the two. Report what changed. `./scripts/gen-card-data.sh` and `cargo coverage` do not answer this question.
 
@@ -172,9 +172,9 @@ Spawn a fresh agent to invoke `review-engine-impl` against `BASE_SHA..CANDIDATE_
 
 ### Step 7 — Final acceptance
 
-Accept when the plan is clean or closed by the small-change lane; the review returns no findings, only comment-only corrections applied and proven as Step 6 says, or only residuals the run limits allow, listed; the completion checks pass at the candidate; and `rev-parse HEAD == CANDIDATE_SHA` — the correction commit when one exists. In a chartered run this is per-phase acceptance, with `PHASE_BASE_SHA` substituted; it emits no Final Report snapshot and no PR handoff, which are run-level only.
+Accept when the plan is clean or closed by the small-change lane; the review returns no findings, only comment-only corrections applied and proven as Step 6 says, or only residuals the run limits allow, listed; the completion checks pass at the candidate; and `rev-parse HEAD == CANDIDATE_SHA` — the correction commit when one exists. In a chartered run this is per-phase acceptance, with `PHASE_BASE_SHA` substituted; it emits no Final Report snapshot, ship, or PR handoff, which are run-level only.
 
-When the task includes opening a PR, follow [pr-handoff.md](pr-handoff.md) after final acceptance.
+After final acceptance of a run a maintainer invoked directly, ship it with `/ship-commits` as [pr-handoff.md](pr-handoff.md#ship-through-the-merge-queue) describes, unless the task says local-only. Otherwise, when the task includes opening a PR, follow [pr-handoff.md](pr-handoff.md).
 
 ## Final Report
 
@@ -193,4 +193,5 @@ Return after final acceptance:
 11. Self-flagged risks and judgment calls (yours + executor's).
 12. Remaining items, if any, with reasons.
 13. The budget, the phase-fit verdict and record path, every expansion case with its prediction and outcome, and abandoned candidates from approved restarts.
-14. Chartered runs additionally: the items [chartered.md](chartered.md) lists.
+14. When shipped, the `/ship-commits` final report.
+15. Chartered runs additionally: the items [chartered.md](chartered.md) lists.
