@@ -38,8 +38,20 @@ import {
   isStateLostMessage,
   nextSnapshotSeq,
 } from "./types";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type {
+  BracketDeckRequest,
+  BracketEstimate,
+  BracketEstimateRequest,
+} from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
+import type { DeckSignals } from "../types/deckSignals";
+import { isDeckSignals } from "../types/deckSignals";
+import type {
+  AiDeckCandidateWire,
+  PodSelectionRequest,
+  PodSelectionResult,
+} from "../types/podSelection";
+import { isPodSelectionResult } from "../types/podSelection";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { classifyInitFailure } from "./init-envelope";
 import { AiWorkerPool } from "./ai-worker-pool";
@@ -1108,12 +1120,36 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     this.invalidateAiDecisionDiagnostics();
   }
 
-  async estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    this.assertInitialized("estimateBracket");
+  async estimateBracket(request: BracketEstimateRequest): Promise<BracketEstimate | null> {
+    await this.initialize();
+    await this.requireCardDb();
+    const estimate = this.engine
+      ? await this.engine.estimateBracketForDeck(request)
+      : await this.fallback!.estimateBracketForDeck(request);
+    if (estimate === null || estimate === undefined) return null;
+    if (isBracketEstimate(estimate)) return estimate;
+    throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
+  }
+
+  async selectAiPod(
+    candidates: AiDeckCandidateWire[],
+    request: PodSelectionRequest,
+  ): Promise<PodSelectionResult> {
+    await this.initialize();
+    await this.requireCardDb();
     if (this.engine) {
-      return this.engine.estimateBracketForDeck(deck);
+      return this.engine.selectAiPod(candidates, request);
     }
-    return this.fallback!.estimateBracketForDeck(deck);
+    return this.fallback!.selectAiPod(candidates, request);
+  }
+
+  async deckSignals(deck: BracketDeckRequest): Promise<DeckSignals | null> {
+    await this.initialize();
+    await this.requireCardDb();
+    if (this.engine) {
+      return this.engine.deckSignalsForDeck(deck);
+    }
+    return this.fallback!.deckSignalsForDeck(deck);
   }
 
   /**
@@ -1487,7 +1523,12 @@ interface MainThreadFallback {
     firstPlayer?: number,
     owner?: HostSessionOwner,
   ): Promise<SubmitResult>;
-  estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
+  estimateBracketForDeck(request: BracketEstimateRequest): Promise<BracketEstimate | null>;
+  selectAiPod(
+    candidates: AiDeckCandidateWire[],
+    request: PodSelectionRequest,
+  ): Promise<PodSelectionResult>;
+  deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
   evaluateDeckFormatGate(request: unknown): Promise<unknown>;
   customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown>;
@@ -1530,6 +1571,7 @@ function throwInitFailure(result: unknown): void {
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
   const runtime = await getMainThreadRuntime();
   const { wasm, cardData } = runtime;
+  const engineRuntime = await import("../services/engineRuntime");
 
   function enqueue<T>(operation: () => T): Promise<T> {
     const p = runtime.queue.then(() => operation());
@@ -1746,15 +1788,16 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     ping: () => wasm.ping(),
 
-    initializeGame: (
+    initializeGame: async (
       deckData: unknown | null,
       seed: number,
       formatConfig: FormatConfig | null,
       matchConfig: MatchConfig | null,
       playerCount?: number,
       firstPlayer?: number,
-    ) =>
-      enqueue(() => {
+    ) => {
+      await engineRuntime.ensureComboTable();
+      return enqueue(() => {
         const r = wasm.initialize_game(
           deckData,
           seed,
@@ -1765,9 +1808,10 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         );
         throwInitFailure(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
-      }),
+      });
+    },
 
-    initializeMultiplayerHostGame: (
+    initializeMultiplayerHostGame: async (
       deckData: unknown | null,
       seed: number,
       formatConfig: FormatConfig | null,
@@ -1775,8 +1819,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       playerCount?: number,
       firstPlayer?: number,
       owner?: HostSessionOwner,
-    ) =>
-      enqueue(() => {
+    ) => {
+      await engineRuntime.ensureComboTable();
+      return enqueue(() => {
         const r = wasm.initialize_multiplayer_host_game(
           deckData,
           seed,
@@ -1794,14 +1839,27 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           events: r.events ?? [],
           log_entries: r.log_entries ?? [],
         };
+      });
+    },
+
+    estimateBracketForDeck: async (request: BracketEstimateRequest) => {
+      await engineRuntime.ensureComboTable();
+      return enqueue(() => wasm.estimate_bracket_for_deck(request));
+    },
+
+    selectAiPod: (candidates: AiDeckCandidateWire[], request: PodSelectionRequest) =>
+      enqueue(() => {
+        const result = wasm.selectAiPod(candidates, request);
+        if (isPodSelectionResult(result)) return result;
+        throw new Error("selectAiPod returned an invalid pod-selection result");
       }),
 
-    estimateBracketForDeck: (deck: BracketDeckRequest) =>
+    deckSignalsForDeck: (deck: BracketDeckRequest) =>
       enqueue(() => {
-        const r = wasm.estimate_bracket_for_deck(deck);
+        const r = wasm.deck_signals_for_deck(deck);
         if (r === null || r === undefined) return null;
-        if (isBracketEstimate(r)) return r;
-        throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
+        if (isDeckSignals(r)) return r;
+        throw new Error("deck_signals_for_deck returned invalid deck signals");
       }),
 
     // Card DB is loaded into this same `@wasm/engine` module singleton by

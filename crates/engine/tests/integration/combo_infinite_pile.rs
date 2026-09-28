@@ -537,7 +537,7 @@ fn create_saproling(state: &mut GameState, owner: PlayerId) -> ObjectId {
 fn bootstrap_4p_game(db: &CardDatabase) -> GameState {
     let decklist: DeckList =
         serde_json::from_str(&DECKLIST_4P).expect("the 4p decklist fixture must deserialize");
-    let payload = resolve_deck_list(db, &decklist);
+    let payload = resolve_deck_list(db, &engine::database::ComboTable::default(), &decklist);
     let mut state = GameState::new(FormatConfig::commander(), 4, RNG_SEED);
     load_and_hydrate_decks(&mut state, &payload, Some(db));
 

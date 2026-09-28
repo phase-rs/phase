@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
+import { UNDECLARED_COMBO } from "../../types/bracket";
 import {
   ACTIVE_DECK_KEY,
   RANDOM_DECK_SELECTION,
@@ -72,7 +73,6 @@ import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
 import { MenuSelect } from "../ui/MenuSelect";
 import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
-import { getSharedAdapter } from "../../adapter/wasm-adapter";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
 /** Sentinel section ids for the virtual/system folders in the collapse set. */
@@ -219,7 +219,8 @@ function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) 
     deck: candidate.deck,
     commanders: candidate.deck.commander ?? [],
     format: candidate.knownFormat,
-    adapter: getSharedAdapter(),
+    declaredTier: null,
+    comboDeclaration: UNDECLARED_COMBO,
   });
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;
 }

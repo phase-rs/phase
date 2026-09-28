@@ -265,16 +265,78 @@
     "clearOverride": "Borrar anulación de ilustración"
   },
   "bracket": {
-    "unavailable": "La estimación de nivel no está disponible en esta versión.",
+    "unavailable": "La estimación de nivel necesita datos de cartas que aún no se han cargado.",
     "addCommander": "Añade un comandante para ver tu estimación de nivel.",
     "estimated": "Estimado: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ discrepancia",
+    "belowFloor": " ⚠ por debajo del mínimo de B{{tier}}",
+    "belowFloorCombo": "elevado por un combo de dos cartas",
     "hideBreakdown": "Ocultar desglose",
     "showBreakdown": "Mostrar desglose",
     "hideBreakdownButton": "▲ Ocultar desglose",
     "showBreakdownButton": "▼ Mostrar desglose",
-    "forced": "(forzado B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Negación masiva de tierras",
+      "extraTurns": "Turnos extra",
+      "efficientTutors": "Tutores eficientes"
+    },
+    "check": {
+      "fired": "{{observed}} — fuerza B{{tier}} {{label}}",
+      "clear": "{{observed}} de {{threshold}} — faltan {{remaining}} para pasar a B{{tier}}",
+      "clearMax": "{{observed}} — no se puede alcanzar B{{tier}} añadiendo cartas",
+      "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Combos de dos cartas",
+      "unmeasured": "El barómetro de combos de dos cartas no se midió en esta compilación",
+      "noneFound": "No se encontraron combos infinitos de dos cartas en este mazo",
+      "attribution": "Datos de combos: {{attribution}}, captura del {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Mínimo por combo autónomo de dos cartas",
+        "earlyTwoCard": "Mínimo por combo temprano de dos cartas (coste de montaje de {{ceiling}} o menos)"
+      },
+      "check": {
+        "fired": "Fuerza B{{tier}} {{label}}",
+        "clear_one": "Añadir 1 carta más podría alcanzar B{{tier}}",
+        "clear_few": "Añadir {{count}} cartas más podría alcanzar B{{tier}}",
+        "clear_many": "Añadir {{count}} cartas más podría alcanzar B{{tier}}",
+        "clear_other": "Añadir {{count}} cartas más podría alcanzar B{{tier}}",
+        "clearMax": "No se puede alcanzar B{{tier}} con coincidencias adicionales"
+      },
+      "outcome": {
+        "wins": "Gana la partida",
+        "unbounded": "{{resource}} sin límite"
+      },
+      "resource": {
+        "mana": "maná",
+        "damage": "daño",
+        "lifeLoss": "pérdida de vidas",
+        "lifegain": "ganancia de vidas",
+        "mill": "milleo",
+        "draw": "robo de cartas",
+        "tokens": "fichas",
+        "combat": "fases de combate",
+        "turns": "turnos"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Definitivamente de dos cartas",
+        "arguablyTwoCard": "Posiblemente de dos cartas",
+        "more": "Más de dos cartas"
+      },
+      "relevance": {
+        "standalone": "Autónomo",
+        "contextual": "Contextual",
+        "helper": "Auxiliar"
+      },
+      "pairSourced": "{{first}} + {{second}} (de la tabla de combos)"
+    },
+    "uncounted": "Contado como evidencia — ninguna regla de nivel se aplica a este eje.",
+    "uncalibrated": "WotC no publica una cifra para «cantidades bajas»; este recuento no está calibrado.",
+    "coverage": "Leídas {{resolved}} de {{counted}} cartas del mazo",
+    "confidencePartial": "No se encontraron {{n}} nombres de cartas en los datos de cartas — estos recuentos son cotas inferiores.",
+    "unresolvedHeading": "No encontrado en los datos de cartas",
+    "baseFloor": "El nivel 1 se define por la temática del mazo, que el estimador no puede detectar. Las estimaciones comienzan en B2.",
     "dataVersion": "Datos: {{version}}",
     "aboutBrackets": "Acerca de los niveles ↗",
     "estimatedChip": "Estimado: B{{tier}}",
@@ -283,6 +345,46 @@
   "bracketPicker": {
     "ariaLabel": "Nivel del mazo",
     "unrated": "Sin clasificar"
+  },
+  "signals": {
+    "title": "Señales del mazo",
+    "disclaimer": "Estadísticas descriptivas del texto de carta analizado del mazo. No son criterios de nivel y nunca cambian la estimación.",
+    "avgManaValue": "Valor de maná promedio (no tierras): {{value}}",
+    "notMeasurable": "no medible",
+    "noCommander": "Añade un comandante para ver las señales del mazo.",
+    "unavailable": "Las señales del mazo necesitan datos de cartas, que aún no se han cargado.",
+    "unresolved": "No se encontraron {{n}} nombres de cartas en los datos de cartas.",
+    "kind": {
+      "counterspells": "Contrahechizos",
+      "spot_removal": "Remoción puntual",
+      "sweepers": "Limpiamesas",
+      "card_advantage": "Ventaja de cartas",
+      "free_interaction": "Interacción gratuita",
+      "mana_producers": "Productores de maná",
+      "land_fetch": "Búsqueda de tierras",
+      "rituals": "Rituales",
+      "extra_land_drops": "Tierras adicionales por turno"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinito de dos cartas",
+    "question": "¿Combo infinito intencional de dos cartas?",
+    "undeclared": "Sin respuesta",
+    "noneIntended": "Ninguno intencional",
+    "intended": "Intencional",
+    "windowAriaLabel": "¿Cuándo puede montarse?",
+    "windowUnstated": "Sin especificar",
+    "windowEarly": "Juego temprano",
+    "windowLate": "Solo juego tardío",
+    "declaredFloor": "(declarado — fuerza B{{tier}})",
+    "heading": "Barómetros",
+    "authorityEngine": "Comprobado por phase",
+    "authorityDeckOwner": "Declarado por ti",
+    "authorityUnanswered": "Sin respuesta",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Turnos extra",
+    "rowMassLandDenial": "Negación masiva de tierras",
+    "rowTwoCardCombos": "Combos infinitos de dos cartas"
   },
   "warnings": {
     "commanderCount": "El mazo tiene {{count}} cartas (necesita exactamente {{expected}})",

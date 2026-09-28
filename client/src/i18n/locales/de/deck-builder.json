@@ -265,16 +265,78 @@
     "clearOverride": "Artwork-Überschreibung aufheben"
   },
   "bracket": {
-    "unavailable": "Die Bracket-Schätzung ist in diesem Build nicht verfügbar.",
+    "unavailable": "Für die Bracket-Schätzung werden Kartendaten benötigt, die noch nicht geladen wurden.",
     "addCommander": "Füge einen Kommandeur hinzu, um deine Bracket-Schätzung zu sehen.",
     "estimated": "Geschätzt: B{{tier}} {{label}}",
     "manual": "Manuell: B{{tier}} {{label}}",
-    "mismatch": " ⚠ Abweichung",
+    "belowFloor": " ⚠ unter dem B{{tier}}-Minimum",
+    "belowFloorCombo": "durch eine Zwei-Karten-Kombo angehoben",
     "hideBreakdown": "Aufschlüsselung ausblenden",
     "showBreakdown": "Aufschlüsselung anzeigen",
     "hideBreakdownButton": "▲ Aufschlüsselung ausblenden",
     "showBreakdownButton": "▼ Aufschlüsselung anzeigen",
-    "forced": "(erzwungen B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Massenhafte Landzerstörung",
+      "extraTurns": "Extrazüge",
+      "efficientTutors": "Effiziente Tutoren"
+    },
+    "check": {
+      "fired": "{{observed}} — erzwingt B{{tier}} {{label}}",
+      "clear": "{{observed}} von {{threshold}} — noch {{remaining}} bis B{{tier}}",
+      "clearMax": "{{observed}} — B{{tier}} kann durch Hinzufügen von Karten nicht erreicht werden",
+      "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Zwei-Karten-Kombos",
+      "unmeasured": "Der Barometer für Zwei-Karten-Kombos wurde in diesem Build nicht gemessen",
+      "noneFound": "Keine unendlichen Zwei-Karten-Kombos in diesem Deck gefunden",
+      "attribution": "Kombo-Daten: {{attribution}}, Stand {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Untergrenze für eigenständige Zwei-Karten-Kombos",
+        "earlyTwoCard": "Untergrenze für frühe Zwei-Karten-Kombos (Aufbaukosten höchstens {{ceiling}})"
+      },
+      "check": {
+        "fired": "Erzwingt B{{tier}} {{label}}",
+        "clear_one": "Mit einer weiteren Karte wäre B{{tier}} erreichbar",
+        "clear_few": "Mit {{count}} weiteren Karten wäre B{{tier}} erreichbar",
+        "clear_many": "Mit {{count}} weiteren Karten wäre B{{tier}} erreichbar",
+        "clear_other": "Mit {{count}} weiteren Karten wäre B{{tier}} erreichbar",
+        "clearMax": "B{{tier}} kann durch zusätzliche Treffer nicht erreicht werden"
+      },
+      "outcome": {
+        "wins": "Gewinnt das Spiel",
+        "unbounded": "Unbegrenzt: {{resource}}"
+      },
+      "resource": {
+        "mana": "Mana",
+        "damage": "Schaden",
+        "lifeLoss": "Lebenspunkteverlust",
+        "lifegain": "Lebenspunktegewinn",
+        "mill": "Mühlen",
+        "draw": "Kartenziehen",
+        "tokens": "Spielsteine",
+        "combat": "Kampfphasen",
+        "turns": "Züge"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Definitiv zwei Karten",
+        "arguablyTwoCard": "Vertretbar zwei Karten",
+        "more": "Mehr als zwei Karten"
+      },
+      "relevance": {
+        "standalone": "Eigenständig",
+        "contextual": "Kontextabhängig",
+        "helper": "Hilfskombo"
+      },
+      "pairSourced": "{{first}} + {{second}} (aus der Kombo-Tabelle)"
+    },
+    "uncounted": "Als Nachweis gezählt — für diese Achse gilt keine Bracket-Regel.",
+    "uncalibrated": "WotC veröffentlicht keine Zahl für „geringe Mengen“; diese Anzahl ist nicht kalibriert.",
+    "coverage": "{{resolved}} von {{counted}} Deckkarten gelesen",
+    "confidencePartial": "{{n}} Kartennamen wurden in den Kartendaten nicht gefunden — diese Zählungen sind Untergrenzen.",
+    "unresolvedHeading": "Nicht in den Kartendaten gefunden",
+    "baseFloor": "Bracket 1 wird durch das Deckthema definiert, das der Schätzer nicht erkennen kann. Schätzungen beginnen bei B2.",
     "dataVersion": "Daten: {{version}}",
     "aboutBrackets": "Über Brackets ↗",
     "estimatedChip": "Geschätzt: B{{tier}}",
@@ -283,6 +345,46 @@
   "bracketPicker": {
     "ariaLabel": "Deck-Bracket",
     "unrated": "Unbewertet"
+  },
+  "signals": {
+    "title": "Deck-Signale",
+    "disclaimer": "Beschreibende Statistiken aus dem analysierten Kartentext des Decks. Sie sind keine Bracket-Kriterien und ändern die Schätzung nie.",
+    "avgManaValue": "Durchschnittlicher Manawert (Nichtländer): {{value}}",
+    "notMeasurable": "nicht messbar",
+    "noCommander": "Füge einen Commander hinzu, um Deck-Signale zu sehen.",
+    "unavailable": "Deck-Signale benötigen Kartendaten, die noch nicht geladen wurden.",
+    "unresolved": "{{n}} Kartennamen wurden in den Kartendaten nicht gefunden.",
+    "kind": {
+      "counterspells": "Gegenzauber",
+      "spot_removal": "Gezielte Entfernung",
+      "sweepers": "Massenentfernung",
+      "card_advantage": "Kartenvorteil",
+      "free_interaction": "Kostenlose Interaktion",
+      "mana_producers": "Manaproduzenten",
+      "land_fetch": "Landsuche",
+      "rituals": "Rituale",
+      "extra_land_drops": "Zusätzliche Länder pro Zug"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Unendliche Zwei-Karten-Kombo",
+    "question": "Beabsichtigte unendliche Zwei-Karten-Kombo?",
+    "undeclared": "Nicht beantwortet",
+    "noneIntended": "Keine beabsichtigt",
+    "intended": "Beabsichtigt",
+    "windowAriaLabel": "Wann kann sie zusammengestellt werden?",
+    "windowUnstated": "Nicht angegeben",
+    "windowEarly": "Frühes Spiel",
+    "windowLate": "Nur spätes Spiel",
+    "declaredFloor": "(deklariert — erzwingt B{{tier}})",
+    "heading": "Barometer",
+    "authorityEngine": "Von phase geprüft",
+    "authorityDeckOwner": "Von dir deklariert",
+    "authorityUnanswered": "Nicht beantwortet",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Extrazüge",
+    "rowMassLandDenial": "Massenhafte Landzerstörung",
+    "rowTwoCardCombos": "Unendliche Zwei-Karten-Kombos"
   },
   "warnings": {
     "commanderCount": "Das Deck hat {{count}} Karten (genau {{expected}} erforderlich)",

@@ -33,8 +33,8 @@ use crate::policies::registry::{PolicyId, PolicyReason};
 
 pub mod aggro_keepables;
 pub mod aristocrats_keepables;
+pub mod bracket_keepables;
 pub mod card_floor;
-pub mod cedh_keepables;
 pub mod fixed_deck_keepables;
 pub mod keepables_by_land_count;
 pub mod landfall_keepables;
@@ -46,8 +46,8 @@ pub mod tribal_density;
 
 pub use aggro_keepables::AggroKeepablesMulligan;
 pub use aristocrats_keepables::AristocratsKeepablesMulligan;
+pub use bracket_keepables::BracketKeepablesMulligan;
 pub use card_floor::MulliganCardFloor;
-pub use cedh_keepables::CedhKeepablesMulligan;
 pub use fixed_deck_keepables::FixedDeckKeepMulligan;
 pub use keepables_by_land_count::KeepablesByLandCount;
 pub use landfall_keepables::LandfallKeepablesMulligan;
@@ -269,7 +269,7 @@ impl Default for MulliganRegistry {
                 Box::new(TokensWideKeepablesMulligan),
                 Box::new(PlusOneCountersMulligan),
                 Box::new(SpellslingerKeepablesMulligan),
-                Box::new(CedhKeepablesMulligan::new()),
+                Box::new(BracketKeepablesMulligan::new()),
                 Box::new(FixedDeckKeepMulligan),
             ],
         }
@@ -360,15 +360,15 @@ mod cedh_registration_tests {
     use crate::policies::registry::PolicyId;
 
     #[test]
-    fn default_registry_contains_cedh_keepables() {
+    fn default_registry_contains_bracket_keepables() {
         let reg = MulliganRegistry::default();
         let has = reg
             .policies
             .iter()
-            .any(|p| p.id() == PolicyId::CedhKeepablesMulligan);
+            .any(|p| p.id() == PolicyId::BracketKeepablesMulligan);
         assert!(
             has,
-            "MulliganRegistry::default() must register CedhKeepablesMulligan"
+            "MulliganRegistry::default() must register BracketKeepablesMulligan"
         );
     }
 
@@ -402,7 +402,7 @@ mod cedh_registration_tests {
     struct AlwaysForceKeep;
     impl MulliganPolicy for AlwaysForceKeep {
         fn id(&self) -> PolicyId {
-            PolicyId::CedhKeepablesMulligan
+            PolicyId::BracketKeepablesMulligan
         }
         fn evaluate(
             &self,
@@ -466,7 +466,7 @@ mod cedh_registration_tests {
     }
 
     /// Add a card to `state` in `Zone::Hand` for player 0; returns its
-    /// `ObjectId`. Mirrors `cedh_keepables.rs`'s private helper, with a distinct
+    /// `ObjectId`. Mirrors `bracket_keepables.rs`'s private helper, with a distinct
     /// `CardId` base so the two test modules cannot be confused when read side
     /// by side.
     fn add_hand_card(
@@ -699,14 +699,17 @@ mod cedh_registration_tests {
     }
 
     /// V7 — end-to-end: after the floor was lifted out of
-    /// `CedhKeepablesMulligan` into `MulliganCardFloor`, a cEDH deck's `keep`
+    /// `BracketKeepablesMulligan` into `MulliganCardFloor`, a cEDH deck's `keep`
     /// is unchanged. The real floor policy's `ForceKeep` must still override the
     /// real cEDH policy's `ForceMulligan` through the registry's three-way
     /// aggregation — the whole point of the feature.
     #[test]
     fn cedh_floor_force_keep_overrides_force_mulligan_in_registry() {
         let cedh_features = DeckFeatures {
-            bracket_tier: CommanderBracketTier::Cedh,
+            effective_bracket_tier: engine::game::bracket_estimate::effective_tier(
+                CommanderBracketTier::Cedh,
+                None,
+            ),
             ..DeckFeatures::default()
         };
         // `MulliganCardFloor` abstains off-step, so `waiting_for` must be set
@@ -724,7 +727,7 @@ mod cedh_registration_tests {
         let registry = MulliganRegistry {
             policies: vec![
                 Box::new(MulliganCardFloor),
-                Box::new(CedhKeepablesMulligan::new()),
+                Box::new(BracketKeepablesMulligan::new()),
                 Box::new(AlwaysForceMulligan),
             ],
         };

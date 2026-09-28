@@ -18,6 +18,8 @@ type EngineModule = typeof import("@wasm/engine");
 let engineModulePromise: Promise<EngineModule> | null = null;
 let wasmInitPromise: Promise<void> | null = null;
 let cardDbPromise: Promise<number> | null = null;
+type ComboTableLoadOutcome = "loaded" | "unavailable";
+let comboTablePromise: Promise<ComboTableLoadOutcome> | null = null;
 
 /**
  * A browser's module map retains failed dynamic imports for the document
@@ -87,6 +89,42 @@ export async function ensureCardDatabase(): Promise<number> {
     });
   }
   return cardDbPromise;
+}
+
+/**
+ * Lazily loads the optional combo artifact once per browser session. Missing,
+ * unreachable, or malformed data resolves as unavailable so bracket estimates
+ * retain the engine's explicit `Unmeasured` coverage instead of failing.
+ */
+export function ensureComboTable(): Promise<ComboTableLoadOutcome> {
+  if (!comboTablePromise) {
+    let definitiveMissing = false;
+    const pending: Promise<ComboTableLoadOutcome> = (async () => {
+      try {
+        await ensureWasmInit();
+        const engine = await loadEngineModule();
+        const response = await fetch(__COMBO_TABLE_URL__);
+        if (response.status === 404) {
+          definitiveMissing = true;
+          return "unavailable";
+        }
+        if (!response.ok) {
+          throw new Error(`Failed to load combo-table.json (${response.status})`);
+        }
+        await engine.load_combo_table(await response.text());
+        return "loaded";
+      } catch {
+        return "unavailable";
+      }
+    })();
+    comboTablePromise = pending;
+    void pending.then((outcome) => {
+      if (outcome === "unavailable" && !definitiveMissing && comboTablePromise === pending) {
+        comboTablePromise = null;
+      }
+    });
+  }
+  return comboTablePromise;
 }
 
 export async function getCardFaceData(cardName: string) {

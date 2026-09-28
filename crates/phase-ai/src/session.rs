@@ -14,12 +14,14 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
 use engine::ai_support::{CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan};
+use engine::game::bracket_estimate::EffectiveBracketTier;
 use engine::game::DeckEntry;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::util::Deadline;
 
+use crate::combo::{ComboLineId, ComboReachability};
 use crate::deck_profile::DeckProfile;
 use crate::features::DeckFeatures;
 use crate::plan::{derive_snapshot, PlanSnapshot};
@@ -35,6 +37,23 @@ use crate::synergy::SynergyGraph;
 /// detection should treat each commander face as more informative than a
 /// singleton main-deck card.
 const COMMANDER_ANALYSIS_WEIGHT: u32 = 4;
+
+/// One key is taken per distinct search node, so this deterministic bound prevents
+/// the memo from growing for an entire game.
+pub const REACHABLE_LINES_CACHE_MAX: usize = 512;
+
+/// `ProjectionKey` minus the projection-specific axes. The turn/active-player
+/// fields are both a cheap collision guard on the 64-bit `quick_state_hash`
+/// digest and what makes staleness unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReachableLinesKey {
+    pub state_hash: u64,
+    pub turn_number: u32,
+    pub active_player: PlayerId,
+    pub ai_player: PlayerId,
+}
+
+pub type ReachableLines = Arc<Vec<(ComboLineId, ComboReachability)>>;
 
 type ProspectiveFetchProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedFetchPrompt)>>;
 pub(crate) type PactRouteStore = HashMap<PlayerId, CertifiedPactPlan>;
@@ -53,6 +72,13 @@ pub struct AiSession {
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
     pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
+    /// Memo for `ComboRegistry::reachable_lines`, which `ComboLinePolicy::verdict` calls once
+    /// per CANDIDATE while every candidate at a node shares one `state` (the policy registry
+    /// builds one `PolicyContext` per candidate from one batch environment). The cache lives
+    /// here and not on the policy because `TacticalPolicy` is `Send + Sync` with
+    /// `fn verdict(&self, ..)` behind a `OnceLock`: a `RefCell` field will not compile and a
+    /// `Mutex` field would be a process-global lock in the per-candidate inner loop.
+    pub reachable_lines_cache: Arc<RwLock<HashMap<ReachableLinesKey, ReachableLines>>>,
     /// Reducer-certified fetch selection armed only after this session chose
     /// its corresponding root activation. The engine token contains no clone
     /// or hidden terminal state and rejects any stale prompt.
@@ -86,6 +112,7 @@ impl std::fmt::Debug for AiSession {
             .field("synergy", &self.synergy)
             .field("memory", &self.memory)
             .field("projection_cache", &self.projection_cache)
+            .field("reachable_lines_cache", &self.reachable_lines_cache)
             .field("prospective_fetch_prompt", &self.prospective_fetch_prompt)
             .field(
                 "prospective_fetch_follow_up",
@@ -120,7 +147,7 @@ impl AiSession {
         for pool in &state.deck_pools {
             let deck = analysis_deck(&pool.current_main, &pool.current_commander);
             let player_profile = DeckProfile::analyze(&deck);
-            let player_features = DeckFeatures::analyze(&deck, pool.bracket_tier);
+            let player_features = DeckFeatures::analyze(&deck, pool.effective_bracket_tier());
             let snapshot = derive_snapshot(&player_features);
             let player_strategy = StrategyProfile::for_profile(&player_profile);
             let graph = SynergyGraph::build(&deck);
@@ -139,6 +166,7 @@ impl AiSession {
             synergy,
             memory: Arc::default(),
             projection_cache: Arc::default(),
+            reachable_lines_cache: Arc::default(),
             prospective_fetch_prompt: Arc::default(),
             prospective_fetch_follow_up: Arc::default(),
             prospective_fetch_proposals: Arc::default(),
@@ -151,12 +179,12 @@ impl AiSession {
 
     /// Build a session for a single player from an explicit deck list.
     /// Used by `AiContext::analyze_with` when only one player's deck is known.
-    /// `tier` is the declared bracket tier; callers without tier information
-    /// (e.g., pure deck-analysis paths) should pass `CommanderBracketTier::Core`.
+    /// Callers without pool access pass `EffectiveBracketTier::default()` and
+    /// are thereby stating that no deck was reconciled.
     pub fn from_single_deck(
         player: PlayerId,
         deck: &[DeckEntry],
-        tier: engine::game::bracket_estimate::CommanderBracketTier,
+        tier: EffectiveBracketTier,
     ) -> Self {
         let mut session = Self::default();
         let player_profile = DeckProfile::analyze(deck);
@@ -181,8 +209,8 @@ impl AiSession {
     /// Used by callers that build a session incrementally (e.g., via
     /// `AiContext::analyze_with`, which only seeds the AI's own deck).
     ///
-    /// `tier` is the declared bracket tier from the player's `PlayerDeckPool`.
-    /// Callers without pool access should pass `CommanderBracketTier::Core`.
+    /// Callers without pool access pass `EffectiveBracketTier::default()` and
+    /// are thereby stating that no deck was reconciled.
     ///
     /// **Staleness note**: this no-ops on re-calls for an already-populated
     /// player. The production auto-play path builds one `AiSession` at game
@@ -193,7 +221,7 @@ impl AiSession {
         &mut self,
         player: PlayerId,
         deck: &[DeckEntry],
-        tier: engine::game::bracket_estimate::CommanderBracketTier,
+        tier: EffectiveBracketTier,
     ) {
         if self.features.contains_key(&player) || deck.is_empty() {
             return;
@@ -273,6 +301,45 @@ impl AiSession {
         Ok(projection)
     }
 
+    /// Read-through memo; poisoned locks degrade to recomputation. On overflow it drops
+    /// earlier turns first, then clears if the current turn still fills the bound.
+    pub fn get_or_reachable_lines(
+        &self,
+        state: &GameState,
+        ai_player: PlayerId,
+        compute: impl FnOnce() -> Vec<(ComboLineId, ComboReachability)>,
+    ) -> ReachableLines {
+        let key = ReachableLinesKey {
+            state_hash: quick_state_hash(state),
+            turn_number: state.turn_number,
+            active_player: state.active_player,
+            ai_player,
+        };
+
+        if let Ok(cache) = self.reachable_lines_cache.read() {
+            if let Some(hit) = cache.get(&key) {
+                return Arc::clone(hit);
+            }
+        }
+
+        let reachable: ReachableLines = Arc::new(compute());
+
+        if let Ok(mut cache) = self.reachable_lines_cache.write() {
+            if cache.len() >= REACHABLE_LINES_CACHE_MAX {
+                cache.retain(|existing, _| existing.turn_number == state.turn_number);
+                if cache.len() >= REACHABLE_LINES_CACHE_MAX {
+                    cache.clear();
+                }
+            }
+            // Both eviction branches are deterministic functions of deterministic
+            // insertion order. An LRU buys no correctness; a dropped entry costs
+            // at most one recompute.
+            cache.insert(key, Arc::clone(&reachable));
+        }
+
+        reachable
+    }
+
     /// Cache-only projection lookup — returns `None` on miss without doing
     /// the expensive multi-turn simulation. Policies that want projection
     /// data but can't afford the miss cost (e.g., under a tight wall-clock
@@ -302,7 +369,7 @@ impl AiSession {
 }
 
 /// Digest of exactly the inputs `AiSession::from_game` reads: each pool's
-/// player id, bracket tier, and (name, count) of every main-deck and
+/// player id, effective and estimated bracket tiers, and (name, count) of every main-deck and
 /// commander entry. Sideboard/planar/scheme/signature and all board/hand
 /// state are deliberately excluded — equal fingerprint ⇒ byte-identical
 /// session analysis, so a session keyed on this value is safe to reuse.
@@ -311,7 +378,8 @@ pub fn deck_pools_fingerprint(state: &GameState) -> u64 {
     let mut h = DefaultHasher::new();
     for pool in &state.deck_pools {
         pool.player.0.hash(&mut h);
-        pool.bracket_tier.hash(&mut h);
+        pool.effective_bracket_tier().hash(&mut h);
+        pool.estimated_bracket_tier.hash(&mut h);
         pool.current_main.len().hash(&mut h);
         for entry in pool.current_main.iter() {
             entry.card.name.hash(&mut h);
@@ -406,7 +474,7 @@ mod tests {
 
     use crate::projection::ProjectionHorizon;
 
-    use super::{deck_pools_fingerprint, AiSession, SessionCache};
+    use super::{deck_pools_fingerprint, AiSession, SessionCache, REACHABLE_LINES_CACHE_MAX};
 
     fn make_pool_with_tier(
         player: PlayerId,
@@ -466,7 +534,7 @@ mod tests {
             .get(&PlayerId(0))
             .expect("player 0 features should be populated");
         assert_eq!(
-            p0_features.bracket_tier,
+            p0_features.effective_bracket_tier.tier(),
             CommanderBracketTier::Cedh,
             "PlayerDeckPool with CommanderBracketTier::Cedh must record the Cedh tier"
         );
@@ -476,7 +544,7 @@ mod tests {
             .get(&PlayerId(1))
             .expect("player 1 features should be populated");
         assert_ne!(
-            p1_features.bracket_tier,
+            p1_features.effective_bracket_tier.tier(),
             CommanderBracketTier::Cedh,
             "PlayerDeckPool with CommanderBracketTier::Core must not record Cedh"
         );
@@ -501,11 +569,14 @@ mod tests {
             .get(&PlayerId(0))
             .expect("player 0 features should be populated");
         assert_eq!(
-            p0_features.bracket_tier,
+            p0_features.effective_bracket_tier.tier(),
             CommanderBracketTier::Optimized,
             "CommanderBracketTier::Optimized (highest non-cEDH tier) must be recorded as-is"
         );
-        assert_ne!(p0_features.bracket_tier, CommanderBracketTier::Cedh);
+        assert_ne!(
+            p0_features.effective_bracket_tier.tier(),
+            CommanderBracketTier::Cedh
+        );
     }
 
     #[test]
@@ -612,6 +683,38 @@ mod tests {
             2,
             "a distinct key must add a second cache entry"
         );
+    }
+
+    #[test]
+    fn reachable_lines_cache_is_bounded() {
+        use std::cell::Cell;
+
+        let session = AiSession::empty();
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 1;
+        let compute_count = Cell::new(0usize);
+
+        for index in 0..REACHABLE_LINES_CACHE_MAX {
+            state.next_object_id = index as u64 + 1;
+            session.get_or_reachable_lines(&state, PlayerId(0), || {
+                compute_count.set(compute_count.get() + 1);
+                Vec::new()
+            });
+        }
+
+        state.turn_number = 2;
+        state.next_object_id = REACHABLE_LINES_CACHE_MAX as u64 + 1;
+        session.get_or_reachable_lines(&state, PlayerId(0), || {
+            compute_count.set(compute_count.get() + 1);
+            Vec::new()
+        });
+
+        assert_eq!(
+            session.reachable_lines_cache.read().unwrap().len(),
+            1,
+            "cross-turn overflow must evict every earlier-turn entry"
+        );
+        assert_eq!(compute_count.get(), REACHABLE_LINES_CACHE_MAX + 1);
     }
 
     /// T3 — the deadline reaches `project_to` THROUGH the cache wrapper, and a
@@ -884,6 +987,30 @@ mod tests {
             deck_pools_fingerprint(&core),
             deck_pools_fingerprint(&cedh),
             "bracket_tier is a session input, so it must be part of the fingerprint"
+        );
+    }
+
+    /// Estimated-tier axis: two otherwise-identical pools differing only in
+    /// `estimated_bracket_tier` must produce different fingerprints because
+    /// reconciliation is a `from_game` input.
+    #[test]
+    fn fingerprint_distinguishes_estimated_bracket_tier() {
+        let mut core = GameState::new_two_player(42);
+        core.deck_pools.clear();
+        core.deck_pools.push(PlayerDeckPool {
+            player: PlayerId(0),
+            bracket_tier: CommanderBracketTier::Exhibition,
+            estimated_bracket_tier: Some(CommanderBracketTier::Core),
+            ..Default::default()
+        });
+
+        let mut optimized = core.clone();
+        optimized.deck_pools[0].estimated_bracket_tier = Some(CommanderBracketTier::Optimized);
+
+        assert_ne!(
+            deck_pools_fingerprint(&core),
+            deck_pools_fingerprint(&optimized),
+            "estimated_bracket_tier is a session input, so it must be part of the fingerprint"
         );
     }
 

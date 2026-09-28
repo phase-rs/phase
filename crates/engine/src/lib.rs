@@ -1,3 +1,4 @@
+pub mod ai_deck_manifest;
 pub mod ai_support;
 pub mod analysis;
 pub mod database;

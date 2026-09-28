@@ -265,16 +265,78 @@
     "clearOverride": "Limpar Substituição de Arte"
   },
   "bracket": {
-    "unavailable": "A estimativa de bracket não está disponível nesta build.",
+    "unavailable": "A estimativa de bracket precisa de dados de cartas que ainda não foram carregados.",
     "addCommander": "Adicione um comandante para ver sua estimativa de bracket.",
     "estimated": "Estimado: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ divergência",
+    "belowFloor": " ⚠ abaixo do mínimo B{{tier}}",
+    "belowFloorCombo": "elevado por um combo de duas cartas",
     "hideBreakdown": "Ocultar detalhamento",
     "showBreakdown": "Mostrar detalhamento",
     "hideBreakdownButton": "▲ Ocultar detalhamento",
     "showBreakdownButton": "▼ Mostrar detalhamento",
-    "forced": "(B{{tier}} forçado)",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Negação em massa de terrenos",
+      "extraTurns": "Turnos extras",
+      "efficientTutors": "Tutores eficientes"
+    },
+    "check": {
+      "fired": "{{observed}} — força B{{tier}} {{label}}",
+      "clear": "{{observed}} de {{threshold}} — faltam {{remaining}} para passar a B{{tier}}",
+      "clearMax": "{{observed}} — não é possível alcançar B{{tier}} adicionando cartas",
+      "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Combos de duas cartas",
+      "unmeasured": "O barômetro de combos de duas cartas não foi medido nesta compilação",
+      "noneFound": "Nenhum combo infinito de duas cartas encontrado neste deck",
+      "attribution": "Dados de combos: {{attribution}}, captura de {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Mínimo por combo autônomo de duas cartas",
+        "earlyTwoCard": "Mínimo por combo rápido de duas cartas (custo de montagem de {{ceiling}} ou menos)"
+      },
+      "check": {
+        "fired": "Força B{{tier}} {{label}}",
+        "clear_one": "Adicionar mais 1 carta pode permitir alcançar B{{tier}}",
+        "clear_few": "Adicionar mais {{count}} cartas pode permitir alcançar B{{tier}}",
+        "clear_many": "Adicionar mais {{count}} cartas pode permitir alcançar B{{tier}}",
+        "clear_other": "Adicionar mais {{count}} cartas pode permitir alcançar B{{tier}}",
+        "clearMax": "Não é possível alcançar B{{tier}} com correspondências adicionais"
+      },
+      "outcome": {
+        "wins": "Vence o jogo",
+        "unbounded": "{{resource}} sem limite"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "dano",
+        "lifeLoss": "perda de vida",
+        "lifegain": "ganho de vida",
+        "mill": "moagem",
+        "draw": "compra de cartas",
+        "tokens": "fichas",
+        "combat": "fases de combate",
+        "turns": "turnos"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Definitivamente duas cartas",
+        "arguablyTwoCard": "Possivelmente duas cartas",
+        "more": "Mais de duas cartas"
+      },
+      "relevance": {
+        "standalone": "Autônomo",
+        "contextual": "Contextual",
+        "helper": "Auxiliar"
+      },
+      "pairSourced": "{{first}} + {{second}} (da tabela de combos)"
+    },
+    "uncounted": "Contado como evidência — nenhuma regra de bracket se aplica a este eixo.",
+    "uncalibrated": "A WotC não publica um número para «quantidades baixas»; esta contagem não está calibrada.",
+    "coverage": "Lidas {{resolved}} de {{counted}} cartas do deck",
+    "confidencePartial": "{{n}} nomes de cartas não foram encontrados nos dados de cartas — estas contagens são limites inferiores.",
+    "unresolvedHeading": "Não encontrado nos dados de cartas",
+    "baseFloor": "O Bracket 1 é definido pelo tema do deck, que o estimador não consegue detectar. As estimativas começam em B2.",
     "dataVersion": "Dados: {{version}}",
     "aboutBrackets": "Sobre brackets ↗",
     "estimatedChip": "Estimado: B{{tier}}",
@@ -283,6 +345,46 @@
   "bracketPicker": {
     "ariaLabel": "Bracket do deck",
     "unrated": "Sem classificação"
+  },
+  "signals": {
+    "title": "Sinais do deck",
+    "disclaimer": "Estatísticas descritivas do texto analisado das cartas do deck. Não são critérios de bracket e nunca alteram a estimativa.",
+    "avgManaValue": "Valor de mana médio (não terrenos): {{value}}",
+    "notMeasurable": "não mensurável",
+    "noCommander": "Adicione um comandante para ver os sinais do deck.",
+    "unavailable": "Os sinais do deck precisam de dados de cartas, que ainda não foram carregados.",
+    "unresolved": "{{n}} nomes de cartas não foram encontrados nos dados de cartas.",
+    "kind": {
+      "counterspells": "Contramágicas",
+      "spot_removal": "Remoção pontual",
+      "sweepers": "Limpadores de mesa",
+      "card_advantage": "Vantagem de cartas",
+      "free_interaction": "Interação gratuita",
+      "mana_producers": "Produtores de mana",
+      "land_fetch": "Busca de terrenos",
+      "rituals": "Rituais",
+      "extra_land_drops": "Terrenos adicionais por turno"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinito de duas cartas",
+    "question": "Combo infinito intencional de duas cartas?",
+    "undeclared": "Sem resposta",
+    "noneIntended": "Nenhum intencional",
+    "intended": "Intencional",
+    "windowAriaLabel": "Quando pode ser montado?",
+    "windowUnstated": "Não especificado",
+    "windowEarly": "Início de jogo",
+    "windowLate": "Apenas no fim do jogo",
+    "declaredFloor": "(declarado — força B{{tier}})",
+    "heading": "Barômetros",
+    "authorityEngine": "Verificado pelo phase",
+    "authorityDeckOwner": "Declarado por você",
+    "authorityUnanswered": "Sem resposta",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Turnos extras",
+    "rowMassLandDenial": "Negação em massa de terrenos",
+    "rowTwoCardCombos": "Combos infinitos de duas cartas"
   },
   "warnings": {
     "commanderCount": "O deck tem {{count}} cartas (precisa de exatamente {{expected}})",

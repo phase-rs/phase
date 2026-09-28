@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use engine::game::bracket_estimate::EffectiveBracketTier;
 use engine::game::DeckEntry;
 use engine::types::player::PlayerId;
 
@@ -45,7 +46,13 @@ static EMPTY_SYNERGY_GRAPH: std::sync::OnceLock<SynergyGraph> = std::sync::OnceL
 impl AiContext {
     /// Analyze a deck list to build the context.
     pub fn analyze(deck: &[DeckEntry], base_weights: &EvalWeightSet) -> Self {
-        Self::analyze_with(deck, base_weights, &ArchetypeMultipliers::default())
+        Self::analyze_for_player(
+            deck,
+            base_weights,
+            &ArchetypeMultipliers::default(),
+            PlayerId(0),
+            EffectiveBracketTier::default(),
+        )
     }
 
     /// Analyze a deck list with custom archetype multipliers.
@@ -57,7 +64,13 @@ impl AiContext {
         base_weights: &EvalWeightSet,
         multipliers: &ArchetypeMultipliers,
     ) -> Self {
-        Self::analyze_for_player(deck, base_weights, multipliers, PlayerId(0))
+        Self::analyze_for_player(
+            deck,
+            base_weights,
+            multipliers,
+            PlayerId(0),
+            EffectiveBracketTier::default(),
+        )
     }
 
     /// Analyze a deck list for a specific AI player. Keys the session's
@@ -69,6 +82,7 @@ impl AiContext {
         base_weights: &EvalWeightSet,
         multipliers: &ArchetypeMultipliers,
         player: PlayerId,
+        tier: EffectiveBracketTier,
     ) -> Self {
         let deck_profile = DeckProfile::analyze(deck);
         let adjusted_weights = EvalWeightSet {
@@ -77,15 +91,7 @@ impl AiContext {
             late: deck_profile.adjust_weights_with(multipliers, &base_weights.late),
         };
         let strategy = StrategyProfile::for_profile(&deck_profile);
-        // Analysis paths (deck evaluation, draft AI, test contexts) that call
-        // `analyze_for_player` don't carry a declared bracket tier — default to
-        // `Core`. The production path (`AiSession::from_game`) reads the real
-        // tier from `PlayerDeckPool::bracket_tier`.
-        let session = Arc::new(AiSession::from_single_deck(
-            player,
-            deck,
-            engine::game::bracket_estimate::CommanderBracketTier::Core,
-        ));
+        let session = Arc::new(AiSession::from_single_deck(player, deck, tier));
         Self {
             deck_profile,
             adjusted_weights,
@@ -118,5 +124,45 @@ impl AiContext {
             .synergy
             .get(&self.player)
             .unwrap_or_else(|| EMPTY_SYNERGY_GRAPH.get_or_init(SynergyGraph::empty))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::game::bracket_estimate::{effective_tier, CommanderBracketTier};
+
+    #[test]
+    fn analyze_for_player_uses_supplied_effective_tier() {
+        let weights = EvalWeightSet::default();
+        let multipliers = ArchetypeMultipliers::default();
+
+        let core = AiContext::analyze_for_player(
+            &[],
+            &weights,
+            &multipliers,
+            PlayerId(0),
+            EffectiveBracketTier::default(),
+        );
+        assert_eq!(
+            core.session.features[&PlayerId(0)]
+                .effective_bracket_tier
+                .tier(),
+            CommanderBracketTier::Core
+        );
+
+        let optimized = AiContext::analyze_for_player(
+            &[],
+            &weights,
+            &multipliers,
+            PlayerId(0),
+            effective_tier(CommanderBracketTier::Optimized, None),
+        );
+        assert_eq!(
+            optimized.session.features[&PlayerId(0)]
+                .effective_bracket_tier
+                .tier(),
+            CommanderBracketTier::Optimized
+        );
     }
 }

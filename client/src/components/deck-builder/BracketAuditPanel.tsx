@@ -2,40 +2,132 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
+  BAROMETERS,
   BRACKET_AXES,
   BRACKET_LABEL,
   BRACKET_TIER_CHIP_CLASS,
   BRACKET_TIER_NUMERIC,
   type BracketAxis,
   type BracketEstimate,
+  type Barometer,
+  type BarometerAuthority,
   type CommanderBracket,
+  type ComboCardinality,
+  type ComboMatch,
+  type ComboRelevance,
+  type ComboResource,
 } from "../../types/bracket";
 
 interface Props {
   estimate: BracketEstimate | null;
+  /** Player-selected bracket shown as display-only metadata. */
   manualBracket: CommanderBracket | null;
   onCardClick: (cardName: string) => void;
   /**
    * "not-commander" hides the panel; "no-commander" renders the
-   * "add a commander" placeholder; "unsupported" renders the
-   * adapter-doesn't-support-bracket-estimation placeholder.
+   * "add a commander" placeholder; "card-data-unavailable" renders the
+   * card-data loading failure placeholder.
    */
-  emptyReason?: "not-commander" | "no-commander" | "unsupported";
+  emptyReason?: "not-commander" | "no-commander" | "card-data-unavailable";
 }
 
-const AXIS_LABEL: Record<BracketAxis, string> = {
-  game_changers: "Game Changers",
-  mass_land_denial: "Mass Land Denial",
-  extra_turns: "Extra Turns",
-  efficient_tutors: "Efficient Tutors",
+const AXIS_I18N_KEY: Record<BracketAxis, string> = {
+  game_changers: "bracket.axis.gameChangers",
+  mass_land_denial: "bracket.axis.massLandDenial",
+  extra_turns: "bracket.axis.extraTurns",
+  efficient_tutors: "bracket.axis.efficientTutors",
 };
+
+const BAROMETER_I18N_KEY: Record<Barometer, string> = {
+  game_changers: "comboBarometer.rowGameChangers",
+  extra_turns: "comboBarometer.rowExtraTurns",
+  mass_land_denial: "comboBarometer.rowMassLandDenial",
+  two_card_combos: "comboBarometer.rowTwoCardCombos",
+};
+
+const AUTHORITY_I18N_KEY: Record<BarometerAuthority, string> = {
+  engine: "comboBarometer.authorityEngine",
+  deck_owner: "comboBarometer.authorityDeckOwner",
+  unanswered: "comboBarometer.authorityUnanswered",
+};
+
+const COMBO_RESOURCE_I18N_KEY: Record<ComboResource, string> = {
+  mana: "bracket.combo.resource.mana",
+  damage: "bracket.combo.resource.damage",
+  life_loss: "bracket.combo.resource.lifeLoss",
+  lifegain: "bracket.combo.resource.lifegain",
+  mill: "bracket.combo.resource.mill",
+  draw: "bracket.combo.resource.draw",
+  tokens: "bracket.combo.resource.tokens",
+  combat: "bracket.combo.resource.combat",
+  turns: "bracket.combo.resource.turns",
+};
+
+const COMBO_CARDINALITY_I18N_KEY: Record<ComboCardinality, string> = {
+  definitely_two_card: "bracket.combo.cardinality.definitelyTwoCard",
+  arguably_two_card: "bracket.combo.cardinality.arguablyTwoCard",
+  more: "bracket.combo.cardinality.more",
+};
+
+const COMBO_RELEVANCE_I18N_KEY: Record<ComboRelevance, string> = {
+  standalone: "bracket.combo.relevance.standalone",
+  contextual: "bracket.combo.relevance.contextual",
+  helper: "bracket.combo.relevance.helper",
+};
+
+interface ComboMatchRowProps {
+  match: ComboMatch;
+  onCardClick: (cardName: string) => void;
+  className?: string;
+}
+
+function ComboMatchRow({ match, onCardClick, className }: ComboMatchRowProps) {
+  const { t } = useTranslation("deck-builder");
+
+  return (
+    <div className={className}>
+      {match.pieces.map((piece, pieceIndex) => (
+        <span key={piece.key}>
+          <button
+            type="button"
+            onClick={() => onCardClick(piece.display)}
+            className="inline-flex min-h-[44px] items-center text-slate-300 underline-offset-2 hover:underline sm:min-h-0"
+          >
+            {piece.display}
+          </button>
+          {pieceIndex === 0 && " + "}
+        </span>
+      ))}
+      <div className="text-[10px] text-slate-400">
+        {match.outcomes.map((outcome, outcomeIndex) => (
+          <span key={`${outcome.kind}-${outcomeIndex}`}>
+            {outcome.kind === "wins"
+              ? t("bracket.combo.outcome.wins")
+              : t("bracket.combo.outcome.unbounded", {
+                  resource: t(COMBO_RESOURCE_I18N_KEY[outcome.resource]),
+                })}
+            {outcomeIndex < match.outcomes.length - 1 && ", "}
+          </span>
+        ))}
+      </div>
+      <div className="mt-0.5 flex flex-wrap gap-1 text-[10px] text-slate-500">
+        <span className="rounded-full border border-white/10 px-1.5 py-0.5">
+          {t(COMBO_CARDINALITY_I18N_KEY[match.cardinality])}
+        </span>
+        <span className="rounded-full border border-white/10 px-1.5 py-0.5">
+          {t(COMBO_RELEVANCE_I18N_KEY[match.relevance])}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyReason }: Props) {
   const { t } = useTranslation("deck-builder");
   const [expanded, setExpanded] = useState(false);
 
   if (emptyReason === "not-commander") return null;
-  if (emptyReason === "unsupported") {
+  if (emptyReason === "card-data-unavailable") {
     return (
       <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs text-slate-400">
         {t("bracket.unavailable")}
@@ -52,7 +144,12 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
 
   const tierNum = BRACKET_TIER_NUMERIC[estimate.tier];
   const tierLabel = BRACKET_LABEL[tierNum];
-  const mismatch = manualBracket !== null && manualBracket !== tierNum;
+  // The engine owns the comparison. The panel never re-derives it: brackets are
+  // a pregame-conversation tool, the declaration governs above the floor, and a
+  // declaration ABOVE the estimate (a cEDH deck over an Optimized floor) is the
+  // system working. See `DeclarationVerdict` in game/bracket_estimate.rs.
+  const belowFloor =
+    estimate.declaration?.kind === "below_floor" ? estimate.declaration : null;
 
   return (
     <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2">
@@ -65,13 +162,15 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
         {manualBracket !== null && (
           <span
             className={
-              mismatch
+              belowFloor !== null
                 ? "rounded-full border border-amber-300/60 bg-amber-500/20 px-2.5 py-1 text-xs font-medium text-amber-100"
                 : "rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-xs font-medium text-slate-400"
             }
           >
             {t("bracket.manual", { tier: manualBracket, label: BRACKET_LABEL[manualBracket] })}
-            {mismatch && t("bracket.mismatch")}
+            {belowFloor &&
+              t("bracket.belowFloor", { tier: BRACKET_TIER_NUMERIC[belowFloor.floor] })}
+            {belowFloor?.raised_by_combo_floor && ` ${t("bracket.belowFloorCombo")}`}
           </span>
         )}
         <button
@@ -85,24 +184,123 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
         </button>
       </div>
 
+      <div className="mt-3 border-t border-white/5 pt-2 text-xs">
+        <div className="mb-1.5 text-[10px] uppercase tracking-wider text-slate-500">
+          {t("comboBarometer.heading")}
+        </div>
+        <dl className="space-y-1.5">
+          {BAROMETERS.map((barometer) => {
+            const authority = estimate.barometers?.[barometer] ?? "unanswered";
+            const unanswered = authority === "unanswered";
+            return (
+              <div
+                key={barometer}
+                className={`grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2 ${unanswered ? "text-slate-500" : "text-slate-300"}`}
+              >
+                <dt>{t(BAROMETER_I18N_KEY[barometer])}</dt>
+                <dd className={unanswered ? "text-slate-500" : "text-slate-400"}>
+                  {t(AUTHORITY_I18N_KEY[authority])}
+                  {barometer === "two_card_combos" &&
+                    estimate.combo_barometer?.floor != null && (
+                      <span className="ml-1 text-amber-300">
+                        {t("comboBarometer.declaredFloor", {
+                          tier: BRACKET_TIER_NUMERIC[estimate.combo_barometer.floor],
+                        })}
+                      </span>
+                    )}
+                </dd>
+              </div>
+            );
+          })}
+        </dl>
+      </div>
+
       {expanded && (
         <dl className="mt-3 space-y-2 text-xs">
-          {BRACKET_AXES.map((axis) => {
-            const count = estimate.axes[axis];
-            const cards = estimate.contributing[axis];
-            const cap = estimate.axis_caps_at_tier[axis];
-            const violation = estimate.violations[axis];
+          {estimate.checks.map((check) => {
+            const outcomeText =
+              check.outcome.kind === "fired"
+                ? t("bracket.check.fired", {
+                    observed: check.observed,
+                    tier: BRACKET_TIER_NUMERIC[check.floor],
+                    label: BRACKET_LABEL[BRACKET_TIER_NUMERIC[check.floor]],
+                  })
+                : check.outcome.cards_until_fired !== null
+                  ? t("bracket.check.clear", {
+                      observed: check.observed,
+                      threshold: check.threshold,
+                      remaining: check.outcome.cards_until_fired,
+                      tier: BRACKET_TIER_NUMERIC[check.floor],
+                    })
+                  : t("bracket.check.clearMax", {
+                      observed: check.observed,
+                      tier: BRACKET_TIER_NUMERIC[check.floor],
+                    });
             return (
-              <div key={axis} className="grid grid-cols-[180px_60px_1fr] items-start gap-2">
-                <dt className="text-slate-300">{AXIS_LABEL[axis]}</dt>
-                <dd className="text-slate-200">
-                  {count}
-                  {cap !== null && ` / ${cap}`}
-                </dd>
+              <div
+                key={`${check.axis}-${check.threshold}-${check.floor}`}
+                className="grid grid-cols-[180px_1fr] items-start gap-2"
+              >
+                <dt className="text-slate-300">{t(AXIS_I18N_KEY[check.axis])}</dt>
                 <dd className="text-slate-400">
-                  {cards.length === 0 && "—"}
-                  {cards.map((name, i) => (
-                    <span key={name}>
+                  <div className={check.outcome.kind === "fired" ? "text-amber-300" : undefined}>
+                    {outcomeText}
+                  </div>
+                  {check.axis === "extra_turns" && (
+                    <div className="text-[10px] text-slate-500">{t("bracket.uncalibrated")}</div>
+                  )}
+                  {check.evidence.length > 0 && (
+                    <div>
+                      {check.evidence.map((name, index) => (
+                        <span key={`${name}-${index}`}>
+                          <button
+                            type="button"
+                            onClick={() => onCardClick(name)}
+                            className="inline-flex min-h-[44px] items-center text-slate-300 underline-offset-2 hover:underline sm:min-h-0"
+                          >
+                            {name}
+                          </button>
+                          {index < check.evidence.length - 1 && ", "}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {estimate.axes[check.axis].combo_pairs?.map(([first, second]) => (
+                    <div key={`${first}-${second}`} className="text-[10px] text-slate-500">
+                      {t("bracket.combo.pairSourced", { first, second })}
+                    </div>
+                  ))}
+                  <div className="mt-1 text-[10px] text-slate-500">
+                    <span>{check.official_line} </span>
+                    <a
+                      href={check.source_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline-offset-2 hover:underline"
+                    >
+                      {t("bracket.check.source", {
+                        document: check.source_document,
+                        published: check.source_published,
+                      })}
+                    </a>
+                  </div>
+                </dd>
+              </div>
+            );
+          })}
+          {BRACKET_AXES.filter(
+            (axis) => !estimate.checks.some((check) => check.axis === axis),
+          ).map((axis) => {
+            const reading = estimate.axes[axis];
+            return (
+              <div key={axis} className="grid grid-cols-[180px_1fr] items-start gap-2">
+                <dt className="text-slate-300">{t(AXIS_I18N_KEY[axis])}</dt>
+                <dd className="text-slate-400">
+                  <div>
+                    {reading.count} — {t("bracket.uncounted")}
+                  </div>
+                  {reading.contributing.map((name, index) => (
+                    <span key={`${name}-${index}`}>
                       <button
                         type="button"
                         onClick={() => onCardClick(name)}
@@ -110,20 +308,130 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
                       >
                         {name}
                       </button>
-                      {i < cards.length - 1 && ", "}
+                      {index < reading.contributing.length - 1 && ", "}
                     </span>
                   ))}
-                  {violation && (
-                    <span className="ml-2 text-amber-300">
-                      {t("bracket.forced", { tier: BRACKET_TIER_NUMERIC[violation.forced_floor] })}
-                    </span>
-                  )}
+                  {reading.combo_pairs?.map(([first, second]) => (
+                    <div key={`${first}-${second}`} className="text-[10px] text-slate-500">
+                      {t("bracket.combo.pairSourced", { first, second })}
+                    </div>
+                  ))}
                 </dd>
               </div>
             );
           })}
+          <div className="border-t border-white/5 pt-2">
+            <dt className="mb-1.5 text-[10px] uppercase tracking-wider text-slate-500">
+              {t("bracket.combo.heading")}
+            </dt>
+            <dd className="space-y-2 text-slate-400">
+              {estimate.combo_coverage !== "measured" ? (
+                <div>{t("bracket.combo.unmeasured")}</div>
+              ) : (
+                <>
+                  {(estimate.combos?.length ?? 0) === 0 && (
+                    <div>{t("bracket.combo.noneFound")}</div>
+                  )}
+                  {estimate.combos?.map((match, matchIndex) => (
+                    <ComboMatchRow
+                      key={`${match.pieces[0].key}-${match.pieces[1].key}-${matchIndex}`}
+                      match={match}
+                      onCardClick={onCardClick}
+                    />
+                  ))}
+                  {estimate.combo_checks?.map((check) => {
+                    const triggerLabel =
+                      check.trigger.kind === "standalone_two_card"
+                        ? t("bracket.combo.trigger.standaloneTwoCard")
+                        : t("bracket.combo.trigger.earlyTwoCard", {
+                            ceiling: check.trigger.assemble_ceiling,
+                          });
+                    const outcomeText =
+                      check.outcome.kind === "fired"
+                        ? t("bracket.combo.check.fired", {
+                            tier: BRACKET_TIER_NUMERIC[check.floor],
+                            label: BRACKET_LABEL[BRACKET_TIER_NUMERIC[check.floor]],
+                          })
+                        : check.outcome.cards_until_fired !== null
+                          ? t("bracket.combo.check.clear", {
+                              count: check.outcome.cards_until_fired,
+                              tier: BRACKET_TIER_NUMERIC[check.floor],
+                            })
+                          : t("bracket.combo.check.clearMax", {
+                              tier: BRACKET_TIER_NUMERIC[check.floor],
+                            });
+
+                    return (
+                      <div
+                        key={`${check.trigger.kind}-${check.floor}`}
+                        className="grid grid-cols-[180px_1fr] items-start gap-2"
+                      >
+                        <div className="text-slate-300">{triggerLabel}</div>
+                        <div>
+                          <div
+                            className={
+                              check.outcome.kind === "fired" ? "text-amber-300" : undefined
+                            }
+                          >
+                            {outcomeText}
+                          </div>
+                          {check.evidence.map((match, matchIndex) => (
+                            <ComboMatchRow
+                              key={`${match.pieces[0].key}-${match.pieces[1].key}-${matchIndex}`}
+                              match={match}
+                              onCardClick={onCardClick}
+                              className="mt-1"
+                            />
+                          ))}
+                          <div className="mt-1 text-[10px] text-slate-500">
+                            <span>{check.official_line} </span>
+                            <a
+                              href={check.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="underline-offset-2 hover:underline"
+                            >
+                              {t("bracket.check.source", {
+                                document: check.source_document,
+                                published: check.source_published,
+                              })}
+                            </a>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div className="text-[10px] text-slate-500">
+                    {t("bracket.combo.attribution", {
+                      attribution: estimate.combo_provenance?.attribution ?? "",
+                      date: estimate.combo_provenance?.snapshot_date ?? "",
+                    })}
+                  </div>
+                </>
+              )}
+            </dd>
+          </div>
+          <div className="border-t border-white/5 pt-2 text-slate-400">
+            {t("bracket.coverage", {
+              resolved: estimate.coverage.resolved,
+              counted: estimate.coverage.counted,
+            })}
+          </div>
+          {estimate.coverage.confidence === "partial" && (
+            <div className="space-y-1 text-slate-400">
+              <div>
+                {t("bracket.confidencePartial", { n: estimate.coverage.unresolved.length })}
+              </div>
+              <div className="text-slate-300">{t("bracket.unresolvedHeading")}</div>
+              <ul className="list-disc pl-5">
+                {estimate.coverage.unresolved.map((name) => (
+                  <li key={name}>{name}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="border-t border-white/5 pt-2 text-[10px] text-slate-500">
-            {t("bracket.dataVersion", { version: estimate.data_version })} ·{" "}
+            {t("bracket.dataVersion", { version: estimate.data_version })} · {t("bracket.baseFloor")} ·{" "}
             <a
               href="https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta"
               target="_blank"

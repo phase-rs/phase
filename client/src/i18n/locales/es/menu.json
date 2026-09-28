@@ -120,6 +120,7 @@
     "opponentLabel": "Oponente {{number}}",
     "deck": "Mazo",
     "difficulty": "Dificultad",
+    "difficultyDefault": "Predeterminado ({{difficulty}})",
     "deckRandom": "Aleatorio",
     "deckRandomCount": "Aleatorio ({{count}})",
     "cedhToggle": {
@@ -132,8 +133,27 @@
       "user": "Usuario",
       "precon": "Precon"
     },
+    "podRelaxation": {
+      "heading": "Ajustes del pod",
+      "bracketDistance": "Asiento {{seat}} — no había ningún mazo del bracket solicitado; se asignó un mazo de Bracket {{tier}}.",
+      "bracketDistanceNoTier": "Asiento {{seat}} — no había ningún mazo del bracket solicitado; se asignó un mazo sin etiqueta.",
+      "labelProvenance": "Asiento {{seat}} — no había ningún mazo con bracket declarado; se asignó un mazo con bracket estimado.",
+      "archetype": "Asiento {{seat}} — no había ningún mazo del arquetipo solicitado.",
+      "distinctColorIdentity": "Asiento {{seat}} — comparte identidad de color con otro asiento.",
+      "distinctCommander": "Asiento {{seat}} — comparte comandante con otro asiento."
+    },
+    "podPreviewCount": "{{n}} mazos coinciden con la configuración actual del pod",
     "brain": "Controlado por",
     "brainEngine": "IA del motor"
+  },
+  "gameProvider": {
+    "podSelectionRefused": {
+      "insufficientCandidates": "No hay suficientes mazos distintos: se solicitaron {{requested}} asientos y hay {{available}} disponibles.",
+      "hardGateUnsatisfiable": "No hay suficientes mazos cEDH para una mesa cEDH: se solicitaron {{requested}} asientos y hay {{available}} disponibles.",
+      "tooManySeats": "Una mesa cEDH admite como máximo cuatro jugadores (se solicitaron {{seats}} asientos de IA).",
+      "unknownCommander": "El catálogo de mazos nombra un comandante que los datos de cartas no conocen: {{name}}.",
+      "cardDataUnavailable": "La selección de asientos de IA necesita datos de cartas, que aún no se han cargado."
+    }
   },
   "feedManager": {
     "title": "Gestionar feeds",

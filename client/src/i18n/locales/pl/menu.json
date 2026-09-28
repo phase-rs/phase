@@ -120,6 +120,7 @@
     "opponentLabel": "Przeciwnik {{number}}",
     "deck": "Talia",
     "difficulty": "Poziom trudności",
+    "difficultyDefault": "Domyślny ({{difficulty}})",
     "deckRandom": "Losowa",
     "deckRandomCount": "Losowa ({{count}})",
     "cedhToggle": {
@@ -132,8 +133,27 @@
       "user": "Użytkownik",
       "precon": "Precon"
     },
+    "podRelaxation": {
+      "heading": "Dostosowania podu",
+      "bracketDistance": "Miejsce {{seat}} — talia z wybranego bracketu nie była dostępna; przydzielono talię z Bracketu {{tier}}.",
+      "bracketDistanceNoTier": "Miejsce {{seat}} — talia z wybranego bracketu nie była dostępna; przydzielono talię bez oznaczenia.",
+      "labelProvenance": "Miejsce {{seat}} — talia z deklarowanym bracketem nie była dostępna; przydzielono talię z oszacowanym bracketem.",
+      "archetype": "Miejsce {{seat}} — talia o wybranym archetypie nie była dostępna.",
+      "distinctColorIdentity": "Miejsce {{seat}} — ma tę samą tożsamość kolorów co inne miejsce.",
+      "distinctCommander": "Miejsce {{seat}} — ma tego samego dowódcę co inne miejsce."
+    },
+    "podPreviewCount": "{{n}} talii pasuje do bieżących ustawień podu",
     "brain": "Sterowany przez",
     "brainEngine": "AI silnika"
+  },
+  "gameProvider": {
+    "podSelectionRefused": {
+      "insufficientCandidates": "Za mało różnych talii: zażądano {{requested}} miejsc, dostępnych jest {{available}}.",
+      "hardGateUnsatisfiable": "Za mało talii cEDH dla stołu cEDH: zażądano {{requested}} miejsc, dostępnych jest {{available}}.",
+      "tooManySeats": "Przy stole cEDH może zasiąść najwyżej czterech graczy (zażądano {{seats}} miejsc SI).",
+      "unknownCommander": "Katalog talii wskazuje dowódcę nieznanego danym kart: {{name}}.",
+      "cardDataUnavailable": "Wybór miejsc SI wymaga danych kart, które nie zostały jeszcze wczytane."
+    }
   },
   "feedManager": {
     "title": "Zarządzaj kanałami",

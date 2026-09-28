@@ -269,12 +269,74 @@
     "addCommander": "ブラケット推定を見るには統率者を追加してください。",
     "estimated": "推定: B{{tier}} {{label}}",
     "manual": "手動: B{{tier}} {{label}}",
-    "mismatch": " ⚠ 不一致",
+    "belowFloor": " ⚠ B{{tier}} の下限未満",
+    "belowFloorCombo": "2枚コンボにより引き上げ",
     "hideBreakdown": "内訳を隠す",
     "showBreakdown": "内訳を表示",
     "hideBreakdownButton": "▲ 内訳を隠す",
     "showBreakdownButton": "▼ 内訳を表示",
-    "forced": "（強制 B{{tier}}）",
+    "axis": {
+      "gameChangers": "ゲームチェンジャー",
+      "massLandDenial": "大量土地破壊",
+      "extraTurns": "追加ターン",
+      "efficientTutors": "効率的なサーチ"
+    },
+    "check": {
+      "fired": "{{observed}} — B{{tier}} {{label}} に確定",
+      "clear": "{{observed}} / {{threshold}} — あと {{remaining}} で B{{tier}} に到達",
+      "clearMax": "{{observed}} — カードを追加しても B{{tier}} には到達しません",
+      "source": "{{document}}、{{published}}"
+    },
+    "combo": {
+      "heading": "2枚コンボ",
+      "unmeasured": "このビルドでは2枚コンボの指標を測定していません",
+      "noneFound": "このデッキに2枚の無限コンボは見つかりませんでした",
+      "attribution": "コンボデータ: {{attribution}}、スナップショット {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "単独2枚コンボの下限",
+        "earlyTwoCard": "序盤2枚コンボの下限（揃えるコスト {{ceiling}} 以下）"
+      },
+      "check": {
+        "fired": "B{{tier}} {{label}} に確定",
+        "clear_one": "あと1枚追加すると B{{tier}} に到達する可能性があります",
+        "clear_few": "あと{{count}}枚追加すると B{{tier}} に到達する可能性があります",
+        "clear_many": "あと{{count}}枚追加すると B{{tier}} に到達する可能性があります",
+        "clear_other": "あと{{count}}枚追加すると B{{tier}} に到達する可能性があります",
+        "clearMax": "一致が増えても B{{tier}} には到達しません"
+      },
+      "outcome": {
+        "wins": "ゲームに勝利",
+        "unbounded": "無限の{{resource}}"
+      },
+      "resource": {
+        "mana": "マナ",
+        "damage": "ダメージ",
+        "lifeLoss": "ライフ減少",
+        "lifegain": "ライフ獲得",
+        "mill": "切削",
+        "draw": "カードを引く",
+        "tokens": "トークン",
+        "combat": "戦闘フェイズ",
+        "turns": "ターン"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "確実に2枚",
+        "arguablyTwoCard": "実質2枚",
+        "more": "3枚以上"
+      },
+      "relevance": {
+        "standalone": "単独",
+        "contextual": "状況依存",
+        "helper": "補助"
+      },
+      "pairSourced": "{{first}} + {{second}}（コンボ表より）"
+    },
+    "uncounted": "根拠として集計 — この軸に適用されるブラケット規定はありません。",
+    "uncalibrated": "WotC は「少数」の具体的な数を公表していないため、この集計は未調整です。",
+    "coverage": "デッキの {{counted}} 枚中 {{resolved}} 枚を読み取りました",
+    "confidencePartial": "{{n}} 件のカード名がカードデータに見つかりませんでした — これらの集計は下限値です。",
+    "unresolvedHeading": "カードデータに見つかりません",
+    "baseFloor": "ブラケット1はデッキのテーマで決まるため、推定器では判定できません。推定は B2 から始まります。",
     "dataVersion": "データ: {{version}}",
     "aboutBrackets": "ブラケットについて ↗",
     "estimatedChip": "推定: B{{tier}}",
@@ -283,6 +345,46 @@
   "bracketPicker": {
     "ariaLabel": "デッキブラケット",
     "unrated": "未評価"
+  },
+  "signals": {
+    "title": "デッキ指標",
+    "disclaimer": "デッキのカードテキストを解析した記述統計です。ブラケットの基準ではなく、推定を変えることはありません。",
+    "avgManaValue": "平均マナ総量（土地以外）: {{value}}",
+    "notMeasurable": "測定不可",
+    "noCommander": "デッキ指標を見るには統率者を追加してください。",
+    "unavailable": "デッキ指標にはカードデータが必要ですが、まだ読み込まれていません。",
+    "unresolved": "{{n}} 件のカード名がカードデータに見つかりませんでした。",
+    "kind": {
+      "counterspells": "打ち消し呪文",
+      "spot_removal": "単体除去",
+      "sweepers": "全体除去",
+      "card_advantage": "カード・アドバンテージ",
+      "free_interaction": "無料の妨害",
+      "mana_producers": "マナ生成",
+      "land_fetch": "土地サーチ",
+      "rituals": "儀式",
+      "extra_land_drops": "追加の土地プレイ"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "2枚の無限コンボ",
+    "question": "意図的な2枚の無限コンボはありますか？",
+    "undeclared": "未回答",
+    "noneIntended": "意図していない",
+    "intended": "意図している",
+    "windowAriaLabel": "いつ揃えられますか？",
+    "windowUnstated": "未指定",
+    "windowEarly": "序盤",
+    "windowLate": "終盤のみ",
+    "declaredFloor": "（申告 — B{{tier}} に確定）",
+    "heading": "指標",
+    "authorityEngine": "phase が判定",
+    "authorityDeckOwner": "あなたが申告",
+    "authorityUnanswered": "未回答",
+    "rowGameChangers": "ゲームチェンジャー",
+    "rowExtraTurns": "追加ターン",
+    "rowMassLandDenial": "大量土地破壊",
+    "rowTwoCardCombos": "2枚の無限コンボ"
   },
   "warnings": {
     "commanderCount": "デッキは{{count}}枚です（{{expected}}枚ちょうど必要）",

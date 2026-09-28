@@ -1921,6 +1921,7 @@ mod tests {
             seat_state,
             &SeatDelta::empty(),
             &engine::database::CardDatabase::default(),
+            &engine::database::ComboTable::default(),
         );
 
         assert_eq!(save(&db, &mgr, &code), FullPersistDisposition::Applied);

@@ -263,7 +263,7 @@ mod tests {
     /// `GameState::new_two_player` default *is* the fixture. Off-step there is
     /// no mulligan to bound, so force-keeping a projection state would be a
     /// guess. (This is also the one observable difference from the
-    /// `CedhKeepablesMulligan` floor this policy replaces, which fell back to
+    /// `BracketKeepablesMulligan` floor this policy replaces, which fell back to
     /// `free_first = false` and evaluated the floor anyway.)
     #[test]
     fn floor_abstains_outside_mulligan_step() {

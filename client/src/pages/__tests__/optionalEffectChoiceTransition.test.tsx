@@ -151,7 +151,6 @@ function scriptedAdapter(): {
       seq: nextSnapshotSeq(),
     })),
     restoreState: vi.fn(),
-    estimateBracket: vi.fn().mockResolvedValue(null),
     dispose: vi.fn(),
   };
   return { adapter, delivered };

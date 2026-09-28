@@ -134,11 +134,19 @@ export function customFormatFromLobbyConfig(name: string, format_config: any): a
 export function deckCopyLimit(name: string): any;
 
 /**
- * Estimates a Commander deck's bracket without touching `GAME_STATE`.
- * Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
- * deck has no commander or the card database is not loaded.
+ * Structural deck signals. Pure and stateless; reads `CARD_DB` without
+ * touching `GAME_STATE`. Returns `null` (via serde) when the deck has no
+ * commander or the card database is not loaded.
  */
-export function estimate_bracket_for_deck(deck_js: any): any;
+export function deck_signals_for_deck(deck_js: any): any;
+
+/**
+ * Estimates a Commander deck's bracket and reconciles an optional declared
+ * tier without touching `GAME_STATE`. Reads `CARD_DB` for bracket signals.
+ * Returns `null` (via serde) when the deck has no commander or the card
+ * database is not loaded.
+ */
+export function estimate_bracket_for_deck(request_js: any): any;
 
 /**
  * Always-definite deck/format gate for callers that ENFORCE rather than hint.
@@ -212,6 +220,11 @@ export function formatConfigForCustomRules(custom_rules: any): any;
  * this check.
  */
 export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, status: number, response_body: string): any;
+
+/**
+ * Returns the engine-authored default AI rung for every Commander bracket.
+ */
+export function getBracketDifficultyTable(): any;
 
 /**
  * Return the authoritative list of user-selectable formats as a typed array.
@@ -342,8 +355,9 @@ export function get_stack_pressure(): any;
 export function get_viewer_snapshot_js(player_id: number): any;
 
 /**
- * Get the viewer-filtered state, legal actions, interaction projection, and
- * event slice associated with one engine transition.
+ * Combined viewer projection and event slice for one engine transition.
+ * Unlike the legacy state-only endpoint, this path validates the viewer id
+ * before narrowing it to the engine's representable PlayerId domain.
  */
 export function get_viewer_transition_snapshot_js(player_id: number, events: any): any;
 
@@ -453,6 +467,12 @@ export function llmProviderCatalog(): any;
  * Must be called before initialize_game to enable name-based deck resolution.
  */
 export function load_card_database(json_str: string): number;
+
+/**
+ * Load the combo table (combo-table.json). Optional: with no table loaded the
+ * estimator reports `ComboCoverage::Unmeasured` and no combo floor can fire.
+ */
+export function load_combo_table(json_str: string): number;
 
 /**
  * Load a replay log (the JSON produced by `export_replay_log`) for
@@ -619,6 +639,8 @@ export function resume_restored_game_state(): any;
  */
 export function search_cards_js(query: any): any;
 
+export function selectAiPod(candidates_js: any, request_js: any): any;
+
 /**
  * Set the multiplayer enforcement flag directly.
  *
@@ -718,6 +740,7 @@ export interface InitOutput {
     readonly companionCandidates: (a: any) => [number, number, number];
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
+    readonly deck_signals_for_deck: (a: any) => [number, number, number];
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
@@ -725,6 +748,7 @@ export interface InitOutput {
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
     readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly getBracketDifficultyTable: () => [number, number, number];
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -748,6 +772,7 @@ export interface InitOutput {
     readonly legal_targets_for_castable_js: (a: number) => any;
     readonly legal_targets_for_castables_js: (a: any) => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
+    readonly load_combo_table: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
     readonly ping: () => [number, number];
@@ -760,6 +785,7 @@ export interface InitOutput {
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
     readonly resume_restored_game_state: () => [number, number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
+    readonly selectAiPod: (a: any, b: any) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];

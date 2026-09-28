@@ -34,6 +34,34 @@ const localStorageItems = vi.hoisted(() => {
   return items;
 });
 
+const aiCatalogResult = vi.hoisted(() => ({
+  candidates: [] as Array<Record<string, unknown>>,
+  loading: false,
+  error: null as string | null,
+}));
+const selectPod = vi.hoisted(() => vi.fn());
+
+vi.mock("../../../services/aiDeckCatalog", () => ({
+  useAiDeckCatalog: () => aiCatalogResult,
+}));
+
+vi.mock("../../../services/podSelection", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../services/podSelection")>();
+  return {
+    ...actual,
+    POD_SELECTION_CONSTRAINTS: [],
+    podSelectionSeed: () => 23,
+    aiDeckCandidateToWire: (candidate: { id: string }) => ({
+      id: candidate.id,
+      commander: [],
+      label: null,
+      coverage_pct: 100,
+      archetype: null,
+    }),
+    selectPod,
+  };
+});
+
 // The saved-format select flow resolves through the WASM adapter. No real
 // engine runs in this environment; stub the one method HostSetup calls.
 vi.mock("../../../adapter/wasm-adapter", () => ({
@@ -115,6 +143,10 @@ describe("HostSetup", () => {
     vi.spyOn(serverDirectory, "refreshServerDirectory").mockResolvedValue(undefined);
     vi.spyOn(useMultiplayerStore.getState(), "ensureSubscriptionSocket").mockResolvedValue(null);
     localStorageItems.clear();
+    aiCatalogResult.candidates = [];
+    aiCatalogResult.loading = false;
+    aiCatalogResult.error = null;
+    selectPod.mockReset();
     useMultiplayerStore.setState({
       displayName: "",
       formatConfig: null,
@@ -131,6 +163,51 @@ describe("HostSetup", () => {
       directorySources: [],
       disabledDirectorySources: [],
     });
+  });
+
+  it("seats distinct decks from the assignment", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn().mockResolvedValue(true);
+    aiCatalogResult.candidates = ["one", "two", "three"].map((id) => ({
+      id,
+      name: id,
+      source: { type: "precon", deckId: id, code: "TST" },
+      deck: { main: [{ name: `${id} card`, count: 60 }], sideboard: [], commander: [`${id} commander`] },
+      coveragePct: 100,
+      archetype: null,
+      bracket: 2,
+      bracketProvenance: "declared",
+      bracketDataVersion: "test-1",
+    }));
+    selectPod.mockResolvedValue({
+      kind: "assignment",
+      assignment: {
+        seats: ["one", "two", "three"].map((id, seat_index) => ({
+          seat_index,
+          candidate_id: id,
+          tier: "core",
+          provenance: "declared",
+          difficulty: "Medium",
+          color_identity: [],
+        })),
+        relaxations: [],
+      },
+    });
+
+    render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "4" }));
+    for (const button of screen.getAllByRole("button", { name: "Human" })) {
+      await user.click(button);
+    }
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    expect(onHost).toHaveBeenCalledOnce();
+    const settings = onHost.mock.calls[0][0];
+    expect(settings.aiSeats.map((seat: { deck: { data: unknown } }) => seat.deck.data)).toEqual([
+      expect.objectContaining({ commander: ["one commander"] }),
+      expect.objectContaining({ commander: ["two commander"] }),
+      expect.objectContaining({ commander: ["three commander"] }),
+    ]);
   });
 
   /** Project fixtures through the PRODUCTION projection, so a listing carries

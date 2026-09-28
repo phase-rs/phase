@@ -32,6 +32,7 @@ import init, {
   resume_restored_game_state,
   resume_multiplayer_host_state,
   load_card_database,
+  load_combo_table,
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
   evaluateDeckFormatGate,
@@ -43,6 +44,8 @@ import init, {
   clear_game_state,
   set_multiplayer_mode,
   estimate_bracket_for_deck,
+  selectAiPod,
+  deck_signals_for_deck,
   has_replay_recording,
   export_replay_log,
   load_replay_for_playback,
@@ -69,7 +72,8 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest } from "../types/bracketEstimate";
+import type { BracketDeckRequest, BracketEstimateRequest } from "../types/bracketEstimate";
+import type { AiDeckCandidateWire, PodSelectionRequest } from "../types/podSelection";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
@@ -154,7 +158,14 @@ type EngineRequest =
   | { type: "takeLastPanic"; id: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "projectSeatView"; id: number; stateJson: string }
-  | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest }
+  | { type: "estimateBracketForDeck"; id: number; request: BracketEstimateRequest }
+  | {
+      type: "selectAiPod";
+      id: number;
+      candidates: AiDeckCandidateWire[];
+      request: PodSelectionRequest;
+    }
+  | { type: "deckSignalsForDeck"; id: number; deck: BracketDeckRequest }
   | { type: "hasReplayRecording"; id: number }
   | { type: "exportReplayLog"; id: number }
   | { type: "loadReplayForPlayback"; id: number; replayJson: string }
@@ -177,6 +188,39 @@ type EngineResponse =
 // ── State ────────────────────────────────────────────────────────────────
 
 let cardDbLoaded = false;
+
+type ComboTableLoadOutcome = "loaded" | "unavailable";
+
+let comboTablePromise: Promise<ComboTableLoadOutcome> | null = null;
+
+function ensureComboTable(): Promise<ComboTableLoadOutcome> {
+  if (!comboTablePromise) {
+    let definitiveMissing = false;
+    const pending: Promise<ComboTableLoadOutcome> = (async () => {
+      try {
+        const response = await fetch(__COMBO_TABLE_URL__);
+        if (response.status === 404) {
+          definitiveMissing = true;
+          return "unavailable";
+        }
+        if (!response.ok) {
+          throw new Error(`Failed to load combo-table.json (${response.status})`);
+        }
+        await load_combo_table(await response.text());
+        return "loaded";
+      } catch {
+        return "unavailable";
+      }
+    })();
+    comboTablePromise = pending;
+    void pending.then((outcome) => {
+      if (outcome === "unavailable" && !definitiveMissing && comboTablePromise === pending) {
+        comboTablePromise = null;
+      }
+    });
+  }
+  return comboTablePromise;
+}
 
 function respond(msg: EngineResponse): void {
   self.postMessage(msg);
@@ -337,6 +381,8 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
           break;
         }
+        // The engine's deck-resolve path reads this table to carry combo floors into each seat's estimated tier.
+        await ensureComboTable();
         const gameResult = initialize_game(
           msg.deckData ?? null,
           msg.seed,
@@ -365,6 +411,8 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
           break;
         }
+        // The engine's deck-resolve path reads this table to carry combo floors into each seat's estimated tier.
+        await ensureComboTable();
         // The host entry point refuses an engine that already holds a game and
         // claims the multiplayer flag alongside the install — both inside this
         // one synchronous handler, so no other posted message can interleave.
@@ -722,10 +770,22 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "estimateBracketForDeck": {
         // Pure, stateless — does not require an active game state. Returns
-        // null when the deck has no commander or the card database is not
-        // loaded yet (engine returns Option::None in those cases).
-        const estimate = estimate_bracket_for_deck(msg.deck);
+        // null only when the deck has no commander; the caller has already
+        // ensured that the card database is loaded.
+        await ensureComboTable();
+        const estimate = estimate_bracket_for_deck(msg.request);
         result(msg.id, estimate ?? null);
+        break;
+      }
+
+      case "selectAiPod": {
+        result(msg.id, selectAiPod(msg.candidates, msg.request));
+        break;
+      }
+
+      case "deckSignalsForDeck": {
+        const signals = deck_signals_for_deck(msg.deck);
+        result(msg.id, signals ?? null);
         break;
       }
 
@@ -749,6 +809,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "loadReplayForPlayback": {
+        // Replay reconstruction resolves the recorded decks again, so it must
+        // see the same combo floors as live-game initialization.
+        await ensureComboTable();
         result(msg.id, load_replay_for_playback(msg.replayJson));
         break;
       }

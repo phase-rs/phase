@@ -120,6 +120,7 @@
     "opponentLabel": "対戦相手{{number}}",
     "deck": "デッキ",
     "difficulty": "難易度",
+    "difficultyDefault": "既定（{{difficulty}}）",
     "deckRandom": "ランダム",
     "deckRandomCount": "ランダム（{{count}}）",
     "cedhToggle": {
@@ -132,8 +133,27 @@
       "user": "ユーザー",
       "precon": "構築済み"
     },
+    "podRelaxation": {
+      "heading": "ポッドの調整",
+      "bracketDistance": "席{{seat}} — 指定ブラケットのデッキがなかったため、ブラケット{{tier}}のデッキを配置しました。",
+      "bracketDistanceNoTier": "席{{seat}} — 指定ブラケットのデッキがなかったため、ブラケット未設定のデッキを配置しました。",
+      "labelProvenance": "席{{seat}} — 申告ブラケットのデッキがなかったため、推定ブラケットのデッキを配置しました。",
+      "archetype": "席{{seat}} — 指定アーキタイプのデッキがありませんでした。",
+      "distinctColorIdentity": "席{{seat}} — 他の席と固有色が同じです。",
+      "distinctCommander": "席{{seat}} — 他の席と統率者が同じです。"
+    },
+    "podPreviewCount": "現在のポッド設定に合うデッキは {{n}} 個です",
     "brain": "使用するAI",
     "brainEngine": "エンジンAI"
+  },
+  "gameProvider": {
+    "podSelectionRefused": {
+      "insufficientCandidates": "異なるデッキが足りません: {{requested}} 席を要求、利用可能 {{available}}。",
+      "hardGateUnsatisfiable": "cEDH テーブルに必要な cEDH デッキが足りません: {{requested}} 席を要求、利用可能 {{available}}。",
+      "tooManySeats": "cEDH テーブルは最大4人です（AI 席 {{seats}} を要求）。",
+      "unknownCommander": "デッキカタログにカードデータが認識しない統率者が含まれています: {{name}}。",
+      "cardDataUnavailable": "AI 席の選択にはカードデータが必要ですが、まだ読み込まれていません。"
+    }
   },
   "feedManager": {
     "title": "フィードを管理",

@@ -68,6 +68,18 @@ describe("preferencesStore", () => {
     expect(seats[1].difficulty).toBe("Hard");
   });
 
+  it("a fresh store's new seat difficulty is null", () => {
+    expect(usePreferencesStore.getInitialState().aiSeats[0].difficulty).toBeNull();
+  });
+
+  it("setAiSeatDifficulty accepts null to return a seat to the bracket default", () => {
+    act(() => {
+      usePreferencesStore.getState().setAiSeatDifficulty(0, null);
+    });
+
+    expect(usePreferencesStore.getState().aiSeats[0].difficulty).toBeNull();
+  });
+
   it("ensureAiSeatCount seeds new seats from the first seat", () => {
     act(() => {
       usePreferencesStore.getState().setAiSeatDifficulty(0, "Hard");
@@ -367,6 +379,28 @@ describe("preferencesStore", () => {
 
     expect(usePreferencesStore.getState().logPanelLastChoice).toBe("open");
     expect(usePreferencesStore.getState()).not.toHaveProperty("logDefaultState");
+  });
+
+  it("v35 to v36 pins every existing seat difficulty", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: {
+          aiSeats: [
+            { difficulty: "Hard", deckId: "Random" },
+            { difficulty: "Medium", deckId: "saved:Dimir Control" },
+          ],
+        },
+        version: 35,
+      }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().aiSeats).toEqual([
+      { difficulty: "Hard", deckId: "Random" },
+      { difficulty: "Medium", deckId: "saved:Dimir Control" },
+    ]);
   });
 
   it.each([undefined, "middle", 7])("resets an invalid current log-dock value (%j) to right", (logDockSide) => {

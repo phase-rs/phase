@@ -6,7 +6,7 @@
 //!
 //! `ComboLinePolicy` (in `policies/combo_line.rs`) wires this layer into the
 //! existing planner via `TacticalPolicy::activation()` keyed on
-//! `DeckFeatures::is_cedh`.
+//! `DeckFeatures::effective_bracket_tier`.
 
 pub mod detection;
 pub mod line;

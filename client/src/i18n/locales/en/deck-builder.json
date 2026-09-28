@@ -265,16 +265,78 @@
     "clearOverride": "Clear Art Override"
   },
   "bracket": {
-    "unavailable": "Bracket estimation isn't available in this build.",
+    "unavailable": "Bracket estimation needs card data, which hasn't loaded yet.",
     "addCommander": "Add a commander to see your bracket estimate.",
     "estimated": "Estimated: B{{tier}} {{label}}",
     "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ mismatch",
+    "belowFloor": " ⚠ below B{{tier}} floor",
+    "belowFloorCombo": "raised by a two-card combo",
     "hideBreakdown": "Hide breakdown",
     "showBreakdown": "Show breakdown",
     "hideBreakdownButton": "▲ Hide breakdown",
     "showBreakdownButton": "▼ Show breakdown",
-    "forced": "(forced B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Mass Land Denial",
+      "extraTurns": "Extra Turns",
+      "efficientTutors": "Efficient Tutors"
+    },
+    "check": {
+      "fired": "{{observed}} — forces B{{tier}} {{label}}",
+      "clear": "{{observed}} of {{threshold}} — {{remaining}} more crosses to B{{tier}}",
+      "clearMax": "{{observed}} — cannot reach B{{tier}} by adding cards",
+      "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Two-card combos",
+      "unmeasured": "Two-card combo barometer not measured in this build",
+      "noneFound": "No two-card infinite combos found in this deck",
+      "attribution": "Combo data: {{attribution}}, snapshot {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Standalone two-card combo floor",
+        "earlyTwoCard": "Early two-card combo floor (assemble cost {{ceiling}} or less)"
+      },
+      "check": {
+        "fired": "Forces B{{tier}} {{label}}",
+        "clear_one": "Adding 1 more card could reach B{{tier}}",
+        "clear_few": "Adding {{count}} more cards could reach B{{tier}}",
+        "clear_many": "Adding {{count}} more cards could reach B{{tier}}",
+        "clear_other": "Adding {{count}} more cards could reach B{{tier}}",
+        "clearMax": "Cannot reach B{{tier}} with additional matches"
+      },
+      "outcome": {
+        "wins": "Wins the game",
+        "unbounded": "Unbounded {{resource}}"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "damage",
+        "lifeLoss": "life loss",
+        "lifegain": "life gain",
+        "mill": "mill",
+        "draw": "card draw",
+        "tokens": "tokens",
+        "combat": "combat phases",
+        "turns": "turns"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Definitely two-card",
+        "arguablyTwoCard": "Arguably two-card",
+        "more": "More than two cards"
+      },
+      "relevance": {
+        "standalone": "Standalone",
+        "contextual": "Contextual",
+        "helper": "Helper"
+      },
+      "pairSourced": "{{first}} + {{second}} (from the combo table)"
+    },
+    "uncounted": "Counted as evidence — no bracket rule applies to this axis.",
+    "uncalibrated": "WotC publishes no number for \"low quantities\"; this count is uncalibrated.",
+    "coverage": "Read {{resolved}} of {{counted}} deck cards",
+    "confidencePartial": "{{n}} card names were not found in the card data — these counts are lower bounds.",
+    "unresolvedHeading": "Not found in card data",
+    "baseFloor": "Bracket 1 is defined by deck theme, which the estimator cannot detect. Estimates start at B2.",
     "dataVersion": "Data: {{version}}",
     "aboutBrackets": "About brackets ↗",
     "estimatedChip": "Estimated: B{{tier}}",
@@ -283,6 +345,46 @@
   "bracketPicker": {
     "ariaLabel": "Deck bracket",
     "unrated": "Unrated"
+  },
+  "signals": {
+    "title": "Deck signals",
+    "disclaimer": "Descriptive statistics from the deck's parsed card text. These are not bracket criteria and never change the estimate.",
+    "avgManaValue": "Average mana value (nonland): {{value}}",
+    "notMeasurable": "not measurable",
+    "noCommander": "Add a commander to see deck signals.",
+    "unavailable": "Deck signals need card data, which hasn't loaded yet.",
+    "unresolved": "{{n}} card names were not found in the card data.",
+    "kind": {
+      "counterspells": "Counterspells",
+      "spot_removal": "Spot removal",
+      "sweepers": "Sweepers",
+      "card_advantage": "Card advantage",
+      "free_interaction": "Free interaction",
+      "mana_producers": "Mana producers",
+      "land_fetch": "Land fetch",
+      "rituals": "Rituals",
+      "extra_land_drops": "Extra land drops"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Two-card infinite combo",
+    "question": "Intentional two-card infinite combo?",
+    "undeclared": "Not answered",
+    "noneIntended": "None intended",
+    "intended": "Intended",
+    "windowAriaLabel": "When can it assemble?",
+    "windowUnstated": "Unstated",
+    "windowEarly": "Early game",
+    "windowLate": "Late game only",
+    "declaredFloor": "(declared — forces B{{tier}})",
+    "heading": "Barometers",
+    "authorityEngine": "Checked by phase",
+    "authorityDeckOwner": "Declared by you",
+    "authorityUnanswered": "Not answered",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Extra Turns",
+    "rowMassLandDenial": "Mass Land Denial",
+    "rowTwoCardCombos": "Two-Card Infinite Combos"
   },
   "warnings": {
     "commanderCount": "Deck has {{count}} cards (need exactly {{expected}})",

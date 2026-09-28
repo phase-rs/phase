@@ -120,6 +120,7 @@
     "opponentLabel": "Oponente {{number}}",
     "deck": "Deck",
     "difficulty": "Dificuldade",
+    "difficultyDefault": "Predefinido ({{difficulty}})",
     "deckRandom": "Aleatório",
     "deckRandomCount": "Aleatório ({{count}})",
     "cedhToggle": {
@@ -132,8 +133,27 @@
       "user": "Usuário",
       "precon": "Precon"
     },
+    "podRelaxation": {
+      "heading": "Ajustes do pod",
+      "bracketDistance": "Lugar {{seat}} — não havia um deck no bracket solicitado; foi atribuído um deck de Bracket {{tier}}.",
+      "bracketDistanceNoTier": "Lugar {{seat}} — não havia um deck no bracket solicitado; foi atribuído um deck sem classificação.",
+      "labelProvenance": "Lugar {{seat}} — não havia um deck com bracket declarado; foi atribuído um deck com bracket estimado.",
+      "archetype": "Lugar {{seat}} — não havia um deck do arquétipo solicitado.",
+      "distinctColorIdentity": "Lugar {{seat}} — compartilha uma identidade de cor com outro lugar.",
+      "distinctCommander": "Lugar {{seat}} — compartilha um comandante com outro lugar."
+    },
+    "podPreviewCount": "{{n}} decks correspondem às configurações atuais do pod",
     "brain": "Controlado por",
     "brainEngine": "IA do motor"
+  },
+  "gameProvider": {
+    "podSelectionRefused": {
+      "insufficientCandidates": "Não há decks distintos suficientes: {{requested}} lugares solicitados, {{available}} disponíveis.",
+      "hardGateUnsatisfiable": "Não há decks cEDH suficientes para uma mesa cEDH: {{requested}} lugares solicitados, {{available}} disponíveis.",
+      "tooManySeats": "Uma mesa cEDH comporta no máximo quatro jogadores ({{seats}} lugares de IA solicitados).",
+      "unknownCommander": "O catálogo de decks cita um comandante desconhecido pelos dados de cartas: {{name}}.",
+      "cardDataUnavailable": "A seleção de lugares de IA precisa dos dados de cartas, que ainda não foram carregados."
+    }
   },
   "feedManager": {
     "title": "Gerenciar Feeds",

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
@@ -12,8 +12,9 @@ use engine::ai_support::{
     end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
     AiProposalApplication,
 };
+use engine::analysis::deck_signals::{deck_signals, DeckSignals};
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
-use engine::database::{CardDatabase, CardSearchQuery};
+use engine::database::{CardDatabase, CardSearchQuery, ComboTable};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
@@ -31,14 +32,14 @@ use engine::game::preview::{
 use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_format_gate};
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
+    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket_for_request,
     evaluate_deck_compatibility, filter_events_for_viewer, filter_state_for_viewer,
     is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
     is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
     rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
-    validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
-    PlayerDeckList, ReplayPlayer,
+    validate_name_deck_for_format_full, BracketEstimate, BracketEstimateRequest,
+    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
@@ -64,6 +65,10 @@ use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
 use phase_ai::choose_action_with_session_diagnostic;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
+use phase_ai::pod_selection::{
+    select_pod, AiDeckCandidate, PodAssignment, PodConstraint, PodSeatOccupant, PodSelectionError,
+    PodSelectionRequest, TierEnforcement, TierSet,
+};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
 
 /// Enrich local diagnostic receipts with names already known to the engine.
@@ -578,6 +583,12 @@ thread_local! {
     /// Cell::take() + Cell::set() has no borrow guard, making it panic-resilient.
     static GAME_STATE: Cell<Option<GameState>> = const { Cell::new(None) };
     static CARD_DB: RefCell<Option<std::sync::Arc<CardDatabase>>> = const { RefCell::new(None) };
+    /// Deliberately NOT a field on `CardDatabase`: the combo table is external,
+    /// unlicensed, separately dated community data with its own refresh cadence.
+    /// Keeping it out of the card pool keeps the provenance boundary visible in
+    /// the type system instead of inside a struct that everything already trusts.
+    static COMBO_TABLE: RefCell<Option<std::sync::Arc<ComboTable>>> =
+        const { RefCell::new(None) };
     /// When set, this engine is claimed by a multiplayer host session. The
     /// engine claims it itself, in the same call that installs the game
     /// (`initialize_multiplayer_host_game`, `resume_multiplayer_host_state`),
@@ -608,6 +619,17 @@ thread_local! {
     /// They deliberately do not serialize with `GameState`: a restore/new game
     /// starts a new generation even when the state revision happens to match.
     static AI_PROPOSALS: RefCell<AiProposalRegistry> = RefCell::new(AiProposalRegistry::default());
+}
+
+/// Runs a resolver against the loaded combo artifact. Browsers that have not
+/// loaded the optional artifact use an explicit unmeasured table, so bracket
+/// estimates remain honest about the unavailable combo floors.
+fn with_combo_table<R>(f: impl FnOnce(&ComboTable) -> R) -> R {
+    COMBO_TABLE.with(|cell| {
+        let combos = cell.borrow();
+        let unmeasured = ComboTable::default();
+        f(combos.as_deref().unwrap_or(&unmeasured))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -945,6 +967,20 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
     Ok(count)
 }
 
+/// Load the combo table (combo-table.json). Optional: with no table loaded the
+/// estimator reports `ComboCoverage::Unmeasured` and no combo floor can fire.
+#[wasm_bindgen]
+pub fn load_combo_table(json_str: &str) -> Result<u32, JsValue> {
+    let table = ComboTable::from_json_str(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse combo table: {e}")))?;
+    let count = u32::try_from(table.len())
+        .map_err(|_| JsValue::from_str("Combo table contains more than u32::MAX entries"))?;
+    COMBO_TABLE.with(|cell| {
+        *cell.borrow_mut() = Some(std::sync::Arc::new(table));
+    });
+    Ok(count)
+}
+
 /// Build the bounded card corpus for parallel AI scoring workers. The live
 /// main engine remains the only authority that owns the full card database.
 #[wasm_bindgen]
@@ -1263,7 +1299,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             commander: Vec::new(),
             ..Default::default()
         };
-        let payload = resolve_player_deck_list(db, &list);
+        let payload = with_combo_table(|combos| resolve_player_deck_list(db, combos, &list));
         let profile = DeckProfile::analyze(&payload.main_deck);
         Ok(to_js(&DeckProfileResult::from(&profile)))
     })
@@ -1485,24 +1521,252 @@ pub fn companion_candidates_js(request: JsValue) -> Result<JsValue, JsValue> {
     })
 }
 
-/// Estimates a Commander deck's bracket without touching `GAME_STATE`.
-/// Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
-/// deck has no commander or the card database is not loaded.
+/// Estimates a Commander deck's bracket and reconciles an optional declared
+/// tier without touching `GAME_STATE`. Reads `CARD_DB` for bracket signals.
+/// Returns `null` (via serde) when the deck has no commander or the card
+/// database is not loaded.
 #[wasm_bindgen]
-pub fn estimate_bracket_for_deck(deck_js: JsValue) -> Result<JsValue, JsError> {
-    let deck: PlayerDeckList = serde_wasm_bindgen::from_value(deck_js)
-        .map_err(|e| JsError::new(&format!("invalid deck: {e}")))?;
-    let result = estimate_bracket_inner(&deck);
+pub fn estimate_bracket_for_deck(request_js: JsValue) -> Result<JsValue, JsError> {
+    let request: BracketEstimateRequest = serde_wasm_bindgen::from_value(request_js)
+        .map_err(|e| JsError::new(&format!("invalid bracket estimate request: {e}")))?;
+    let result = estimate_bracket_inner(&request);
     Ok(to_js(&result))
 }
 
-/// Pure helper, exposed for native-side tests. Reads `CARD_DB` thread-local.
-fn estimate_bracket_inner(deck: &PlayerDeckList) -> Option<BracketEstimate> {
+/// Pure helper, exposed for native-side tests. Reads the card and combo table
+/// thread-locals.
+fn estimate_bracket_inner(request: &BracketEstimateRequest) -> Option<BracketEstimate> {
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let db = db.as_ref()?;
-        estimate_bracket(deck, db)
+        with_combo_table(|combos| estimate_bracket_for_request(request, db, combos))
     })
+}
+
+const COMMANDER_BRACKET_TIERS: [engine::game::bracket_estimate::CommanderBracketTier; 5] = [
+    engine::game::bracket_estimate::CommanderBracketTier::Exhibition,
+    engine::game::bracket_estimate::CommanderBracketTier::Core,
+    engine::game::bracket_estimate::CommanderBracketTier::Upgraded,
+    engine::game::bracket_estimate::CommanderBracketTier::Optimized,
+    engine::game::bracket_estimate::CommanderBracketTier::Cedh,
+];
+
+fn commander_bracket_tier_key(
+    tier: engine::game::bracket_estimate::CommanderBracketTier,
+) -> &'static str {
+    use engine::game::bracket_estimate::CommanderBracketTier;
+
+    match tier {
+        CommanderBracketTier::Exhibition => "exhibition",
+        CommanderBracketTier::Core => "core",
+        CommanderBracketTier::Upgraded => "upgraded",
+        CommanderBracketTier::Optimized => "optimized",
+        CommanderBracketTier::Cedh => "cedh",
+    }
+}
+
+fn bracket_difficulty_table() -> BTreeMap<&'static str, AiDifficulty> {
+    COMMANDER_BRACKET_TIERS
+        .into_iter()
+        .map(|tier| {
+            (
+                commander_bracket_tier_key(tier),
+                AiDifficulty::for_bracket(tier),
+            )
+        })
+        .collect()
+}
+
+/// Returns the engine-authored default AI rung for every Commander bracket.
+#[wasm_bindgen(js_name = getBracketDifficultyTable)]
+pub fn get_bracket_difficulty_table() -> Result<JsValue, JsError> {
+    Ok(to_js(&bracket_difficulty_table()))
+}
+
+/// WASM request DTO. JavaScript numbers exactly represent integers only through
+/// 2^53 - 1; callers must keep `seed` in that exact-integer range. The bridge
+/// follows the existing game-initialization convention and converts with
+/// `as u64` at the transport boundary.
+#[derive(Debug, Deserialize)]
+struct PodSelectionRequestDto {
+    allowed: TierSet,
+    prefer: Option<engine::game::bracket_estimate::CommanderBracketTier>,
+    enforcement: TierEnforcement,
+    seats: u8,
+    constraints: Vec<PodConstraint>,
+    coverage_floor_pct: u8,
+    archetype: Option<DeckArchetype>,
+    seed: f64,
+    #[serde(default)]
+    occupied: Vec<PodSeatOccupant>,
+}
+
+impl From<PodSelectionRequestDto> for PodSelectionRequest {
+    fn from(request: PodSelectionRequestDto) -> Self {
+        PodSelectionRequest::new(
+            request.allowed,
+            request.prefer,
+            request.enforcement,
+            request.seats,
+            request.constraints,
+            request.coverage_floor_pct,
+            request.archetype,
+            request.seed as u64,
+        )
+        .with_occupied(request.occupied)
+    }
+}
+
+/// Typed result sum returned by `selectAiPod`: success serializes as
+/// `{ "ok": PodAssignment }`, while selection failures serialize as
+/// `{ "err": PodSelectionError }`. A missing card database returns `null`.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SelectAiPodResult {
+    Ok(PodAssignment),
+    Err(PodSelectionError),
+}
+
+#[wasm_bindgen(js_name = selectAiPod)]
+pub fn select_ai_pod(candidates_js: JsValue, request_js: JsValue) -> Result<JsValue, JsError> {
+    let candidates: Vec<AiDeckCandidate> = serde_wasm_bindgen::from_value(candidates_js)
+        .map_err(|error| JsError::new(&format!("invalid AI pod candidates: {error}")))?;
+    let request: PodSelectionRequestDto = serde_wasm_bindgen::from_value(request_js)
+        .map_err(|error| JsError::new(&format!("invalid AI pod request: {error}")))?;
+    Ok(to_js(&select_ai_pod_inner(&candidates, &request.into())))
+}
+
+fn select_ai_pod_inner(
+    candidates: &[AiDeckCandidate],
+    request: &PodSelectionRequest,
+) -> Option<SelectAiPodResult> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref()?;
+        Some(match select_pod(candidates, request, db) {
+            Ok(assignment) => SelectAiPodResult::Ok(assignment),
+            Err(error) => SelectAiPodResult::Err(error),
+        })
+    })
+}
+
+/// Structural deck signals. Pure and stateless; reads `CARD_DB` without
+/// touching `GAME_STATE`. Returns `null` (via serde) when the deck has no
+/// commander or the card database is not loaded.
+#[wasm_bindgen]
+pub fn deck_signals_for_deck(deck_js: JsValue) -> Result<JsValue, JsError> {
+    let deck: PlayerDeckList = serde_wasm_bindgen::from_value(deck_js)
+        .map_err(|e| JsError::new(&format!("invalid deck: {e}")))?;
+    let result = deck_signals_inner(&deck);
+    Ok(to_js(&result))
+}
+
+/// Pure helper for native-side tests. Reads the `CARD_DB` thread-local.
+fn deck_signals_inner(deck: &PlayerDeckList) -> Option<DeckSignals> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref()?;
+        deck_signals(deck, db)
+    })
+}
+
+#[cfg(test)]
+mod ai_pod_export_tests {
+    use super::*;
+    use engine::game::bracket_estimate::CommanderBracketTier;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+    use engine::types::mana::ManaColor;
+    use phase_ai::pod_selection::{PodConstraint, SeatAttribute};
+
+    fn synthetic_db() -> CardDatabase {
+        let faces = [
+            ("White Commander", ManaColor::White),
+            ("Blue Commander", ManaColor::Blue),
+            ("Black Commander", ManaColor::Black),
+        ];
+        let entries = faces
+            .into_iter()
+            .map(|(name, color)| {
+                let face = CardFace {
+                    name: name.to_string(),
+                    card_type: CardType {
+                        supertypes: vec![Supertype::Legendary],
+                        core_types: vec![CoreType::Creature],
+                        subtypes: Vec::new(),
+                    },
+                    color_identity: vec![color],
+                    ..CardFace::default()
+                };
+                (name.to_lowercase(), serde_json::to_value(face).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>();
+        CardDatabase::from_json_str(&serde_json::to_string(&entries).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn get_bracket_difficulty_table_lists_every_tier() {
+        let table = bracket_difficulty_table();
+        assert_eq!(COMMANDER_BRACKET_TIERS.len(), 5);
+        assert_eq!(table.len(), COMMANDER_BRACKET_TIERS.len());
+        assert_eq!(table["exhibition"], AiDifficulty::Easy);
+        assert_eq!(table["core"], AiDifficulty::Medium);
+        assert_eq!(table["upgraded"], AiDifficulty::Hard);
+        assert_eq!(table["optimized"], AiDifficulty::VeryHard);
+        assert_eq!(table["cedh"], AiDifficulty::CEDH);
+        for tier in COMMANDER_BRACKET_TIERS {
+            let key = match tier {
+                CommanderBracketTier::Exhibition => "exhibition",
+                CommanderBracketTier::Core => "core",
+                CommanderBracketTier::Upgraded => "upgraded",
+                CommanderBracketTier::Optimized => "optimized",
+                CommanderBracketTier::Cedh => "cedh",
+            };
+            assert!(table.contains_key(key));
+        }
+    }
+
+    #[test]
+    fn select_ai_pod_inner_returns_a_pod_over_a_synthetic_db() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::new(synthetic_db())));
+        let candidates = ["White Commander", "Blue Commander", "Black Commander"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, commander)| AiDeckCandidate {
+                id: format!("deck-{index}"),
+                commander: vec![commander.to_string()],
+                label: None,
+                coverage_pct: None,
+                archetype: None,
+            })
+            .collect::<Vec<_>>();
+        let request = PodSelectionRequest::new(
+            TierSet::default(),
+            None,
+            TierEnforcement::Advisory,
+            2,
+            vec![
+                PodConstraint::Distinct(SeatAttribute::Deck),
+                PodConstraint::Distinct(SeatAttribute::Commander),
+                PodConstraint::Distinct(SeatAttribute::ColorIdentity),
+            ],
+            0,
+            None,
+            61_11,
+        );
+
+        let Some(SelectAiPodResult::Ok(assignment)) = select_ai_pod_inner(&candidates, &request)
+        else {
+            panic!("synthetic candidates should produce a pod")
+        };
+        assert_eq!(assignment.seats.len(), 2);
+        assert_ne!(
+            assignment.seats[0].candidate_id,
+            assignment.seats[1].candidate_id
+        );
+
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
 }
 
 /// Which client-side session is installing this game. Selects the
@@ -1844,7 +2108,7 @@ fn initialize_game_impl(
             // `deck_pools.is_empty()`-style invariants below — and the
             // per-player library check at game start — will surface it as
             // a hard error instead of a silently-wrong-format game.
-            let payload = resolve_deck_list(db, &deck_list);
+            let payload = with_combo_table(|combos| resolve_deck_list(db, combos, &deck_list));
 
             load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
@@ -1873,7 +2137,7 @@ fn initialize_game_impl(
             let cedh_error: Option<Vec<String>> = CARD_DB.with(|cell| {
                 let borrow = cell.borrow();
                 let db = borrow.as_ref().expect("CARD_DB presence checked above");
-                let payload = resolve_deck_list(db, &deck_list);
+                let payload = with_combo_table(|combos| resolve_deck_list(db, combos, &deck_list));
                 let all_decks: Vec<_> = std::iter::once(&payload.player)
                     .chain(std::iter::once(&payload.opponent))
                     .chain(payload.ai_decks.iter())
@@ -3446,7 +3710,7 @@ pub fn load_replay_for_playback(json_str: &str) -> Result<u32, JsValue> {
     let player = CARD_DB
         .with(|cell| {
             let db = cell.borrow();
-            ReplayPlayer::load(log, db.as_ref())
+            with_combo_table(|combos| ReplayPlayer::load(log, db.as_ref(), combos))
         })
         .map_err(|e| JsValue::from_str(&format!("Engine error: {e}")))?;
     let len = player.len();
@@ -4086,8 +4350,9 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
             // Stay at the name-only layer — `wasm.initialize_game` re-resolves
             // against `CARD_DB` when the game actually starts, so resolving
             // here would be wasted work and would force a name-vs-resolved
-            // shape coercion at every JS boundary. The declared bracket_tier is
-            // carried through so a cEDH seat's declaration survives the round-trip.
+            // shape coercion at every JS boundary. The declared bracket tier and
+            // combo-barometer answer are carried through so the owner's declarations
+            // survive the round-trip.
             Ok(PlayerDeckList {
                 main_deck: deck_data.main_deck,
                 sideboard: deck_data.sideboard,
@@ -4100,6 +4365,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 sticker_sheets: deck_data.sticker_sheets,
                 signature_spell: deck_data.signature_spell,
                 bracket_tier: deck_data.bracket_tier,
+                combo_declaration: deck_data.combo_declaration,
             })
         }
     }
@@ -4137,15 +4403,95 @@ pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
 }
 
 #[cfg(test)]
-mod bracket_estimate_tests {
+mod deck_signals_tests {
     use super::*;
-    use engine::database::{BracketLists, CardDatabase};
-    use engine::game::bracket_estimate::CommanderBracketTier;
-    use engine::game::deck_loading::PlayerDeckList;
+    use engine::analysis::deck_signals::DeckSignalKind;
+
+    fn db_with_counterspell() -> CardDatabase {
+        CardDatabase::from_json_str(
+            r#"{
+                "counterspell": {
+                    "name": "Counterspell",
+                    "mana_cost": { "type": "Cost", "shards": ["Blue", "Blue"], "generic": 0 },
+                    "card_type": { "supertypes": [], "core_types": ["Instant"], "subtypes": [] },
+                    "power": null,
+                    "toughness": null,
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": "Counter target spell.",
+                    "abilities": [{
+                        "kind": "Spell",
+                        "effect": {
+                            "type": "Counter",
+                            "target": { "type": "StackSpell" }
+                        },
+                        "cost": null,
+                        "sub_ability": null,
+                        "duration": null,
+                        "description": "Counter target spell.",
+                        "target_prompt": null,
+                        "condition": null,
+                        "optional_targeting": false,
+                        "optional": false,
+                        "forward_result": false
+                    }],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .expect("counterspell database parses")
+    }
 
     #[test]
-    fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
-        let db = CardDatabase::from_json_str(
+    fn deck_signals_inner_returns_none_with_no_db() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let deck = PlayerDeckList {
+            commander: vec!["Counterspell".into()],
+            ..Default::default()
+        };
+
+        assert!(deck_signals_inner(&deck).is_none());
+    }
+
+    #[test]
+    fn deck_signals_inner_counts_a_counterspell() {
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_counterspell()));
+        });
+        let deck = PlayerDeckList {
+            commander: vec!["Counterspell".into()],
+            ..Default::default()
+        };
+
+        let signals = deck_signals_inner(&deck).expect("signals present");
+
+        assert_eq!(signals.readings[&DeckSignalKind::Counterspells].count, 1);
+        assert_eq!(
+            signals.readings[&DeckSignalKind::Counterspells].contributing,
+            ["Counterspell"]
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+mod bracket_estimate_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    use engine::database::{
+        BracketLists, CardDatabase, ComboCoverage, ComboEntry, ComboFilterCounts, ComboOmission,
+        ComboOutcome, ComboPiece, ComboPieceZone, ComboProvenance, ComboRelevance, ComboResource,
+        ComboSetup, ComboTableDoc,
+    };
+    use engine::game::bracket_estimate::{BracketAxis, CommanderBracketTier, DeclarationVerdict};
+    use engine::game::deck_loading::PlayerDeckList;
+
+    fn db_with_one_game_changer() -> CardDatabase {
+        CardDatabase::from_json_str(
             r#"{
                 "smothering tithe": {
                     "name": "Smothering Tithe",
@@ -4171,7 +4517,65 @@ mod bracket_estimate_tests {
             }"#,
         )
         .unwrap()
-        .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap());
+        .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap())
+    }
+
+    fn reset_bracket_thread_locals() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        COMBO_TABLE.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    fn one_row_combo_table_json() -> String {
+        let piece = |name: &str| ComboPiece {
+            key: name.to_lowercase(),
+            display: name.to_owned(),
+            zone: ComboPieceZone::Anywhere,
+        };
+        serde_json::to_string(&ComboTableDoc {
+            provenance: ComboProvenance {
+                snapshot_date: "2026-09-27".to_owned(),
+                table_version: "wasm-test-v1".to_owned(),
+                attribution: "Commander Spellbook test fixture".to_owned(),
+                card_pool_version: "wasm-test-pool".to_owned(),
+                filtered: ComboFilterCounts {
+                    kept: 1,
+                    ..ComboFilterCounts::default()
+                },
+                omitted: vec![
+                    ComboOmission::PrerequisiteText,
+                    ComboOmission::ResultText,
+                    ComboOmission::UnmodeledResultClasses,
+                ],
+            },
+            entries: vec![ComboEntry {
+                pieces: [piece("Devoted Druid"), piece("Vizier of Remedies")],
+                relevance: ComboRelevance::Standalone,
+                setup: ComboSetup::AsPrinted,
+                mana_value_needed: 2,
+                assemble_cost: 6,
+                popularity: 1,
+                outcomes: BTreeSet::from([ComboOutcome::Unbounded(ComboResource::Mana)]),
+                axes: BTreeSet::new(),
+            }],
+        })
+        .expect("combo table fixture serializes")
+    }
+
+    fn combo_request() -> BracketEstimateRequest {
+        BracketEstimateRequest {
+            deck: PlayerDeckList {
+                commander: vec!["Test Commander".into()],
+                main_deck: vec!["Devoted Druid".into(), "Vizier of Remedies".into()],
+                ..Default::default()
+            },
+            declared_tier: None,
+        }
+    }
+
+    #[test]
+    fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
+        reset_bracket_thread_locals();
+        let db = db_with_one_game_changer();
         CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let deck = PlayerDeckList {
@@ -4180,24 +4584,121 @@ mod bracket_estimate_tests {
             sideboard: vec![],
             ..Default::default()
         };
-        let result = estimate_bracket_inner(&deck);
+        let request = BracketEstimateRequest {
+            deck,
+            declared_tier: None,
+        };
+        let result = estimate_bracket_inner(&request);
         let est = result.expect("estimate present");
         assert_eq!(est.tier, CommanderBracketTier::Upgraded);
 
         // Reset to avoid leaking state to other tests in this module.
-        CARD_DB.with(|c| *c.borrow_mut() = None);
+        reset_bracket_thread_locals();
     }
 
     #[test]
     fn estimate_bracket_inner_returns_none_with_no_db() {
-        CARD_DB.with(|c| *c.borrow_mut() = None);
+        reset_bracket_thread_locals();
         let deck = PlayerDeckList {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
             ..Default::default()
         };
-        assert!(estimate_bracket_inner(&deck).is_none());
+        let request = BracketEstimateRequest {
+            deck,
+            declared_tier: None,
+        };
+        assert!(estimate_bracket_inner(&request).is_none());
+    }
+
+    #[test]
+    fn estimate_bracket_inner_reconciles_declared_tier() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+        let request = BracketEstimateRequest {
+            deck: PlayerDeckList {
+                commander: vec!["Atraxa, Praetors' Voice".into()],
+                main_deck: vec!["Smothering Tithe".into()],
+                ..Default::default()
+            },
+            declared_tier: Some(CommanderBracketTier::Core),
+        };
+
+        let estimate = estimate_bracket_inner(&request).expect("estimate present");
+        assert_eq!(
+            estimate.declaration,
+            Some(DeclarationVerdict::BelowFloor {
+                floor: CommanderBracketTier::Upgraded,
+                raised_by: vec![BracketAxis::GameChangers],
+                raised_by_combo_floor: None,
+            })
+        );
+
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn estimate_bracket_inner_reports_unmeasured_without_a_combo_table() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+
+        let estimate = estimate_bracket_inner(&combo_request()).expect("estimate present");
+        assert_eq!(estimate.combo_coverage, ComboCoverage::Unmeasured);
+
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn load_combo_table_makes_estimate_bracket_inner_measured() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+
+        let count = load_combo_table(&one_row_combo_table_json()).expect("combo table loads");
+        assert_eq!(count, 1);
+        let estimate = estimate_bracket_inner(&combo_request()).expect("estimate present");
+        assert_eq!(estimate.combo_coverage, ComboCoverage::Measured);
+        assert_eq!(estimate.combos.len(), 1);
+
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn resolve_player_deck_list_uses_the_loaded_combo_table() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+        let list = combo_request().deck;
+
+        let unmeasured = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().expect("card database loaded");
+            with_combo_table(|combos| resolve_player_deck_list(db, combos, &list))
+        });
+        assert_eq!(
+            unmeasured.estimated_bracket_tier,
+            Some(CommanderBracketTier::Core)
+        );
+
+        load_combo_table(&one_row_combo_table_json()).expect("combo table loads");
+        let measured = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().expect("card database loaded");
+            with_combo_table(|combos| resolve_player_deck_list(db, combos, &list))
+        });
+        assert_eq!(
+            measured.estimated_bracket_tier,
+            Some(CommanderBracketTier::Optimized)
+        );
+
+        reset_bracket_thread_locals();
     }
 }
 

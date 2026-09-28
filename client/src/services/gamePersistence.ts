@@ -64,6 +64,8 @@ export interface ActiveGameMeta {
    *  resume the client reconnects to the server session rather than loading a
    *  local snapshot. Absent for in-browser (WASM) AI games. */
   nativeSession?: NativeSoloSession;
+  /** Exact uint32 seed used for deterministic AI pod selection. */
+  podSeed?: number;
 }
 
 /**

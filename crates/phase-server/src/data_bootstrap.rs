@@ -16,8 +16,9 @@ const RELEASE_MANIFEST_BASE_URL: &str = "https://data.phase-rs.dev/desktop";
 const PREVIEW_MANIFEST_URL: &str = "https://data.phase-rs.dev/desktop/preview-server.json";
 pub const CARD_DATA_FILE: &str = "card-data.json";
 pub const DRAFT_POOLS_FILE: &str = "draft-pools.json";
+pub const COMBO_TABLE_FILE: &str = "combo-table.json";
 const REQUIRED_DATA_FILES: [&str; 1] = [CARD_DATA_FILE];
-const BEST_EFFORT_DATA_FILES: [&str; 1] = [DRAFT_POOLS_FILE];
+const BEST_EFFORT_DATA_FILES: [&str; 2] = [DRAFT_POOLS_FILE, COMBO_TABLE_FILE];
 
 /// A copy moved aside for the duration of one replacement attempt. Never
 /// overwritten: if one is here, an attempt that did not finish left the only
@@ -945,7 +946,7 @@ mod tests {
         open_data_lock, parse_manifest_data, resolve_manifest, restore_held_copy, retire_held_copy,
         verify_manifest_signature, verify_sha256, write_verified_data_file,
         write_verified_data_file_blocking, BootstrapOptions, ChannelIdentity, CARD_DATA_FILE,
-        DRAFT_POOLS_FILE, REQUIRED_DATA_FILES,
+        COMBO_TABLE_FILE, DRAFT_POOLS_FILE, REQUIRED_DATA_FILES,
     };
     use sha2::{Digest, Sha256};
     use url::Url;
@@ -1627,6 +1628,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         std::fs::write(temp.path().join(CARD_DATA_FILE), "CARDS").expect("write card data");
         std::fs::write(temp.path().join(DRAFT_POOLS_FILE), "POOLS").expect("write pools");
+        std::fs::write(temp.path().join(COMBO_TABLE_FILE), "COMBOS").expect("write combo table");
         std::fs::write(held(temp.path(), name), "ORIGINAL").expect("write held");
         let options = BootstrapOptions {
             manifest_url_override: Some(

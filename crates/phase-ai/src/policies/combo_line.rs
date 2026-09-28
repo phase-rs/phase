@@ -1,10 +1,8 @@
 //! ComboLinePolicy — boosts priors on candidate actions that progress a
-//! reachable combo line. Gating: `activation()` returns `None` unless the
-//! deck's `bracket_tier` is `Cedh`, so non-cEDH decks pay zero cost (the
-//! per-DecisionKind index in PolicyRegistry still includes us, but activation
-//! skips us).
+//! reachable combo line. Gating resolves every reconciled effective bracket tier
+//! through one exhaustive table; only cEDH is enabled today, so all other tiers
+//! pay zero per-candidate cost.
 
-use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -21,8 +19,7 @@ use crate::policies::registry::{
 /// tutor/draw/ramp actions that close the gap.
 ///
 /// Holds an owned `ComboRegistry`. Constructed once per policy registry
-/// instantiation. The registry's `reachable_lines` call is cheap-enough to
-/// run per candidate at the skeleton stage; caching is a Phase-N optimisation.
+/// instantiation. Per-state reachability results are memoized by `AiSession`.
 pub struct ComboLinePolicy {
     registry: ComboRegistry,
 }
@@ -56,23 +53,30 @@ impl TacticalPolicy for ComboLinePolicy {
         _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        if features.bracket_tier == CommanderBracketTier::Cedh {
-            // activation-constant: combo-line guidance is only active for cEDH decks.
-            Some(1.0)
-        } else {
-            None
+        use engine::game::bracket_estimate::CommanderBracketTier::{
+            Cedh, Core, Exhibition, Optimized, Upgraded,
+        };
+
+        match features.effective_bracket_tier.tier() {
+            // `None` is the FREE opt-out: the registry skips `verdict()` entirely.
+            Exhibition | Core | Upgraded => None,
+            // U6 owns turning this row on with the P9 pod baseline attached.
+            Optimized => None,
+            // activation-constant: combo-line guidance is fully active for cEDH decks.
+            Cedh => Some(1.0),
         }
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        // TODO(cedh-perf): cache reachable_lines() by (quick_state_hash(state), ai_player)
-        // — verdict() runs per candidate, and CastSpell/ActivateAbility
-        // can each carry many candidates. The registry currently holds 3 lines,
-        // each O(pieces) zone scans; the per-candidate cost is still small but
-        // grows with the line count, so a (state, ai)-keyed cache shared across
-        // sibling search nodes is the next optimization if it lands more lines.
-        let reachable = self.registry.reachable_lines(ctx.state, ctx.ai_player);
-        for (_id, reachability) in &reachable {
+        // `quick_state_hash` is a lossy 64-bit digest; `ProjectionKey` accepts the
+        // same exposure, while turn and active-player fields narrow it.
+        let reachable =
+            ctx.context
+                .session
+                .get_or_reachable_lines(ctx.state, ctx.ai_player, || {
+                    self.registry.reachable_lines(ctx.state, ctx.ai_player)
+                });
+        for (_id, reachability) in reachable.iter() {
             match reachability {
                 // Only fire the bonus when mana is actually available and
                 // the candidate matches one of the line's resolved steps.
@@ -167,6 +171,9 @@ mod tests {
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::context::AiContext;
     use crate::features::DeckFeatures;
+    use crate::test_support::{context_with_plans, default_deck_plan};
+    use engine::game::bracket_estimate::{effective_tier, CommanderBracketTier};
+    use strum::IntoEnumIterator;
 
     fn make_state() -> GameState {
         GameState::new_two_player(0)
@@ -174,7 +181,7 @@ mod tests {
 
     fn make_features(tier: CommanderBracketTier) -> DeckFeatures {
         DeckFeatures {
-            bracket_tier: tier,
+            effective_bracket_tier: effective_tier(tier, None),
             ..DeckFeatures::default()
         }
     }
@@ -195,6 +202,16 @@ mod tests {
         let features = make_features(CommanderBracketTier::Cedh);
         let activation = policy.activation(&features, &state, PlayerId(0));
         assert_eq!(activation, Some(1.0));
+    }
+
+    #[test]
+    fn activation_table_is_exhaustive_and_only_cedh_is_on() {
+        let policy = ComboLinePolicy::new();
+        let state = make_state();
+        let actual: Vec<_> = CommanderBracketTier::iter()
+            .map(|tier| policy.activation(&make_features(tier), &state, PlayerId(0)))
+            .collect();
+        assert_eq!(actual, vec![None, None, None, None, Some(1.0)]);
     }
 
     #[test]
@@ -382,6 +399,131 @@ mod tests {
                 assert_eq!(reason.kind, "combo_line_no_match");
             }
             other => panic!("expected zero-delta Score, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reachable_lines_memo_holds_one_entry_per_state_and_isolates_turns() {
+        use crate::planner::quick_state_hash;
+
+        let policy = ComboLinePolicy::new();
+        let state = make_state();
+        let config = create_config(AiDifficulty::CEDH, Platform::Native);
+        let context = context_with_plans(
+            &state,
+            PlayerId(0),
+            &config,
+            &[(PlayerId(0), default_deck_plan())],
+        );
+        let candidate = CandidateAction {
+            action: GameAction::PassPriority,
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+        };
+        let decision = engine::ai_support::AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: vec![candidate.clone()],
+        };
+
+        let ctx = make_context(&state, &candidate, &decision, &config, &context);
+        policy.verdict(&ctx);
+        policy.verdict(&ctx);
+        assert_eq!(
+            context.session.reachable_lines_cache.read().unwrap().len(),
+            1,
+            "identical states must share one reachable-lines memo entry"
+        );
+
+        let mut changed_state = state.clone();
+        changed_state.next_object_id += 1;
+        assert_ne!(quick_state_hash(&state), quick_state_hash(&changed_state));
+        let changed_ctx = make_context(&changed_state, &candidate, &decision, &config, &context);
+        policy.verdict(&changed_ctx);
+        assert_eq!(
+            context.session.reachable_lines_cache.read().unwrap().len(),
+            2,
+            "a distinct state hash must add a second memo entry"
+        );
+
+        let mut later_state = state.clone();
+        later_state.turn_number += 1;
+        let later_ctx = make_context(&later_state, &candidate, &decision, &config, &context);
+        policy.verdict(&later_ctx);
+        assert_eq!(
+            context.session.reachable_lines_cache.read().unwrap().len(),
+            3,
+            "a later turn must not hit an earlier-turn memo entry"
+        );
+    }
+
+    #[test]
+    fn reachable_lines_memo_never_changes_the_verdict() {
+        let policy = ComboLinePolicy::new();
+        let (state, heliod_id, ballista_id) = heliod_ballista_state();
+        let config = create_config(AiDifficulty::CEDH, Platform::Native);
+        let context = context_with_plans(
+            &state,
+            PlayerId(0),
+            &config,
+            &[(PlayerId(0), default_deck_plan())],
+        );
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: heliod_id,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
+        };
+        let decision = engine::ai_support::AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: vec![candidate.clone()],
+        };
+        let ctx = make_context(&state, &candidate, &decision, &config, &context);
+
+        let cold = policy.verdict(&ctx);
+        let warm = policy.verdict(&ctx);
+
+        match (&cold, &warm) {
+            (
+                PolicyVerdict::Score {
+                    delta: cold_delta,
+                    reason: cold_reason,
+                },
+                PolicyVerdict::Score {
+                    delta: warm_delta,
+                    reason: warm_reason,
+                },
+            ) => {
+                assert_eq!(
+                    *cold_delta, config.policy_penalties.combo_progress_this_turn_bonus,
+                    "the cold lookup must exercise the positive combo path"
+                );
+                assert_eq!(warm_delta, cold_delta);
+                assert_eq!(warm_reason.kind, cold_reason.kind);
+                assert_eq!(warm_reason.facts, cold_reason.facts);
+            }
+            verdicts => panic!("expected two Score verdicts, got {verdicts:?}"),
+        }
+
+        let mut changed_state = state.clone();
+        changed_state.objects.remove(&ballista_id);
+        changed_state.battlefield.retain(|&id| id != ballista_id);
+        let changed_decision = engine::ai_support::AiDecisionContext {
+            waiting_for: changed_state.waiting_for.clone(),
+            candidates: vec![candidate.clone()],
+        };
+        let changed_ctx = make_context(
+            &changed_state,
+            &candidate,
+            &changed_decision,
+            &config,
+            &context,
+        );
+        match policy.verdict(&changed_ctx) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(delta, 0.0, "removing Ballista must break the combo line");
+                assert_eq!(reason.kind, "combo_line_no_match");
+            }
+            other => panic!("expected changed state to return Score, got {other:?}"),
         }
     }
 }

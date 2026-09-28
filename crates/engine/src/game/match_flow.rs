@@ -144,8 +144,8 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
 
     // `PlayerDeckPayload`'s deck fields are plain `Vec<DeckEntry>` — deref
     // the Arc then deep-clone so the payload owns its own vec.
-    // Propagate `bracket_tier` so the pool rebuilt by `load_deck_into_state`
-    // in the next game carries the same declared tier as the current game.
+    // Propagate both bracket inputs so the pool rebuilt by `load_deck_into_state`
+    // in the next game retains the same reconciled effective tier.
     //
     // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
     // so `bracket_tier = Cedh` is not silently dropped between games.
@@ -172,6 +172,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 .unwrap_or_default(),
             signature_spell: (*p.current_signature_spell).clone(),
             bracket_tier: p.bracket_tier,
+            estimated_bracket_tier: p.estimated_bracket_tier,
         })
         .collect();
 
@@ -188,6 +189,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sticker_sheets: state.players[0].sticker_sheets.clone(),
             signature_spell: (*p0.current_signature_spell).clone(),
             bracket_tier: p0.bracket_tier,
+            estimated_bracket_tier: p0.estimated_bracket_tier,
         },
         opponent: PlayerDeckPayload {
             main_deck: (*p1.current_main).clone(),
@@ -201,6 +203,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sticker_sheets: state.players[1].sticker_sheets.clone(),
             signature_spell: (*p1.current_signature_spell).clone(),
             bracket_tier: p1.bracket_tier,
+            estimated_bracket_tier: p1.estimated_bracket_tier,
         },
         ai_decks,
         // cEDH bracket validation ran at game 1 setup; decks haven't
@@ -1580,6 +1583,47 @@ mod tests {
             payload.ai_decks[0].bracket_tier,
             CommanderBracketTier::Cedh,
             "AI seat bracket_tier (Cedh) must be propagated — not silently dropped"
+        );
+    }
+
+    #[test]
+    fn deck_payload_from_current_pools_propagates_estimated_bracket_tier() {
+        use crate::game::bracket_estimate::CommanderBracketTier;
+        use crate::types::game_state::PlayerDeckPool;
+
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools = vec![
+            PlayerDeckPool {
+                player: PlayerId(0),
+                estimated_bracket_tier: Some(CommanderBracketTier::Upgraded),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(1),
+                estimated_bracket_tier: Some(CommanderBracketTier::Optimized),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(2),
+                estimated_bracket_tier: Some(CommanderBracketTier::Core),
+                ..Default::default()
+            },
+        ];
+
+        let payload = deck_payload_from_current_pools(&state)
+            .expect("deck_payload_from_current_pools must succeed with three pools");
+
+        assert_eq!(
+            payload.player.estimated_bracket_tier,
+            Some(CommanderBracketTier::Upgraded)
+        );
+        assert_eq!(
+            payload.opponent.estimated_bracket_tier,
+            Some(CommanderBracketTier::Optimized)
+        );
+        assert_eq!(
+            payload.ai_decks[0].estimated_bracket_tier,
+            Some(CommanderBracketTier::Core)
         );
     }
 

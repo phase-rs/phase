@@ -1,5 +1,11 @@
 import { DRAFT_KINDS } from "../adapter/draftKinds";
-import { isCommanderBracket, type CommanderBracket } from "../types/bracket";
+import {
+  isCommanderBracket,
+  isComboDeclaration,
+  UNDECLARED_COMBO,
+  type ComboDeclaration,
+  type CommanderBracket,
+} from "../types/bracket";
 import type { FeedSubscription } from "../types/feed";
 import { repairParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { projectSavedDeckSpecialSlots } from "../services/savedDeckProjection";
@@ -647,6 +653,45 @@ export function saveSavedDeckBracket(txn: SavedDeckTxn, deckName: string, bracke
       parsed.bracket = bracket;
     }
     localStorage.setItem(STORAGE_KEY_PREFIX + deckName, JSON.stringify(parsed));
+  } catch {
+    // Corrupt JSON: leave it alone. The deck builder will overwrite on save.
+  }
+}
+
+/** Read the two-card-combo declaration sidecar from a saved deck. */
+export function loadSavedDeckComboDeclaration(deckName: string): ComboDeclaration {
+  if (isRandomDeckSelection(deckName)) return UNDECLARED_COMBO;
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
+  if (!raw) return UNDECLARED_COMBO;
+  try {
+    const parsed = JSON.parse(raw) as { combo_declaration?: unknown };
+    return isComboDeclaration(parsed.combo_declaration)
+      ? parsed.combo_declaration
+      : UNDECLARED_COMBO;
+  } catch {
+    return UNDECLARED_COMBO;
+  }
+}
+
+/** Write or remove the two-card-combo declaration sidecar on a saved deck. */
+export function saveSavedDeckComboDeclaration(
+  txn: SavedDeckTxn,
+  deckName: string,
+  value: ComboDeclaration,
+): void {
+  void txn;
+  const storageKey = STORAGE_KEY_PREFIX + deckName;
+  const raw = localStorage.getItem(storageKey);
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (value.kind === "undeclared") {
+      if (!("combo_declaration" in parsed)) return;
+      delete parsed.combo_declaration;
+    } else {
+      parsed.combo_declaration = value;
+    }
+    localStorage.setItem(storageKey, JSON.stringify(parsed));
   } catch {
     // Corrupt JSON: leave it alone. The deck builder will overwrite on save.
   }

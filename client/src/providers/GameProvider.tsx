@@ -27,14 +27,33 @@ import {
   isRandomDeckSelection,
   loadActiveDeck,
   loadSavedDeckBracket,
+  loadSavedDeckComboDeclaration,
 } from "../constants/storage";
-import type { CommanderBracket } from "../types/bracket";
+import type { AIDifficulty } from "../constants/ai";
+import {
+  UNDECLARED_COMBO,
+  type ComboDeclaration,
+  type CommanderBracket,
+} from "../types/bracket";
 import type { CommanderBracketTier } from "../types/bracketEstimate";
+import { BRACKET_TIER_BY_NUMERIC } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
-import { effectiveAiDifficulty } from "../services/cedhLock";
+import { resolveSeatDifficulty } from "../services/cedhLock";
+import {
+  aiDeckCandidateToWire,
+  POD_SELECTION_CONSTRAINTS,
+  podSelectionErrorMessage,
+  podSelectionSeed,
+  selectPod,
+} from "../services/podSelection";
+import type {
+  PodSelectionRequest,
+  PodSeatOccupant,
+  TierEnforcement,
+} from "../types/podSelection";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
@@ -101,13 +120,16 @@ function resolveAiSeatBindings(
   if (opponentCount === 0) return undefined;
   const meta = loadActiveGame();
   const snapshot = meta?.id === gameId ? meta.aiSeats : undefined;
-  const fallback = fallbackDifficulty ?? "Medium";
-  return Array.from({ length: opponentCount }, (_, i) => ({
-    playerId: i + 1,
-    difficulty: snapshot?.[i]?.difficulty ?? fallback,
-  }));
+  return Array.from({ length: opponentCount }, (_, i) => {
+    const explicit = snapshot?.[i]?.difficulty ?? fallbackDifficulty;
+    return {
+      playerId: i + 1,
+      difficulty: resolveSeatDifficulty(explicit as AIDifficulty | undefined, null, "advisory"),
+    };
+  });
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- shared error guard is covered by provider tests
 export function isDeckRejectedError(error: unknown): error is AdapterError {
   return error instanceof AdapterError && error.code === AdapterErrorCode.DECK_REJECTED;
 }
@@ -256,6 +278,13 @@ function loadActiveDeckBracket(): CommanderBracket | null {
   return loadSavedDeckBracket(name);
 }
 
+/** Single bridge from the active saved deck's sidecar to engine-bound deck data. */
+function loadActiveDeckComboDeclaration(): ComboDeclaration {
+  const name = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!name || isRandomDeckSelection(name)) return UNDECLARED_COMBO;
+  return loadSavedDeckComboDeclaration(name);
+}
+
 /**
  * Convert the numeric `CommanderBracket` (1–5) stored on deck metadata into the
  * lowercase string tier the Rust engine expects on `PlayerDeckList.bracket_tier`.
@@ -285,6 +314,7 @@ type ExpandedDeckWithTier = {
   companion: string[];
   sticker_sheets: string[];
   bracket_tier: CommanderBracketTier;
+  combo_declaration: ComboDeclaration;
 };
 type DeckListPayload = {
   player: ExpandedDeckWithTier;
@@ -327,7 +357,11 @@ function matchesPublishedDraftPayload(value: unknown, run: DraftRunState): boole
 function nativeAiSeatsFromDeckList(deckList: DeckListPayload): NativeAiSeat[] {
   return [deckList.opponent, ...deckList.ai_decks].map((deck, index) => ({
     seatIndex: index + 1,
-    difficulty: deckList.ai_difficulties[index] ?? "Medium",
+    difficulty: resolveSeatDifficulty(
+      deckList.ai_difficulties[index] as AIDifficulty | undefined,
+      null,
+      "advisory",
+    ),
     deck,
   }));
 }
@@ -341,19 +375,25 @@ function saveWasmAiResumePointer(
 ): void {
   const { aiSeats, cedhMode } = usePreferencesStore.getState();
   const opponentCount = Math.max(1, (playerCount ?? 2) - 1);
+  const enforcement: TierEnforcement = cedhMode ? "hard_gate" : "advisory";
   const seats = Array.from({ length: opponentCount }, (_, index) => {
     const seat = aiSeats[index];
     return {
-      difficulty: effectiveAiDifficulty(seat?.difficulty ?? fallbackDifficulty ?? "Medium", cedhMode),
+      difficulty: resolveSeatDifficulty(
+        seat?.difficulty ?? fallbackDifficulty as AIDifficulty | undefined,
+        null,
+        enforcement,
+      ),
       deckId: seat?.deckId === AI_DECK_RANDOM ? null : seat?.deckId ?? null,
     };
   });
   saveActiveGame({
     id: gameId,
     mode: "ai",
-    difficulty: seats[0]?.difficulty ?? fallbackDifficulty ?? "Medium",
+    difficulty: resolveSeatDifficulty(seats[0]?.difficulty, null, enforcement),
     aiSeats: seats,
     formatConfig,
+    podSeed: podSeedsByGame.get(gameId),
   });
 }
 
@@ -363,35 +403,18 @@ function nativeFallbackReason(error: unknown): string {
     : "native_engine_unavailable";
 }
 
-function candidatePassesFilters(
-  candidate: AiDeckCandidate,
-  archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
-  coverageFloor: number,
-): boolean {
-  if (candidate.coveragePct != null && candidate.coveragePct < coverageFloor) return false;
-  return archetypeFilter === "Any" || !candidate.archetype || candidate.archetype === archetypeFilter;
-}
+const podSeedsByGame = new Map<string, number>();
 
-function pickOpponentDeck(
-  catalog: AiDeckCandidate[],
-  requestedDeckId: string,
-  excludeIds: Set<string>,
-  archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
-  coverageFloor: number,
-  selectedFormat?: FormatConfig["format"] | null,
-): AiDeckCandidate {
-  if (requestedDeckId !== AI_DECK_RANDOM) {
-    const pinned = catalog.find((candidate) => candidate.id === requestedDeckId);
-    if (pinned) return pinned;
+function seedForGame(gameId: string): number {
+  const active = loadActiveGame();
+  const seed = active?.id === gameId && active.podSeed !== undefined
+    ? active.podSeed
+    : (podSeedsByGame.get(gameId) ?? podSelectionSeed());
+  podSeedsByGame.set(gameId, seed);
+  if (active?.id === gameId && active.podSeed !== seed) {
+    saveActiveGame({ ...active, podSeed: seed });
   }
-
-  const filtered = catalog.filter((candidate) =>
-    candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
-  );
-  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : catalog, {
-    selectedFormat,
-    excludeIds,
-  }) ?? catalog[0];
+  return seed;
 }
 
 // Placeholder decklist for fixed-deck formats (Momir's Madness): the player
@@ -399,9 +422,17 @@ function pickOpponentDeck(
 // builders below ignore its contents for such formats.
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
 
-function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBracket | null): DeckListPayload {
+function buildPlayerOnlyDeckList(
+  deck: ParsedDeck,
+  playerBracket: CommanderBracket | null | undefined,
+  comboDeclaration: ComboDeclaration,
+): DeckListPayload {
   const expanded = expandParsedDeck(deck);
-  const player: ExpandedDeckWithTier = { ...expanded, bracket_tier: bracketToEngineTier(playerBracket) };
+  const player: ExpandedDeckWithTier = {
+    ...expanded,
+    bracket_tier: bracketToEngineTier(playerBracket),
+    combo_declaration: comboDeclaration,
+  };
   return {
     player,
     opponent: {
@@ -414,19 +445,23 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
       companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
+      combo_declaration: UNDECLARED_COMBO,
     },
     ai_decks: [],
     ai_difficulties: [],
   };
 }
 
-async function buildLocalAiDeckList(
+// eslint-disable-next-line react-refresh/only-export-components -- exported for the pod-selection contract tests
+export async function buildLocalAiDeckList(
   t: TFunction,
+  gameId: string,
   deck: ParsedDeck | null,
   playerCount: number,
   formatConfig?: FormatConfig,
   selectedMatchType?: MatchType,
   playerBracket?: CommanderBracket | null,
+  comboDeclaration: ComboDeclaration = UNDECLARED_COMBO,
 ): Promise<DeckListPayload> {
   // Fixed-deck formats (Momir's Madness) supply the deck for every seat from the
   // engine, so there is no AI deck catalog to draw from — submit empty seats and
@@ -434,6 +469,7 @@ async function buildLocalAiDeckList(
   if (formatConfig && formatSuppliesDeck(formatConfig.format)) {
     const { aiSeats, cedhMode } = usePreferencesStore.getState();
     const opponentCount = Math.max(1, playerCount - 1);
+    const enforcement: TierEnforcement = cedhMode ? "hard_gate" : "advisory";
     const emptySeat = (): ExpandedDeckWithTier => ({
       main_deck: [],
       sideboard: [],
@@ -444,9 +480,10 @@ async function buildLocalAiDeckList(
       companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
+      combo_declaration: UNDECLARED_COMBO,
     });
     const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
-      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+      resolveSeatDifficulty(aiSeats[i]?.difficulty, null, enforcement),
     );
     return {
       player: emptySeat(),
@@ -456,7 +493,13 @@ async function buildLocalAiDeckList(
     };
   }
 
-  const { aiSeats, cedhMode, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+  const {
+    aiSeats,
+    cedhMode,
+    aiArchetypeFilter,
+    aiCoverageFloor,
+    aiBracketFilter,
+  } = usePreferencesStore.getState();
   const catalog = await buildLegalAiDeckCatalog({
     selectedFormat: formatConfig?.format,
     selectedMatchType,
@@ -469,7 +512,7 @@ async function buildLocalAiDeckList(
     );
   }
 
-  const excludeIds = new Set<string>();
+  const occupied: PodSeatOccupant[] = [];
   let playerDeck = deck;
   let resolvedPlayerBracket = playerBracket;
   if (!playerDeck) {
@@ -485,43 +528,91 @@ async function buildLocalAiDeckList(
     }
     playerDeck = playerPick.deck;
     resolvedPlayerBracket = playerPick.bracket;
-    excludeIds.add(playerPick.id);
+    occupied.push({
+      deck_id: playerPick.id,
+      commander: expandParsedDeck(playerPick.deck).commander,
+    });
   }
 
   const opponentCount = Math.max(1, playerCount - 1);
-  const picks: AiDeckCandidate[] = [];
+  const pinnedBySeat = new Map<number, AiDeckCandidate>();
   for (let i = 0; i < opponentCount; i++) {
     // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
     // through to seat 0 would re-introduce the original bug: if the user
     // pinned one deck for a 2-player session and a 4-player resume-fallback
     // fires, every missing seat would clone that pinned deck.
     const requestedDeckId = aiSeats[i]?.deckId ?? AI_DECK_RANDOM;
-    const result = pickOpponentDeck(
-      catalog.candidates,
-      requestedDeckId,
-      excludeIds,
-      aiArchetypeFilter,
-      aiCoverageFloor,
-      formatConfig?.format,
-    );
-    picks.push(result);
-    excludeIds.add(result.id);
+    if (requestedDeckId === AI_DECK_RANDOM) continue;
+    const pinned = catalog.candidates.find((candidate) => candidate.id === requestedDeckId);
+    if (!pinned) continue;
+    pinnedBySeat.set(i, pinned);
+    occupied.push({
+      deck_id: pinned.id,
+      commander: expandParsedDeck(pinned.deck).commander,
+    });
   }
+
+  const allowed = cedhMode
+    ? (["cedh"] as CommanderBracketTier[])
+    : aiBracketFilter.map((tier) => BRACKET_TIER_BY_NUMERIC[tier]);
+  const enforcement: TierEnforcement = cedhMode ? "hard_gate" : "advisory";
+  const request: PodSelectionRequest = {
+    allowed,
+    prefer: allowed.length === 1 ? allowed[0] : null,
+    enforcement,
+    seats: opponentCount - pinnedBySeat.size,
+    constraints: [...POD_SELECTION_CONSTRAINTS],
+    coverage_floor_pct: aiCoverageFloor,
+    archetype: aiArchetypeFilter === "Any" ? null : aiArchetypeFilter,
+    seed: seedForGame(gameId),
+    occupied,
+  };
+  const outcome = await selectPod(catalog.candidates.map(aiDeckCandidateToWire), request);
+  if (outcome.kind === "card-data-unavailable") {
+    throw new Error(t("menu:gameProvider.podSelectionRefused.cardDataUnavailable"));
+  }
+  if (outcome.kind === "refused") {
+    throw new Error(podSelectionErrorMessage(t, outcome.error));
+  }
+
+  let automaticIndex = 0;
+  const picks = Array.from({ length: opponentCount }, (_, index) => {
+    const pinned = pinnedBySeat.get(index);
+    if (pinned) {
+      const tier = pinned.bracket === null ? null : BRACKET_TIER_BY_NUMERIC[pinned.bracket];
+      return { candidate: pinned, tier };
+    }
+    const assigned = outcome.assignment.seats[automaticIndex++];
+    const candidate = catalog.candidates.find((entry) => entry.id === assigned?.candidate_id);
+    if (!assigned || !candidate) {
+      throw new Error(t("menu:gameProvider.podSelectionRefused.cardDataUnavailable"));
+    }
+    return { candidate, tier: assigned.tier };
+  });
 
   const playerExpanded = expandParsedDeck(playerDeck);
   const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
-  // to ai_decks. Missing seat prefs default to "Medium".
+  // to ai_decks. Missing seat prefs follow the selected deck's engine-authored
+  // bracket default.
   // cEDH is a table-wide toggle: every seat resolves to "CEDH" when it's on,
   // regardless of the remembered per-seat difficulty.
-  const aiDifficulties = picks.map((_, i) =>
-    effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+  const aiDifficulties = picks.map((pick, i) =>
+    resolveSeatDifficulty(aiSeats[i]?.difficulty, pick.tier, enforcement),
   );
   return {
-    player: { ...playerExpanded, bracket_tier: playerTier },
-    opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
-    ai_decks: picks.slice(1).map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: bracketToEngineTier(c.bracket) })),
+    player: { ...playerExpanded, bracket_tier: playerTier, combo_declaration: comboDeclaration },
+    opponent: {
+      ...expandParsedDeck(picks[0].candidate.deck),
+      bracket_tier: picks[0].tier ?? "core",
+      combo_declaration: UNDECLARED_COMBO,
+    },
+    ai_decks: picks.slice(1).map(({ candidate, tier }) => ({
+      ...expandParsedDeck(candidate.deck),
+      bracket_tier: tier ?? "core",
+      combo_declaration: UNDECLARED_COMBO,
+    })),
     ai_difficulties: aiDifficulties,
   };
 }
@@ -887,6 +978,7 @@ export function GameProvider({
         const deckList = buildPlayerOnlyDeckList(
           parsedDeck ?? EMPTY_PARSED_DECK,
           loadActiveDeckBracket(),
+          loadActiveDeckComboDeclaration(),
         );
         signal.throwIfAborted();
 
@@ -1682,11 +1774,13 @@ export function GameProvider({
           try {
             deckList = await buildLocalAiDeckList(
               tRef.current,
+              gameId,
               randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
               playerCount ?? 2,
               formatConfig,
               matchConfig?.match_type,
               loadActiveDeckBracket(),
+              loadActiveDeckComboDeclaration(),
             );
           } catch (deckErr) {
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1751,11 +1845,13 @@ export function GameProvider({
       try {
         deckList = await buildLocalAiDeckList(
           tRef.current,
+          gameId,
           randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
           playerCount ?? 2,
           formatConfig,
           matchConfig?.match_type,
           loadActiveDeckBracket(),
+          loadActiveDeckComboDeclaration(),
         );
       } catch (deckErr) {
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1836,11 +1932,13 @@ export function GameProvider({
 
             deckList = await buildLocalAiDeckList(
               tRef.current,
+              gameId,
               randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
               playerCount ?? 2,
               formatConfig,
               matchConfig?.match_type,
               loadActiveDeckBracket(),
+              loadActiveDeckComboDeclaration(),
             );
             if (cancelled) return;
           }
@@ -1974,13 +2072,18 @@ export function GameProvider({
                 : {
                     id: gameId,
                     mode: "ai",
-                    difficulty: difficulty ?? "Medium",
+                    difficulty: resolveSeatDifficulty(
+                      difficulty as AIDifficulty | undefined,
+                      null,
+                      "advisory",
+                    ),
                     aiSeats: deckList
                       ? nativeAiSeatsFromDeckList(deckList).map((seat) => ({
                           difficulty: seat.difficulty,
                         }))
                       : undefined,
                     formatConfig,
+                    podSeed: podSeedsByGame.get(gameId),
                     nativeSession: session,
                   },
             );

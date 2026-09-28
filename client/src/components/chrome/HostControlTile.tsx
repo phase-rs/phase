@@ -15,6 +15,8 @@ import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck } from "../../services/deckParser";
 import { SelectField } from "../ui/SelectField";
 import { copyText } from "../../services/copyText";
+import type { AIDifficulty } from "../../constants/ai";
+import { resolveSeatDifficulty } from "../../services/cedhLock";
 
 const AI_DIFFICULTIES = ["Easy", "Medium", "Hard", "VeryHard"] as const;
 const RANDOM_DECK: DeckChoice = { type: "Random" };
@@ -173,7 +175,11 @@ function SeatRow({
                       kind: {
                         type: "Ai",
                         data: {
-                          difficulty: aiSeat?.data.difficulty ?? "Medium",
+                          difficulty: resolveSeatDifficulty(
+                            aiSeat?.data.difficulty as AIDifficulty | undefined,
+                            null,
+                            "advisory",
+                          ),
                           deck: deckChoices.find(({ choice }) => deckChoiceKey(choice) === e.target.value)
                             ?.choice ?? aiSeat?.data.deck ?? RANDOM_DECK,
                         },

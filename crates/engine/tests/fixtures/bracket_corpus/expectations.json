@@ -1,0 +1,350 @@
+{
+  "rows": {
+    "designed-001-winter-orb-prison": {
+      "tier": "optimized",
+      "observed": {
+        "game_changers": 0,
+        "mass_land_denial": 2,
+        "extra_turns": 0,
+        "efficient_tutors": 0
+      },
+      "evidence": {
+        "game_changers": [],
+        "mass_land_denial": [
+          "blood moon",
+          "winter orb"
+        ],
+        "extra_turns": [],
+        "efficient_tutors": []
+      },
+      "fired": [
+        {
+          "axis": "game_changers",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "game_changers",
+          "threshold": 4,
+          "state": "not_fired"
+        },
+        {
+          "axis": "mass_land_denial",
+          "threshold": 1,
+          "state": "fired"
+        },
+        {
+          "axis": "extra_turns",
+          "threshold": 1,
+          "state": "not_fired"
+        }
+      ]
+    },
+    "designed-002-aggravated-assault-combat": {
+      "tier": "core",
+      "observed": {
+        "game_changers": 0,
+        "mass_land_denial": 0,
+        "extra_turns": 0,
+        "efficient_tutors": 0
+      },
+      "evidence": {
+        "game_changers": [],
+        "mass_land_denial": [],
+        "extra_turns": [],
+        "efficient_tutors": []
+      },
+      "fired": [
+        {
+          "axis": "game_changers",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "game_changers",
+          "threshold": 4,
+          "state": "not_fired"
+        },
+        {
+          "axis": "mass_land_denial",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "extra_turns",
+          "threshold": 1,
+          "state": "not_fired"
+        }
+      ]
+    },
+    "designed-003-chained-extra-turns": {
+      "tier": "core",
+      "observed": {
+        "game_changers": 0,
+        "mass_land_denial": 0,
+        "extra_turns": 3,
+        "efficient_tutors": 0
+      },
+      "evidence": {
+        "game_changers": [],
+        "mass_land_denial": [],
+        "extra_turns": [
+          "capture of jingzhou",
+          "temporal manipulation",
+          "time warp"
+        ],
+        "efficient_tutors": []
+      },
+      "fired": [
+        {
+          "axis": "game_changers",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "game_changers",
+          "threshold": 4,
+          "state": "not_fired"
+        },
+        {
+          "axis": "mass_land_denial",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "extra_turns",
+          "threshold": 1,
+          "state": "fired"
+        }
+      ]
+    },
+    "designed-004-zero-signal": {
+      "tier": "core",
+      "observed": {
+        "game_changers": 0,
+        "mass_land_denial": 0,
+        "extra_turns": 0,
+        "efficient_tutors": 0
+      },
+      "evidence": {
+        "game_changers": [],
+        "mass_land_denial": [],
+        "extra_turns": [],
+        "efficient_tutors": []
+      },
+      "fired": [
+        {
+          "axis": "game_changers",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "game_changers",
+          "threshold": 4,
+          "state": "not_fired"
+        },
+        {
+          "axis": "mass_land_denial",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "extra_turns",
+          "threshold": 1,
+          "state": "not_fired"
+        }
+      ]
+    },
+    "designed-005-four-game-changers": {
+      "tier": "optimized",
+      "observed": {
+        "game_changers": 4,
+        "mass_land_denial": 0,
+        "extra_turns": 0,
+        "efficient_tutors": 0
+      },
+      "evidence": {
+        "game_changers": [
+          "ad nauseam",
+          "bolas's citadel",
+          "cyclonic rift",
+          "drannith magistrate"
+        ],
+        "mass_land_denial": [],
+        "extra_turns": [],
+        "efficient_tutors": []
+      },
+      "fired": [
+        {
+          "axis": "game_changers",
+          "threshold": 1,
+          "state": "fired"
+        },
+        {
+          "axis": "game_changers",
+          "threshold": 4,
+          "state": "fired"
+        },
+        {
+          "axis": "mass_land_denial",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "extra_turns",
+          "threshold": 1,
+          "state": "not_fired"
+        }
+      ]
+    },
+    "population-001-bundled-heliod": {
+      "tier": "upgraded",
+      "observed": {
+        "game_changers": 2,
+        "mass_land_denial": 0,
+        "extra_turns": 0,
+        "efficient_tutors": 1
+      },
+      "evidence": {
+        "game_changers": [
+          "enlightened tutor",
+          "mox diamond"
+        ],
+        "mass_land_denial": [],
+        "extra_turns": [],
+        "efficient_tutors": [
+          "enlightened tutor"
+        ]
+      },
+      "fired": [
+        {
+          "axis": "game_changers",
+          "threshold": 1,
+          "state": "fired"
+        },
+        {
+          "axis": "game_changers",
+          "threshold": 4,
+          "state": "not_fired"
+        },
+        {
+          "axis": "mass_land_denial",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "extra_turns",
+          "threshold": 1,
+          "state": "not_fired"
+        }
+      ]
+    },
+    "population-002-bundled-inalla": {
+      "tier": "optimized",
+      "observed": {
+        "game_changers": 9,
+        "mass_land_denial": 0,
+        "extra_turns": 0,
+        "efficient_tutors": 6
+      },
+      "evidence": {
+        "game_changers": [
+          "chrome mox",
+          "demonic tutor",
+          "force of will",
+          "imperial seal",
+          "mana vault",
+          "mox diamond",
+          "mystical tutor",
+          "thassa's oracle",
+          "vampiric tutor"
+        ],
+        "mass_land_denial": [],
+        "extra_turns": [],
+        "efficient_tutors": [
+          "demonic consultation",
+          "demonic tutor",
+          "grim tutor",
+          "imperial seal",
+          "mystical tutor",
+          "vampiric tutor"
+        ]
+      },
+      "fired": [
+        {
+          "axis": "game_changers",
+          "threshold": 1,
+          "state": "fired"
+        },
+        {
+          "axis": "game_changers",
+          "threshold": 4,
+          "state": "fired"
+        },
+        {
+          "axis": "mass_land_denial",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "extra_turns",
+          "threshold": 1,
+          "state": "not_fired"
+        }
+      ]
+    },
+    "population-003-bundled-winota": {
+      "tier": "optimized",
+      "observed": {
+        "game_changers": 4,
+        "mass_land_denial": 0,
+        "extra_turns": 0,
+        "efficient_tutors": 1
+      },
+      "evidence": {
+        "game_changers": [
+          "chrome mox",
+          "enlightened tutor",
+          "mana vault",
+          "mox diamond"
+        ],
+        "mass_land_denial": [],
+        "extra_turns": [],
+        "efficient_tutors": [
+          "enlightened tutor"
+        ]
+      },
+      "fired": [
+        {
+          "axis": "game_changers",
+          "threshold": 1,
+          "state": "fired"
+        },
+        {
+          "axis": "game_changers",
+          "threshold": 4,
+          "state": "fired"
+        },
+        {
+          "axis": "mass_land_denial",
+          "threshold": 1,
+          "state": "not_fired"
+        },
+        {
+          "axis": "extra_turns",
+          "threshold": 1,
+          "state": "not_fired"
+        }
+      ]
+    }
+  },
+  "ratchet_history": [
+    {
+      "engine_version": "0.78.0",
+      "recorded_on": "2026-09-26",
+      "rows_digest": "sha256:0bf4cae2aebffa810c404fc6ed2ff4325fb121800517c2b9bc036a5cf3719178",
+      "changelog_note": "Initial corpus recording. Of plan 61-06's four predicted designed misses, only designed-003 remains: its three chained extra turns are labelled Optimized but read Core. designed-001 was cleared by the landed 2026-02-09 split mass_land_sweepers + mass_mana_denial lists, which now classify Winter Orb and Blood Moon; designed-002 was cleared when Aggravated Assault moved from extra_turns to the evidence-only extra_combats list; designed-004 was cleared when the estimator base floor moved to Core. P0's frozen baseline predates the FloorRule table, so no rows were imported from it."
+    }
+  ],
+  "band_agreement_floor": null
+}

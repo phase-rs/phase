@@ -265,16 +265,78 @@
     "clearOverride": "Effacer le remplacement d'illustration"
   },
   "bracket": {
-    "unavailable": "L'estimation du palier n'est pas disponible dans cette version.",
+    "unavailable": "L'estimation du palier nécessite des données de cartes qui ne sont pas encore chargées.",
     "addCommander": "Ajoutez un commandant pour voir l'estimation de votre palier.",
     "estimated": "Estimé : B{{tier}} {{label}}",
     "manual": "Manuel : B{{tier}} {{label}}",
-    "mismatch": " ⚠ incohérence",
+    "belowFloor": " ⚠ sous le minimum B{{tier}}",
+    "belowFloorCombo": "relevé par un combo de deux cartes",
     "hideBreakdown": "Masquer le détail",
     "showBreakdown": "Afficher le détail",
     "hideBreakdownButton": "▲ Masquer le détail",
     "showBreakdownButton": "▼ Afficher le détail",
-    "forced": "(B{{tier}} forcé)",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Déni massif de terrains",
+      "extraTurns": "Tours supplémentaires",
+      "efficientTutors": "Tuteurs efficaces"
+    },
+    "check": {
+      "fired": "{{observed}} — impose B{{tier}} {{label}}",
+      "clear": "{{observed}} sur {{threshold}} — encore {{remaining}} pour passer à B{{tier}}",
+      "clearMax": "{{observed}} — impossible d’atteindre B{{tier}} en ajoutant des cartes",
+      "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Combos de deux cartes",
+      "unmeasured": "Le baromètre des combos de deux cartes n’est pas mesuré dans cette version",
+      "noneFound": "Aucun combo infini de deux cartes trouvé dans ce deck",
+      "attribution": "Données de combos : {{attribution}}, instantané du {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Minimum pour un combo autonome de deux cartes",
+        "earlyTwoCard": "Minimum pour un combo précoce de deux cartes (coût d’assemblage de {{ceiling}} ou moins)"
+      },
+      "check": {
+        "fired": "Impose B{{tier}} {{label}}",
+        "clear_one": "Ajouter 1 carte de plus pourrait permettre d’atteindre B{{tier}}",
+        "clear_few": "Ajouter {{count}} cartes de plus pourrait permettre d’atteindre B{{tier}}",
+        "clear_many": "Ajouter {{count}} cartes de plus pourrait permettre d’atteindre B{{tier}}",
+        "clear_other": "Ajouter {{count}} cartes de plus pourrait permettre d’atteindre B{{tier}}",
+        "clearMax": "Impossible d’atteindre B{{tier}} avec des correspondances supplémentaires"
+      },
+      "outcome": {
+        "wins": "Gagne la partie",
+        "unbounded": "{{resource}} sans limite"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "blessures",
+        "lifeLoss": "perte de points de vie",
+        "lifegain": "gain de points de vie",
+        "mill": "meule",
+        "draw": "pioche de cartes",
+        "tokens": "jetons",
+        "combat": "phases de combat",
+        "turns": "tours"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Certainement deux cartes",
+        "arguablyTwoCard": "Possiblement deux cartes",
+        "more": "Plus de deux cartes"
+      },
+      "relevance": {
+        "standalone": "Autonome",
+        "contextual": "Contextuel",
+        "helper": "Auxiliaire"
+      },
+      "pairSourced": "{{first}} + {{second}} (depuis la table des combos)"
+    },
+    "uncounted": "Compté comme indice — aucune règle de palier ne s’applique à cet axe.",
+    "uncalibrated": "WotC ne publie aucun chiffre pour les « faibles quantités » ; ce décompte n’est pas étalonné.",
+    "coverage": "{{resolved}} cartes du deck lues sur {{counted}}",
+    "confidencePartial": "{{n}} noms de cartes n’ont pas été trouvés dans les données des cartes — ces décomptes sont des bornes inférieures.",
+    "unresolvedHeading": "Introuvable dans les données des cartes",
+    "baseFloor": "Le palier 1 est défini par le thème du deck, que l’estimateur ne peut pas détecter. Les estimations commencent à B2.",
     "dataVersion": "Données : {{version}}",
     "aboutBrackets": "À propos des paliers ↗",
     "estimatedChip": "Estimé : B{{tier}}",
@@ -283,6 +345,46 @@
   "bracketPicker": {
     "ariaLabel": "Palier du deck",
     "unrated": "Non classé"
+  },
+  "signals": {
+    "title": "Indicateurs du deck",
+    "disclaimer": "Statistiques descriptives tirées du texte de carte analysé du deck. Elles ne constituent pas des critères de palier et ne modifient jamais l’estimation.",
+    "avgManaValue": "Valeur de mana moyenne (hors terrains) : {{value}}",
+    "notMeasurable": "non mesurable",
+    "noCommander": "Ajoutez un commandant pour voir les indicateurs du deck.",
+    "unavailable": "Les indicateurs du deck nécessitent des données de cartes, qui ne sont pas encore chargées.",
+    "unresolved": "{{n}} noms de carte sont introuvables dans les données de cartes.",
+    "kind": {
+      "counterspells": "Contresorts",
+      "spot_removal": "Gestion ciblée",
+      "sweepers": "Nettoyeurs de table",
+      "card_advantage": "Avantage de cartes",
+      "free_interaction": "Interaction gratuite",
+      "mana_producers": "Producteurs de mana",
+      "land_fetch": "Recherche de terrains",
+      "rituals": "Rituels",
+      "extra_land_drops": "Terrains supplémentaires par tour"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinie à deux cartes",
+    "question": "Combo infinie intentionnelle à deux cartes ?",
+    "undeclared": "Sans réponse",
+    "noneIntended": "Aucune prévue",
+    "intended": "Prévue",
+    "windowAriaLabel": "Quand peut-elle être assemblée ?",
+    "windowUnstated": "Non précisé",
+    "windowEarly": "Début de partie",
+    "windowLate": "Fin de partie uniquement",
+    "declaredFloor": "(déclaré — impose B{{tier}})",
+    "heading": "Baromètres",
+    "authorityEngine": "Vérifié par phase",
+    "authorityDeckOwner": "Déclaré par vous",
+    "authorityUnanswered": "Sans réponse",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Tours supplémentaires",
+    "rowMassLandDenial": "Déni massif de terrains",
+    "rowTwoCardCombos": "Combos infinies à deux cartes"
   },
   "warnings": {
     "commanderCount": "Le deck contient {{count}} cartes (il en faut exactement {{expected}})",

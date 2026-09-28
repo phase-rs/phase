@@ -1,4 +1,3 @@
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   InteractionActionId,
   InteractionPreview,
@@ -560,6 +559,7 @@ export interface ReplayPlayerDeckList {
   sticker_sheets: string[];
   signature_spell: string[];
   bracket_tier: string;
+  combo_declaration?: import("../types/bracketEstimate").ComboDeclaration;
 }
 
 /** Mirrors the engine's `DeckList` — the name-only deck payload `initializeGame` accepts. */
@@ -4565,7 +4565,6 @@ export const AdapterErrorCode = {
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   DECK_REJECTED: "DECK_REJECTED",
-  BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
   /**
@@ -5021,15 +5020,6 @@ export interface EngineAdapter {
   exportPersistenceState?(): Promise<string>;
   dispose(): void;
 
-  /**
-   * Estimates a Commander deck's bracket from card contents. Returns null
-   * when the deck has no commander, is empty, or the adapter doesn't
-   * support local deck analysis (multiplayer adapters throw via
-   * `AdapterError` instead of silently returning null).
-   *
-   * Pure — no game state, no side effects. Safe to call on every deck edit.
-   */
-  estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }
 
 /**

@@ -27,6 +27,36 @@ use phase_ai::config::{create_config, create_config_for_players, AiDifficulty, P
 use phase_ai::features::DeckFeatures;
 use phase_ai::policies::registry::{PolicyId, PolicyRegistry};
 use phase_ai::search::{choose_action, score_candidates, select_safe_action_from_scores};
+use phase_ai::session::AiSession;
+
+#[test]
+fn session_reconciles_declared_and_estimated_bracket_tiers() {
+    let mut state = GameState::new_two_player(42);
+    state.deck_pools = vec![
+        PlayerDeckPool {
+            player: PlayerId(0),
+            bracket_tier: CommanderBracketTier::Exhibition,
+            estimated_bracket_tier: Some(CommanderBracketTier::Optimized),
+            ..Default::default()
+        },
+        PlayerDeckPool {
+            player: PlayerId(1),
+            bracket_tier: CommanderBracketTier::Cedh,
+            estimated_bracket_tier: Some(CommanderBracketTier::Core),
+            ..Default::default()
+        },
+    ];
+
+    let session = AiSession::from_game(&state);
+    assert_eq!(
+        session.features[&PlayerId(0)].effective_bracket_tier.tier(),
+        CommanderBracketTier::Optimized
+    );
+    assert_eq!(
+        session.features[&PlayerId(1)].effective_bracket_tier.tier(),
+        CommanderBracketTier::Cedh
+    );
+}
 
 /// Builds the minimal `GameState` shared by the `score_candidates` and
 /// `choose_action` cEDH combo tests.
@@ -183,20 +213,23 @@ fn cedh_full_stack_smoke() {
         "4-player CEDH must skip paranoid scaling"
     );
 
-    // 3. DeckFeatures::bracket_tier defaults to a non-cEDH tier.
+    // 3. DeckFeatures' effective tier defaults to a non-cEDH tier.
     let features = DeckFeatures::default();
     assert_ne!(
-        features.bracket_tier,
+        features.effective_bracket_tier.tier(),
         engine::game::bracket_estimate::CommanderBracketTier::Cedh
     );
 
     // 4. DeckFeatures::analyze records the Cedh tier when given it.
     let cedh_features = DeckFeatures::analyze(
         &[],
-        engine::game::bracket_estimate::CommanderBracketTier::Cedh,
+        engine::game::bracket_estimate::effective_tier(
+            engine::game::bracket_estimate::CommanderBracketTier::Cedh,
+            None,
+        ),
     );
     assert_eq!(
-        cedh_features.bracket_tier,
+        cedh_features.effective_bracket_tier.tier(),
         engine::game::bracket_estimate::CommanderBracketTier::Cedh
     );
 

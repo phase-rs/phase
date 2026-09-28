@@ -1,5 +1,8 @@
 import type { AIDifficulty } from "../constants/ai";
+import { BRACKET_DIFFICULTY_DEFAULT } from "../data/bracketDifficulty";
 import type { CommanderBracket } from "../types/bracket";
+import type { CommanderBracketTier } from "../types/bracketEstimate";
+import type { TierEnforcement } from "../types/podSelection";
 
 /**
  * Single source of truth for cEDH semantics on the frontend.
@@ -31,11 +34,27 @@ export const CEDH_BRACKET: CommanderBracket = 5;
  * engine's per-seat difficulty contract — used both when persisting the game's
  * seat snapshot and when building the deck list at game start.
  */
+export function resolveSeatDifficulty(
+  explicit: AIDifficulty | null | undefined,
+  tier: CommanderBracketTier | null,
+  enforcement: TierEnforcement,
+): AIDifficulty {
+  if (enforcement === "hard_gate") {
+    // `for_bracket(Cedh) === "CEDH"`, preserving the existing cEDH lock.
+    return BRACKET_DIFFICULTY_DEFAULT[tier ?? "cedh"];
+  }
+  return explicit ?? BRACKET_DIFFICULTY_DEFAULT[tier ?? "core"];
+}
+
 export function effectiveAiDifficulty(
   difficulty: AIDifficulty,
   cedhMode: boolean,
 ): AIDifficulty {
-  return cedhMode ? CEDH_DIFFICULTY : difficulty;
+  return resolveSeatDifficulty(
+    difficulty,
+    cedhMode ? "cedh" : null,
+    cedhMode ? "hard_gate" : "advisory",
+  );
 }
 
 /**

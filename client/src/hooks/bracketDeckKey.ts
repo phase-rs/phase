@@ -1,3 +1,5 @@
+import type { ComboDeclaration, CommanderBracketTier } from "../types/bracketEstimate";
+
 /** Minimal deck shape the bracket-estimate key depends on. */
 export interface BracketKeyEntry {
   name: string;
@@ -6,22 +8,38 @@ export interface BracketKeyEntry {
 export interface BracketKeyDeck {
   main: BracketKeyEntry[];
   sideboard: BracketKeyEntry[];
+  /** ParsedDeck carries at most one companion. */
+  companion?: string;
+  /** Oathbreaker RC: 0 or 1 entries. */
+  signature_spell?: string[];
 }
 
 /**
- * Content key for a bracket-estimate request. Two decks produce the same key
- * iff they would produce the same estimate, so the hook can cache/short-circuit
- * on it. It must therefore cover **everything** the estimate depends on —
- * commanders, main, AND sideboard (the request sends the sideboard too). The
- * parts are sorted so object-identity / ordering churn does not change the key.
+ * Content key for a bracket-estimate request. The key must be a SUPERSET of the
+ * estimate's inputs: two decks with the same key must produce the same estimate.
+ * Over-keying is safe (an extra cache miss); under-keying returns another deck's
+ * estimate. The sideboard is therefore kept in the key even though
+ * `estimate_bracket` does not read it — Commander has no sideboard, and dropping
+ * it would buy nothing while making the key wrong the day a section is added.
+ * Companion and signature spell ARE read by the estimator and must be in the key.
+ * Both the tier declaration and combo declaration are estimate inputs and must
+ * be in the key.
  */
 export function buildBracketDeckKey(
   commanders: string[],
   deck: BracketKeyDeck,
+  declaredTier: CommanderBracketTier | null,
+  combo: ComboDeclaration,
 ): string {
   const parts: string[] = [...commanders.map((c) => `c:${c.toLowerCase()}`)];
   for (const e of deck.main) parts.push(`m:${e.count}x${e.name.toLowerCase()}`);
   for (const e of deck.sideboard) parts.push(`s:${e.count}x${e.name.toLowerCase()}`);
+  if (deck.companion) parts.push(`co:${deck.companion.toLowerCase()}`);
+  for (const name of deck.signature_spell ?? []) parts.push(`sig:${name.toLowerCase()}`);
   parts.sort();
-  return parts.join("|");
+  // Appended AFTER the sort so it is a suffix, not an interleaved part: the
+  // declaration is an input to the estimate (it produces `declaration`), not a
+  // deck member.
+  const comboWindow = combo.kind === "intended" ? combo.window ?? "unstated" : "-";
+  return `${parts.join("|")}#d:${declaredTier ?? "none"}#combo:${combo.kind}:${comboWindow}`;
 }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{
-    load_atomic_cards, load_card_types, AtomicCard, Ruling, SetCard, SetFile,
+    load_atomic_cards, load_card_types, AtomicCard, AtomicCardsFile, Ruling, SetCard, SetFile,
 };
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::load_set_catalog;
@@ -17,7 +17,7 @@ use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout,
     prepare_oracle_parser_input, LayoutKind,
 };
-use engine::database::{set_gating, BracketLists, BracketSignals, CardDatabase};
+use engine::database::{set_gating, BracketCardClass, BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
@@ -549,8 +549,62 @@ fn bracket_signals_for_face(
     source: &AtomicCard,
 ) -> BracketSignals {
     let mut signals = lists.signals_for(&face.name);
-    signals.game_changer = source.is_game_changer;
+    // The curated Game Changers list is authoritative when present. A union
+    // with the bundled MTGJSON snapshot could add names but could never express
+    // a later WotC removal.
+    if lists.has(BracketCardClass::GameChangers) {
+        // Game Changers classify cards, not faces. MTGJSON repeats the flag on
+        // both faces of a modal double-faced card, while WotC prints its front
+        // face name. Use that card-level identity so either exported face gets
+        // the same curated signal.
+        let card_name = source
+            .name
+            .split_once(" // ")
+            .map_or(source.name.as_str(), |(front, _)| front);
+        signals.game_changer = lists.signals_for(card_name).game_changer;
+    } else {
+        signals.game_changer = source.is_game_changer;
+    }
     signals
+}
+
+fn report_game_changer_drift(lists: &BracketLists, atomic: &AtomicCardsFile) {
+    let Some(curated) = lists.get(BracketCardClass::GameChangers) else {
+        return;
+    };
+
+    let mtgjson_names: BTreeSet<String> = atomic
+        .data
+        .iter()
+        .filter(|(_, faces)| faces.iter().any(|face| face.is_game_changer))
+        .map(|(name, _)| name.to_lowercase())
+        .collect();
+    let flagged_faces = atomic
+        .data
+        .values()
+        .flat_map(|faces| faces.iter())
+        .filter(|face| face.is_game_changer)
+        .count();
+    let curated_only: Vec<&str> = curated
+        .names
+        .difference(&mtgjson_names)
+        .map(String::as_str)
+        .collect();
+    let mtgjson_only: Vec<&str> = mtgjson_names
+        .difference(&curated.names)
+        .map(String::as_str)
+        .collect();
+
+    eprintln!(
+        "Game Changers drift: curated={} cards; MTGJSON={} cards/{} flagged faces; curated-only={} {:?}; MTGJSON-only={} {:?}",
+        curated.names.len(),
+        mtgjson_names.len(),
+        flagged_faces,
+        curated_only.len(),
+        curated_only,
+        mtgjson_only.len(),
+        mtgjson_only,
+    );
 }
 
 /// Insert a card face under its short-name key, resolving collisions when
@@ -1408,9 +1462,8 @@ fn main() {
         .map(|d| load_set_catalog(d))
         .unwrap_or_default();
 
-    // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
-    // directly from MTGJSON `isGameChanger`; this file covers policy axes that
-    // MTGJSON does not expose.
+    // Load curated bracket lists for signal stamping. A present Game Changers
+    // list is authoritative; MTGJSON is its fallback when that list is absent.
     let bracket_lists_path = data_dir
         .as_ref()
         .map(|d| d.join("bracket_lists.json"))
@@ -1418,10 +1471,10 @@ fn main() {
     let bracket_lists = if bracket_lists_path.exists() {
         BracketLists::from_json_path(&bracket_lists_path).unwrap_or_else(|e| {
             eprintln!(
-                "warning: failed to load {}: {e}; non-MTGJSON bracket signals will be all-false",
+                "error: failed to load {}: {e}",
                 bracket_lists_path.display()
             );
-            BracketLists::default()
+            process::exit(1)
         })
     } else {
         eprintln!(
@@ -1548,6 +1601,7 @@ fn main() {
             );
         }
     }
+    report_game_changer_drift(&bracket_lists, &atomic);
 
     // Release-gate (hybrid): keep cards available ONLY through gated sets in
     // card-data so they stay browsable, but mark them Banned in every format so
@@ -2177,6 +2231,67 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn curated_game_changers_override_the_mtgjson_flag() {
+        let lists = BracketLists::from_pairs(
+            "test",
+            &[(BracketCardClass::GameChangers, &["Curated Card"])],
+        );
+
+        let curated_face = CardFace {
+            name: "Curated Card".into(),
+            ..Default::default()
+        };
+        let curated_source = atomic_single("Curated Card", None);
+        assert!(
+            bracket_signals_for_face(&lists, &curated_face, &curated_source).game_changer,
+            "curated membership must add a signal absent from MTGJSON"
+        );
+
+        let mtgjson_face = CardFace {
+            name: "MTGJSON-only Card".into(),
+            ..Default::default()
+        };
+        let mut mtgjson_source = atomic_single("MTGJSON-only Card", None);
+        mtgjson_source.is_game_changer = true;
+        assert!(
+            !bracket_signals_for_face(&lists, &mtgjson_face, &mtgjson_source).game_changer,
+            "curated absence must express a removal from the MTGJSON snapshot"
+        );
+    }
+
+    #[test]
+    fn mtgjson_flag_is_the_fallback_when_no_curated_list() {
+        let face = CardFace {
+            name: "MTGJSON Game Changer".into(),
+            ..Default::default()
+        };
+        let mut source = atomic_single("MTGJSON Game Changer", None);
+        source.is_game_changer = true;
+        assert!(bracket_signals_for_face(&BracketLists::default(), &face, &source).game_changer);
+    }
+
+    #[test]
+    fn curated_game_changer_applies_to_both_faces_of_an_mdfc() {
+        let lists = BracketLists::from_pairs(
+            "test",
+            &[(BracketCardClass::GameChangers, &["Tergrid, God of Fright"])],
+        );
+        let mut source = atomic_single("Tergrid, God of Fright // Tergrid's Lantern", None);
+        source.is_game_changer = true;
+
+        for name in ["Tergrid, God of Fright", "Tergrid's Lantern"] {
+            let face = CardFace {
+                name: name.into(),
+                ..Default::default()
+            };
+            assert!(
+                bracket_signals_for_face(&lists, &face, &source).game_changer,
+                "card-level curated membership must apply when the deck names {name}"
+            );
+        }
+    }
 
     #[test]
     fn parser_trace_args_require_a_complete_unique_pair() {

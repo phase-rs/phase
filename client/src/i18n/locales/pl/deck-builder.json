@@ -265,16 +265,78 @@
     "clearOverride": "Wyczyść nadpisanie grafiki"
   },
   "bracket": {
-    "unavailable": "Szacowanie poziomu nie jest dostępne w tej wersji.",
+    "unavailable": "Szacowanie poziomu wymaga danych kart, które nie zostały jeszcze wczytane.",
     "addCommander": "Dodaj dowódcę, aby zobaczyć szacowany poziom.",
     "estimated": "Szacowany: B{{tier}} {{label}}",
     "manual": "Ręczny: B{{tier}} {{label}}",
-    "mismatch": " ⚠ niezgodność",
+    "belowFloor": " ⚠ poniżej minimum B{{tier}}",
+    "belowFloorCombo": "podniesiony przez kombinację dwóch kart",
     "hideBreakdown": "Ukryj szczegóły",
     "showBreakdown": "Pokaż szczegóły",
     "hideBreakdownButton": "▲ Ukryj szczegóły",
     "showBreakdownButton": "▼ Pokaż szczegóły",
-    "forced": "(wymuszony B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Masowe niszczenie lądów",
+      "extraTurns": "Dodatkowe tury",
+      "efficientTutors": "Efektywne tutory"
+    },
+    "check": {
+      "fired": "{{observed}} — wymusza B{{tier}} {{label}}",
+      "clear": "{{observed}} z {{threshold}} — jeszcze {{remaining}}, aby przejść do B{{tier}}",
+      "clearMax": "{{observed}} — nie można osiągnąć B{{tier}} przez dodawanie kart",
+      "source": "{{document}}, {{published}}"
+    },
+    "combo": {
+      "heading": "Kombinacje dwóch kart",
+      "unmeasured": "W tej wersji nie zmierzono wskaźnika kombinacji dwóch kart",
+      "noneFound": "W tej talii nie znaleziono nieskończonych kombinacji dwóch kart",
+      "attribution": "Dane kombinacji: {{attribution}}, migawka z {{date}}",
+      "trigger": {
+        "standaloneTwoCard": "Minimum dla samodzielnej kombinacji dwóch kart",
+        "earlyTwoCard": "Minimum dla wczesnej kombinacji dwóch kart (koszt złożenia najwyżej {{ceiling}})"
+      },
+      "check": {
+        "fired": "Wymusza B{{tier}} {{label}}",
+        "clear_one": "Dodanie jeszcze jednej karty może pozwolić osiągnąć B{{tier}}",
+        "clear_few": "Dodanie jeszcze {{count}} karty może pozwolić osiągnąć B{{tier}}",
+        "clear_many": "Dodanie jeszcze {{count}} kart może pozwolić osiągnąć B{{tier}}",
+        "clear_other": "Dodanie jeszcze {{count}} karty może pozwolić osiągnąć B{{tier}}",
+        "clearMax": "Nie można osiągnąć B{{tier}} dodatkowymi dopasowaniami"
+      },
+      "outcome": {
+        "wins": "Wygrywa grę",
+        "unbounded": "Nieograniczone: {{resource}}"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "obrażenia",
+        "lifeLoss": "utrata życia",
+        "lifegain": "zyskiwanie życia",
+        "mill": "mielenie",
+        "draw": "dobieranie kart",
+        "tokens": "żetony",
+        "combat": "fazy walki",
+        "turns": "tury"
+      },
+      "cardinality": {
+        "definitelyTwoCard": "Zdecydowanie dwie karty",
+        "arguablyTwoCard": "Prawdopodobnie dwie karty",
+        "more": "Więcej niż dwie karty"
+      },
+      "relevance": {
+        "standalone": "Samodzielna",
+        "contextual": "Kontekstowa",
+        "helper": "Pomocnicza"
+      },
+      "pairSourced": "{{first}} + {{second}} (z tabeli kombinacji)"
+    },
+    "uncounted": "Uwzględniono jako przesłankę — dla tej osi nie obowiązuje żadna reguła poziomu.",
+    "uncalibrated": "WotC nie publikuje liczby dla „małych ilości”; ta wartość nie jest skalibrowana.",
+    "coverage": "Odczytano {{resolved}} z {{counted}} kart w talii",
+    "confidencePartial": "{{n}} nazw kart nie znaleziono w danych kart — te zliczenia są dolnymi granicami.",
+    "unresolvedHeading": "Nie znaleziono w danych kart",
+    "baseFloor": "Poziom 1 jest definiowany przez motyw talii, którego estymator nie potrafi wykryć. Szacunki zaczynają się od B2.",
     "dataVersion": "Dane: {{version}}",
     "aboutBrackets": "O poziomach ↗",
     "estimatedChip": "Szacowany: B{{tier}}",
@@ -283,6 +345,46 @@
   "bracketPicker": {
     "ariaLabel": "Poziom talii",
     "unrated": "Bez oceny"
+  },
+  "signals": {
+    "title": "Sygnały talii",
+    "disclaimer": "Statystyki opisowe z przeanalizowanego tekstu kart w talii. Nie są kryteriami poziomu i nigdy nie zmieniają oszacowania.",
+    "avgManaValue": "Średnia wartość many (karty niebędące lądami): {{value}}",
+    "notMeasurable": "niemierzalna",
+    "noCommander": "Dodaj dowódcę, aby zobaczyć sygnały talii.",
+    "unavailable": "Sygnały talii wymagają danych kart, które nie zostały jeszcze wczytane.",
+    "unresolved": "Nie znaleziono {{n}} nazw kart w danych kart.",
+    "kind": {
+      "counterspells": "Kontry",
+      "spot_removal": "Punktowe usuwanie",
+      "sweepers": "Czyszczenie stołu",
+      "card_advantage": "Przewaga kart",
+      "free_interaction": "Darmowa interakcja",
+      "mana_producers": "Źródła many",
+      "land_fetch": "Wyszukiwanie lądów",
+      "rituals": "Rytuały",
+      "extra_land_drops": "Dodatkowe zagrania lądów"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Nieskończona kombinacja dwóch kart",
+    "question": "Celowa nieskończona kombinacja dwóch kart?",
+    "undeclared": "Bez odpowiedzi",
+    "noneIntended": "Brak zamierzonych",
+    "intended": "Zamierzona",
+    "windowAriaLabel": "Kiedy można ją złożyć?",
+    "windowUnstated": "Nie określono",
+    "windowEarly": "Wczesna faza gry",
+    "windowLate": "Tylko późna faza gry",
+    "declaredFloor": "(zadeklarowano — wymusza B{{tier}})",
+    "heading": "Barometry",
+    "authorityEngine": "Sprawdzone przez phase",
+    "authorityDeckOwner": "Zadeklarowane przez ciebie",
+    "authorityUnanswered": "Bez odpowiedzi",
+    "rowGameChangers": "Game Changers",
+    "rowExtraTurns": "Dodatkowe tury",
+    "rowMassLandDenial": "Masowe niszczenie lądów",
+    "rowTwoCardCombos": "Nieskończone kombinacje dwóch kart"
   },
   "warnings": {
     "commanderCount": "Talia ma {{count}} kart (potrzeba dokładnie {{expected}})",

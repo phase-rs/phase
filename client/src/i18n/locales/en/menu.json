@@ -116,10 +116,11 @@
     "cardCoverage": "Card Coverage",
     "coverageThresholdHint": "Exclude decks below this engine-support threshold",
     "bracket": "Bracket",
-    "bracketHint": "Random AI picks from these brackets. Untagged decks are excluded when filtering.",
+    "bracketHint": "Random AI prioritizes these brackets; untagged decks remain available as a fallback.",
     "opponentLabel": "Opponent {{number}}",
     "deck": "Deck",
     "difficulty": "Difficulty",
+    "difficultyDefault": "Default ({{difficulty}})",
     "deckRandom": "Random",
     "deckRandomCount": "Random ({{count}})",
     "cedhToggle": {
@@ -132,8 +133,27 @@
       "user": "User",
       "precon": "Precon"
     },
+    "podRelaxation": {
+      "heading": "Pod adjustments",
+      "bracketDistance": "Seat {{seat}} — no deck in the requested bracket was available; seated a Bracket {{tier}} deck.",
+      "bracketDistanceNoTier": "Seat {{seat}} — no deck in the requested bracket was available; seated an untagged deck.",
+      "labelProvenance": "Seat {{seat}} — no declared-bracket deck was available; seated a deck with an estimated bracket.",
+      "archetype": "Seat {{seat}} — no deck of the requested archetype was available.",
+      "distinctColorIdentity": "Seat {{seat}} — shares a colour identity with another seat.",
+      "distinctCommander": "Seat {{seat}} — shares a commander with another seat."
+    },
+    "podPreviewCount": "{{n}} decks match the current pod settings",
     "brain": "Driven by",
     "brainEngine": "Engine AI"
+  },
+  "gameProvider": {
+    "podSelectionRefused": {
+      "insufficientCandidates": "Not enough distinct decks: {{requested}} seats requested, {{available}} available.",
+      "hardGateUnsatisfiable": "Not enough cEDH decks for a cEDH table: {{requested}} seats requested, {{available}} available.",
+      "tooManySeats": "A cEDH table seats at most four players ({{seats}} AI seats requested).",
+      "unknownCommander": "Deck catalog names a commander the card data does not know: {{name}}.",
+      "cardDataUnavailable": "AI seat selection needs card data, which hasn't loaded yet."
+    }
   },
   "feedManager": {
     "title": "Manage Feeds",

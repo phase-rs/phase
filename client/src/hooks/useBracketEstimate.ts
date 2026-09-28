@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 
-import { AdapterError, AdapterErrorCode } from "../adapter/types";
-import type { EngineAdapter, GameFormat } from "../adapter/types";
-import type { BracketEstimate } from "../types/bracket";
+import type { GameFormat } from "../adapter/types";
+import {
+  estimateDeckBracket,
+  type BracketEstimateOutcome,
+} from "../services/bracketEstimate";
+import type {
+  BracketEstimate,
+  ComboDeclaration,
+  CommanderBracketTier,
+} from "../types/bracket";
 import { isCommanderFamilyFormat } from "../types/bracket";
+import { expandParsedDeck } from "../services/deckParser";
 import type { ParsedDeck } from "../services/deckParser";
 import { buildBracketDeckKey } from "./bracketDeckKey";
 
@@ -18,13 +26,13 @@ const DEBOUNCE_MS = 200;
  * stamped onto each BracketEstimate handles bracket_lists.json updates
  * naturally — a hot-reload of card data will produce new keys.
  */
-const cache = new Map<string, Promise<BracketEstimate | null>>();
+const cache = new Map<string, Promise<BracketEstimateOutcome>>();
 const CACHE_MAX_ENTRIES = 256;
 
 function readCacheOrFetch(
   deckKey: string,
-  fetcher: () => Promise<BracketEstimate | null>,
-): Promise<BracketEstimate | null> {
+  fetcher: () => Promise<BracketEstimateOutcome>,
+): Promise<BracketEstimateOutcome> {
   const cached = cache.get(deckKey);
   if (cached) return cached;
   const promise = fetcher();
@@ -46,18 +54,14 @@ interface Options {
   deck: ParsedDeck;
   commanders: string[];
   format: GameFormat | undefined;
-  adapter: Pick<EngineAdapter, "estimateBracket">;
+  declaredTier: CommanderBracketTier | null;
+  comboDeclaration: ComboDeclaration;
 }
 
 interface Result {
   estimate: BracketEstimate | null;
   loading: boolean;
-  /**
-   * True when the active adapter (Tauri, WebSocket, P2P, server-draft) threw
-   * `BRACKET_ESTIMATION_UNSUPPORTED`. Lets callers distinguish "this build
-   * doesn't support local bracket estimation" from "deck has no commander".
-   */
-  unsupported: boolean;
+  outcome: BracketEstimateOutcome | null;
 }
 
 /**
@@ -75,11 +79,12 @@ export function useBracketEstimate({
   deck,
   commanders,
   format,
-  adapter,
+  declaredTier,
+  comboDeclaration,
 }: Options): Result {
   const [estimate, setEstimate] = useState<BracketEstimate | null>(null);
   const [loading, setLoading] = useState(false);
-  const [unsupported, setUnsupported] = useState(false);
+  const [outcome, setOutcome] = useState<BracketEstimateOutcome | null>(null);
   /** Last successfully *stored* key — used to short-circuit identical re-renders. */
   const storedKeyRef = useRef<string | null>(null);
   /** Latest *scheduled* key — written synchronously, used as the stale-result guard. */
@@ -87,13 +92,15 @@ export function useBracketEstimate({
 
   const eligible = isCommanderFamilyFormat(format) && commanders.length > 0;
 
-  const deckKey = eligible ? buildBracketDeckKey(commanders, deck) : null;
+  const deckKey = eligible
+    ? buildBracketDeckKey(commanders, deck, declaredTier, comboDeclaration)
+    : null;
 
   useEffect(() => {
     if (!eligible || !deckKey) {
       setEstimate(null);
       setLoading(false);
-      setUnsupported(false);
+      setOutcome(null);
       storedKeyRef.current = null;
       pendingKeyRef.current = null;
       return;
@@ -102,15 +109,22 @@ export function useBracketEstimate({
 
     pendingKeyRef.current = deckKey;
     setLoading(true);
-    setUnsupported(false);
+    setOutcome(null);
     const scheduledKey = deckKey;
     const timer = setTimeout(async () => {
       try {
+        const expanded = expandParsedDeck(deck);
         const result = await readCacheOrFetch(scheduledKey, () =>
-          adapter.estimateBracket({
-            commander: commanders,
-            main_deck: deck.main.flatMap((e) => Array(e.count).fill(e.name)),
-            sideboard: deck.sideboard.flatMap((e) => Array(e.count).fill(e.name)),
+          estimateDeckBracket({
+            deck: {
+              commander: commanders,
+              main_deck: expanded.main_deck,
+              sideboard: expanded.sideboard,
+              companion: expanded.companion,
+              signature_spell: expanded.signature_spell,
+              combo_declaration: comboDeclaration,
+            },
+            declared_tier: declaredTier,
           }),
         );
         if (pendingKeyRef.current !== scheduledKey) {
@@ -118,15 +132,12 @@ export function useBracketEstimate({
           return;
         }
         storedKeyRef.current = scheduledKey;
-        setEstimate(result);
-        setUnsupported(false);
-      } catch (err) {
+        setOutcome(result);
+        setEstimate(result.kind === "estimate" ? result.estimate : null);
+      } catch {
         if (pendingKeyRef.current !== scheduledKey) return;
         setEstimate(null);
-        setUnsupported(
-          err instanceof AdapterError &&
-            err.code === AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-        );
+        setOutcome(null);
       } finally {
         if (pendingKeyRef.current === scheduledKey) {
           setLoading(false);
@@ -134,11 +145,11 @@ export function useBracketEstimate({
       }
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
-    // `commanders`, `deck.main`, and `deck.sideboard` are intentionally
-    // omitted: their content is fully captured by `deckKey`, which changes
-    // only when the deck actually differs. Including the raw arrays would
-    // cause re-runs on every object-identity churn with no observable change.
-  }, [eligible, deckKey, adapter]); // eslint-disable-line react-hooks/exhaustive-deps
+    // `commanders` and the raw `deck` sections are intentionally omitted:
+    // their content is fully captured by `deckKey`, which changes only when
+    // the deck actually differs. Including the raw arrays would cause re-runs
+    // on every object-identity churn with no observable change.
+  }, [eligible, deckKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { estimate, loading, unsupported };
+  return { estimate, loading, outcome };
 }
