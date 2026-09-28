@@ -1493,15 +1493,16 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     ping: () => wasm.ping(),
 
-    initializeGame: (
+    initializeGame: async (
       deckData: unknown | null,
       seed: number,
       formatConfig: FormatConfig | null,
       matchConfig: MatchConfig | null,
       playerCount?: number,
       firstPlayer?: number,
-    ) =>
-      enqueue(() => {
+    ) => {
+      await engineRuntime.ensureComboTable();
+      return enqueue(() => {
         const r = wasm.initialize_game(
           deckData,
           seed,
@@ -1512,17 +1513,19 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         );
         throwInitFailure(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
-      }),
+      });
+    },
 
-    initializeMultiplayerHostGame: (
+    initializeMultiplayerHostGame: async (
       deckData: unknown | null,
       seed: number,
       formatConfig: FormatConfig | null,
       matchConfig: MatchConfig | null,
       playerCount?: number,
       firstPlayer?: number,
-    ) =>
-      enqueue(() => {
+    ) => {
+      await engineRuntime.ensureComboTable();
+      return enqueue(() => {
         const r = wasm.initialize_multiplayer_host_game(
           deckData,
           seed,
@@ -1533,7 +1536,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         );
         throwInitFailure(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
-      }),
+      });
+    },
 
     estimateBracketForDeck: async (request: BracketEstimateRequest) => {
       await engineRuntime.ensureComboTable();

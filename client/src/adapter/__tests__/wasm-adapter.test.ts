@@ -22,6 +22,12 @@ const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const resumeRestoredGameState = vi.hoisted(() => vi.fn());
 const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
 const previewInteractionJs = vi.hoisted(() => vi.fn());
+const fallbackWasm = vi.hoisted(() => ({
+  init: vi.fn().mockResolvedValue(undefined),
+  loadComboTable: vi.fn().mockResolvedValue(0),
+  initializeGame: vi.fn().mockReturnValue({ events: [], log_entries: [] }),
+  initializeMultiplayerHostGame: vi.fn().mockReturnValue({ events: [], log_entries: [] }),
+}));
 
 vi.mock("../../services/cardData", () => ({
   ensureWasmInit,
@@ -29,6 +35,10 @@ vi.mock("../../services/cardData", () => ({
 }));
 
 vi.mock("@wasm/engine", () => ({
+  default: fallbackWasm.init,
+  load_combo_table: fallbackWasm.loadComboTable,
+  initialize_game: fallbackWasm.initializeGame,
+  initialize_multiplayer_host_game: fallbackWasm.initializeMultiplayerHostGame,
   resume_restored_game_state: resumeRestoredGameState,
   resume_multiplayer_host_state: resumeMultiplayerHostState,
   preview_interaction_js: previewInteractionJs,
@@ -105,6 +115,13 @@ describe("WasmAdapter", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    fallbackWasm.init.mockResolvedValue(undefined);
+    fallbackWasm.loadComboTable.mockResolvedValue(0);
+    fallbackWasm.initializeGame.mockReturnValue({ events: [], log_entries: [] });
+    fallbackWasm.initializeMultiplayerHostGame.mockReturnValue({
+      events: [],
+      log_entries: [],
+    });
     adapter = new WasmAdapter();
     mockWorkerClient.getState.mockResolvedValue(buildGameState({
       turn_number: 1,
@@ -1030,6 +1047,72 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       await adapter.initializeGame({ decks: [] });
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("main-thread fallback combo loading", () => {
+    beforeEach(() => {
+      vi.resetModules();
+      vi.stubGlobal("__COMBO_TABLE_URL__", "/combo-table.json");
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("initializeGame awaits the combo table before calling the engine", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response('{"entries":[]}', { status: 200 })),
+      );
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      const fallbackAdapter = new WasmAdapter();
+      await fallbackAdapter.initialize();
+
+      await expect(fallbackAdapter.initializeGame()).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(fallbackWasm.loadComboTable).toHaveBeenCalledWith('{"entries":[]}');
+      expect(fallbackWasm.loadComboTable.mock.invocationCallOrder[0]).toBeLessThan(
+        fallbackWasm.initializeGame.mock.invocationCallOrder[0],
+      );
+    });
+
+    it("a missing combo table does not block initializeGame", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      const fallbackAdapter = new WasmAdapter();
+      await fallbackAdapter.initialize();
+
+      await expect(fallbackAdapter.initializeGame()).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(fallbackWasm.loadComboTable).not.toHaveBeenCalled();
+      expect(fallbackWasm.initializeGame).toHaveBeenCalledOnce();
+    });
+
+    it("initializeMultiplayerHostGame awaits the combo table before calling the engine", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response('{"entries":[]}', { status: 200 })),
+      );
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      const fallbackAdapter = new WasmAdapter();
+      await fallbackAdapter.initialize();
+
+      await expect(fallbackAdapter.initializeMultiplayerHostGame()).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(fallbackWasm.loadComboTable).toHaveBeenCalledWith('{"entries":[]}');
+      expect(fallbackWasm.loadComboTable.mock.invocationCallOrder[0]).toBeLessThan(
+        fallbackWasm.initializeMultiplayerHostGame.mock.invocationCallOrder[0],
+      );
     });
   });
 

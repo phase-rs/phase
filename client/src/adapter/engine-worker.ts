@@ -332,6 +332,8 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
           break;
         }
+        // The engine's deck-resolve path reads this table to carry combo floors into each seat's estimated tier.
+        await ensureComboTable();
         const gameResult = initialize_game(
           msg.deckData ?? null,
           msg.seed,
@@ -360,6 +362,8 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
           break;
         }
+        // The engine's deck-resolve path reads this table to carry combo floors into each seat's estimated tier.
+        await ensureComboTable();
         // The host entry point refuses an engine that already holds a game and
         // claims the multiplayer flag alongside the install — both inside this
         // one synchronous handler, so no other posted message can interleave.
