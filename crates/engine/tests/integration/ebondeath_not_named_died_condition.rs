@@ -417,9 +417,9 @@ fn not_named_under_an_opponents_control_gate_covers_every_opponent() {
 }
 
 /// "Under your control" for a permission card that was STOLEN and died into its
-/// owner's graveyard. Once it is in the graveyard it has no controller (CR 109.4
-/// + CR 108.4a), so "your" is its owner. Its own death under the thief's control
-/// doesn't count for the owner.
+/// owner's graveyard. Once it is in the graveyard it has no controller, so
+/// "your" is its owner (CR 109.4 + CR 108.4a). Its own death under the thief's
+/// control doesn't count for the owner.
 #[test]
 fn not_named_under_your_control_reads_the_owner_after_a_stolen_death() {
     const TEXT: &str = "You may cast this card from your graveyard if a creature not named Grizzly Bears died under your control this turn.";
