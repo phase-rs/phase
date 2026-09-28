@@ -106,10 +106,20 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  66 — game_setup and state_update carry GameState, whose graveyard cast
+ *  67 — game_setup and state_update carry GameState, whose graveyard cast
  *       permissions can now require a casting method (required_cast_keyword),
  *       and casting-menu options carry the non-mana part of their cost
- *       (additional_cost). Bumped in lockstep with full-game protocol 84.
+ *       (additional_cost). Bumped in lockstep with full-game protocol 85.
+ *  66 — WaitingFor.ChooseDungeon options gained required `card`, `rooms`, and
+ *       `room_count`: the whole dungeon behind each choice, so the prompt
+ *       previews each card instead of describing only its entry room. A PARSE
+ *       bump like 50: none of the fields carries a serde default, so a v65
+ *       peer cannot parse a snapshot paused at the dungeon choice, and the
+ *       reverse skew throws in render — this client reads `card`
+ *       unconditionally when resolving the preview art. Since game_setup and
+ *       reconnect_ack carry GameState, first contact rejects the skew instead
+ *       of allowing either failure. Bumped in lockstep with full-game
+ *       protocol 84.
  *  65 — game_setup and state_update carry GameState, whose reduce-ability-cost
  *       statics can now carry a target restriction and a once-per-turn
  *       frequency, whose per-turn activation journal records each turn's
@@ -440,7 +450,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 66 as const;
+export const WIRE_PROTOCOL_VERSION = 67 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
