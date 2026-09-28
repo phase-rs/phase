@@ -5739,20 +5739,17 @@ fn graveyard_permission_variant(
 /// you're using as you begin to play the card."). The engine does not model
 /// that announcement yet, so for the card's own Blitz/Bestow it elects a
 /// permission only where no choice is left to make: exactly one usable
-/// permission, or a strictly dominant one. An `Unlimited` permission with no
-/// rider (`GraveyardPermissionSource::is_strictly_dominant`) spends no slot and
-/// adds nothing, so a bounded slot is not spent when such a permission also
-/// admits the cast (Sabin, Master Monk's own "using its blitz ability" rider
-/// beside Muldrotha or Exploration Broodship).
+/// permission.
 ///
 /// Stated gap: a graveyard Blitz/Bestow cast is unavailable when two or more
-/// eligible permissions differ and neither is strictly dominant (Muldrotha
-/// beside Leonardo, Sewer Samurai: a slot against a finality counter), because
-/// only the player's announcement can choose between them. It fails closed
-/// (`None`) rather than electing by source order; the player's announcement
-/// choice lands in a follow-up. The printed-cost election
-/// (`printed_graveyard_permission_election`) still falls back to source order,
-/// as it did before this rider path existed.
+/// eligible permissions admit it (Sabin, Master Monk's own "using its blitz
+/// ability" permission beside Muldrotha; Muldrotha beside Leonardo, Sewer
+/// Samurai), because only the player's announcement can choose between them,
+/// even where one looks dominant: a player may deliberately spend a slot or
+/// want a permission's rider. It fails closed (`None`) rather than electing for
+/// the player; the player's announcement choice lands in a follow-up. The
+/// printed-cost election (`printed_graveyard_permission_election`) is
+/// unchanged.
 ///
 /// CR 118.9b: a permission that requires a casting method ("using its blitz
 /// ability") authorizes only that method, so each arm considers only the
@@ -5794,10 +5791,7 @@ fn elected_graveyard_permission_source(
                 .collect();
             match usable.as_slice() {
                 [only] => Some(*only),
-                _ => usable
-                    .iter()
-                    .find(|candidate| candidate.is_strictly_dominant())
-                    .copied(),
+                _ => None,
             }
         }
         _ => printed_graveyard_permission_election(candidates),
