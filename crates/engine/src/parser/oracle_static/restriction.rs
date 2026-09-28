@@ -2202,6 +2202,17 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     if graveyard_destination_replacement.is_some() && !is_punctuation_only(residual) {
         return None;
     }
+    // CR 601.3 + CR 607.1: a trailing "If …" sentence that no modelled rider
+    // consumed ("If you cast a spell this way, that artifact enters tapped." —
+    // Edgar, Master Machinist; "If you do, it perpetually becomes …" —
+    // Mischievous Lookout) is an unmodelled linked rider. Emitting the
+    // permission without it is strictly more permissive than printed, so it
+    // declines like an unmodelled gate. It must not ride on a populated
+    // turn-restriction condition, which would otherwise discharge the
+    // swallowed-clause `Condition_If` expectation for the rider.
+    if parse_unconsumed_if_sentence(residual).is_ok() {
+        return None;
+    }
 
     let affected = if let Some(kind) = rider_kind {
         inject_keyword_kind_filter_prop(filter, kind)
@@ -2512,6 +2523,22 @@ fn is_punctuation_only(text: &str) -> bool {
     all_consuming(many0(tag::<_, _, OracleError<'_>>(".")))
         .parse(text.trim())
         .is_ok()
+}
+
+/// CR 607.1: a residual that opens (after sentence punctuation) with an "if"
+/// sentence, i.e. a linked rider none of the modelled rider parsers consumed.
+fn parse_unconsumed_if_sentence(residual: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(
+            many0(alt((
+                tag::<_, _, OracleError<'_>>("."),
+                tag::<_, _, OracleError<'_>>(" "),
+            ))),
+            tag("if "),
+        ),
+    )
+    .parse(residual)
 }
 
 /// CR 601.2a + CR 113.6b: True when `lower` opens with this module's

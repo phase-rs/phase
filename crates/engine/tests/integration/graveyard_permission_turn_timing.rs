@@ -647,3 +647,40 @@ fn unmodelled_permission_gate_declines_the_permission() {
         "control: a modelled gate keeps its permission, got {oathsworn:?}"
     );
 }
+
+/// An unconsumed linked "If …" rider after the permission declines the whole
+/// permission. Otherwise the lead's populated `DuringYourTurn` condition would
+/// discharge the swallowed-clause expectation while the rider silently did
+/// nothing. Positive control: a rider a modelled parser consumes (Kess's
+/// stack-exit replacement) keeps the permission.
+#[test]
+fn unconsumed_if_rider_declines_the_permission() {
+    const EDGAR: &str = "Once during each of your turns, you may cast an artifact spell from your graveyard. If you cast a spell this way, that artifact enters tapped.\nTools — Whenever Edgar attacks, it gets +X/+0 until end of turn, where X is the greatest mana value among artifacts you control.";
+    const LOOKOUT: &str = "Once during each of your turns, you may cast a noncreature, non-Aura permanent spell from your graveyard. If you do, it perpetually becomes a 2/1 Rat creature in addition to its other types.";
+    const KESS: &str = "Flying\nOnce during each of your turns, you may cast an instant or sorcery spell from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead.";
+    for (name, text, types) in [
+        ("Edgar, Master Machinist", EDGAR, &["Creature"][..]),
+        (
+            "Mischievous Lookout",
+            LOOKOUT,
+            &["Enchantment", "Creature"][..],
+        ),
+    ] {
+        assert!(
+            graveyard_permission_conditions(text, name, types).is_empty(),
+            "{name}: the unmodelled rider declines the permission"
+        );
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &[]);
+        assert!(
+            serde_json::to_string(&parsed.abilities)
+                .unwrap()
+                .contains("Unimplemented"),
+            "{name}: the line falls through to an honest Unimplemented"
+        );
+    }
+    assert_eq!(
+        graveyard_permission_conditions(KESS, "Kess, Dissident Mage", &["Creature"]),
+        vec![Some(StaticCondition::DuringYourTurn)],
+        "control: a consumed rider keeps the permission"
+    );
+}
