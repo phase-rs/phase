@@ -21,9 +21,10 @@ pub(crate) fn reveal_hand_parks_card_choice(
     choice_optional || !matches!(card_filter, TargetFilter::None)
 }
 
-/// CR 608.2d + CR 701.20a: single authority for "this effect parks a post-reveal
-/// card choice" — read by the resolver's needs-choice test, the fan-out referent
-/// predicate and the parser's per-player reveal-choice rule.
+/// CR 608.2d + CR 701.20a: "this effect parks a post-reveal card choice" over a
+/// whole `Effect` — read by the fan-out referent predicate, the trigger-lowering
+/// chosen-object boundary and the parser's per-player reveal-choice rule; the
+/// resolver's needs-choice test reads `reveal_hand_parks_card_choice` directly.
 pub(crate) fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
     matches!(
         effect,

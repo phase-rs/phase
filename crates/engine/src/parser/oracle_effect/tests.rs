@@ -74499,7 +74499,7 @@ fn revealed_this_way_population_mismatch_is_declined() {
     // Declined: the consumer keeps its own parsed object and its own
     // "For each player," population; it is never re-bound to the reveal's
     // per-opponent iteration. Provenance: the expected node is the
-    // base parse of this same text (72c4f4a49, `parse_effect_chain` JSON) —
+    // pre-change parse of this same text (`parse_effect_chain` JSON) —
     // `player_scope: All`, no `repeat_for`, target `Typed[Creature]`, not
     // `ParentTarget` — so the decline path leaves the base shape untouched.
     assert_eq!(

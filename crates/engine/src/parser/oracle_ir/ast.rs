@@ -312,8 +312,8 @@ impl EntersUnderSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum RevealChoiceBinding {
     /// CR 608.2c: "choose a <type> card from it / from among them" — the consumer
-    /// names the choice itself over the revealed hand ("it"), so the choice
-    /// refines the reveal (Kitesail Freebooter, Deep-Cavern Bat).
+    /// names the choice itself over the revealed hand ("it") and is absorbed into
+    /// it (Kitesail Freebooter, Deep-Cavern Bat).
     FromIt,
     /// CR 608.2c: "<verb> a <type> card [they] revealed this way" — the consumer
     /// acts on a card chosen from what the reveal showed, so its object is the
