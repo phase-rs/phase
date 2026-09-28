@@ -2112,7 +2112,16 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // The predicate lives in `sba` so it shares the same CR 101.2 "can't lose"
     // exception as the real player-loss SBA checks, and stays narrower than the
     // full SBA loop to avoid unrelated mid-resolution SBA prompts.
-    if sba::has_pending_player_loss_sba(state) {
+    //
+    // CR 704.3 + CR 104.3b: not while the game is inside a process no player
+    // receives priority during: a cast or activation (CR 601.2h; CR 602.2b), a
+    // special action (CR 116.2), a mana ability (CR 605.3b) or a triggered
+    // mana ability (CR 605.4a). Paying life down to 0 is a legal payment
+    // (CR 119.4), so the 0-life check waits until that process ends and a
+    // player would next receive priority. Until then that player is still in
+    // the game, so waiting on their choices is not the #962 softlock; prompts
+    // owned by a resolution keep the net.
+    if sba::has_pending_player_loss_sba(state) && !state.withholds_priority() {
         sba::check_state_based_actions(state, &mut result.events);
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.

@@ -1738,6 +1738,7 @@ mod xantid_swarm_defending_player_cant_cast;
 mod you_have_been_caught_stealing_any_damage;
 mod yurlok_of_scorch_thrash;
 mod zenos_yae_galvus_chosen_object;
+mod zero_life_mid_cast_payment;
 mod zhulodok_double_cascade;
 
 mod arm_the_cathars_conjunct_anaphor_p6;

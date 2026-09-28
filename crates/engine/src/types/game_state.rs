@@ -7406,6 +7406,20 @@ pub enum DeferredLifeCostResume {
 }
 
 impl DeferredLifeCostResume {
+    /// CR 601.2h + CR 602.2b + CR 116.2: Whether the suspended payment belongs
+    /// to casting a spell, activating an ability or performing a special
+    /// action, rather than to a resolution. Exhaustive so a new owner has to
+    /// be classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            DeferredLifeCostResume::Cast { .. } => true,
+            // A resolution-time "pay any amount of life" choice (CR 608.2).
+            DeferredLifeCostResume::PayAmount { .. } => false,
+            // A mana payment's Phyrexian life; its outer root names the owner.
+            DeferredLifeCostResume::ManaRoot { resume, .. } => resume.withholds_priority(),
+        }
+    }
+
     pub fn resume_at_resolution_depth(&self) -> usize {
         match self {
             DeferredLifeCostResume::Cast {
@@ -7766,6 +7780,43 @@ pub enum PendingCostMoveResume {
     /// a replacement pause, which is exactly the shape that guard says to box
     /// rather than widen the budget for.
     RandomDiscardUnlessPayment(Box<RandomDiscardUnlessPaymentResume>),
+}
+
+impl PendingCostMoveResume {
+    /// CR 601.2h + CR 602.2b + CR 605.3b + CR 116.2h: Whether the paused cost
+    /// move belongs to casting a spell, activating an ability (a mana ability
+    /// included) or performing a special action, none of which gives a player
+    /// priority until it completes, rather than to a resolution or a
+    /// replacement's own optional cost. Exhaustive so a new owner has to be
+    /// classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::DelveManaPayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. } => true,
+            // CR 116.2h: foretelling is a special action; its {2} is paid before
+            // its exile move, which can then pause on a replacement.
+            PendingCostMoveResume::Foretell { .. } => true,
+            // Cast and activation payments keep their announcement; an
+            // optional payment made during a resolution does not.
+            PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.is_some(),
+            PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::Casting { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => true,
+                CollectEvidenceResume::Effect { .. } => false,
+            },
+            // Unless-costs and ward payments are made while an ability resolves
+            // (CR 118.12), and a replacement's optional cost belongs to that
+            // replacement (CR 614.1).
+            PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
+        }
+    }
 }
 
 /// CR 701.9b + CR 118.12 + CR 616.1: payload of
@@ -8269,6 +8320,33 @@ pub enum ManaAbilityResume {
     FinalizePendingManaPayment {
         player: PlayerId,
     },
+}
+
+impl ManaAbilityResume {
+    /// CR 601.2h + CR 602.2b + CR 116.2: Whether the outer payment root this
+    /// resumes is a cast, activation or special action (no priority until it
+    /// completes) rather than a resolution. Exhaustive so a new root has to be
+    /// classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            // CR 601.2g-h: the outer spell or ability cost is still being paid.
+            ManaAbilityResume::ManaPayment { .. }
+            | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::PhyrexianCastPayment { .. }
+            | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
+            // CR 116.2g / 116.2b / 116.2c: companion to hand, turning a
+            // permanent face up, and paying to end an effect are special actions.
+            ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::TurnFaceUp { .. }
+            | ManaAbilityResume::EndContinuousEffect { .. } => true,
+            // CR 118.12 / CR 608.2: payments made while an ability resolves.
+            ManaAbilityResume::UnlessPayment { .. } | ManaAbilityResume::EffectPayCost { .. } => {
+                false
+            }
+            // No outer process: the mana ability itself returns to priority.
+            ManaAbilityResume::Priority => false,
+        }
+    }
 }
 
 /// CR 605.3b + CR 106.1a: A pre-resolved choice that short-circuits the normal
@@ -16339,6 +16417,176 @@ impl WaitingFor {
         self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. })
     }
 
+    /// CR 605.3a + CR 605.3b: Whether this state continues a mana ability's
+    /// activation — one of its cost choices, or the choice of which mana it
+    /// adds. A mana ability doesn't use the stack and resolves immediately, so
+    /// no player receives priority until it has finished, whether it was
+    /// activated with priority or while paying a cost (CR 117.1d).
+    ///
+    /// A mana-color choice made while an *effect* resolves
+    /// (`ManaChoiceContext::ResolvingEffect`) is not a mana ability.
+    pub fn is_mana_ability_continuation(&self) -> bool {
+        match self {
+            WaitingFor::ChooseManaColor { context, .. } => match context {
+                ManaChoiceContext::ManaAbility(_) => true,
+                ManaChoiceContext::ResolvingEffect(_) => false,
+            },
+            WaitingFor::PayCost { resume, .. } => match resume {
+                CostResume::ManaAbility { .. } => true,
+                CostResume::Spell { .. }
+                | CostResume::SpellCost { .. }
+                | CostResume::Resolution => false,
+            },
+            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::ManaAbility { .. } => true,
+                CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
+                    false
+                }
+            },
+            WaitingFor::PayAmountChoice {
+                pending_mana_ability,
+                ..
+            } => pending_mana_ability.is_some(),
+            WaitingFor::PayManaAbilityMana { .. } => true,
+            // Every other prompt is not part of a mana ability's activation.
+            // Listed rather than `_` so a new prompt has to be classified.
+            WaitingFor::Priority { .. }
+            | WaitingFor::ResolveAllConsent { .. }
+            | WaitingFor::ResolveAllReady { .. }
+            | WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
+            | WaitingFor::MulliganDecision { .. }
+            | WaitingFor::OpeningHandBottomCards { .. }
+            | WaitingFor::ManaPayment { .. }
+            | WaitingFor::ManaSourceSelection { .. }
+            | WaitingFor::AssistChoosePlayer { .. }
+            | WaitingFor::AssistPayment { .. }
+            | WaitingFor::ChooseXValue { .. }
+            | WaitingFor::TargetSelection { .. }
+            | WaitingFor::DeclareAttackers { .. }
+            | WaitingFor::DeclareBlockers { .. }
+            | WaitingFor::UntapChoice { .. }
+            | WaitingFor::ChooseUntapSubset { .. }
+            | WaitingFor::ExertChoice { .. }
+            | WaitingFor::EnlistChoice { .. }
+            | WaitingFor::GameOver { .. }
+            | WaitingFor::ReplacementChoice { .. }
+            | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::OrderTriggers { .. }
+            | WaitingFor::CopyTargetChoice { .. }
+            | WaitingFor::ExploreChoice { .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
+            | WaitingFor::EquipTarget { .. }
+            | WaitingFor::CrewVehicle { .. }
+            | WaitingFor::StationTarget { .. }
+            | WaitingFor::SaddleMount { .. }
+            | WaitingFor::ScryChoice { .. }
+            | WaitingFor::RippleRevealChoice { .. }
+            | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::ArrangePlanarDeckTopChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
+            | WaitingFor::DieKeepChoice { .. }
+            | WaitingFor::DigChoice { .. }
+            | WaitingFor::SurveilChoice { .. }
+            | WaitingFor::RevealChoice { .. }
+            | WaitingFor::SearchChoice { .. }
+            | WaitingFor::SearchPartitionChoice { .. }
+            | WaitingFor::OutsideGameChoice { .. }
+            | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::BeholdChoice { .. }
+            | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
+            | WaitingFor::ConniveDiscard { .. }
+            | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
+            | WaitingFor::LearnChoice { .. }
+            | WaitingFor::ManifestDreadChoice { .. }
+            | WaitingFor::TriggerTargetSelection { .. }
+            | WaitingFor::BetweenGamesSideboard { .. }
+            | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::NamedChoice { .. }
+            | WaitingFor::OpponentGuess { .. }
+            | WaitingFor::SpellbookDraft { .. }
+            | WaitingFor::DamageSourceChoice { .. }
+            | WaitingFor::ModeChoice { .. }
+            | WaitingFor::DiscardToHandSize { .. }
+            | WaitingFor::OptionalCostChoice { .. }
+            | WaitingFor::ChooseGiftRecipient { .. }
+            | WaitingFor::SpliceOffer { .. }
+            | WaitingFor::DefilerPayment { .. }
+            | WaitingFor::OrderCostReductions { .. }
+            | WaitingFor::CastOffer { .. }
+            | WaitingFor::ModalFaceChoice { .. }
+            | WaitingFor::AlternativeCastChoice { .. }
+            | WaitingFor::MutateMergeChoice { .. }
+            | WaitingFor::CipherEncodeChoice { .. }
+            | WaitingFor::CastingVariantChoice { .. }
+            | WaitingFor::ChoosePermanentTypeSlot { .. }
+            | WaitingFor::MultiTargetSelection { .. }
+            | WaitingFor::AbilityModeChoice { .. }
+            | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::ResolutionOptionalPaymentChoice { .. }
+            | WaitingFor::PairChoice { .. }
+            | WaitingFor::TributeChoice { .. }
+            | WaitingFor::MiracleReveal { .. }
+            | WaitingFor::OpponentMayChoice { .. }
+            | WaitingFor::LoopShortcut { .. }
+            | WaitingFor::RespondToShortcut { .. }
+            | WaitingFor::PrecastCopyShortcutOffer { .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { .. }
+            | WaitingFor::UnlessPayment { .. }
+            | WaitingFor::UnlessPaymentChooseCost { .. }
+            | WaitingFor::WardDiscardChoice { .. }
+            | WaitingFor::WardSacrificeChoice { .. }
+            | WaitingFor::UnlessBounceChoice { .. }
+            | WaitingFor::ChooseRingBearer { .. }
+            | WaitingFor::ChooseRoomDoor { .. }
+            | WaitingFor::ChooseDungeon { .. }
+            | WaitingFor::ChooseDungeonRoom { .. }
+            | WaitingFor::SpecializeColor { .. }
+            | WaitingFor::ActivationCostOneOfChoice { .. }
+            | WaitingFor::CostTypeChoice { .. }
+            | WaitingFor::BlightChoice { .. }
+            | WaitingFor::HarmonizeTapChoice { .. }
+            | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
+            | WaitingFor::TopOrBottomChoice { .. }
+            | WaitingFor::PopulateChoice { .. }
+            | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::ChooseFromZoneOpponentChooser { .. }
+            | WaitingFor::ChooseAnnouncingOpponent { .. }
+            | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::VoteChoice { .. }
+            | WaitingFor::SeparatePilesChooseOpponent { .. }
+            | WaitingFor::SeparatePilesPartition { .. }
+            | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::CompanionReveal { .. }
+            | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::CommanderZoneChoice { .. }
+            | WaitingFor::BattleProtectorChoice { .. }
+            | WaitingFor::ProliferateChoice { .. }
+            | WaitingFor::TimeTravelChoice { .. }
+            | WaitingFor::ChooseObjectsSelection { .. }
+            | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { .. }
+            | WaitingFor::KeepExactPermanentsChoice { .. }
+            | WaitingFor::CopyRetarget { .. }
+            | WaitingFor::AssignCombatDamage { .. }
+            | WaitingFor::AssignBlockerDamage { .. }
+            | WaitingFor::DistributeAmong { .. }
+            | WaitingFor::MoveCountersDistribution { .. }
+            | WaitingFor::RemoveCountersChoice { .. }
+            | WaitingFor::RetargetChoice { .. }
+            | WaitingFor::CombatTaxPayment { .. }
+            | WaitingFor::PhyrexianPayment { .. } => false,
+        }
+    }
+
     /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j / CR 310.11 /
     /// CR 703.1 + CR 117.3a + CR 704.3: the windows the ENGINE forces open before the
     /// next grant of priority. Two sources feed the class — the windows that open
@@ -23096,6 +23344,46 @@ fn annotate_paused_exile_event(
 }
 
 impl GameState {
+    /// CR 704.3: Whether the game is inside a process that no player receives
+    /// priority during, so the state-based action check must wait until it
+    /// completes. There are four owners:
+    /// - **a cast or activation** (CR 601.2 + CR 602.2b; priority returns only
+    ///   at CR 601.2i): an inline cast carrier (`has_pending_cast`), or one
+    ///   parked in the external `pending_cast` carrier behind a prompt that
+    ///   doesn't carry it (Assist);
+    /// - **a cast, activation or special-action cost paused on a replacement**
+    ///   (CR 616.1; special actions per CR 116.2): a cost move awaiting its
+    ///   replacement, a life payment whose replacement is still running its
+    ///   interactive effect, or a cost discard. Those prompts
+    ///   (`ReplacementChoice`, `ChooseOneOfBranch`, ...) are shared with
+    ///   resolutions, so the owner is read from the typed resume instead;
+    /// - **a mana ability's activation** (CR 605.3b), with priority or while
+    ///   paying a cost;
+    /// - **a triggered mana ability** (CR 605.4a), which "resolves immediately
+    ///   after the mana ability that triggered it, without waiting for
+    ///   priority".
+    ///
+    /// Prompts owned by a resolution are deliberately not counted, so the
+    /// #962 safety net still ends a game stuck waiting on a player who has
+    /// already lost. Wider than [`WaitingFor::has_pending_cast`], the display
+    /// and `CancelCast` predicate.
+    pub fn withholds_priority(&self) -> bool {
+        self.pending_cast.is_some()
+            || self.waiting_for.has_pending_cast()
+            || self
+                .pending_cost_move_resume
+                .as_ref()
+                .is_some_and(PendingCostMoveResume::withholds_priority)
+            || self
+                .pending_deferred_life_cost_resume
+                .as_ref()
+                .is_some_and(DeferredLifeCostResume::withholds_priority)
+            // Both variants carry the cast being paid for.
+            || self.pending_discard_for_cost.is_some()
+            || self.waiting_for.is_mana_ability_continuation()
+            || self.pending_triggered_mana_resume.is_some()
+    }
+
     /// Returns the active continuation only when its typed frame is the stack
     /// top. A buried continuation is an invalid nesting dependency, not a
     /// fallback lookup opportunity.
@@ -38553,7 +38841,8 @@ mod tests {
         // A PayCost with a ManaAbility resume carries PendingManaAbility, not
         // PendingCast. A mana ability activated inside a spell cast still routes
         // the cast through the outer ManaPayment state, so excluding this
-        // variant here does not lose mid-cast tracking.
+        // variant here does not lose mid-cast tracking. (The CR 704.3 gate reads
+        // `GameState::withholds_priority`, which does count it.)
         let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
             kind: PayCostKind::TapCreatures {
@@ -38587,6 +38876,129 @@ mod tests {
         };
         assert!(!tap_mana.has_pending_cast());
         assert!(tap_mana.pending_cast_ref().is_none());
+    }
+
+    /// CR 605.3b + CR 704.3: a mana ability's own prompts are part of its
+    /// activation, so no state-based action check runs there, even though they
+    /// aren't cast states for display or `CancelCast`.
+    #[test]
+    fn mana_ability_continuations_count_as_activating() {
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: ObjectId(1),
+            ability_index: Some(0),
+            rules_execution_node: None,
+            ability_snapshot: None,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            cost_move_resume: None,
+            chosen_tappers: None,
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(!state.withholds_priority());
+
+        state.waiting_for = WaitingFor::ChooseManaColor {
+            player: PlayerId(0),
+            choice: ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Black, ManaType::Green],
+            },
+            context: ManaChoiceContext::ManaAbility(Box::new(pending.clone())),
+        };
+        assert!(!state.waiting_for.has_pending_cast());
+        assert!(state.waiting_for.is_mana_ability_continuation());
+        assert!(state.withholds_priority());
+
+        state.waiting_for = WaitingFor::PayManaAbilityMana {
+            player: PlayerId(0),
+            options: vec![vec![ManaType::Black]],
+            pending_mana_ability: Box::new(pending),
+        };
+        assert!(state.withholds_priority());
+
+        // CR 702.132a: Assist parks the cast in the external carrier while the
+        // caster picks a helper; the cast is still in progress.
+        state.waiting_for = WaitingFor::AssistChoosePlayer {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1)],
+            max_generic: 1,
+            convoke_mode: None,
+        };
+        assert!(!state.waiting_for.has_pending_cast());
+        assert!(!state.withholds_priority());
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            ObjectId(2),
+            CardId(2),
+            ability,
+            ManaCost::zero(),
+        )));
+        assert!(state.withholds_priority());
+    }
+
+    /// CR 608.2 + CR 616.1: a replacement prompt left over from a resolution's
+    /// own life payment keeps the resolution's #962 safety net; the same prompt
+    /// during a cast's payment does not.
+    #[test]
+    fn cost_owner_decides_whether_priority_is_withheld() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 3,
+            resume_at_resolution_depth: 0,
+        });
+        assert!(!state.withholds_priority());
+
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::Cast {
+            player: PlayerId(0),
+            pending: None,
+            remaining_life_payments: Vec::new(),
+            resume_at_resolution_depth: 0,
+        });
+        assert!(state.withholds_priority());
+
+        // CR 601.2h + CR 616.1: a cost discard paused on a replacement carries
+        // its cast inside the resume, not in `pending_cast`.
+        state.pending_deferred_life_cost_resume = None;
+        assert!(!state.withholds_priority());
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
+            player: PlayerId(0),
+            pending: PendingCast::new(ObjectId(2), CardId(2), ability, ManaCost::zero()),
+            chosen: vec![ObjectId(3)],
+            paused_at_index: 0,
+        }));
+        assert!(state.withholds_priority());
     }
 
     #[test]

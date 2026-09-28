@@ -18,15 +18,16 @@ state machine — MUST be implemented through the
 is not satisfied by reading the skill and editing by hand.
 
 The skill orchestrates the full pipeline — plan → review-plan → implement →
-review-impl → commit — each step in a fresh agent context. The review loops are
-unbounded; "two rounds and ship" is not acceptable. This is how the repo keeps
+review-engine-impl → commit — each step in a fresh agent context. A review loop
+closes after two consecutive rounds without behavior findings; the skill's run
+limits bound the rest by finding class and your budget. This is how the repo keeps
 ad-hoc edits from shipping plausible-but-wrong ASTs, special-cased logic that
 breaks the next card, and unverified CR annotations.
 
-**A final [`/review-impl`](.claude/skills/review-impl/SKILL.md) pass is
+**A final [`/review-engine-impl`](.claude/skills/review-engine-impl/SKILL.md) pass is
 mandatory before any PR opens** — regardless of how the diff was produced (full
 pipeline or a narrow inline edit). The last action before pushing is a
-`/review-impl` review whose findings are addressed *with code*, not merely
+`/review-engine-impl` review whose findings are addressed *with code*, not merely
 acknowledged. Two checks lead that review and are non-negotiable: (1) the change
 sits at the architecturally correct seam, and (2) the change at that seam is the
 most idiomatic one the codebase allows. A PR that opens without a

@@ -384,7 +384,7 @@ function clusterImplementPrompt(mechanic, cards, plan, heterogeneous) {
 
 function reviewImplPrompt(label) {
   return (
-    `Use the \`review-impl\` skill against the current uncommitted working-tree ` +
+    `Use the \`review-engine-impl\` skill against the current uncommitted working-tree ` +
     `diff for ${label}. Set clean=true only if there are no defects, gaps, or ` +
     `missing cases. CRITICAL (engine-implementer feedback_review_impl_verify_bug_fixed): ` +
     `you MUST confirm the targeted behavior is ACTUALLY fixed via a discriminating runtime ` +
@@ -396,7 +396,7 @@ function reviewImplPrompt(label) {
 
 function fixImplPrompt(label, findings) {
   return (
-    `Address every one of these review-impl findings for ${label} with code ` +
+    `Address every one of these review-engine-impl findings for ${label} with code ` +
     `changes in the working tree. Do not commit.\n\nFINDINGS:\n` +
     findings.map((f) => `- ${f}`).join('\n')
   )
@@ -494,10 +494,10 @@ async function implementMechanicCluster(mechanic, cards, heterogeneous) {
   // This legacy workflow intentionally uses a general implementation agent.
   const impl = await agent(clusterImplementPrompt(mechanic, cards, plan, heterogeneous), { label: `implement:${mechanic}`, phase: 'Implement', schema: IMPL_SCHEMA })
 
-  // Step 5: /review-impl, looped until clean; fixes use a fresh general implementation agent.
+  // Step 5: /review-engine-impl, looped until clean; fixes use a fresh general implementation agent.
   let implReviewClean = false
   for (let r = 1; r <= MAX_IMPL_REVIEW_ROUNDS && !implReviewClean; r++) {
-    const review = await agent(reviewImplPrompt(label), { label: `review-impl:${mechanic}#${r}`, phase: 'Implement', schema: REVIEW_SCHEMA })
+    const review = await agent(reviewImplPrompt(label), { label: `review-engine-impl:${mechanic}#${r}`, phase: 'Implement', schema: REVIEW_SCHEMA })
     if (review.clean) { implReviewClean = true; break }
     await agent(fixImplPrompt(label, review.findings), { label: `fix-impl:${mechanic}#${r}`, phase: 'Implement' })
   }

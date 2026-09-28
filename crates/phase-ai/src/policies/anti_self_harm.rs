@@ -1875,7 +1875,7 @@ mod tests {
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
-    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::player::PlayerId;
     use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::StaticMode;
@@ -8062,6 +8062,35 @@ mod tests {
         engine::game::apply_as_current(&mut receipt_state, receipt_candidate.action)
             .expect("the generated Defiler decision must remain reducer-legal at lethal life");
         assert_eq!(receipt_state.players[0].life, 0);
+        // CR 704.3 + CR 601.2h: no one gets priority mid-cast, so the lethal
+        // Defiler payment leaves the cast in progress; the spell is cast, then
+        // the game ends at the next priority check.
+        assert!(
+            matches!(receipt_state.waiting_for, WaitingFor::ManaPayment { .. }),
+            "a lethal Defiler payment must not end the game mid-cast, got {:?}",
+            receipt_state.waiting_for
+        );
+        let spell = receipt_state
+            .pending_cast
+            .as_ref()
+            .expect("the cast is still pending")
+            .object_id;
+        receipt_state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(90_099),
+            false,
+            Vec::new(),
+        ));
+        let result = engine::game::apply_as_current(&mut receipt_state, GameAction::PassPriority)
+            .expect("the remaining {G} is payable from the pool");
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                engine::types::events::GameEvent::SpellCast { object_id, .. } if *object_id == spell
+            )),
+            "the spell must become cast before the game ends: {:?}",
+            result.events
+        );
         assert!(
             matches!(
                 receipt_state.waiting_for,
@@ -8069,7 +8098,7 @@ mod tests {
                     winner: Some(PlayerId(1))
                 }
             ),
-            "public action reconciliation must end the game after a lethal Defiler payment, got {:?}",
+            "the game must end at the priority check after the cast, got {:?}",
             receipt_state.waiting_for
         );
     }
