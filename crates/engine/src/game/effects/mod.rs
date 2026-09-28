@@ -818,12 +818,9 @@ pub(crate) fn settle_forwarded_zone_result(
     if marker.group != Some(group.logical_group_id) {
         return;
     }
-    let Some(selected) = marker.selected else {
-        return;
-    };
     let result = forwarded_zone_result_from_events(
         state,
-        Some(&selected),
+        marker.selected.as_deref(),
         group
             .all_origin_occurrences
             .iter()
@@ -15528,7 +15525,7 @@ fn resolve_chain_body(
             // Counter is not prevented (its controller cannot pay). This is the
             // inverse of the `{0}` "players can always pay 0" branch below, and
             // the two must stay distinct: `ManaCost::NoCost != ManaCost::zero()`.
-            if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::NoCost) {
+            if unless_cost_is_unpayable(&resolved_cost) {
                 // Unpayable: fall through to execute the effect unconditionally.
             } else if matches!(ability.effect, Effect::Counter { .. })
                 && matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
@@ -17457,16 +17454,21 @@ fn resolve_chain_body(
                 let result =
                     forwarded_zone_result_from_events(state, None, events[events_before..].iter());
                 if result.object_incarnations.is_empty() {
+                    let group = state
+                        .active_change_zone_frame()
+                        .and_then(|frame| frame.pending.as_ref())
+                        .map(|pending| pending.logical_zone_change_group.logical_group_id);
+                    // A grouped move settles from every arrival in its logical group.
+                    let selected = group
+                        .is_none()
+                        .then(|| state.pending_zone_change_delivery_from_replacement())
+                        .flatten()
+                        .map(|delivery| vec![delivery.member]);
                     sub_clone.context.pending_forwarded_zone_result =
                         Some(crate::types::ability::PendingForwardedZoneResult {
                             producer: ability.source_id,
-                            selected: state
-                                .pending_zone_change_delivery_from_replacement()
-                                .map(|delivery| vec![delivery.member]),
-                            group: state
-                                .active_change_zone_frame()
-                                .and_then(|frame| frame.pending.as_ref())
-                                .map(|pending| pending.logical_zone_change_group.logical_group_id),
+                            selected,
+                            group,
                         });
                 } else {
                     bind_moved_objects_to_child(
@@ -18047,6 +18049,18 @@ fn resolved_unless_cost(
     // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
     // it (kept distinct from a payable `{0}`).
     crate::game::keywords::resolve_self_mana_in_ability_cost(state, ability.source_id, &expanded)
+}
+
+/// CR 118.6: a cost that requires paying a nonexistent mana cost can't be paid.
+fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Mana { cost } => *cost == ManaCost::NoCost,
+        AbilityCost::Composite { costs } => costs.iter().any(unless_cost_is_unpayable),
+        AbilityCost::OneOf { costs } => {
+            !costs.is_empty() && costs.iter().all(unless_cost_is_unpayable)
+        }
+        _ => false,
+    }
 }
 
 /// CR 608.2b: a group constraint ("that share a color") that the targets fail,
@@ -26059,6 +26073,26 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn unless_cost_with_nested_no_cost_is_unpayable() {
+        let no_cost = AbilityCost::Mana {
+            cost: ManaCost::NoCost,
+        };
+        let payable = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+        assert!(unless_cost_is_unpayable(&AbilityCost::Composite {
+            costs: vec![payable.clone(), no_cost.clone()],
+        }));
+        assert!(!unless_cost_is_unpayable(&AbilityCost::OneOf {
+            costs: vec![payable.clone(), no_cost.clone()],
+        }));
+        assert!(unless_cost_is_unpayable(&AbilityCost::OneOf {
+            costs: vec![no_cost],
+        }));
+        assert!(!unless_cost_is_unpayable(&payable));
     }
 
     #[test]

@@ -15932,12 +15932,18 @@ fn trigger_unless_you_pay_its_mana_cost_is_self_mana_cost() {
 
 #[test]
 fn unless_pay_its_mana_cost_reduced_by_generic() {
-    assert_eq!(
-        parse_unless_alt_cost("you pay its mana cost reduced by {2}."),
-        Some(AbilityCost::Mana {
-            cost: crate::types::mana::ManaCost::SelfManaCostReduced { reduction: 2 },
-        })
-    );
+    for phrase in [
+        "you pay its mana cost reduced by {2}.",
+        "you pay ~'s mana cost reduced by {2}",
+    ] {
+        assert_eq!(
+            parse_unless_alt_cost(phrase),
+            Some(AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::SelfManaCostReduced { reduction: 2 },
+            }),
+            "{phrase}"
+        );
+    }
     assert_eq!(
         parse_unless_alt_cost("you pay ~'s mana cost"),
         Some(AbilityCost::Mana {
@@ -15948,7 +15954,7 @@ fn unless_pay_its_mana_cost_reduced_by_generic() {
         "you pay its mana cost reduced by {U}",
         "you pay its mana cost reduced by {2}{U}",
         "you pay its mana cost reduced by {2} more",
-        "you pay ~'s mana cost reduced by {2}",
+        "you pay their mana cost reduced by {2}",
     ] {
         assert_eq!(parse_unless_alt_cost(phrase), None, "{phrase}");
     }
