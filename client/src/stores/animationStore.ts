@@ -37,6 +37,13 @@ interface AnimationStoreState {
    * Step-scoped: every step change and queue clear resets it.
    */
   veiledObjectIds: ReadonlySet<number>;
+  /**
+   * Objects a card flight presents itself from launch to landing, so the
+   * surfaces that render them hide until the flight releases them. Unlike
+   * `veiledObjectIds`, a step change does not reset it, because a flight may
+   * outlive its step. Only `clearQueue` resets it.
+   */
+  flightVeiledObjectIds: ReadonlySet<number>;
 }
 
 interface AnimationStoreActions {
@@ -50,6 +57,10 @@ interface AnimationStoreActions {
   recordDisplayedLife: (playerId: number, life: number, engineCommitEpoch: number) => void;
   /** Hide these objects' board cards for the rest of the active step. */
   veilObjects: (objectIds: readonly number[]) => void;
+  /** Hide this object's card surfaces until its flight releases it. */
+  veilFlight: (objectId: number) => void;
+  /** Release a flight veil. */
+  unveilFlight: (objectId: number) => void;
   clearQueue: () => void;
 }
 
@@ -66,6 +77,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   animationNewState: null,
   displayedLife: null,
   veiledObjectIds: NO_VEILED_OBJECTS,
+  flightVeiledObjectIds: NO_VEILED_OBJECTS,
 
   enqueueSteps: (steps) => {
     if (steps.length === 0) return;
@@ -148,6 +160,18 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     set((state) => ({ veiledObjectIds: new Set([...state.veiledObjectIds, ...objectIds]) }));
   },
 
+  veilFlight: (objectId) => {
+    set((state) => ({ flightVeiledObjectIds: new Set([...state.flightVeiledObjectIds, objectId]) }));
+  },
+
+  unveilFlight: (objectId) => {
+    set((state) => {
+      const next = new Set(state.flightVeiledObjectIds);
+      next.delete(objectId);
+      return { flightVeiledObjectIds: next };
+    });
+  },
+
   clearQueue: () => set((state) => ({
     queue: [],
     activeStep: null,
@@ -156,5 +180,6 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
     animationNewState: null,
     displayedLife: null,
     veiledObjectIds: NO_VEILED_OBJECTS,
+    flightVeiledObjectIds: NO_VEILED_OBJECTS,
   })),
 }));

@@ -13,6 +13,7 @@ import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
@@ -296,8 +297,10 @@ export const PermanentCard = memo(function PermanentCard({
     (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
   );
   const counterDisplay = useCounterDisplay(objectId);
-  // An active animation (the meld forge) is presenting this card itself.
+  // An active animation (the meld forge) or a card flight is presenting this
+  // card itself.
   const isVeiledByAnimation = useAnimationStore((s) => s.veiledObjectIds.has(objectId));
+  const flightHidden = useFlightVeil(objectId);
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
@@ -789,13 +792,14 @@ export const PermanentCard = memo(function PermanentCard({
     <motion.div
       ref={cardRef}
       data-object-id={objectId}
+      data-permanent-card={objectId}
       data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
         zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : isHovered ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
-        visibility: isVeiledByAnimation ? "hidden" : undefined,
+        visibility: isVeiledByAnimation || flightHidden ? "hidden" : undefined,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:

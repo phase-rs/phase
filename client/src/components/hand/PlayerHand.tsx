@@ -37,6 +37,7 @@ import {
   HAND_REORDER_SELECTOR,
 } from "./handInsertionSlot.ts";
 import { useCastableZoneObjects } from "../../hooks/useCastableZoneObjects.ts";
+import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { ZONE_THEME, type ZoneTheme } from "../../viewmodel/zoneAffordance.ts";
 import { useCardOrganizer } from "../modal/cardChoice/useCardOrganizer.ts";
 import { CardOrganizerToolbar } from "../modal/cardChoice/CardOrganizerToolbar.tsx";
@@ -918,6 +919,7 @@ const HandCard = memo(function HandCard({
       s.mobileHandGesture?.phase === "drag"
       && s.mobileHandGesture.objectId === objectId,
   );
+  const flightHidden = useFlightVeil(objectId);
 
   // Slide-apart displacement: derive this card's signed x offset from the shared
   // insertion signal. useTransform updates imperatively when the MotionValues
@@ -985,7 +987,7 @@ const HandCard = memo(function HandCard({
       data-hand-rotation={rotation}
       data-object-id={objectId}
       layout
-      initial={{ opacity: 0, y: restingY + 10 }}
+      initial={flightHidden ? false : { opacity: 0, y: restingY + 10 }}
       animate={{
         opacity: 1,
         y: restingY + arcOffset,
@@ -1042,6 +1044,7 @@ const HandCard = memo(function HandCard({
         // handSize (not a fixed 20) so it still wins in a Commander-sized hand
         // whose plain indices can exceed 20.
         zIndex: isDragging ? 9999 : isSelected ? handSize + 20 : index,
+        visibility: flightHidden ? "hidden" : undefined,
       }}
       {...longPressHandlers}
     >
@@ -1146,6 +1149,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
     inspectObject(objectId, undefined, "hover", "cursor", "playerHand");
     setPreviewSticky(true);
   });
+  const flightHidden = useFlightVeil(objectId);
 
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
   const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
@@ -1167,7 +1171,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
       // reorder sweeps select `[data-hand-card]`.
       data-card-hover
       layout
-      initial={{ opacity: 0, y: restingY + 10 }}
+      initial={flightHidden ? false : { opacity: 0, y: restingY + 10 }}
       animate={{ opacity: 1, y: restingY + arcOffset, rotate: rotation }}
       exit={{ opacity: 0, scale: 0.8 }}
       whileHover={{ y: hoverY + arcOffset, scale: 1.08, zIndex: 30 }}
@@ -1205,7 +1209,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
       onMouseEnter={() => onMouseEnter(objectId)}
       onMouseLeave={onMouseLeave}
       className="relative cursor-grab active:cursor-grabbing leading-[0] select-none"
-      style={{ marginLeft, zIndex }}
+      style={{ marginLeft, zIndex, visibility: flightHidden ? "hidden" : undefined }}
       {...longPressHandlers}
     >
       <div

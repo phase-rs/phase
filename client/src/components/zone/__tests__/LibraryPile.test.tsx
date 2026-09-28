@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -6,6 +6,7 @@ import {
   type GameAction,
   type GameObject,
 } from "../../../adapter/types.ts";
+import { useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
@@ -336,5 +337,70 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     // generic "from top of library" phrasing.
     const button = screen.getByRole("button", { name: /play top of library from top of library/i });
     expect(button).not.toBeDisabled();
+  });
+});
+
+describe("LibraryPile flight veil", () => {
+  beforeEach(() => {
+    useAnimationStore.getState().clearQueue();
+  });
+
+  afterEach(() => {
+    cleanup();
+    useAnimationStore.getState().clearQueue();
+  });
+
+  it("shows a back in place of a visible top card that is in flight, keeping the count", () => {
+    setStore({ canPeek: true, actions: [] });
+    useAnimationStore.getState().veilFlight(42);
+
+    render(<LibraryPile playerId={0} />);
+
+    expect(screen.queryByRole("img", { name: "Sol Ring" })).toBeNull();
+    expect(screen.getByAltText("Card back")).toBeInTheDocument();
+    expect(screen.getByText("1")).toBeInTheDocument();
+  });
+
+  it("shows the visible top card again once the flight releases it", () => {
+    setStore({ canPeek: true, actions: [] });
+    useAnimationStore.getState().veilFlight(42);
+    render(<LibraryPile playerId={0} />);
+
+    act(() => useAnimationStore.getState().unveilFlight(42));
+
+    expect(screen.getByRole("img", { name: "Sol Ring" })).toBeInTheDocument();
+  });
+
+  it("keeps a hidden top card anonymous while it is in flight", () => {
+    setStore({ canPeek: false, actions: [] });
+    useAnimationStore.getState().veilFlight(42);
+
+    render(<LibraryPile playerId={0} />);
+
+    expect(screen.getByAltText("Card back")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /library \(1 card\)/i })).not.toHaveAttribute(
+      "data-grouped-ids",
+    );
+  });
+
+  it("ignores a flight veil on a card below the top", () => {
+    setStore({ canPeek: true, actions: [] });
+    useGameStore.setState((state) => ({
+      gameState: state.gameState
+        ? {
+            ...state.gameState,
+            objects: { ...state.gameState.objects, 43: makeObject(43, "Mox Pearl") },
+            players: state.gameState.players.map((player, index) =>
+              index === 0 ? { ...player, library: [42, 43] } : player,
+            ),
+          }
+        : state.gameState,
+    }));
+    useAnimationStore.getState().veilFlight(43);
+
+    render(<LibraryPile playerId={0} />);
+
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Sol Ring" })).toBeInTheDocument();
   });
 });

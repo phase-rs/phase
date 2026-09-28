@@ -7,6 +7,7 @@ import type { TFunction } from "i18next";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -73,6 +74,9 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
     (s) => s.gameState?.derived?.stack_revealed_cards?.[entry.id],
   );
   const inspectObject = useUiStore((s) => s.inspectObject);
+  // A spell's stack entry id is its object id, so a card flight veils the
+  // entry by that id.
+  const flightHidden = useFlightVeil(entry.id);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const priorityYields = useGameStore((s) => s.gameState?.priority_yields);
@@ -230,14 +234,14 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, x: 30, scale: 0.9 }}
+      initial={flightHidden ? false : { opacity: 0, x: 30, scale: 0.9 }}
       animate={{ opacity: 1, x: 0, scale: 1 }}
       exit={{ opacity: 0, x: 30, scale: 0.9 }}
       transition={{
         delay: index * 0.03 * pacingMultiplier,
         duration: pacingMultiplier === 0 ? 0 : undefined,
       }}
-      style={style}
+      style={flightHidden ? { ...style, visibility: "hidden" } : style}
       data-stack-entry={entry.id}
       data-object-id={entry.id}
       data-grouped-ids={groupedObjectIds && groupedObjectIds.length > 1 ? groupedObjectIds.join(" ") : undefined}

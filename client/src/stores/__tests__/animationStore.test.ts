@@ -57,6 +57,53 @@ describe("animationStore", () => {
     });
   });
 
+  describe("flight veil", () => {
+    it("survives every step advance, including the one that empties the queue", () => {
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()]);
+      useAnimationStore.getState().veilFlight(7);
+
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().flightVeiledObjectIds.has(7)).toBe(true);
+
+      useAnimationStore.getState().advanceStep();
+      expect(useAnimationStore.getState().activeStep).toBeNull();
+      expect(useAnimationStore.getState().flightVeiledObjectIds.has(7)).toBe(true);
+    });
+
+    it("keeps the flight veil while a step advance clears the step veil", () => {
+      useAnimationStore.getState().enqueueSteps([makeStep(), makeStep()]);
+      useAnimationStore.getState().veilObjects([8]);
+      useAnimationStore.getState().veilFlight(7);
+
+      useAnimationStore.getState().advanceStep();
+
+      const state = useAnimationStore.getState();
+      expect(state.veiledObjectIds.size).toBe(0);
+      expect(state.flightVeiledObjectIds.has(7)).toBe(true);
+    });
+
+    it("releases only the unveiled object", () => {
+      useAnimationStore.getState().veilFlight(7);
+      useAnimationStore.getState().veilFlight(9);
+      useAnimationStore.getState().unveilFlight(7);
+
+      expect([...useAnimationStore.getState().flightVeiledObjectIds]).toEqual([9]);
+    });
+
+    it("is cleared by clearQueue", () => {
+      useAnimationStore.getState().veilFlight(7);
+      useAnimationStore.getState().clearQueue();
+
+      expect(useAnimationStore.getState().flightVeiledObjectIds.size).toBe(0);
+    });
+
+    it("does not touch the step veil", () => {
+      useAnimationStore.getState().veilFlight(7);
+
+      expect(useAnimationStore.getState().veiledObjectIds.size).toBe(0);
+    });
+  });
+
   describe("advanceStep", () => {
     it("advances through steps in order", () => {
       const step1 = makeStep(100);
