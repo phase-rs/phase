@@ -791,12 +791,12 @@ fn coordinated_grant_on_opponents_turn(text: &str) -> (GameRunner, ObjectId) {
 #[test]
 fn coordinated_grant_with_an_unconsumed_gate_grants_nothing() {
     let (mut runner, instant) = coordinated_grant_on_opponents_turn(COORDINATED_AS_LONG_AS);
+    assert!(!offered_to(&runner, P0, instant), "no Zombie, no cast");
+    assert_cast_rejected(&mut runner, instant);
     assert!(
         runner.state().transient_continuous_effects.is_empty(),
         "no grant is installed for the gated sentence"
     );
-    assert!(!offered_to(&runner, P0, instant), "no Zombie, no cast");
-    assert_cast_rejected(&mut runner, instant);
 
     let (mut runner, instant) = coordinated_grant_on_opponents_turn(COORDINATED);
     assert_eq!(
