@@ -18,7 +18,9 @@ use crate::types::casting_costs::{
     CostReductionOutcome, ManaCarrier, ReductionProvenance, SettledTail,
 };
 use crate::types::events::{ActivatedAbilityKind, GameEvent};
-use crate::types::game_state::{AbilityActivationRecord, ActivationTargetFact, LKISnapshot};
+use crate::types::game_state::{
+    AbilityActivationRecord, ActivationTargetFact, LKISnapshot, TransientContinuousEffect,
+};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
     CastOfferKind, CastPaymentMode, CastingPermissionIndex, CastingVariant,
@@ -11437,6 +11439,29 @@ fn transient_modify_cost_present(state: &GameState) -> bool {
     })
 }
 
+/// CR 601.2f: label a transient grant's row in the reduction-order prompt. A
+/// live source object names itself; a source that changed zones falls back to
+/// the name snapshotted at construction (CR 400.7); a dungeon sentinel —
+/// which is neither an object nor a snapshot — falls back to the controller's
+/// active dungeon, the honest granularity available (the grant names no room,
+/// and the marker may since have moved on). Without the last leg a room grant
+/// renders a blank row next to every real reducer.
+fn transient_grant_display_name(state: &GameState, tce: &TransientContinuousEffect) -> String {
+    state
+        .objects
+        .get(&tce.source_id)
+        .map(|obj| obj.name.clone())
+        .or_else(|| (!tce.source_name.is_empty()).then(|| tce.source_name.clone()))
+        .or_else(|| {
+            state
+                .dungeon_progress
+                .get(&tce.controller)
+                .and_then(|progress| progress.current_dungeon)
+                .map(|dungeon| super::dungeon::get_definition(dungeon).name.to_string())
+        })
+        .unwrap_or_default()
+}
+
 fn collect_battlefield_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
@@ -11598,18 +11623,33 @@ fn collect_battlefield_cost_modifiers(
     }
 
     // CR 611.2 + CR 601.2f: duration-scoped continuous ModifyCost grants
-    // (Moonrise Towers' "spells you cast this turn cost {3} less"; Rowan/Will,
-    // Scion of ...'s "spells you cast this turn cost ... less"). Installed by
-    // a resolving ability as a GenericEffect grant and read here, off the
-    // TCE, through the SAME gates as battlefield statics — there is no
-    // parallel reduction pathway. Mirrors the activation-side transient
-    // collector; the spell path simply never had one, so these grants
-    // silently did nothing. No zone gate: a transient effect functions until
-    // its duration expires regardless of its source's zone (CR 611.2c), and
-    // room-ability grants have no battlefield source at all. TCE presence in
-    // the list is liveness: expired durations are pruned at cleanup (CR 514.2).
+    // that are genuinely player-wide (Moonrise Towers' "spells you cast this
+    // turn cost {3} less", installed as a SpecificPlayer TCE layers never
+    // grafts onto any object). Installed by a resolving ability as a
+    // GenericEffect grant and read here, off the TCE, through the SAME gates
+    // as battlefield statics — there is no parallel reduction pathway.
+    // Mirrors the activation-side transient collector; the spell path simply
+    // never had one, so these grants silently did nothing. Object-bound
+    // grants stay on the functioning-static path above and are never read
+    // here (CR 611.2c).
     if has_transient {
         for tce in &state.transient_continuous_effects {
+            // CR 611.2a: a lapsed effect stays stored until a sweep, so list
+            // presence is not liveness — the shared authority decides whether
+            // this grant still applies before anything else reads it.
+            if !super::layers::transient_effect_is_live(state, tce) {
+                continue;
+            }
+            // CR 611.2c + CR 604.1: only player-wide grants are read off the
+            // TCE. An object-bound grant is grafted onto its recipient by the
+            // layer-6 apply, so `game_functioning_statics` already yields it
+            // and the static pass owns it — reading it here too double-counts
+            // (Will X=2 reducing {3} to {0}), and reading it after its
+            // recipient stops functioning would re-scope an object-bound
+            // definition into a board-wide discount on unrelated spells.
+            if !matches!(tce.affected, TargetFilter::SpecificPlayer { .. }) {
+                continue;
+            }
             let grants =
                 tce.modifications
                     .iter()
@@ -11624,31 +11664,6 @@ fn collect_battlefield_cost_modifiers(
                         _ => None,
                     });
             for (ordinal, definition) in grants {
-                // CR 611.2c + CR 604.1: dedupe against the static pass above.
-                // An object-bound grant (Rowan/Will resolving while its source
-                // is on the battlefield) is grafted onto the recipient by the
-                // layer-6 apply, so `game_functioning_statics` already yields
-                // it and the static pass owns it — applying it here too
-                // double-counts (Will X=2 reducing {3} to {0}). Skip iff the
-                // affected object sits on a functioning zone AND currently
-                // yields a structurally-equal definition (the same equality
-                // the graft uses for idempotency). Player-bound grants
-                // (Moonrise Towers) are never grafted and always fall through;
-                // so does an object-bound grant whose recipient left the
-                // battlefield (CR 611.2c: the duration-scoped effect outlives
-                // its source — strictly better than the pre-pass behavior,
-                // which dropped it).
-                if let TargetFilter::SpecificObject { id } = &tce.affected {
-                    let grafted_live = (state.battlefield.contains(id)
-                        || state.command_zone.contains(id))
-                        && state.objects.get(id).is_some_and(|obj| {
-                            super::functioning_abilities::object_functioning_statics(obj)
-                                .any(|sd| sd == definition.as_ref())
-                        });
-                    if grafted_live {
-                        continue;
-                    }
-                }
                 let Some(modifier) = definition.board_wide_cost_modifier() else {
                     continue;
                 };
@@ -11737,11 +11752,6 @@ fn collect_battlefield_cost_modifiers(
                 } else {
                     1
                 };
-                let display_name = state
-                    .objects
-                    .get(&tce.source_id)
-                    .map(|obj| obj.name.clone())
-                    .unwrap_or_default();
                 collected.push(CostModification {
                     is_raise,
                     amount: base_amount,
@@ -11751,7 +11761,7 @@ fn collect_battlefield_cost_modifiers(
                         effect: tce.id,
                         ordinal: ordinal.min(u8::MAX as usize) as u8,
                     },
-                    display_name,
+                    display_name: transient_grant_display_name(state, tce),
                 });
             }
         }

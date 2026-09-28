@@ -962,6 +962,29 @@ describe("multiplayerStore", () => {
     ]);
   });
 
+  it("rehydrates a legacy custom config missing the experimental-dungeons flag", () => {
+    seedSavedCustomFormat("saved-1");
+    // Persisted before the axis existed: every field but the new flag.
+    const { allow_experimental_dungeons: _dropped, ...legacyConfig } =
+      customFormatConfigFixture();
+
+    const normalized = normalizeRememberedHostConfig(
+      persistedCustomHostConfig({ formatConfig: legacyConfig }),
+    );
+
+    // The setup survives with the engine's default filled in — not discarded.
+    expect(normalized).not.toBeNull();
+    expect(normalized?.format).toBe("Custom:0");
+    expect(normalized?.formatConfig).toEqual(customFormatConfigFixture());
+    expect(normalized?.formatConfig.allow_experimental_dungeons).toBe(false);
+    // ...and the format-independent tail ran, so nothing else was lost either.
+    expect(normalized?.playerCount).toBe(3);
+    expect(normalized?.isPublic).toBe(false);
+    expect(normalized?.aiSeats).toEqual([
+      { seatIndex: 1, difficulty: "Hard", deckName: null },
+    ]);
+  });
+
   it("clamps a remembered custom-format player count to the format's own seats", () => {
     seedSavedCustomFormat("saved-1");
     // The shared tail must clamp against the CUSTOM config's max_players (4),

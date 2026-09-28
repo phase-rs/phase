@@ -2095,9 +2095,10 @@ mod tests {
     /// grows with it, by the same rule. Version 11 is the one true non-surface
     /// step: no field, no variant, moved ahead of new `GameFormat` variants;
     /// see that constant's own `/// 11` entry. Version 12 extends the chain by
-    /// the same rule.
+    /// the same rule, as does version 13 (`FormatConfig` gains the optional
+    /// `allow_experimental_dungeons` flag).
     #[test]
-    fn the_tournament_chain_spans_lobby_versions_four_through_twelve() {
+    fn the_tournament_chain_spans_lobby_versions_four_through_thirteen() {
         const PRE_TOURNAMENT_LOBBY_VERSION: u32 = 3;
         const TOURNAMENT_SET_LOBBY_VERSION: u32 = PRE_TOURNAMENT_LOBBY_VERSION + 1;
         const CORRELATED_SETTLEMENT_LOBBY_VERSION: u32 = TOURNAMENT_SET_LOBBY_VERSION + 1;
@@ -2113,10 +2114,10 @@ mod tests {
         const PREEMPTIVE_FORMAT_LOBBY_VERSION: u32 = REQUESTED_ROOM_CODE_LOBBY_VERSION + 1;
         // Adds an optional field (`draft_metadata`) to a broker → client reply.
         const JOIN_TARGET_DRAFT_METADATA_LOBBY_VERSION: u32 = PREEMPTIVE_FORMAT_LOBBY_VERSION + 1;
-        assert_eq!(
-            LOBBY_PROTOCOL_VERSION,
-            JOIN_TARGET_DRAFT_METADATA_LOBBY_VERSION
-        );
+        // Adds an optional field (`allow_experimental_dungeons`) to `FormatConfig`.
+        const EXPERIMENTAL_DUNGEONS_LOBBY_VERSION: u32 =
+            JOIN_TARGET_DRAFT_METADATA_LOBBY_VERSION + 1;
+        assert_eq!(LOBBY_PROTOCOL_VERSION, EXPERIMENTAL_DUNGEONS_LOBBY_VERSION);
     }
 
     /// The guard for [`is_known_lobby_tag`], which is a string `matches!` and

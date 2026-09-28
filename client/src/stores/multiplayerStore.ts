@@ -2350,6 +2350,18 @@ export function normalizeRememberedHostConfig(
  *
  * Any failure degrades to `null`, exactly like every other unresolvable case.
  */
+/**
+ * Fill a missing (or corrupt) `allow_experimental_dungeons` on a persisted
+ * custom-format blob with the engine's default (`false`) before shape
+ * validation. Returns the input untouched when there is nothing to fill, so
+ * current saves pass through by reference.
+ */
+function rehydrateExperimentalDungeons(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  if (typeof value.allow_experimental_dungeons === "boolean") return value;
+  return { ...value, allow_experimental_dungeons: false };
+}
+
 function normalizeCustomHostConfig(
   persisted: Record<string, unknown>,
   format: CustomGameFormat,
@@ -2358,7 +2370,12 @@ function normalizeCustomHostConfig(
   if (typeof savedCustomFormatId !== "string") return null;
   if (!findSavedCustomFormat(savedCustomFormatId)) return null;
 
-  const storedFormatConfig = persisted.formatConfig;
+  // Configs persisted before the experimental-dungeons axis existed lack the
+  // flag; the engine defaults it to false, so rehydrate it here — before the
+  // shape guard — rather than discarding the whole remembered setup.
+  // Non-boolean values reset to the default too: a capability flag must never
+  // rehydrate as truthy from corrupt data.
+  const storedFormatConfig = rehydrateExperimentalDungeons(persisted.formatConfig);
   if (!isFormatConfigShape(storedFormatConfig)) return null;
   // The blob must describe the format it is filed under. `isFormatConfigShape`
   // already ties `format` to `custom_rules.id`; this ties both to the key the

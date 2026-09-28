@@ -1002,6 +1002,7 @@ fn room_13_balthazars_lab_returns_two_creatures_from_graveyard() {
 fn room_14_circus_copies_your_commander_without_legendary() {
     use engine::types::ability::TargetRef;
     use engine::types::card_type::Supertype;
+    use engine::types::keywords::Keyword;
 
     let mut scenario = experimental_scenario();
     let commander = scenario
@@ -1013,8 +1014,13 @@ fn room_14_circus_copies_your_commander_without_legendary() {
     let object = runner.state_mut().objects.get_mut(&commander).unwrap();
     object.card_types.supertypes.push(Supertype::Legendary);
     object.base_card_types = object.card_types.clone();
+    // Shroud rejects every targeting reading: a commander that cannot be
+    // targeted at all is still a legal resolution-time choice (CR 115.10a).
+    object.keywords.push(Keyword::Shroud);
+    object.base_keywords.push(Keyword::Shroud);
 
     enter_room(&mut runner, 14);
+    let mut saw_choice = false;
     for _ in 0..64 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
@@ -1024,23 +1030,27 @@ fn room_14_circus_copies_your_commander_without_legendary() {
             WaitingFor::OrderTriggers { .. } => {
                 engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
             }
-            WaitingFor::TriggerTargetSelection { selection, .. } => {
-                // Only the commander is a legal copy source — the bystander
-                // must be excluded by the IsCommander narrowing.
+            WaitingFor::ChooseObjectsSelection { eligible, .. } => {
+                // No TriggerTargetSelection ever appears (it would panic
+                // below): the choice happens during resolution, untargeted.
+                // Only the commander is eligible — the bystander is excluded
+                // by the IsCommander narrowing, and shroud excludes nothing.
                 assert_eq!(
-                    selection.current_legal_targets,
+                    eligible,
                     vec![TargetRef::Object(commander)],
-                    "only your commander can be copied"
+                    "only your commander can be chosen"
                 );
+                saw_choice = true;
                 runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(commander)),
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(commander)],
                     })
-                    .expect("copy the commander");
+                    .expect("choose the commander");
             }
             other => panic!("unexpected prompt: {other:?}"),
         }
     }
+    assert!(saw_choice, "the room must ask which commander to copy");
 
     let tokens = p0_tokens(&runner);
     assert_eq!(tokens.len(), 1, "one commander token is created");

@@ -463,14 +463,15 @@ use crate::parser::oracle_effect::parse_effect_chain;
 use crate::types::ability::{
     AbilityCondition, AbilityKind, AggregateFunction, CardPlayMode, CardTypeSetSource,
     CastFromZoneDriver, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, ObjectProperty, PlayerFilter, PlayerScope, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, StaticDefinition,
-    TargetFilter, TrackedAnaphorSource, TypeFilter, TypedFilter,
+    FilterProp, ObjectProperty, ObjectSelectionCardinality, PlayerFilter, PlayerScope,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TrackedAnaphorSource, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::game_state::TargetSelectionConstraint;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::statics::StaticMode;
@@ -1047,7 +1048,7 @@ pub fn room_effects(
                 "Instant and sorcery spells you cast this turn cost {3} less to cast.";
             let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
             (
-                patch_moonrise_spell_filter(build_resolved_from_def(&def, source_id, controller)),
+                patch_moonrise_cost_grant(build_resolved_from_def(&def, source_id, controller)),
                 vec![],
             )
         }
@@ -1079,7 +1080,7 @@ pub fn room_effects(
                 "Create a token that's a copy of one of your commanders, except it's not legendary.";
             let def = parse_effect_chain(ORACLE, AbilityKind::Spell);
             (
-                patch_circus_commander_target(build_resolved_from_def(&def, source_id, controller)),
+                patch_circus_commander_choice(build_resolved_from_def(&def, source_id, controller)),
                 vec![],
             )
         }
@@ -1342,22 +1343,47 @@ fn retarget_hexproof_to_parent(ability: &mut ResolvedAbility) {
     }
 }
 
-/// CR 309.4c: Baldur's Gate Wilderness room 14 (Circus of the Last Days).
-/// The parser lowers "one of your commanders" to an unconstrained `Any`
-/// target, so the grant would copy any permanent. Narrow it to a commander
-/// the controller owns on the battlefield — no zone is named, so the copy
-/// source is a permanent (a command-zone card is not a legal copy source
-/// for an effect that doesn't name the zone).
-fn patch_circus_commander_target(mut root: ResolvedAbility) -> ResolvedAbility {
-    if let Effect::CopyTokenOf { target, .. } = &mut root.effect {
-        *target = TargetFilter::Typed(TypedFilter::permanent().properties(vec![
-            FilterProp::IsCommander,
-            FilterProp::Owned {
-                controller: ControllerRef::You,
-            },
-        ]));
+/// CR 309.4c + CR 115.10 + CR 115.10a: Baldur's Gate Wilderness room 14
+/// (Circus of the Last Days). "One of your commanders" never uses the word
+/// "target", so the commander is chosen — untargeted — during resolution, not
+/// declared when the trigger goes on the stack. The parser lowers the phrase
+/// to an unconstrained `Any` target; rebuild the room as a choice chain: a
+/// `ChooseObjectsIntoTrackedSet` root (exactly one commander permanent the
+/// controller owns — the same eligibility the targeted form narrowed to, now
+/// as a choice filter, so hexproof/shroud can't exclude it) with the parsed
+/// `CopyTokenOf` body as its continuation, re-pointed at the chain's tracked
+/// set. Neither half declares a stack target (`TrackedSet` is a context ref),
+/// and `source_filter` stays `None`: it resolves as EVERY matching object,
+/// not one chosen source.
+fn patch_circus_commander_choice(mut root: ResolvedAbility) -> ResolvedAbility {
+    if !matches!(root.effect, Effect::CopyTokenOf { .. }) {
+        return root;
     }
-    root
+    if let Effect::CopyTokenOf { target, .. } = &mut root.effect {
+        *target = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+    }
+    let mut choice = ResolvedAbility::new(
+        Effect::ChooseObjectsIntoTrackedSet {
+            chooser: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::IsCommander,
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+            ])),
+            min: 1,
+            max: Some(1),
+            cardinality: Some(ObjectSelectionCardinality::Exactly { count: 1 }),
+            eligibility: None,
+        },
+        Vec::new(),
+        root.source_id,
+        root.controller,
+    );
+    choice.sub_ability = Some(Box::new(root));
+    choice
 }
 
 /// CR 309.4c: Baldur's Gate Wilderness room 11 (Moonrise Towers).
@@ -1368,12 +1394,32 @@ fn patch_circus_commander_target(mut root: ResolvedAbility) -> ResolvedAbility {
 /// cast") is enforced separately from the granted static's affected filter,
 /// and resolving "you" against the sentinel source would only add a
 /// stale-source dependency.
-fn patch_moonrise_spell_filter(mut root: ResolvedAbility) -> ResolvedAbility {
+///
+/// The same parse binds the grant `SelfRef` — both the `GenericEffect`
+/// target descriptor and the static's `affected` — which installation
+/// resolves to the room's sentinel, an object that is never on the
+/// battlefield, so the layer-6 graft can never land and the functioning-static
+/// path stays blind. Rebind a sentinel-sourced grant to the controller: the
+/// granted effect is player-scoped (CR 611.2), and only the player arm
+/// installs a TCE the cost collector is allowed to read. The declared target
+/// goes back to `None` (the room trigger targets nothing); the application
+/// filter falls through to the controller binding. Printed-card grants keep
+/// their `SelfRef` (their source is a real permanent); this rewrite is
+/// room-local.
+fn patch_moonrise_cost_grant(mut root: ResolvedAbility) -> ResolvedAbility {
     if let Effect::GenericEffect {
-        static_abilities, ..
+        target,
+        static_abilities,
+        ..
     } = &mut root.effect
     {
+        if *target == Some(TargetFilter::SelfRef) {
+            *target = None;
+        }
         for static_ability in static_abilities.iter_mut() {
+            if static_ability.affected == Some(TargetFilter::SelfRef) {
+                static_ability.affected = Some(TargetFilter::Controller);
+            }
             for modification in static_ability.modifications.iter_mut() {
                 if let ContinuousModification::GrantStaticAbility { definition } = modification {
                     if let StaticMode::ModifyCost { spell_filter, .. } = &mut definition.mode {
@@ -1898,6 +1944,45 @@ mod tests {
         DungeonId::BaldursGateWilderness,
     ];
 
+    /// CR 611.2: Moonrise Towers' cost grant binds the controller, not the
+    /// room sentinel — installation must take the player arm (a `SelfRef`
+    /// grant would resolve to a sentinel no graft can ever land on, leaving
+    /// the reduction readable by neither cost path).
+    #[test]
+    fn wilderness_moonrise_grant_is_player_scoped() {
+        let (ability, _) = room_effects(
+            DungeonId::BaldursGateWilderness,
+            11,
+            ObjectId(1),
+            PlayerId(0),
+        );
+        match &ability.effect {
+            Effect::GenericEffect {
+                target,
+                static_abilities,
+                ..
+            } => {
+                assert_eq!(
+                    *target, None,
+                    "the room trigger declares no target, got {target:?}"
+                );
+                assert!(
+                    !static_abilities.is_empty(),
+                    "Moonrise Towers must grant a cost reduction"
+                );
+                for static_ability in static_abilities {
+                    assert_eq!(
+                        static_ability.affected,
+                        Some(TargetFilter::Controller),
+                        "room cost grants bind the controller, got {:?}",
+                        static_ability.affected
+                    );
+                }
+            }
+            other => panic!("expected a GenericEffect grant, got {other:?}"),
+        }
+    }
+
     /// CR 309.4c: Every room has a room ability, so every room must carry its
     /// printed effect — the prompts, stack entry, and game log all render it.
     #[test]
@@ -2365,8 +2450,9 @@ mod tests {
 
     /// Oracle fidelity: Baldur's Gate Wilderness "Circus of the Last Days"
     /// is "Create a token that's a copy of one of your commanders, except
-    /// it's not legendary" — the copy source is narrowed to your
-    /// battlefield commanders and loses Legendary.
+    /// it's not legendary" — no "target", so the room is a choice chain: pick
+    /// exactly one of your battlefield commanders at resolution (CR 115.10a),
+    /// then copy the chosen commander without Legendary.
     #[test]
     fn wilderness_circus_copies_your_commander_nonlegendary() {
         let (ability, _) = room_effects(
@@ -2376,21 +2462,49 @@ mod tests {
             PlayerId(0),
         );
         match &ability.effect {
+            Effect::ChooseObjectsIntoTrackedSet {
+                chooser,
+                filter,
+                cardinality,
+                ..
+            } => {
+                assert_eq!(
+                    *chooser,
+                    TargetFilter::Controller,
+                    "you choose your commander, got {chooser:?}"
+                );
+                match filter {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.properties.contains(&FilterProp::IsCommander),
+                            "choice must be a commander, got {:?}",
+                            tf.properties
+                        );
+                    }
+                    other => panic!("expected a typed commander choice, got {other:?}"),
+                }
+                assert_eq!(
+                    *cardinality,
+                    Some(crate::types::ability::ObjectSelectionCardinality::Exactly { count: 1 }),
+                    "exactly one commander is chosen"
+                );
+            }
+            other => panic!("expected ChooseObjectsIntoTrackedSet, got {other:?}"),
+        }
+        let copy = ability
+            .sub_ability
+            .as_ref()
+            .expect("the choice continues into the copy");
+        match &copy.effect {
             Effect::CopyTokenOf {
                 target,
                 additional_modifications,
                 ..
             } => {
-                match target {
-                    TargetFilter::Typed(tf) => {
-                        assert!(
-                            tf.properties.contains(&FilterProp::IsCommander),
-                            "copy source must be a commander, got {:?}",
-                            tf.properties
-                        );
-                    }
-                    other => panic!("expected a typed commander target, got {other:?}"),
-                }
+                assert!(
+                    matches!(target, TargetFilter::TrackedSet { .. }),
+                    "the copy reads the chosen commander, got {target:?}"
+                );
                 assert!(
                     additional_modifications.iter().any(|modification| {
                         matches!(
@@ -2402,7 +2516,7 @@ mod tests {
                     "the copy must lose Legendary, got {additional_modifications:?}"
                 );
             }
-            other => panic!("expected CopyTokenOf, got {other:?}"),
+            other => panic!("expected CopyTokenOf continuation, got {other:?}"),
         }
     }
 
