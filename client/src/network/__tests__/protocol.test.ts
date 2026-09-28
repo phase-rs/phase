@@ -71,8 +71,8 @@ const PREVIEW_ANSWER = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v70", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(70);
+  it("pins the P2P wire protocol to v72", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(72);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -282,6 +282,52 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     const bytes = await encodeWireMessage(msg);
     const out = await decodeWireMessage(bytes);
     expect(out).toEqual(msg);
+  });
+
+  // CR 601.2a + CR 601.2b: an announced graveyard permission's digest travels
+  // as a string, so a value above 2^53 survives JSON between JavaScript peers
+  // bit for bit (a JSON number would have lost its low bits).
+  it("round-trips an announced graveyard permission with a digest above 2^53", async () => {
+    const digest = (2n ** 60n + 1n).toString(16).padStart(16, "0");
+    expect(Number.parseInt(digest, 16)).toBeGreaterThan(Number.MAX_SAFE_INTEGER);
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "CastingVariantChoice",
+          data: {
+            player: 0,
+            object_id: 7,
+            card_id: 7,
+            options: [
+              {
+                variant: { type: "Blitz" },
+                face: "Current",
+                mana_cost: { type: "Cost", shards: ["Green"], generic: 3 },
+                authority: {
+                  announcement: {
+                    permission: { source: 3, grant: { type: "Static", index: 1 } },
+                    grant_digest: digest,
+                    slot_type: "Creature",
+                  },
+                  frequency: "OncePerTurnPerPermanentType",
+                },
+              },
+            ],
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const out = await decodeWireMessage(await encodeWireMessage(msg));
+    expect(out).toEqual(msg);
+    const decoded = out as Extract<P2PMessage, { type: "state_update" }>;
+    const waiting = decoded.state.waiting_for;
+    if (waiting.type !== "CastingVariantChoice") throw new Error("menu lost");
+    expect(waiting.data.options[0].authority?.announcement.grant_digest).toBe(digest);
   });
 
   it("round-trips monarch-bounded exile links", async () => {

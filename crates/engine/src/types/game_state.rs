@@ -9638,6 +9638,80 @@ pub struct CastingVariantChoiceOption {
     /// serde default: old paused menus cannot safely select a face by index.
     pub face: CastingVariantFace,
     pub mana_cost: ManaCost,
+    /// CR 601.2f-h: the non-mana part of an alternative cost this option pays
+    /// ("Discard a card" for a Blitz option), shown beside its mana cost.
+    /// `None` when the option pays mana only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_cost: Option<crate::types::ability::AbilityCost>,
+    /// CR 601.2a + CR 601.2b: the graveyard permission this option casts
+    /// under, announced with the option. `Some` for every cast from the
+    /// graveyard authorized by a graveyard-cast permission (printed cost,
+    /// Blitz, Bestow); `None` for every other option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<CastAuthorityChoice>,
+}
+
+/// CR 601.2a: which graveyard-cast permission grant authorizes a cast: the
+/// permission's source plus the grant on it, so two grants from one source are
+/// two permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GraveyardPermissionId {
+    pub source: ObjectId,
+    pub grant: PermissionGrant,
+}
+
+/// Where a graveyard-cast permission grant lives on its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PermissionGrant {
+    /// The definition's position in the source object's `static_definitions`.
+    Static { index: u32 },
+    /// The `GrantStaticAbility` at `modification` in the transient continuous
+    /// effect `effect_id` (a resolution-created grant: Yawgmoth's Will).
+    Transient { effect_id: u64, modification: u32 },
+}
+
+/// An opaque digest of a grant's full definition, compared only for equality,
+/// so a menu answer bound to a grant whose definition changed is refused.
+/// Serialized as a hex string so JavaScript peers keep all 64 bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GrantDigest(pub String);
+
+/// CR 601.2a + CR 601.2b: what the player announced for a graveyard-permission
+/// cast: the grant, its digest, and the per-type slot (CR 110.4, Muldrotha)
+/// when one has been chosen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncedGraveyardPermission {
+    pub permission: GraveyardPermissionId,
+    pub grant_digest: GrantDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_type: Option<super::card_type::CoreType>,
+}
+
+/// CR 601.2f + CR 601.2h + CR 614.1c: a graveyard permission's terms as they
+/// were when the cast was announced. The cast pays and applies these even if
+/// the permission's source leaves or loses the ability during casting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraveyardPermissionLatch {
+    pub permission: GraveyardPermissionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_cost: Option<crate::types::statics::CastExtraCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_with_counter: Option<crate::types::counter::CounterType>,
+}
+
+/// The engine-authored authority of a graveyard casting option: the
+/// announcement it commits to plus the permission's terms, for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastAuthorityChoice {
+    pub announcement: AnnouncedGraveyardPermission,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_cost: Option<crate::types::statics::CastExtraCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_with_counter: Option<crate::types::counter::CounterType>,
+    pub frequency: crate::types::statics::CastFrequency,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graveyard_destination_replacement: Option<Zone>,
 }
 
 /// CR 118.3 + CR 601.2b + CR 605.3b: Identifies the specific action to take
@@ -13408,6 +13482,18 @@ pub enum WaitingFor {
             deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
         )]
         must_be_blocked_targets: HashMap<ObjectId, Vec<ObjectId>>,
+        /// CR 509.1a + CR 101.1: per creature able to block, how many
+        /// attackers it may block — `None` for any number. Display-only —
+        /// computed by `combat::block_capacity`; the declaration validator's
+        /// own authority is `combat::extra_block_limit`, the same function's
+        /// numeric form.
+        #[serde(
+            default,
+            skip_serializing_if = "HashMap::is_empty",
+            serialize_with = "crate::types::deterministic_serde::hash_map",
+            deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
+        )]
+        block_capacities: HashMap<ObjectId, Option<u32>>,
     },
     /// CR 502.3: During the untap step, the active player may choose not to
     /// untap permanents with "You may choose not to untap..." static abilities.
@@ -14543,6 +14629,11 @@ pub enum WaitingFor {
         #[serde(default)]
         payment_mode: CastPaymentMode,
         available_slots: Vec<super::card_type::CoreType>,
+        /// CR 601.2a: the graveyard permission grant the player announced for
+        /// this printed-cost cast, carried so the slot answer re-prepares that
+        /// exact grant. `None` only for a land play (CR 305.1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission: Option<AnnouncedGraveyardPermission>,
     },
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
@@ -17870,6 +17961,58 @@ pub enum CastingVariant {
 impl CastingVariant {
     pub fn is_normal(&self) -> bool {
         *self == CastingVariant::Normal
+    }
+
+    /// CR 118.9b: the keyword that names this casting method, matched against
+    /// a permission that requires one ("You may cast this card from your
+    /// graveyard using its blitz ability."). `None` when no keyword names the
+    /// method: the printed cost and the permission routes, and the keyword
+    /// methods `KeywordKind` has no discriminant for. A permission that requires
+    /// a method admits a cast only when this is `Some` of that keyword.
+    pub fn cast_keyword(self) -> Option<crate::types::keywords::KeywordKind> {
+        use crate::types::keywords::KeywordKind;
+        match self {
+            CastingVariant::Warp => Some(KeywordKind::Warp),
+            CastingVariant::Escape => Some(KeywordKind::Escape),
+            CastingVariant::Retrace => Some(KeywordKind::Retrace),
+            CastingVariant::Harmonize => Some(KeywordKind::Harmonize),
+            CastingVariant::Mayhem => Some(KeywordKind::Mayhem),
+            CastingVariant::Flashback => Some(KeywordKind::Flashback),
+            CastingVariant::Aftermath => Some(KeywordKind::Aftermath),
+            CastingVariant::Disturb => Some(KeywordKind::Disturb),
+            CastingVariant::Sneak { .. } => Some(KeywordKind::Sneak),
+            CastingVariant::Miracle => Some(KeywordKind::Miracle),
+            CastingVariant::Madness => Some(KeywordKind::Madness),
+            CastingVariant::Dash => Some(KeywordKind::Dash),
+            CastingVariant::Blitz => Some(KeywordKind::Blitz),
+            CastingVariant::Suspend => Some(KeywordKind::Suspend),
+            CastingVariant::Plot => Some(KeywordKind::Plot),
+            CastingVariant::Foretell => Some(KeywordKind::Foretell),
+            CastingVariant::Bestow => Some(KeywordKind::Bestow),
+            CastingVariant::Awaken => Some(KeywordKind::Awaken),
+            CastingVariant::Cleave => Some(KeywordKind::Cleave),
+            CastingVariant::MoreThanMeetsTheEye => Some(KeywordKind::MoreThanMeetsTheEye),
+            CastingVariant::Mutate => Some(KeywordKind::Mutate),
+            CastingVariant::Freerunning => Some(KeywordKind::Freerunning),
+            CastingVariant::JumpStart => Some(KeywordKind::JumpStart),
+            CastingVariant::Fuse => Some(KeywordKind::Fuse),
+            CastingVariant::Normal
+            | CastingVariant::Adventure
+            | CastingVariant::Omen
+            | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::HandPermission { .. }
+            | CastingVariant::ExilePermission { .. }
+            | CastingVariant::WebSlinging { .. }
+            | CastingVariant::Evoke
+            | CastingVariant::Emerge
+            | CastingVariant::Spectacle
+            | CastingVariant::Overload
+            | CastingVariant::Impending
+            | CastingVariant::Prototype
+            | CastingVariant::Prowl
+            | CastingVariant::Surge
+            | CastingVariant::FaceDown => None,
+        }
     }
 
     /// CR 601.2a: The `ObjectId` of the `StaticMode::ExileCastPermission` source
@@ -29815,6 +29958,7 @@ mod forced_cascade_window_tests {
                     block_requirements: Default::default(),
                     blocker_constraints: Default::default(),
                     must_be_blocked_targets: Default::default(),
+                    block_capacities: Default::default(),
                 },
             ),
             (
@@ -38561,6 +38705,7 @@ mod tests {
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
             must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::GameOver {
             winner: Some(PlayerId(0)),

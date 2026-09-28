@@ -2,7 +2,7 @@ use std::{borrow::Cow, ops::ControlFlow};
 
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until, take_while};
+use nom::bytes::complete::{tag, take_till, take_until, take_while};
 use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, map, opt, value};
 use nom::sequence::{preceded, terminated};
@@ -2311,9 +2311,19 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
     );
 
     if head_is_refused_land_play {
+        // CR 601.3 + CR 611.2a: rebuild the grant only when the printed sentence
+        // ENDS at its graveyard anchor. A trailing gate the lowering dropped
+        // ("… from your graveyard as long as you control a Zombie") would
+        // otherwise become an ungated grant. Keep the refused fragment (an
+        // honest Unimplemented) instead.
+        let sentence_is_fully_modelled = def
+            .description
+            .as_deref()
+            .is_some_and(coordinated_permission_sentence_ends_at_anchor);
         let recovered = def
             .sub_ability
             .as_deref()
+            .filter(|_| sentence_is_fully_modelled)
             .and_then(|sub| match &*sub.effect {
                 Effect::CastFromZone {
                     target, duration, ..
@@ -2409,6 +2419,24 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
     }
 }
 
+/// CR 601.3 + CR 611.2a: true when the sentence carrying the coordinated
+/// permission's graveyard anchor ends there, i.e. the text between
+/// " from your graveyard" and the next sentence boundary is empty. Any gate
+/// after the anchor ("as long as …", "if …", "unless …") was not lowered into
+/// the recovered grant, so a remainder means the grant must not be synthesized.
+/// A missing anchor fails closed too.
+fn coordinated_permission_sentence_ends_at_anchor(description: &str) -> bool {
+    let lower = description.to_lowercase();
+    parse_graveyard_anchor_sentence_tail(&lower).is_ok_and(|(_, tail)| tail.trim().is_empty())
+}
+
+/// The text after the first " from your graveyard" up to the next `.`.
+fn parse_graveyard_anchor_sentence_tail(input: &str) -> OracleResult<'_, &str> {
+    let (rest, _) = take_until(" from your graveyard").parse(input)?;
+    let (rest, _) = tag(" from your graveyard").parse(rest)?;
+    take_till(|c: char| c == '.').parse(rest)
+}
+
 /// CR 116.2a + CR 601.2a: build the two-part permission from the cast half of the
 /// sentence -- the land axis and the card axis under ONE grant, because the
 /// printed sentence is one permission naming two actions.
@@ -2465,6 +2493,7 @@ fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<Static
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            required_cast_keyword: None,
         })
         // CR 611.2c: class-wide and re-evaluated live, so cards that reach the
         // graveyard later this turn are covered.

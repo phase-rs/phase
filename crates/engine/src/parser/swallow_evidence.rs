@@ -452,6 +452,23 @@ const ACTIVATION_RESTRICTION_KEYS: &[&str] = &[
 const STATIC_DEFINITION_KEYS: &[&str] =
     &["statics", "static_abilities", "static_def", "definition"];
 
+/// Every JSON key at which a `Vec<Keyword>` field is serialized.
+///
+/// `Keyword` is EXTERNALLY tagged, so its unit variants are bare strings that would
+/// otherwise match unrelated string values anywhere in the tree — it MUST be probed
+/// key-anchored (see module docs, hazard 1). `extractedKeywords` is the camelCase
+/// serialization of `ParsedAbilities::extracted_keywords` (verified by probe: the
+/// snake_case spelling matches nothing); `keywords` covers a `Vec<Keyword>` carried
+/// by a nested definition (e.g. `Effect::Token.keywords`), which is the same carrier.
+///
+/// The singular `keyword` key is deliberately excluded from this flat probe: the
+/// fields that use it are grants, cast permissions, prohibitions and conditions that
+/// NAME a keyword. A grant (`ContinuousModification::AddKeyword.keyword`) is the one
+/// shape that can itself carry a payment, and it is reached through its typed parent
+/// carrier via [`UnitEvidence::granted_keywords`] rather than by adding the bare key
+/// here.
+const KEYWORD_KEYS: &[&str] = &["extractedKeywords", "keywords"];
+
 /// One audit unit's lowered definitions, as a walkable tree with the prose removed.
 ///
 /// Built once per unit and shared by every detector — the same one-serialization-per-unit
@@ -653,14 +670,17 @@ impl UnitEvidence {
     ///
     /// The collecting sibling of [`Self::any_at`], with the identical key-anchoring
     /// contract — use it when a detector needs the carrier's *payload* rather than
-    /// just its presence. The only such fact today is the recorded text on a
-    /// `StaticCondition::Unrecognized`: "which source text did the parser explicitly
-    /// admit it could not parse?" cannot be answered by a boolean.
+    /// just its presence. Three such facts today: the recorded text on a
+    /// `StaticCondition::Unrecognized` ("which source text did the parser explicitly
+    /// admit it could not parse?" cannot be answered by a boolean), read through
+    /// [`Self::static_definition_conditions`]; the flat `Keyword` payloads whose count
+    /// a detector consumes, read through [`Self::keywords`]; and the `Keyword`s
+    /// GRANTED by static definitions, read through [`Self::granted_keywords`].
     ///
     /// Anchor on the key of the **carrier that owns the payload's field**, not on the
     /// payload's own key, whenever the payload type is not self-discriminating. See
-    /// [`Self::static_definition_conditions`], the one caller, for why: the payload
-    /// there is a `StaticCondition`, whose `Unrecognized` variant is field-identical to
+    /// [`Self::static_definition_conditions`] for why: the payload there is a
+    /// `StaticCondition`, whose `Unrecognized` variant is field-identical to
     /// `ReplacementCondition::Unrecognized`, and both live under the same bare key
     /// `condition`.
     fn collect_at<T: DeserializeOwned>(&self, keys: &[&str]) -> Vec<T> {
@@ -696,6 +716,44 @@ impl UnitEvidence {
         self.collect_at::<StaticDefinition>(STATIC_DEFINITION_KEYS)
             .into_iter()
             .filter_map(|def| def.condition)
+            .collect()
+    }
+
+    /// Every `Keyword` carrier on this unit, in walk order — key-anchored per
+    /// [`KEYWORD_KEYS`] because `Keyword` is externally tagged (its unit variants are
+    /// bare strings that would otherwise match unrelated string values anywhere in the
+    /// tree).
+    ///
+    /// The flat collecting probe over `KEYWORD_KEYS`. A detector that must COUNT what a
+    /// keyword payload represents — one represented payment per carrier, so N raised
+    /// marker occurrences need N carriers — cannot answer its question from a boolean;
+    /// it needs the payloads. Granted keywords live under a typed parent field, not a
+    /// flat key; collect them with [`Self::granted_keywords`].
+    pub(super) fn keywords(&self) -> Vec<crate::types::keywords::Keyword> {
+        self.collect_at(KEYWORD_KEYS)
+    }
+
+    /// Every keyword GRANTED by this unit's static definitions
+    /// (`ContinuousModification::AddKeyword`), in walk order.
+    ///
+    /// Reached through the typed `StaticDefinition` carrier — key-anchored per
+    /// [`STATIC_DEFINITION_KEYS`], then its `modifications` field read by type — not by
+    /// adding the bare singular `keyword` key to [`KEYWORD_KEYS`]: the other fields
+    /// that use that key (cast permissions, prohibitions, conditions) merely NAME a
+    /// keyword, while a grant is the shape that carries one as a characteristic, and
+    /// a granted Ward can be a dynamic payment. Nested
+    /// `ContinuousModification::GrantStaticAbility` definitions are included because
+    /// `definition` is in the anchored key set and the walk is total.
+    pub(super) fn granted_keywords(&self) -> Vec<crate::types::keywords::Keyword> {
+        self.collect_at::<StaticDefinition>(STATIC_DEFINITION_KEYS)
+            .into_iter()
+            .flat_map(|def| def.modifications)
+            .filter_map(|modification| match modification {
+                crate::types::ability::ContinuousModification::AddKeyword { keyword } => {
+                    Some(keyword)
+                }
+                _ => None,
+            })
             .collect()
     }
 }

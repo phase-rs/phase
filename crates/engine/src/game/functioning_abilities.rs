@@ -433,6 +433,34 @@ pub fn active_static_definitions<'a>(
     }))
 }
 
+/// [`active_static_definitions`] with each definition's position in `obj`'s
+/// full `static_definitions`, for callers that must name WHICH definition
+/// applies (CR 601.2a: a graveyard-cast permission the player announces).
+/// Same gates, same order.
+pub fn active_static_definitions_indexed<'a>(
+    state: &'a GameState,
+    obj: &'a GameObject,
+) -> Box<dyn Iterator<Item = (usize, &'a StaticDefinition)> + 'a> {
+    // CR 702.26b: phased-out permanents' abilities never function.
+    if obj.is_phased_out() {
+        return Box::new(std::iter::empty());
+    }
+    Box::new(
+        obj.static_definitions
+            .iter_all()
+            .enumerate()
+            .filter(move |(_, def)| {
+                static_def_applies(
+                    state,
+                    obj,
+                    def,
+                    ConditionContext::NONE,
+                    PolarityDeferral::Skip,
+                )
+            }),
+    )
+}
+
 /// CR 508.1c + CR 702.3b + CR 611.3a: the ATTACK-LEGALITY slice of
 /// [`active_static_definitions`] — the SAME CR gate stack, with BOTH anchors
 /// bound and the polarity deferral

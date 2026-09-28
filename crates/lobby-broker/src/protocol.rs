@@ -60,15 +60,35 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 88 — `FormatConfig` gained `allow_experimental_dungeons`, the per-session
+/// 90 — `FormatConfig` gained `allow_experimental_dungeons`, the per-session
 ///      capability flag behind the experimental dungeon pool (Baldur's Gate
 ///      Wilderness joins the normal venture options and the initiative choice
 ///      when set). A CAPABILITY bump like 24 and 50: the field is
 ///      `#[serde(default)]`, so either side still parses a peer that omits
-///      it — but a v87 peer would silently fail the flag closed to `false`
+///      it — but a v89 peer would silently fail the flag closed to `false`
 ///      and run the game without the pool the host chose, a rule change no
 ///      parse error would catch. Full-game peers and P2P move in lockstep
-///      (wire 70); lobby carriers move too, see `LOBBY_PROTOCOL_VERSION` 13.
+///      (wire 72); lobby carriers move too, see `LOBBY_PROTOCOL_VERSION` 13.
+/// 89 — CR 118.9b graveyard permissions that require a casting method ("You
+///      may cast this card from your graveyard using its blitz ability.":
+///      Sabin, Master Monk; Tenacious Underdog; Detective's Phoenix):
+///      `StaticMode::GraveyardCastPermission` gains `required_cast_keyword`,
+///      no longer carried as a card-filter `HasKeywordKind`, and
+///      `CastingVariantChoiceOption` gains `additional_cost`. A v88 peer
+///      would drop the method silently and admit a printed-cost cast the
+///      permission forbids. CR 601.2a + CR 601.2b: the same bump carries the
+///      announced graveyard permission: `CastingVariantChoiceOption` gains
+///      `authority`, `SpellContext` gains `graveyard_permission_latch`, and
+///      `WaitingFor::ChoosePermanentTypeSlot` gains `permission`. Full-game
+///      peers and P2P move in lockstep (wire 71); lobby messages are unchanged.
+/// 88 — `WaitingFor::DeclareBlockers` gains `block_capacities`
+///      (CR 509.1a + CR 101.1): for each able blocker, its block limit —
+///      `null` for any number. Serde-additive
+///      (`#[serde(default, skip_serializing_if = "HashMap::is_empty")]`), but
+///      the client bounds the pile stepper with it; a v87 host would silently
+///      omit it. Full-game handshakes must refuse that capability mismatch,
+///      as in 60. Lobby messages are unchanged; P2P moves in lockstep
+///      (wire 70).
 /// 87 — `WaitingFor::DigRestSplitChoice` and `Effect::Dig.rest_split_top_count`
 ///      extend serialized game state for Telling Time-class rest piles. A v86
 ///      peer cannot represent the split choice; full-game and P2P peers move
@@ -727,7 +747,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 88;
+pub const PROTOCOL_VERSION: u32 = 90;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -755,7 +775,7 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
 /// 13 — `FormatConfig` gained `allow_experimental_dungeons` (see
-///      `PROTOCOL_VERSION` 84 for the full entry). Same three carriers as 2:
+///      `PROTOCOL_VERSION` 90 for the full entry). Same three carriers as 2:
 ///      `CreateGameWithSettings` on [`LobbyClientMessage`] (client → broker),
 ///      `JoinTargetInfo` and `PeerInfo` on [`LobbyServerMessage`] (broker →
 ///      client). Like 3, this is a CAPABILITY bump, not a parse bump — the
@@ -1957,12 +1977,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 88);
+        assert_eq!(PROTOCOL_VERSION, 90);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 87);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 89);
     }
 
     #[test]

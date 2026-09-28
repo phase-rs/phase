@@ -94,6 +94,7 @@ describe("ActionButton", () => {
     useUiStore.setState({
       combatMode: null,
       selectedAttackers: [],
+      pendingBlocker: null,
       blockerAssignments: new Map(),
       combatClickHandler: null,
     });
@@ -472,6 +473,7 @@ describe("ActionButton", () => {
 
     act(() => useUiStore.getState().combatClickHandler?.(100));
     expect(screen.getByText("Select the attacker this blocker should defend against")).toBeInTheDocument();
+    expect(useUiStore.getState().pendingBlocker).toBe(100);
 
     const nextPrompt = blockerPrompt();
     act(() => {
@@ -482,6 +484,22 @@ describe("ActionButton", () => {
     });
 
     expect(screen.queryByText("Select the attacker this blocker should defend against")).not.toBeInTheDocument();
+    expect(useUiStore.getState().pendingBlocker).toBeNull();
+  });
+
+  it("Reset Blocks also drops a pending blocker", () => {
+    render(<ActionButton />);
+
+    act(() => useUiStore.getState().combatClickHandler?.(100));
+    act(() => useUiStore.getState().combatClickHandler?.(200));
+    expect(screen.getByText("Select the attacker this blocker should defend against")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset Blocks" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Blocks" }));
+
+    expect(screen.queryByText("Select the attacker this blocker should defend against")).not.toBeInTheDocument();
+    expect(useUiStore.getState().pendingBlocker).toBeNull();
+    expect(useUiStore.getState().blockerAssignments.size).toBe(0);
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {
