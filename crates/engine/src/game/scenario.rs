@@ -4886,15 +4886,6 @@ mod tests {
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ) {
-            eprintln!(
-                "Flash nested frames: {:?}",
-                runner
-                    .state()
-                    .resolution_stack
-                    .iter()
-                    .map(|frame| frame.kind())
-                    .collect::<Vec<_>>()
-            );
             assert!(
                 runner.state().resolution_stack.iter().any(|frame| {
                     matches!(
@@ -4998,6 +4989,105 @@ mod tests {
             ),
             "{:?}",
             runner.state().waiting_for
+        );
+    }
+
+    #[test]
+    fn paused_forwarded_move_keeps_original_source_for_its_grant() {
+        use crate::types::ability::{
+            ContinuousModification, EffectScope, ReplacementDefinition, StaticDefinition,
+            TapStateChange,
+        };
+        use crate::types::keywords::Keyword;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let producer = scenario.add_creature(P0, "Reanimator", 0, 1).id();
+        let creature = scenario.add_creature_to_hand(P0, "Returned", 3, 3).id();
+        for state_change in [TapStateChange::Tap, TapStateChange::Untap] {
+            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: state_change,
+                    },
+                ))
+                .valid_card(TargetFilter::Any)
+                .destination_zone(Zone::Battlefield);
+            scenario
+                .add_creature(P1, "Entry Modifier", 0, 1)
+                .with_replacement_definition(replacement);
+        }
+        let mut runner = scenario.build();
+        let grant = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::OriginalSource)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: None,
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            producer,
+            P0,
+        );
+        let mut put = ResolvedAbility::new(
+            move_zone_effect(Some(Zone::Hand), Zone::Battlefield, TargetFilter::Any),
+            vec![TargetRef::Object(creature)],
+            producer,
+            P0,
+        )
+        .sub_ability(grant);
+        put.forward_result = true;
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(runner.state_mut(), &put, &mut events, 0)
+            .expect("start the forwarded move");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "the move must pause for its replacement choice: {:?}",
+            runner.state().waiting_for
+        );
+        for _ in 0..4 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+        }
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
+        let flying_grants: Vec<_> = runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .filter(|tce| {
+                tce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Flying
+                        }
+                    )
+                })
+            })
+            .map(|tce| tce.affected.clone())
+            .collect();
+        assert_eq!(
+            flying_grants,
+            vec![TargetFilter::SpecificObject { id: producer }],
+            "OriginalSource must stay on the producer after a paused forwarded move"
         );
     }
 

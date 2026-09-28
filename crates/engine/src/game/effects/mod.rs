@@ -882,55 +882,179 @@ fn forwarded_zone_result_from_events<'a>(
     }
 }
 
-fn bind_forwarded_zone_result(child: &mut ResolvedAbility, result: ForwardedResultContext) {
-    let first = result.object_incarnations.first().copied();
+/// CR 400.7j: point a `forward_result` child at the objects its producer moved,
+/// keeping the producer's pre-move identity where the child names it. Returns
+/// the Attach attachment candidates drawn from the moved set.
+fn rebind_child_to_forwarded_objects(
+    state: &GameState,
+    child: &mut ResolvedAbility,
+    producer: ObjectId,
+    producer_targets: &[TargetRef],
+    moved: &[ObjectId],
+) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
+    if moved.is_empty() {
+        return Vec::new();
+    }
+    let attachment_candidates = attach::attachment_candidates_from_zone_change(state, child, moved);
+    // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
+    // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
+    // rebinding `source_id` to the just-moved permanent would make
+    // `copy_spell::resolve` look up the wrong stack entry after
+    // `resolve_top` has popped the spell (issue #2860).
+    if copy_spell_self_ref_keeps_resolving_spell_source(child) {
+        return attachment_candidates;
+    }
+    // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
+    // ability's source. Its ParentTarget anaphora read the separate
+    // forwarded-result context at delayed-trigger creation.
+    if !matches!(child.effect, Effect::CreateDelayedTrigger { .. }) {
+        child.source_id = moved[0];
+    }
+    if let Effect::Attach { target, .. } = &child.effect {
+        let attach_target_is_last_created = matches!(target, TargetFilter::LastCreated);
+        // CR 608.2c: ParentTarget hosts inherit an explicit parent
+        // choice when present (Necrotic Plague). When none was chosen,
+        // fall back to the ability source as host — CR 301.5b +
+        // CR 701.3a put→attach-to-~ (Iron Man, Armored Skyhunter).
+        // Do not append the source on top of an already-bound host:
+        // that would let ParentTarget resolve to the returned Aura.
+        let attach_target_is_parent = matches!(target, TargetFilter::ParentTarget);
+        if attach_target_is_parent {
+            if child.targets.is_empty() {
+                if !producer_targets.is_empty() {
+                    child.targets = producer_targets.to_vec();
+                } else {
+                    child.targets.push(TargetRef::Object(producer));
+                }
+            }
+        } else if !attach_target_is_last_created
+            && !child
+                .targets
+                .iter()
+                .any(|t| matches!(t, TargetRef::Object(id) if *id == producer))
+        {
+            child.targets.push(TargetRef::Object(producer));
+        }
+    }
+    // CR 608.2c: OriginalSource names the ability's TRUE pre-rebind source — the
+    // reanimator-Aura's own identity — surviving the forward_result rebind above
+    // that would otherwise point source_id at the just-reanimated creature
+    // instead of the Aura whose own keyword text this static is rewriting
+    // (Animate Dead / Dance of the Dead class: "it loses ... and gains ...").
+    // Concretized here, eagerly, in-place — never persisted as a ResolvedAbility
+    // field — because this is where the pre-rebind producer identity and the
+    // rebound child coexist.
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &mut child.effect
+    {
+        for sd in static_abilities.iter_mut() {
+            if sd.affected == Some(TargetFilter::OriginalSource) {
+                sd.affected = Some(TargetFilter::SpecificObject { id: producer });
+            }
+        }
+    }
+    attachment_candidates
+}
+
+fn bind_forwarded_zone_result(
+    child: &mut ResolvedAbility,
+    result: ForwardedResultContext,
+    attachment_candidates: Vec<crate::types::identifiers::ObjectIncarnationRef>,
+) {
     child.context.pending_forwarded_zone_result = None;
     child.context.forwarded_result_context = Some(Box::new(result));
-    if let Some(first) = first {
-        if !matches!(child.effect, Effect::CreateDelayedTrigger { .. })
-            && !copy_spell_self_ref_keeps_resolving_spell_source(child)
-        {
-            child.source_id = first.object_id;
-        }
-        bind_forwarded_result_targets_for_legacy_effect(child);
+    bind_forwarded_result_targets_for_legacy_effect(child);
+    if !attachment_candidates.is_empty() {
+        child.bind_attach_attachment_candidates(attachment_candidates);
+    }
+}
+
+fn bind_moved_objects_to_child(
+    state: &GameState,
+    child: &mut ResolvedAbility,
+    producer: ObjectId,
+    producer_targets: &[TargetRef],
+    result: ForwardedResultContext,
+) {
+    let moved: Vec<ObjectId> = result
+        .object_incarnations
+        .iter()
+        .map(|pin| pin.object_id)
+        .collect();
+    let attachment_candidates =
+        rebind_child_to_forwarded_objects(state, child, producer, producer_targets, &moved);
+    bind_forwarded_zone_result(child, result, attachment_candidates);
+}
+
+fn bind_active_continuation_to_moved_objects(
+    state: &mut GameState,
+    producer: ObjectId,
+    producer_targets: &[TargetRef],
+    result: ForwardedResultContext,
+) {
+    let Some(pending) = state.active_ability_continuation() else {
+        return;
+    };
+    let mut child = pending.chain.clone();
+    bind_moved_objects_to_child(state, &mut child, producer, producer_targets, result);
+    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        frame.pending.chain = child;
     }
 }
 
 fn bind_completed_forwarded_zone_result(state: &mut GameState, result: ForwardedResultContext) {
-    if let Some(frame) = state.active_ability_continuation_frame_mut() {
-        bind_forwarded_zone_result(&mut frame.pending.chain, result);
-    }
+    let Some(producer) = state
+        .active_ability_continuation()
+        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.as_ref())
+        .map(|marker| marker.producer)
+    else {
+        return;
+    };
+    bind_active_continuation_to_moved_objects(state, producer, &[], result);
 }
 
-/// CR 608.2c: an accepted optional move settles its rider from its own event slice.
+/// CR 400.7j: an accepted optional move binds its stashed rider from its own event slice.
 fn park_forwarded_zone_result_on_active_continuation(
     state: &mut GameState,
     ability: &ResolvedAbility,
     producer_events: &[GameEvent],
 ) {
-    if !forwards_battlefield_move(ability) {
+    if !forwards_battlefield_move(ability)
+        || !state.active_ability_continuation().is_some_and(|pending| {
+            pending.chain.source_id == ability.source_id
+                && pending
+                    .chain
+                    .context
+                    .pending_forwarded_zone_result
+                    .is_none()
+        })
+    {
         return;
     }
     let result = forwarded_zone_result_from_events(state, None, producer_events.iter());
-    let pending = (result.object_incarnations.is_empty()
-        && waits_for_resolution_choice(&state.waiting_for))
-    .then(|| crate::types::ability::PendingForwardedZoneResult {
-        producer: ability.source_id,
-        selected: state
-            .pending_zone_change_delivery_from_replacement()
-            .map(|delivery| vec![delivery.member]),
-        group: None,
-    });
-    let Some(frame) = state.active_ability_continuation_frame_mut() else {
-        return;
-    };
-    match pending {
-        Some(marker) => frame.pending.chain.context.pending_forwarded_zone_result = Some(marker),
-        None => bind_forwarded_zone_result(&mut frame.pending.chain, result),
+    if result.object_incarnations.is_empty() && waits_for_resolution_choice(&state.waiting_for) {
+        let marker = crate::types::ability::PendingForwardedZoneResult {
+            producer: ability.source_id,
+            selected: state
+                .pending_zone_change_delivery_from_replacement()
+                .map(|delivery| vec![delivery.member]),
+            group: None,
+        };
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.chain.context.pending_forwarded_zone_result = Some(marker);
+        }
+    } else {
+        bind_active_continuation_to_moved_objects(
+            state,
+            ability.source_id,
+            &ability.targets,
+            result,
+        );
     }
 }
 
-/// CR 616.1: settle a single replacement-paused move from its own terminal delivery slice.
+/// CR 614.6: a replaced move settles its rider from its own terminal delivery slice.
 pub(crate) fn settle_replaced_forwarded_zone_delivery(
     state: &mut GameState,
     member: crate::types::identifiers::ObjectIncarnationRef,
@@ -15401,7 +15525,7 @@ fn resolve_chain_body(
             } else if matches!(ability.effect, Effect::Counter { .. })
                 && matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero())
             {
-                // CR 118.5: players can always pay {0}, so the counter is prevented.
+                // Legacy {0} counter auto-pay; aligning it with CR 118.5's acknowledgment is separate.
                 events.push(GameEvent::EffectResolved {
                     kind: EffectKind::Counter,
                     source_id: ability.source_id,
@@ -17319,7 +17443,13 @@ fn resolve_chain_body(
                                 .map(|pending| pending.logical_zone_change_group.logical_group_id),
                         });
                 } else {
-                    bind_forwarded_zone_result(&mut sub_clone, result);
+                    bind_moved_objects_to_child(
+                        state,
+                        &mut sub_clone,
+                        ability.source_id,
+                        &ability.targets,
+                        result,
+                    );
                 }
             }
             prepend_to_pending_continuation(state, sub_clone);
@@ -17507,89 +17637,13 @@ fn resolve_chain_body(
             );
         } else if ability.forward_result {
             let mut sub_with_context = sub.as_ref().clone();
-            let attachment_candidates = if forwarded_objects.is_empty() {
-                Vec::new()
-            } else {
-                attach::attachment_candidates_from_zone_change(state, sub, &forwarded_objects)
-            };
-            // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
-            // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
-            // rebinding `source_id` to the just-moved permanent would make
-            // `copy_spell::resolve` look up the wrong stack entry after
-            // `resolve_top` has popped the spell (issue #2860).
-            //
-            // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
-            // ability's source. Its ParentTarget anaphora read the separate
-            // forwarded-result context at delayed-trigger creation.
-            if !forwarded_objects.is_empty()
-                && !copy_spell_self_ref_keeps_resolving_spell_source(sub)
-            {
-                if !matches!(sub.effect, Effect::CreateDelayedTrigger { .. }) {
-                    sub_with_context.source_id = forwarded_objects[0];
-                }
-                if matches!(sub.effect, Effect::Attach { .. }) {
-                    let attach_target_is_last_created = matches!(
-                        &sub.effect,
-                        Effect::Attach {
-                            target: TargetFilter::LastCreated,
-                            ..
-                        }
-                    );
-                    // CR 608.2c: ParentTarget hosts inherit an explicit parent
-                    // choice when present (Necrotic Plague). When none was chosen,
-                    // fall back to the ability source as host — CR 301.5b +
-                    // CR 701.3a put→attach-to-~ (Iron Man, Armored Skyhunter).
-                    // Do not append the source on top of an already-bound host:
-                    // that would let ParentTarget resolve to the returned Aura.
-                    let attach_target_is_parent = matches!(
-                        &sub.effect,
-                        Effect::Attach {
-                            target: TargetFilter::ParentTarget,
-                            ..
-                        }
-                    );
-                    if attach_target_is_parent {
-                        if sub_with_context.targets.is_empty() {
-                            if !ability.targets.is_empty() {
-                                sub_with_context.targets = ability.targets.clone();
-                            } else {
-                                sub_with_context
-                                    .targets
-                                    .push(TargetRef::Object(ability.source_id));
-                            }
-                        }
-                    } else if !attach_target_is_last_created
-                        && !sub_with_context
-                            .targets
-                            .iter()
-                            .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
-                    {
-                        sub_with_context
-                            .targets
-                            .push(TargetRef::Object(ability.source_id));
-                    }
-                }
-                // CR 608.2c: OriginalSource names the ability's TRUE pre-rebind source — the
-                // reanimator-Aura's own identity — surviving the forward_result rebind above
-                // that would otherwise point source_id at the just-reanimated creature
-                // instead of the Aura whose own keyword text this static is rewriting
-                // (Animate Dead / Dance of the Dead class: "it loses ... and gains ...").
-                // Concretized here, eagerly, in-place — never persisted as a ResolvedAbility
-                // field — because this is the ONE point in the whole chain where the
-                // pre-rebind `ability.source_id` and the about-to-be-mutated clone coexist.
-                if let Effect::GenericEffect {
-                    static_abilities, ..
-                } = &mut sub_with_context.effect
-                {
-                    for sd in static_abilities.iter_mut() {
-                        if sd.affected == Some(TargetFilter::OriginalSource) {
-                            sd.affected = Some(TargetFilter::SpecificObject {
-                                id: ability.source_id,
-                            });
-                        }
-                    }
-                }
-            }
+            let attachment_candidates = rebind_child_to_forwarded_objects(
+                state,
+                &mut sub_with_context,
+                ability.source_id,
+                &ability.targets,
+                &forwarded_objects,
+            );
             apply_parent_chain_context(
                 &mut sub_with_context,
                 ability,
@@ -17600,13 +17654,11 @@ fn resolve_chain_body(
             // from ordinary declared targets. A nested producer replaces this
             // value after its own parent context has been applied; `Some([])`
             // deliberately records a completed zero-object move.
-            sub_with_context.context.forwarded_result_context = Some(Box::new(
+            bind_forwarded_zone_result(
+                &mut sub_with_context,
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
-            ));
-            bind_forwarded_result_targets_for_legacy_effect(&mut sub_with_context);
-            if !attachment_candidates.is_empty() {
-                sub_with_context.bind_attach_attachment_candidates(attachment_candidates);
-            }
+                attachment_candidates,
+            );
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -17911,7 +17963,7 @@ fn resolved_unless_cost(
     ability: &ResolvedAbility,
     cost: &AbilityCost,
 ) -> AbilityCost {
-    match cost {
+    let expanded = match cost {
         AbilityCost::PerCounter {
             counter,
             target,
@@ -17958,21 +18010,17 @@ fn resolved_unless_cost(
                 cost: ManaCost::generic(amount.max(0) as u32),
             }
         }
-        // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
-        // the ability source's OWN printed mana cost at resolution time. The
-        // cost is dynamic because the granting Aura can be attached to any
-        // permanent (Pendrell Flux, Disruption Aura). An absent source or a
-        // costless source (land, token, other permanent with no mana cost)
-        // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
-        // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
-        // it (kept distinct from the `{0}` "always payable" short-circuit).
-        AbilityCost::Mana {
-            cost: mana @ (ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. }),
-        } => AbilityCost::Mana {
-            cost: crate::game::keywords::resolve_keyword_mana_cost(state, ability.source_id, mana),
-        },
         other => other.clone(),
-    }
+    };
+    // CR 118.12 + CR 202.1: "unless you pay its mana cost" — materialize
+    // the ability source's OWN printed mana cost at resolution time. The
+    // cost is dynamic because the granting Aura can be attached to any
+    // permanent (Pendrell Flux, Disruption Aura). An absent source or a
+    // costless source (land, token, other permanent with no mana cost)
+    // resolves to `ManaCost::NoCost`, which CR 118.6 / CR 202.1b define
+    // as an UNPAYABLE cost; the dedicated unpayable branch in `resolve_chain_body` handles
+    // it (kept distinct from a payable `{0}`).
+    crate::game::keywords::resolve_self_mana_in_ability_cost(state, ability.source_id, &expanded)
 }
 
 /// CR 608.2b: a group constraint ("that share a color") that the targets fail,
@@ -25938,6 +25986,52 @@ mod tests {
                 GameEvent::PermanentSacrificed { object_id, .. } if *object_id == source
             )),
             "ParentTarget must not fall back to the source permanent"
+        );
+    }
+
+    #[test]
+    fn unless_cost_resolves_self_mana_inside_composite() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().mana_cost = ManaCost::generic(3);
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCostReduced { reduction: 2 },
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::SelfManaCost,
+                },
+            ],
+        };
+        assert_eq!(
+            resolved_unless_cost(&state, &ability, &cost),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(3),
+                    },
+                ],
+            }
         );
     }
 
