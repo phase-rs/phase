@@ -3319,16 +3319,16 @@ mod tests {
     }
 
     /// `StateUpdate.events` can now carry the tagged `DieRollIgnored` display
-    /// event. A v83 peer would silently omit the ignored die from its overlay,
-    /// so it must be refused before receiving v84 event batches.
+    /// event. A v84 peer would silently omit the ignored die from its overlay,
+    /// so it must be refused before receiving v85 event batches.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_84_for_ignored_die_events() {
-        assert_eq!(PROTOCOL_VERSION, 84);
+    fn protocol_version_is_85_for_ignored_die_events() {
+        assert_eq!(PROTOCOL_VERSION, 85);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3339,7 +3339,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_84_for_ignored_die_events` stays
+    /// `protocol_version_is_85_for_ignored_die_events` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
