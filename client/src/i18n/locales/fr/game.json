@@ -2082,7 +2082,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Lancer avec Prototype",
     "variantFaceDown": "Lancer face cachée",
-    "variantFallback": "Lancer avec {{type}}"
+    "variantFallback": "Lancer avec {{type}}",
+    "viaSource": "via {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "au lieu de son coût de mana : {{cost}}",
+    "entersWithCounter": "arrive avec un marqueur {{counter}}",
+    "slotPerType": "utilise son emplacement {{type}}",
+    "slotChooseType": "choisissez un type de permanent",
+    "slotOncePerTurn": "une fois ce tour"
   },
   "categoryChoice": {
     "title": "Choisir les permanents à garder",

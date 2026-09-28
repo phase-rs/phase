@@ -28,8 +28,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // v84 adds required dungeon choice card and room previews.
 // v85 adds the tagged ignored-die display event; v86 adds the CR 118.9b
 // required casting method on graveyard permissions
-// (`GraveyardCastPermission.required_cast_keyword`) and the casting-menu
-// option's `additional_cost`.
+// (`GraveyardCastPermission.required_cast_keyword`), the casting-menu
+// option's `additional_cost`, and the announced graveyard permission (the
+// option's `authority`, the slot prompt's `permission`, the latched terms).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;

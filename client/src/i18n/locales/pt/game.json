@@ -2082,7 +2082,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Conjurar com Protótipo",
     "variantFaceDown": "Conjurar Virada para Baixo",
-    "variantFallback": "Conjurar com {{type}}"
+    "variantFallback": "Conjurar com {{type}}",
+    "viaSource": "via {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "em vez de seu custo de mana: {{cost}}",
+    "entersWithCounter": "entra com um marcador de {{counter}}",
+    "slotPerType": "usa o espaço de {{type}}",
+    "slotChooseType": "escolha um tipo de permanente",
+    "slotOncePerTurn": "uma vez neste turno"
   },
   "categoryChoice": {
     "title": "Escolher Permanentes para Manter",

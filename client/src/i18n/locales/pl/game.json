@@ -2082,7 +2082,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Rzuć z Prototype",
     "variantFaceDown": "Rzuć zakrytą",
-    "variantFallback": "Rzuć z {{type}}"
+    "variantFallback": "Rzuć z {{type}}",
+    "viaSource": "przez {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "zamiast kosztu many: {{cost}}",
+    "entersWithCounter": "wchodzi z żetonem {{counter}}",
+    "slotPerType": "używa miejsca {{type}}",
+    "slotChooseType": "wybierz typ permanentu",
+    "slotOncePerTurn": "raz w tej turze"
   },
   "categoryChoice": {
     "title": "Wybierz trwałe do zatrzymania",

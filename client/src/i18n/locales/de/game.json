@@ -2082,7 +2082,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Mit Prototyp wirken",
     "variantFaceDown": "Verdeckt wirken",
-    "variantFallback": "Mit {{type}} wirken"
+    "variantFallback": "Mit {{type}} wirken",
+    "viaSource": "über {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "statt seiner Manakosten: {{cost}}",
+    "entersWithCounter": "kommt mit einer {{counter}}-Marke ins Spiel",
+    "slotPerType": "nutzt den {{type}}-Platz",
+    "slotChooseType": "wähle einen Permanenttyp",
+    "slotOncePerTurn": "einmal in diesem Zug"
   },
   "categoryChoice": {
     "title": "Bleibende Karten zum Behalten wählen",

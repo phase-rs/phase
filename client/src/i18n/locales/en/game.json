@@ -2120,7 +2120,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Cast with Prototype",
     "variantFaceDown": "Cast Face Down",
-    "variantFallback": "Cast with {{type}}"
+    "variantFallback": "Cast with {{type}}",
+    "viaSource": "via {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "instead of its mana cost: {{cost}}",
+    "entersWithCounter": "enters with a {{counter}} counter",
+    "slotPerType": "uses its {{type}} slot",
+    "slotChooseType": "choose a permanent type",
+    "slotOncePerTurn": "once this turn"
   },
   "categoryChoice": {
     "title": "Choose Permanents to Keep",

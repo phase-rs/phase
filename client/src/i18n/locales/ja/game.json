@@ -2125,7 +2125,14 @@
     "variantMoreThanMeetsTheEye": "変身した状態で唱える",
     "variantPrototype": "試作で唱える",
     "variantFaceDown": "裏向きで唱える",
-    "variantFallback": "{{type}}で唱える"
+    "variantFallback": "{{type}}で唱える",
+    "viaSource": "{{name}}による",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "マナ・コストの代わりに：{{cost}}",
+    "entersWithCounter": "{{counter}}カウンターが置かれた状態で戦場に出る",
+    "slotPerType": "{{type}}の枠を使う",
+    "slotChooseType": "パーマネント・タイプを選ぶ",
+    "slotOncePerTurn": "このターンに1回"
   },
   "categoryChoice": {
     "title": "保持するパーマネントを選択",

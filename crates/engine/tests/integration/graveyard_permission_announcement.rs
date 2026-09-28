@@ -1201,3 +1201,67 @@ fn a_two_permission_cast_with_no_payable_option_is_not_offered() {
     );
     assert!(!casts(&runner, bears));
 }
+
+// --- Routes that are their own authority ----------------------------------
+
+const UNDERWORLD_BREACH: &str = "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard. (You may cast cards from your graveyard for their escape cost.)\nAt the beginning of the end step, sacrifice this enchantment.";
+
+/// CR 702.138a: Escape is its own authority to cast from the graveyard, so an
+/// escape cast beside two permissions announces none of them: under
+/// Underworld Breach with Muldrotha and Lurrus, choosing Escape pays the
+/// escape cost and spends neither permission's slot.
+#[test]
+fn escape_beside_two_permissions_spends_neither() {
+    let (mut scenario_runner, bears) = {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(P0, "Underworld Breach", UNDERWORLD_BREACH);
+        add_permission_source(
+            &mut scenario,
+            "Muldrotha, the Gravetide",
+            MULDROTHA,
+            &["Elemental", "Avatar"],
+        );
+        add_permission_source(
+            &mut scenario,
+            "Lurrus of the Dream-Den",
+            LURRUS,
+            &["Cat", "Nightmare"],
+        );
+        let bears = add_bears_to_graveyard(&mut scenario, "Grizzly Bears");
+        for i in 0..3 {
+            scenario.add_creature_to_graveyard(P0, &format!("Fodder {i}"), 1, 1);
+        }
+        let mut runner = scenario.build();
+        add_mana(&mut runner, ManaType::Green, 2);
+        (runner, bears)
+    };
+    let runner = &mut scenario_runner;
+    let lurrus = object_named(runner, "Lurrus of the Dream-Den");
+    let options = menu(runner, bears, CastPaymentMode::Auto);
+    let escape = options
+        .iter()
+        .position(|option| option.variant == CastingVariant::Escape)
+        .expect("escape is offered");
+    assert!(
+        options[escape].authority.is_none(),
+        "escape announces no permission"
+    );
+    runner
+        .act(GameAction::ChooseCastingVariant { index: escape })
+        .expect("choosing escape is legal");
+    for _ in 0..4 {
+        let pick = match &runner.state().waiting_for {
+            WaitingFor::PayCost { choices, count, .. } => {
+                choices.iter().copied().take(*count).collect::<Vec<_>>()
+            }
+            _ => break,
+        };
+        runner
+            .act(GameAction::SelectCards { cards: pick })
+            .expect("paying escape's exile is legal");
+    }
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Stack);
+    assert!(per_type_used(runner).is_empty());
+    assert!(!once_used(runner, lurrus));
+}

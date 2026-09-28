@@ -3321,7 +3321,10 @@ mod tests {
     /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
     /// serialized full-game state; a v85 peer would drop it silently and admit
     /// a printed-cost graveyard cast the permission forbids, so it must be
-    /// refused before it receives v86 state. The preceding v85 bump let
+    /// refused before it receives v86 state. v86 also carries the announced
+    /// graveyard permission (CR 601.2a + CR 601.2b: the casting-menu option's
+    /// `authority`, the slot prompt's `permission`, the cast's latched terms).
+    /// The preceding v85 bump let
     /// `StateUpdate.events` carry the tagged `DieRollIgnored` display event.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,

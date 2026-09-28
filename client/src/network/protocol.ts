@@ -109,7 +109,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *  68 — game_setup and state_update carry GameState, whose graveyard cast
  *       permissions can now require a casting method (required_cast_keyword),
  *       and casting-menu options carry the non-mana part of their cost
- *       (additional_cost). Bumped in lockstep with full-game protocol 86.
+ *       (additional_cost) and the graveyard permission they announce
+ *       (authority; the slot prompt's permission; the cast's latched terms).
+ *       Bumped in lockstep with full-game protocol 86.
  *  67 — game_setup and state_update carry GameEvent[] and can now carry
  *       DieRollIgnored { player_id, sides, result }. Older peers omit ignored
  *       dice from the roll overlay; the exact-match first-contact gate rejects

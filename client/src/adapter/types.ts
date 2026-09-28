@@ -1098,6 +1098,42 @@ export interface CastingVariantChoiceOption {
   mana_cost: ManaCost;
   /** CR 601.2f-h: the non-mana part of the alternative cost this option pays. */
   additional_cost?: SerializedAbilityCost | null;
+  /**
+   * CR 601.2a + CR 601.2b: the graveyard permission this option is announced
+   * under. Present for every cast through a graveyard-cast permission.
+   */
+  authority?: CastAuthorityChoice | null;
+}
+
+/** CR 601.2a: one graveyard-cast permission grant: its source and the grant on it. */
+export interface GraveyardPermissionId {
+  source: ObjectId;
+  grant:
+    | { type: "Static"; index: number }
+    | { type: "Transient"; effect_id: number; modification: number };
+}
+
+/** CR 601.2a + CR 601.2b: what the player announces for a graveyard-permission cast. */
+export interface AnnouncedGraveyardPermission {
+  permission: GraveyardPermissionId;
+  /** Opaque; compared only for equality by the engine. */
+  grant_digest: string;
+  slot_type?: CoreType | null;
+}
+
+/** CR 601.2f: a graveyard permission's extra cost and whether it replaces the mana cost. */
+export interface CastExtraCost {
+  cost: SerializedAbilityCost;
+  mode: "Alternative" | "Additional";
+}
+
+/** The engine-authored terms of a casting option's graveyard permission, for display. */
+export interface CastAuthorityChoice {
+  announcement: AnnouncedGraveyardPermission;
+  extra_cost?: CastExtraCost | null;
+  enters_with_counter?: CounterType | null;
+  frequency: CastFrequency;
+  graveyard_destination_replacement?: Zone | null;
 }
 
 export type CastPaymentMode =
@@ -2487,7 +2523,7 @@ export type WaitingFor =
   // on a creature they control (or decline, sending it to the graveyard).
   | { type: "CipherEncodeChoice"; data: { player: PlayerId; card_id: ObjectId; creatures: ObjectId[] } }
   | { type: "CastingVariantChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; options: CastingVariantChoiceOption[] } }
-  | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; payment_mode?: CastPaymentMode; available_slots: CoreType[] } }
+  | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; payment_mode?: CastPaymentMode; available_slots: CoreType[]; permission?: AnnouncedGraveyardPermission | null } }
   | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
   | { type: "MiracleReveal"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
   // CR 118.3 + CR 601.2b + CR 605.3b: unified cost-payment selection. Replaces

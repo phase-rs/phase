@@ -67,8 +67,11 @@ pub struct TournamentRequestId(pub u64);
 ///      no longer carried as a card-filter `HasKeywordKind`, and
 ///      `CastingVariantChoiceOption` gains `additional_cost`. A v85 peer
 ///      would drop the method silently and admit a printed-cost cast the
-///      permission forbids. Full-game peers and P2P move in lockstep (wire
-///      68); lobby messages are unchanged.
+///      permission forbids. CR 601.2a + CR 601.2b: the same bump carries the
+///      announced graveyard permission: `CastingVariantChoiceOption` gains
+///      `authority`, `SpellContext` gains `graveyard_permission_latch`, and
+///      `WaitingFor::ChoosePermanentTypeSlot` gains `permission`. Full-game
+///      peers and P2P move in lockstep (wire 68); lobby messages are unchanged.
 /// 85 — `GameEvent` gained the tagged `DieRollIgnored { player_id, sides,
 ///      result }` display-only variant. `StateUpdate.events` carries it to
 ///      clients; a v84 peer would accept the session but omit ignored dice from

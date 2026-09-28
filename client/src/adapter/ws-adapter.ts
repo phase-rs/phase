@@ -214,6 +214,9 @@ export class NativeEngineVersionMismatchError extends Error {
  *      Master Monk: "using its blitz ability"): GraveyardCastPermission gains
  *      required_cast_keyword and casting-menu options gain additional_cost. A
  *      v85 peer would drop the method silently and admit a printed-cost cast.
+ *      The same bump carries the announced graveyard permission (CR 601.2a-b):
+ *      casting-menu options gain authority, ChoosePermanentTypeSlot gains
+ *      permission, and the cast's context gains graveyard_permission_latch.
  * 85 — GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
  *      display event. StateUpdate carries GameEvent[]; older peers would
  *      accept the connection but omit ignored dice from the roll overlay.
