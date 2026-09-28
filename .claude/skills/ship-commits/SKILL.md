@@ -142,16 +142,22 @@ done
 git status --short -- "${SHIPPED_PATHS[@]}"
 # A path whose whole diff is yours: git commit -- <those paths>
 # A path that also holds another agent's hunks: commit only your hunks, built in
-# a private index so neither their hunks nor anything they staged is swept in:
-#   run=$(mktemp -d)                             # per-run patch and index; agents run concurrently
-#   git diff -U0 HEAD -- <path> > "$run/mine.patch"   # against HEAD, so staged hunks are included;
-#                                                # then delete the hunks that are not yours
-#   export GIT_INDEX_FILE="$run/index"; git read-tree HEAD
+# a private index so neither their hunks nor anything they staged is swept in,
+# and land it only if HEAD has not moved (another agent's commit would otherwise
+# be undone by your stale snapshot):
+#   run=$(mktemp -d); base=$(git rev-parse HEAD)  # per-run files; agents run concurrently
+#   git diff -U0 "$base" -- <path> > "$run/mine.patch"            # staged + unstaged; delete hunks not yours
+#   git diff --cached -U0 "$base" -- <path> > "$run/theirs.patch"  # delete YOUR hunks; empty if none left
+#   export GIT_INDEX_FILE="$run/index"; git read-tree "$base"
 #   git apply --cached --unidiff-zero "$run/mine.patch"
-#   git diff --cached                            # read every hunk: each must be yours
-#   git commit -m "…"
-#   unset GIT_INDEX_FILE; rm -rf "$run"
-#   git reset -q -- <path>                       # resync the shared index to the new HEAD
+#   git diff --cached "$base"                    # read every hunk: each must be yours
+#   git hook run --ignore-missing pre-commit     # the checks git commit would run
+#   new=$(git commit-tree "$(git write-tree)" -p "$base" -m "…")
+#   unset GIT_INDEX_FILE
+#   git update-ref -m "commit: …" HEAD "$new" "$base"   # refuses if HEAD moved: start over from the new HEAD
+#   git reset -q -- <path>                       # resync the shared index to the new HEAD,
+#   [ -s "$run/theirs.patch" ] && git apply --cached --unidiff-zero "$run/theirs.patch"  # then restage theirs
+#   rm -rf "$run"
 # (`git add -p` is interactive and unavailable to agents.)
 
 # 4) Re-check. Any remaining diff in these paths must be another agent's hunks only.
