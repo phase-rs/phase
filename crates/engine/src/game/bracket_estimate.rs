@@ -14,9 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::database::combo_table::{detect_combos_for_resolved, ResolvedComboDeck};
 use crate::database::{
-    combo_cardinality, detect_combos, CardDatabase, ComboCardinality, ComboCoverage, ComboEntry,
-    ComboMatch, ComboProvenance, ComboRelevance, ComboTable, EarlyComboReading, SignalSource,
+    combo_cardinality, CardDatabase, ComboCardinality, ComboCoverage, ComboEntry, ComboMatch,
+    ComboProvenance, ComboRelevance, ComboTable, EarlyComboReading, SignalSource,
 };
 use crate::game::deck_loading::PlayerDeckList;
 use crate::types::ability::Comparator;
@@ -724,8 +725,9 @@ pub fn estimate_bracket(
         }
     }
 
-    let combos = detect_combos(deck, combo_table);
-    contribute_combo_mass_land_denial(deck, &combos, &mut axes);
+    let resolved_combo_deck = ResolvedComboDeck::new(deck, db);
+    let combos = detect_combos_for_resolved(combo_table, &resolved_combo_deck);
+    contribute_combo_mass_land_denial(&combos, &mut axes);
 
     let unresolved: Vec<String> = unresolved.into_iter().collect();
     let confidence = if unresolved.is_empty() {
@@ -734,7 +736,7 @@ pub fn estimate_bracket(
         EstimateConfidence::Partial
     };
     let (mut tier, checks) = decide_tier(&axes);
-    let combo_checks = evaluate_combo_floors(deck, combo_table, &combos);
+    let combo_checks = evaluate_combo_floors(combo_table, &combos, &resolved_combo_deck);
     for check in &combo_checks {
         if check.outcome == BracketCheckOutcome::Fired && check.floor.as_u8() > tier.as_u8() {
             tier = check.floor;
@@ -848,37 +850,24 @@ fn match_from_entry(entry: &ComboEntry, cardinality: ComboCardinality) -> ComboM
 /// Evaluates both combo rows while walking table entries exactly once for the
 /// clear-row lookahead.
 fn evaluate_combo_floors(
-    deck: &PlayerDeckList,
     table: &ComboTable,
     detected: &[ComboMatch],
+    resolved: &ResolvedComboDeck,
 ) -> Vec<ComboCheck> {
     match table.coverage() {
         ComboCoverage::Unmeasured => return Vec::new(),
         ComboCoverage::Measured => {}
     }
 
-    let commanders: BTreeSet<String> = deck
-        .commander
-        .iter()
-        .map(|name| name.to_lowercase())
-        .collect();
-    let deck_keys: BTreeSet<String> = deck
-        .commander
-        .iter()
-        .chain(&deck.main_deck)
-        .chain(&deck.companion)
-        .chain(&deck.signature_spell)
-        .map(|name| name.to_lowercase())
-        .collect();
     let mut qualifying_entry = vec![false; COMBO_FLOOR_RULES.len()];
     let mut one_piece_present = vec![false; COMBO_FLOOR_RULES.len()];
 
     for entry in table.entries() {
-        let combo = match_from_entry(entry, combo_cardinality(entry, &commanders));
+        let combo = match_from_entry(entry, combo_cardinality(entry, &resolved.commanders));
         let pieces_present = entry
             .pieces
             .iter()
-            .filter(|piece| deck_keys.contains(&piece.key))
+            .filter(|piece| resolved.deck_keys.contains(&piece.key))
             .count();
         for (index, rule) in COMBO_FLOOR_RULES.iter().enumerate() {
             if combo_floor_matches(rule.trigger, &combo) {
@@ -925,13 +914,18 @@ fn evaluate_combo_floors(
 }
 
 fn contribute_combo_mass_land_denial(
-    deck: &PlayerDeckList,
     combos: &[ComboMatch],
     axes: &mut BTreeMap<BracketAxis, AxisReading>,
 ) {
     let relevant: Vec<&ComboMatch> = combos
         .iter()
-        .filter(|combo| combo.axes.contains(&BracketAxis::MassLandDenial))
+        .filter(|combo| {
+            let contributes = match combo.relevance {
+                ComboRelevance::Helper | ComboRelevance::Contextual => false,
+                ComboRelevance::Standalone => true,
+            };
+            contributes && combo.axes.contains(&BracketAxis::MassLandDenial)
+        })
         .collect();
     let reading = axes.entry(BracketAxis::MassLandDenial).or_default();
     reading.combo_pairs.extend(relevant.iter().map(|combo| {
@@ -941,29 +935,17 @@ fn contribute_combo_mass_land_denial(
         ]
     }));
 
-    for deck_name in deck
-        .commander
-        .iter()
-        .chain(&deck.main_deck)
-        .chain(&deck.companion)
-        .chain(&deck.signature_spell)
-    {
-        let Some(piece) = relevant
-            .iter()
-            .flat_map(|combo| combo.pieces.iter())
-            .find(|piece| piece.key == deck_name.to_lowercase())
-        else {
-            continue;
-        };
-        if reading
-            .contributing
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(&piece.display))
-        {
-            continue;
-        }
+    for combo in relevant {
         reading.count = reading.count.saturating_add(1);
-        reading.contributing.push(piece.display.clone());
+        for piece in &combo.pieces {
+            if !reading
+                .contributing
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&piece.display))
+            {
+                reading.contributing.push(piece.display.clone());
+            }
+        }
     }
 }
 

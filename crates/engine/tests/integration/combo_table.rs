@@ -7,6 +7,7 @@ use engine::database::combo_table::{
     ComboProvenance, ComboRelevance, ComboResource, ComboSetup, ComboTable, ComboTableDoc,
     ComboTableError, SignalSource,
 };
+use engine::database::CardDatabase;
 use engine::game::bracket_estimate::BracketAxis;
 use engine::game::deck_loading::PlayerDeckList;
 use serde_json::Value;
@@ -79,6 +80,10 @@ fn table_entries(table: &ComboTable) -> Vec<ComboEntry> {
         .collect()
 }
 
+fn empty_db() -> CardDatabase {
+    CardDatabase::default()
+}
+
 #[test]
 fn combo_table_roundtrips_through_serde() {
     let original = doc(vec![entry(
@@ -130,9 +135,10 @@ fn by_card_index_finds_both_pieces() {
 
     assert_eq!(table.entries_for("alpha"), &[0]);
     assert_eq!(table.entries_for("beta"), &[0]);
-    assert!(detect_combos(&deck(&["Commander"], &["Alpha"]), &table).is_empty());
+    let db = empty_db();
+    assert!(detect_combos(&deck(&["Commander"], &["Alpha"]), &db, &table).is_empty());
     assert_eq!(
-        detect_combos(&deck(&["Commander"], &["Alpha", "Beta"]), &table).len(),
+        detect_combos(&deck(&["Commander"], &["Alpha", "Beta"]), &db, &table).len(),
         1
     );
 }
@@ -152,9 +158,10 @@ fn detect_combos_is_deterministic() {
     let ordered = deck(&["Commander"], &["Alpha", "Beta", "Gamma"]);
     let shuffled = deck(&["Commander"], &["Gamma", "Alpha", "Beta"]);
 
-    let first = detect_combos(&ordered, &table);
-    assert_eq!(first, detect_combos(&ordered, &table));
-    assert_eq!(first, detect_combos(&shuffled, &table));
+    let db = empty_db();
+    let first = detect_combos(&ordered, &db, &table);
+    assert_eq!(first, detect_combos(&ordered, &db, &table));
+    assert_eq!(first, detect_combos(&shuffled, &db, &table));
 }
 
 #[test]
@@ -336,7 +343,11 @@ fn matches_report_combo_pair_source() {
     )]));
 
     assert_eq!(
-        detect_combos(&deck(&["Commander"], &["Alpha", "Beta"]), &table),
+        detect_combos(
+            &deck(&["Commander"], &["Alpha", "Beta"]),
+            &empty_db(),
+            &table
+        ),
         vec![ComboMatch {
             pieces: [
                 piece("alpha", "Alpha", ComboPieceZone::Anywhere),
@@ -353,5 +364,109 @@ fn matches_report_combo_pair_source() {
             axes: BTreeSet::from([BracketAxis::MassLandDenial]),
             source: SignalSource::ComboPair,
         }]
+    );
+}
+
+fn fixture_db() -> Option<&'static CardDatabase> {
+    let Some(db) = crate::support::shared_card_db() else {
+        eprintln!("skipping: committed integration card fixture is unavailable");
+        return None;
+    };
+    Some(db)
+}
+
+fn fixture_pair_table(first: ComboPiece, second: ComboPiece) -> ComboTable {
+    ComboTable::from_doc(doc(vec![entry(first, second)]))
+}
+
+fn assert_main_deck_pair_matches(db: &CardDatabase, first: &str, table: &ComboTable) {
+    assert_eq!(
+        detect_combos(&deck(&["Commander"], &["Fire", "Grizzly Bears"]), db, table).len(),
+        1,
+        "canonical names must reach the tested table row"
+    );
+    assert_eq!(
+        detect_combos(&deck(&["Commander"], &[first, "Grizzly Bears"]), db, table).len(),
+        1
+    );
+}
+
+#[test]
+fn spaced_composite_deck_name_matches_front_face_combo_key() {
+    let Some(db) = fixture_db() else { return };
+    let table = fixture_pair_table(
+        piece("fire", "Fire", ComboPieceZone::Anywhere),
+        piece("grizzly bears", "Grizzly Bears", ComboPieceZone::Anywhere),
+    );
+
+    assert_main_deck_pair_matches(db, "Fire // Ice", &table);
+}
+
+#[test]
+fn glued_composite_deck_name_matches_front_face_combo_key() {
+    let Some(db) = fixture_db() else { return };
+    let table = fixture_pair_table(
+        piece("fire", "Fire", ComboPieceZone::Anywhere),
+        piece("grizzly bears", "Grizzly Bears", ComboPieceZone::Anywhere),
+    );
+
+    assert_main_deck_pair_matches(db, "Fire//Ice", &table);
+}
+
+#[test]
+fn unaccented_deck_name_matches_accented_combo_key() {
+    let Some(db) = fixture_db() else { return };
+    let table = fixture_pair_table(
+        piece("dandân", "Dandân", ComboPieceZone::Anywhere),
+        piece("grizzly bears", "Grizzly Bears", ComboPieceZone::Anywhere),
+    );
+
+    assert_eq!(
+        detect_combos(
+            &deck(&["Commander"], &["Dandân", "Grizzly Bears"]),
+            db,
+            &table
+        )
+        .len(),
+        1,
+        "canonical names must reach the tested table row"
+    );
+    assert_eq!(
+        detect_combos(
+            &deck(&["Commander"], &["Dandan", "Grizzly Bears"]),
+            db,
+            &table
+        )
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn composite_named_commander_uses_the_front_face_for_cardinality() {
+    let Some(db) = fixture_db() else { return };
+    let mut combo = entry(
+        piece("fire", "Fire", ComboPieceZone::CommandZone),
+        piece("grizzly bears", "Grizzly Bears", ComboPieceZone::Anywhere),
+    );
+    combo.setup = ComboSetup::NotablePrerequisites;
+    let table = ComboTable::from_doc(doc(vec![combo]));
+
+    let canonical = detect_combos(&deck(&["Fire"], &["Grizzly Bears"]), db, &table);
+    assert_eq!(
+        canonical.len(),
+        1,
+        "canonical names must reach the tested table row"
+    );
+    assert_eq!(
+        canonical[0].cardinality,
+        ComboCardinality::DefinitelyTwoCard
+    );
+
+    let composite = detect_combos(&deck(&["Fire // Ice"], &["Grizzly Bears"]), db, &table);
+    assert_eq!(composite.len(), 1);
+    assert_eq!(
+        composite[0].cardinality,
+        ComboCardinality::DefinitelyTwoCard
     );
 }

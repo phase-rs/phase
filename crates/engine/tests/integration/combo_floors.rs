@@ -63,9 +63,13 @@ fn entry(
 }
 
 fn table_with(entry: ComboEntry) -> ComboTable {
+    table_with_entries(vec![entry])
+}
+
+fn table_with_entries(entries: Vec<ComboEntry>) -> ComboTable {
     ComboTable::from_doc(ComboTableDoc {
         provenance: provenance(),
-        entries: vec![entry],
+        entries,
     })
 }
 
@@ -226,9 +230,24 @@ fn floor_a_and_floor_b_do_not_share_a_predicate() {
 }
 
 #[test]
-fn combo_sourced_mass_land_denial_increments_the_existing_axis() {
+fn only_standalone_combo_sourced_mass_land_denial_contributes() {
+    for relevance in [ComboRelevance::Helper, ComboRelevance::Contextual] {
+        let table = table_with(entry(
+            relevance,
+            ComboSetup::AsPrinted,
+            12,
+            &[BracketAxis::MassLandDenial],
+        ));
+        let estimate = estimate_bracket(&deck_with(&[VIZIER, DRUID]), &db(), &table).unwrap();
+        let reading = &estimate.axes[&BracketAxis::MassLandDenial];
+
+        assert_eq!(reading.count, 0);
+        assert!(reading.contributing.is_empty());
+        assert!(reading.combo_pairs.is_empty());
+    }
+
     let table = table_with(entry(
-        ComboRelevance::Helper,
+        ComboRelevance::Standalone,
         ComboSetup::AsPrinted,
         12,
         &[BracketAxis::MassLandDenial],
@@ -236,12 +255,39 @@ fn combo_sourced_mass_land_denial_increments_the_existing_axis() {
     let estimate = estimate_bracket(&deck_with(&[VIZIER, DRUID]), &db(), &table).unwrap();
     let reading = &estimate.axes[&BracketAxis::MassLandDenial];
 
-    assert_eq!(reading.count, 2);
-    assert_eq!(reading.contributing, [VIZIER, DRUID]);
+    assert_eq!(reading.count, 1);
+    assert_eq!(reading.contributing, [DRUID, VIZIER]);
     assert_eq!(reading.combo_pairs, [[DRUID.to_owned(), VIZIER.to_owned()]]);
     assert!(estimate.checks.iter().any(|check| {
         check.axis == BracketAxis::MassLandDenial && check.outcome == BracketCheckOutcome::Fired
     }));
+}
+
+#[test]
+fn combo_sourced_mass_land_denial_deduplicates_shared_piece_names() {
+    let first = entry(
+        ComboRelevance::Standalone,
+        ComboSetup::AsPrinted,
+        12,
+        &[BracketAxis::MassLandDenial],
+    );
+    let mut second = first.clone();
+    second.pieces[1] = piece("Third Piece");
+    let table = table_with_entries(vec![first, second]);
+    let estimate =
+        estimate_bracket(&deck_with(&[DRUID, VIZIER, "Third Piece"]), &db(), &table).unwrap();
+    let reading = &estimate.axes[&BracketAxis::MassLandDenial];
+
+    assert_eq!(reading.count, 2);
+    assert_eq!(reading.contributing, [DRUID, VIZIER, "Third Piece"]);
+    assert_eq!(
+        reading
+            .contributing
+            .iter()
+            .filter(|name| name.eq_ignore_ascii_case(DRUID))
+            .count(),
+        1
+    );
 }
 
 #[test]
