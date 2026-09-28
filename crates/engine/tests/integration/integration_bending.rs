@@ -4,6 +4,8 @@
 use engine::ai_support::candidate_actions;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::triggers::process_triggers;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, Effect, EffectScope, PtValue, QuantityExpr, ResolvedAbility,
@@ -41,6 +43,8 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
 // ---------------------------------------------------------------------------
 // Step 1: Earthbend event emission
 // ---------------------------------------------------------------------------
+
+const BADGERMOLE_CUB_ORACLE: &str = "When this creature enters, earthbend 1. (Target land you control becomes a 0/0 creature with haste that's still a land. Put a +1/+1 counter on it. When it dies or is exiled, return it to the battlefield tapped.)\nWhenever you tap a creature for mana, add an additional {G}.";
 
 #[test]
 fn test_earthbending_registers_event_and_turn_tracking() {
@@ -138,14 +142,18 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
             ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
         ],
     );
-    let cub = scenario.add_real_card(P0, "Badgermole Cub", Zone::Hand, db);
+    let cub = scenario
+        .add_creature_to_hand_from_oracle(P0, "Badgermole Cub", 2, 2, BADGERMOLE_CUB_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
     let garden = scenario.add_real_card(P0, "Khalni Garden", Zone::Battlefield, db);
     let yawgmoth = scenario.add_real_card(P0, "Yawgmoth, Thran Physician", Zone::Battlefield, db);
     scenario.add_card_to_library_top(P0, "Yawgmoth draw");
 
     let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-
     runner.cast(cub).target_object(garden).resolve();
     let animated_garden = &runner.state().objects[&garden];
     assert!(
@@ -197,6 +205,57 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_yawgmoth_sacrifice() {
     assert!(
         runner.state().stack.is_empty(),
         "the full interaction must settle"
+    );
+}
+
+/// The same delayed return must bind the land's exile event, rather than the
+/// earlier ETB event that created the delayed trigger.
+#[test]
+fn badgermole_cub_earthbend_returns_khalni_garden_after_exile() {
+    let db = crate::support::shared_card_db().expect("curated real-card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+        ],
+    );
+    let cub = scenario
+        .add_creature_to_hand_from_oracle(P0, "Badgermole Cub", 2, 2, BADGERMOLE_CUB_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
+    let garden = scenario.add_real_card(P0, "Khalni Garden", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    runner.cast(cub).target_object(garden).resolve();
+    assert!(
+        runner.state().objects[&garden]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "the live-parsed Earthbend trigger must animate the land"
+    );
+
+    let mut events = Vec::new();
+    assert!(!move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(garden, Zone::Exile, cub),
+        &mut events,
+    ));
+    assert_eq!(runner.state().objects[&garden].zone, Zone::Exile);
+    process_triggers(runner.state_mut(), &events);
+    runner.advance_until_stack_empty();
+
+    let returned = &runner.state().objects[&garden];
+    assert_eq!(returned.zone, Zone::Battlefield);
+    assert!(
+        returned.tapped,
+        "the delayed trigger returns the land tapped"
     );
 }
 
