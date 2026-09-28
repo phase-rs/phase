@@ -1874,8 +1874,22 @@ pub(super) fn parse_targeted_action_ast(
         }
         let base_was_typed = matches!(target, TargetFilter::Typed(_));
         let (target, folded_rest) = fold_article_led_type_union(target, rem);
-        if base_was_typed
-            && matches!(target, TargetFilter::Or { .. })
+        // CR 608.2c: An already-folded, article-less union can also leave an
+        // article-led third leg. Refuse only unfinished union continuations;
+        // a comma introducing a separate instruction is not another type.
+        let unfinished_union = nom_parse_lower(&folded_rest.trim_start().to_lowercase(), |input| {
+            value(
+                (),
+                (
+                    opt(tag::<_, _, OracleError<'_>>(", ")),
+                    alt((tag("and/or "), tag("or "))),
+                ),
+            )
+            .parse(input)
+        })
+        .is_some();
+        if matches!(target, TargetFilter::Or { .. })
+            && (base_was_typed || unfinished_union)
             && all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
                 .parse(folded_rest.trim())
                 .is_err()
@@ -18279,11 +18293,30 @@ mod tests {
 
     #[test]
     fn parse_sacrifice_refuses_incomplete_article_led_union() {
-        let text = "sacrifice another creature or an artifact or an enchantment";
-        assert!(
-            parse_targeted_action_ast(text, text, &mut ParseContext::default()).is_none(),
-            "incomplete third leg must not be emitted as a supported two-leg sacrifice"
-        );
+        for text in [
+            "sacrifice another creature or an artifact or an enchantment",
+            "sacrifice another creature or artifact or an enchantment",
+        ] {
+            assert!(
+                parse_targeted_action_ast(text, text, &mut ParseContext::default()).is_none(),
+                "{text}: incomplete third leg must not be emitted as a supported sacrifice"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_articleless_union_keeps_unrelated_clause_remainder() {
+        let text = "sacrifice another creature or artifact, then draw a card";
+        let ast = parse_targeted_action_ast(text, text, &mut ParseContext::default())
+            .expect("a separate comma-led instruction is not another union leg");
+        let Effect::Sacrifice {
+            target: TargetFilter::Or { filters },
+            ..
+        } = lower_targeted_action_ast(ast)
+        else {
+            panic!("expected complete two-leg sacrifice before next instruction");
+        };
+        assert_eq!(filters.len(), 2);
     }
 
     #[test]

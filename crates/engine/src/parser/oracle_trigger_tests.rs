@@ -130,37 +130,87 @@ fn gut_attack_trigger_sacrifice_is_a_scoped_type_union() {
 
 #[test]
 fn attack_trigger_refuses_truncated_third_sacrifice_type() {
-    // Synthetic full Oracle line: the production entry must report the
-    // unsupported third leg rather than claiming a supported two-leg filter.
+    // A third independently determined type must remain visible as unsupported
+    // whether the first two types were folded here or by the base type grammar.
+    for phrase in [
+        "sacrifice another creature or an artifact or an enchantment",
+        "sacrifice another creature or artifact or an enchantment",
+    ] {
+        let oracle = format!(
+            "Whenever you attack, you may {phrase}. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking."
+        );
+        let parsed = parse_oracle_text(
+            &oracle,
+            "Synthetic Attack Sacrifice",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("attack trigger reached production parser");
+        assert_eq!(trigger.mode, TriggerMode::YouAttack);
+        let effects = trigger_chain_effects(trigger);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented {
+                    description: Some(description),
+                    ..
+                } if description.contains(phrase)
+            )),
+            "{phrase}: unsupported clause must remain visible in coverage: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Sacrifice { .. })),
+            "{phrase}: truncated sacrifice must not be marked supported: {effects:?}"
+        );
+    }
+}
+
+#[test]
+fn attack_trigger_supports_complete_articleless_sacrifice_union() {
     let parsed = parse_oracle_text(
-        "Whenever you attack, you may sacrifice another creature or an artifact or an enchantment. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking.",
+        "Whenever you attack, you may sacrifice another creature or artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking.",
         "Synthetic Attack Sacrifice",
         &[],
         &["Creature".to_string()],
         &[],
     );
-    let trigger = parsed
-        .triggers
-        .first()
-        .expect("attack trigger reached production parser");
+    let trigger = parsed.triggers.first().expect("production attack trigger");
     assert_eq!(trigger.mode, TriggerMode::YouAttack);
-    let effects = trigger_chain_effects(trigger);
-    assert!(
-        effects.iter().any(|effect| matches!(
-            effect,
-            Effect::Unimplemented {
-                description: Some(description),
-                ..
-            } if description.contains("another creature or an artifact or an enchantment")
-        )),
-        "the unsupported clause must remain visible in coverage: {effects:?}"
+    let sacrifice = trigger.execute.as_deref().expect("optional sacrifice");
+    assert!(sacrifice.optional);
+    assert_no_unimplemented(sacrifice);
+    let Effect::Sacrifice {
+        target: TargetFilter::Or { filters },
+        count: QuantityExpr::Fixed { value: 1 },
+        ..
+    } = sacrifice.effect.as_ref()
+    else {
+        panic!("expected one sacrifice from complete article-less union: {sacrifice:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for (leg, ty) in filters
+        .iter()
+        .zip([TypeFilter::Creature, TypeFilter::Artifact])
+    {
+        let TargetFilter::Typed(typed) = leg else {
+            panic!("expected typed sacrifice leg: {leg:?}");
+        };
+        assert!(typed.type_filters.contains(&ty), "{leg:?}");
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.properties.contains(&FilterProp::Another), "{leg:?}");
+    }
+    let followup = sacrifice.sub_ability.as_deref().expect("If you do");
+    assert_eq!(
+        followup.condition,
+        Some(AbilityCondition::effect_performed())
     );
-    assert!(
-        !effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::Sacrifice { .. })),
-        "truncated sacrifice must not be marked supported: {effects:?}"
-    );
+    assert!(matches!(followup.effect.as_ref(), Effect::Token { .. }));
 }
 
 /// CR 608.2c: the scoped phase player stated once governs a same-sentence
