@@ -840,6 +840,28 @@ fn forwards_battlefield_move(ability: &ResolvedAbility) -> bool {
         )
 }
 
+/// CR 400.7j: a grouped move settles from every arrival in its logical group;
+/// an ungrouped one from the single member its replacement choice paused.
+fn pending_forwarded_zone_result(
+    state: &GameState,
+    producer: ObjectId,
+) -> crate::types::ability::PendingForwardedZoneResult {
+    let group = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+        .map(|pending| pending.logical_zone_change_group.logical_group_id);
+    let selected = group
+        .is_none()
+        .then(|| state.pending_zone_change_delivery_from_replacement())
+        .flatten()
+        .map(|delivery| vec![delivery.member]);
+    crate::types::ability::PendingForwardedZoneResult {
+        producer,
+        selected,
+        group,
+    }
+}
+
 fn forwarded_zone_result_from_events<'a>(
     state: &GameState,
     selected: Option<&[crate::types::identifiers::ObjectIncarnationRef]>,
@@ -1029,15 +1051,12 @@ fn park_forwarded_zone_result_on_active_continuation(
     {
         return;
     }
+    let marker = pending_forwarded_zone_result(state, ability.source_id);
     let result = forwarded_zone_result_from_events(state, None, producer_events.iter());
-    if result.object_incarnations.is_empty() && waits_for_resolution_choice(&state.waiting_for) {
-        let marker = crate::types::ability::PendingForwardedZoneResult {
-            producer: ability.source_id,
-            selected: state
-                .pending_zone_change_delivery_from_replacement()
-                .map(|delivery| vec![delivery.member]),
-            group: None,
-        };
+    if marker.group.is_some()
+        || (result.object_incarnations.is_empty()
+            && waits_for_resolution_choice(&state.waiting_for))
+    {
         if let Some(frame) = state.active_ability_continuation_frame_mut() {
             frame.pending.chain.context.pending_forwarded_zone_result = Some(marker);
         }
@@ -17451,25 +17470,11 @@ fn resolve_chain_body(
                 state,
             );
             if forwards_battlefield_move(ability) {
+                let marker = pending_forwarded_zone_result(state, ability.source_id);
                 let result =
                     forwarded_zone_result_from_events(state, None, events[events_before..].iter());
-                if result.object_incarnations.is_empty() {
-                    let group = state
-                        .active_change_zone_frame()
-                        .and_then(|frame| frame.pending.as_ref())
-                        .map(|pending| pending.logical_zone_change_group.logical_group_id);
-                    // A grouped move settles from every arrival in its logical group.
-                    let selected = group
-                        .is_none()
-                        .then(|| state.pending_zone_change_delivery_from_replacement())
-                        .flatten()
-                        .map(|delivery| vec![delivery.member]);
-                    sub_clone.context.pending_forwarded_zone_result =
-                        Some(crate::types::ability::PendingForwardedZoneResult {
-                            producer: ability.source_id,
-                            selected,
-                            group,
-                        });
+                if marker.group.is_some() || result.object_incarnations.is_empty() {
+                    sub_clone.context.pending_forwarded_zone_result = Some(marker);
                 } else {
                     bind_moved_objects_to_child(
                         state,

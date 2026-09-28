@@ -5101,97 +5101,105 @@ mod tests {
         use crate::types::keywords::Keyword;
         use crate::types::replacements::ReplacementEvent;
 
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let producer = scenario.add_creature(P0, "Returner", 0, 1).id();
-        let first = scenario.add_creature_to_hand(P0, "First", 2, 2).id();
-        let second = scenario.add_creature_to_hand(P0, "Second", 3, 3).id();
-        for state_change in [TapStateChange::Tap, TapStateChange::Untap] {
-            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
-                .execute(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::SetTapState {
-                        target: TargetFilter::SelfRef,
-                        scope: EffectScope::Single,
-                        state: state_change,
-                    },
-                ))
-                .valid_card(TargetFilter::Any)
-                .destination_zone(Zone::Battlefield);
-            scenario
-                .add_creature(P1, "Entry Modifier", 0, 1)
-                .with_replacement_definition(replacement);
-        }
-        let mut runner = scenario.build();
-        let haste = ResolvedAbility::new(
-            Effect::GenericEffect {
-                static_abilities: vec![StaticDefinition::continuous()
-                    .affected(TargetFilter::ParentTarget)
-                    .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Haste,
-                    }])],
-                duration: None,
-                target: Some(TargetFilter::ParentTarget),
-                end_cost: None,
-            },
-            vec![],
-            producer,
-            P0,
-        );
-        let mut put = ResolvedAbility::new(
-            move_zone_effect(Some(Zone::Hand), Zone::Battlefield, TargetFilter::Any),
-            vec![TargetRef::Object(first), TargetRef::Object(second)],
-            producer,
-            P0,
-        )
-        .sub_ability(haste);
-        put.forward_result = true;
-        let mut events = Vec::new();
-        crate::game::effects::resolve_ability_chain(runner.state_mut(), &put, &mut events, 0)
-            .expect("start the forwarded move");
-        let mut replacement_choices = 0;
-        for _ in 0..8 {
-            if !matches!(
-                runner.state().waiting_for,
-                WaitingFor::ReplacementChoice { .. }
-            ) {
-                break;
+        for only_second_pauses in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let producer = scenario.add_creature(P0, "Returner", 0, 1).id();
+            let first = scenario.add_creature_to_hand(P0, "First", 2, 2).id();
+            let second = scenario.add_creature_to_hand(P0, "Second", 3, 3).id();
+            let paused = if only_second_pauses {
+                TargetFilter::SpecificObject { id: second }
+            } else {
+                TargetFilter::Any
+            };
+            for state_change in [TapStateChange::Tap, TapStateChange::Untap] {
+                let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::SetTapState {
+                            target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: state_change,
+                        },
+                    ))
+                    .valid_card(paused.clone())
+                    .destination_zone(Zone::Battlefield);
+                scenario
+                    .add_creature(P1, "Entry Modifier", 0, 1)
+                    .with_replacement_definition(replacement);
             }
-            replacement_choices += 1;
-            runner
-                .act(GameAction::ChooseReplacement { index: 0 })
-                .unwrap();
-        }
-        assert!(
-            replacement_choices >= 2,
-            "each creature's entry must pause for a replacement choice"
-        );
-        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
-        assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
-        let hasted: std::collections::BTreeSet<_> = runner
-            .state()
-            .transient_continuous_effects
-            .iter()
-            .filter(|tce| {
-                tce.modifications.iter().any(|m| {
-                    matches!(
-                        m,
-                        ContinuousModification::AddKeyword {
-                            keyword: Keyword::Haste
-                        }
-                    )
+            let mut runner = scenario.build();
+            let haste = ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTarget)
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }])],
+                    duration: None,
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                },
+                vec![],
+                producer,
+                P0,
+            );
+            let mut put = ResolvedAbility::new(
+                move_zone_effect(Some(Zone::Hand), Zone::Battlefield, TargetFilter::Any),
+                vec![TargetRef::Object(first), TargetRef::Object(second)],
+                producer,
+                P0,
+            )
+            .sub_ability(haste);
+            put.forward_result = true;
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(runner.state_mut(), &put, &mut events, 0)
+                .expect("start the forwarded move");
+            let mut replacement_choices = 0;
+            for _ in 0..8 {
+                if !matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ) {
+                    break;
+                }
+                replacement_choices += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+            }
+            assert!(
+                replacement_choices >= if only_second_pauses { 1 } else { 2 },
+                "the move must pause for its replacement choice ({only_second_pauses})"
+            );
+            assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+            let hasted: std::collections::BTreeSet<_> = runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .filter(|tce| {
+                    tce.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Haste
+                            }
+                        )
+                    })
                 })
-            })
-            .filter_map(|tce| match tce.affected {
-                TargetFilter::SpecificObject { id } => Some(id),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            hasted,
-            [first, second].into_iter().collect(),
-            "the rider must bind every creature the paused move put onto the battlefield"
-        );
+                .filter_map(|tce| match tce.affected {
+                    TargetFilter::SpecificObject { id } => Some(id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                hasted,
+                [first, second].into_iter().collect(),
+                "the rider must bind every creature the paused move put onto the battlefield \
+             ({only_second_pauses})"
+            );
+        }
     }
 
     #[test]
