@@ -1882,3 +1882,36 @@ fn a_choice_nested_in_a_composite_extra_cost_is_not_offered() {
         ],
     });
 }
+
+/// The same when the choice-cost permission is GRANTED (a noncreature
+/// permanent grants creatures the permission): the host holds it, and it
+/// authorizes no graveyard cast.
+#[test]
+fn a_granted_choice_extra_cost_permission_is_not_offered() {
+    use engine::types::ability::{
+        ContinuousModification, StaticDefinition, TargetFilter, TypedFilter,
+    };
+    use engine::types::statics::{CastCostMode, CastExtraCost, StaticMode};
+    let mut permission = creature_permission(CastFrequency::Unlimited, None, vec![]);
+    if let StaticMode::GraveyardCastPermission { extra_cost, .. } = &mut permission.mode {
+        *extra_cost = Some(CastExtraCost {
+            cost: choice_of_five_or_ten_life(),
+            mode: CastCostMode::Additional,
+        });
+    }
+    let grant = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(TypedFilter::creature()))
+        .modifications(vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(permission),
+        }]);
+    let (runner, host, guardian) = shared_slot_board(vec![], Some(grant));
+    assert!(
+        !runner.state().objects[&host].static_definitions.is_empty(),
+        "reach: the host holds the granted permission"
+    );
+    assert!(offered_cast(&runner, guardian).is_none());
+    assert!(
+        engine::game::casting::current_casting_variant_choice_options(runner.state(), P0, guardian)
+            .is_empty()
+    );
+}

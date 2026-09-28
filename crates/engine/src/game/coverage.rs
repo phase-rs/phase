@@ -7182,38 +7182,6 @@ pub const GRAVEYARD_CHOICE_COST_GAP: &str = "GraveyardCastPermission:choice_cost
 /// Two once-per-turn graveyard permissions printed on one face share the
 /// source's per-turn slot (see `SHARED_SOURCE_GRAVEYARD_SLOT_GAP`).
 fn check_shared_source_graveyard_slot(face: &CardFace, missing: &mut Vec<String>) {
-    let alternative = |definition: &StaticDefinition| {
-        matches!(
-            &definition.mode,
-            StaticMode::GraveyardCastPermission {
-                extra_cost: Some(extra),
-                ..
-            } if extra.mode == crate::types::statics::CastCostMode::Alternative
-        )
-    };
-    if face.static_abilities.iter().any(alternative)
-        && !missing
-            .iter()
-            .any(|label| label == GRAVEYARD_ALTERNATIVE_COST_GAP)
-    {
-        missing.push(GRAVEYARD_ALTERNATIVE_COST_GAP.to_string());
-    }
-    let choice = |definition: &StaticDefinition| {
-        matches!(
-            &definition.mode,
-            StaticMode::GraveyardCastPermission {
-                extra_cost: Some(extra),
-                ..
-            } if crate::game::casting::cost_contains_choice(&extra.cost)
-        )
-    };
-    if face.static_abilities.iter().any(choice)
-        && !missing
-            .iter()
-            .any(|label| label == GRAVEYARD_CHOICE_COST_GAP)
-    {
-        missing.push(GRAVEYARD_CHOICE_COST_GAP.to_string());
-    }
     if face
         .static_abilities
         .iter()
@@ -7222,6 +7190,32 @@ fn check_shared_source_graveyard_slot(face: &CardFace, missing: &mut Vec<String>
         > 1
     {
         push_shared_source_graveyard_slot_gap(missing);
+    }
+}
+
+/// A graveyard-cast permission whose extra cost the graveyard route can't pay:
+/// one that replaces the mana cost (`GRAVEYARD_ALTERNATIVE_COST_GAP`), or one
+/// that is a choice of costs (`GRAVEYARD_CHOICE_COST_GAP`). Checked on every
+/// static definition, printed or granted (`check_static_definition`), so a face
+/// that grants such a permission is marked like one that prints it.
+fn check_graveyard_permission_extra_cost(definition: &StaticDefinition, missing: &mut Vec<String>) {
+    let StaticMode::GraveyardCastPermission {
+        extra_cost: Some(extra),
+        ..
+    } = &definition.mode
+    else {
+        return;
+    };
+    let mut push = |label: &str| {
+        if !missing.iter().any(|existing| existing == label) {
+            missing.push(label.to_string());
+        }
+    };
+    if extra.mode == crate::types::statics::CastCostMode::Alternative {
+        push(GRAVEYARD_ALTERNATIVE_COST_GAP);
+    }
+    if crate::game::casting::cost_contains_choice(&extra.cost) {
+        push(GRAVEYARD_CHOICE_COST_GAP);
     }
 }
 
@@ -7335,6 +7329,7 @@ fn check_static_definition(
             missing.push(label);
         }
     }
+    check_graveyard_permission_extra_cost(def, missing);
     // Flag unrecognized conditions — these represent parser gaps where
     // the condition text wasn't decomposed into typed building blocks.
     // Recurse through And/Or/Not (`contains_unrecognized`/`unrecognized_texts`)
@@ -16442,6 +16437,71 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let mut face = make_face();
         face.static_abilities.push(definition);
         assert!(card_face_gaps(&face).contains(&GRAVEYARD_CHOICE_COST_GAP.to_string()));
+    }
+
+    /// A face whose continuous static GRANTS a graveyard permission with an
+    /// extra cost the graveyard route can't pay (a choice of costs; one that
+    /// replaces the mana cost) is marked like a face that prints one.
+    #[test]
+    fn granting_an_unpayable_extra_cost_graveyard_permission_is_a_named_gap() {
+        use crate::types::ability::{AbilityCost, QuantityExpr};
+        use crate::types::statics::{CastCostMode, CastExtraCost, CastFrequency};
+        let life = |value| AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value },
+        };
+        for (cost, mode, label) in [
+            (
+                AbilityCost::OneOf {
+                    costs: vec![life(2), life(3)],
+                },
+                CastCostMode::Additional,
+                GRAVEYARD_CHOICE_COST_GAP,
+            ),
+            (
+                life(2),
+                CastCostMode::Alternative,
+                GRAVEYARD_ALTERNATIVE_COST_GAP,
+            ),
+        ] {
+            let mut permission = graveyard_permission(CastFrequency::Unlimited, None);
+            if let StaticMode::GraveyardCastPermission { extra_cost, .. } = &mut permission.mode {
+                *extra_cost = Some(CastExtraCost { cost, mode });
+            }
+            let grant = StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::creature(),
+                ))
+                .modifications(vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(permission.clone()),
+                }]);
+            // A static that grants it, and a spell whose resolution creates it
+            // (Yawgmoth's Will's shape), each on its own face and both on one
+            // face: the label appears, once.
+            let spell = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![permission.clone()],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            );
+            let mut granting = make_face();
+            granting.static_abilities.push(grant.clone());
+            let mut resolving = make_face();
+            resolving.abilities.push(spell.clone());
+            let mut both = make_face();
+            both.static_abilities.push(grant);
+            both.abilities.push(spell);
+            for face in [granting, resolving, both] {
+                let gaps = card_face_gaps(&face);
+                assert_eq!(
+                    gaps.iter().filter(|gap| gap.as_str() == label).count(),
+                    1,
+                    "{label}: {gaps:?}"
+                );
+            }
+        }
     }
 
     /// A face that GRANTS a bounded graveyard permission to another object can
