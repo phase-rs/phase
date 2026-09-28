@@ -1512,6 +1512,7 @@ describe("GameProvider native AI routing", () => {
       default_deck_copy_limit: { type: "UpTo", data: 1 },
       uses_commander: true,
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
     };
 
     render(

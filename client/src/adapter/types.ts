@@ -406,6 +406,14 @@ export interface FormatConfig {
    */
   allow_debug_actions: boolean;
   /**
+   * Experimental-dungeons capability flag: when true the engine offers
+   * Baldur's Gate Wilderness alongside the AFR trio on a normal venture,
+   * and as an alternative to Undercity when taking the initiative. Off by
+   * default. Orthogonal to format — applies on top of any `GameFormat`.
+   * Immutable for the life of a session.
+   */
+  allow_experimental_dungeons: boolean;
+  /**
    * Present exactly when `format` is a `Custom:<id>` string, and then
    * `custom_rules.id` must equal that id — the engine's
    * `validate_custom_rules_consistency` enforces the biconditional in both
@@ -1040,7 +1048,8 @@ export type ManaCost =
   | { type: "NoCost" }
   | { type: "Cost"; shards: ManaCostShard[]; generic: number }
   | { type: "SelfManaCost" }
-  | { type: "SelfManaValue" };
+  | { type: "SelfManaValue" }
+  | { type: "SelfManaCostReduced"; reduction: number };
 
 /**
  * CR 107.4: one mana-cost component, serialized as its Rust enum variant name

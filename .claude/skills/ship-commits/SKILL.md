@@ -112,9 +112,9 @@ This only ever touches `ship/*` worktrees this skill created; `forge.rs-pr` and 
 
 ### 1. Identify the commits to ship
 
-If the user named commits explicitly (SHAs, "the last commit", "HEAD~3..HEAD"), use them. Otherwise, ask once: which commits?
+Ship only your own work: commits this session created, named by the SHAs its `git commit` printed. Every agent commits under the same git identity, so author fields cannot tell your commits from another agent's. Use a range such as `origin/main..main` only after checking that every commit in it is yours; leave out any that are not and report them. If the user named commits explicitly (SHAs, "the last commit", "HEAD~3..HEAD"), use them. Otherwise, ask once: which commits?
 
-**Hard gate: do not ship uncommitted source changes by recreating them in the ship worktree.** If the work to ship currently exists as tracked modifications in local `main`, first commit that exact work in the source worktree by pathspec, then verify the shipped pathspecs are clean there before continuing. The source worktree may contain unrelated dirty files from other agents, but the files you are shipping must not remain dirty.
+**Hard gate: do not ship uncommitted source changes by recreating them in the ship worktree.** If the work to ship currently exists as tracked modifications in local `main`, first commit that exact work in the source worktree, then verify none of it remains uncommitted before continuing. The source worktree may contain other agents' uncommitted changes, including hunks in the files you are shipping; those stay uncommitted and out of your commit.
 
 Use this checklist before creating the ship worktree:
 
@@ -138,29 +138,43 @@ for p in "${SHIPPED_PATHS[@]}"; do
   [ -e "$p" ] || echo "MISSING PATHSPEC (fix before trusting any check): $p"
 done
 
-# 3) If any shipped path is dirty, commit it in the source worktree first.
+# 3) If any shipped path is dirty, commit your work in the source worktree first.
 git status --short -- "${SHIPPED_PATHS[@]}"
-# If output is non-empty: run /commit, or stage exactly these paths and commit:
-#   git add -- "${SHIPPED_PATHS[@]}"
-#   git diff --cached --name-only   # verify the staged set is exactly what you expect
-#   git commit
+# A path whose whole diff is yours: git commit -- <those paths>
+# A path that also holds another agent's hunks: commit only your hunks, built in
+# a private index so neither their hunks nor anything they staged is swept in,
+# and land it only if HEAD has not moved (another agent's commit would otherwise
+# be undone by your stale snapshot):
+#   run=$(mktemp -d); base=$(git rev-parse HEAD)  # per-run files; agents run concurrently
+#   git diff -U0 "$base" -- <path> > "$run/mine.patch"            # staged + unstaged; delete hunks not yours
+#   git diff --cached -U0 "$base" -- <path> > "$run/theirs.patch"  # delete YOUR hunks; empty if none left
+#   export GIT_INDEX_FILE="$run/index"; git read-tree "$base"
+#   git apply --cached --unidiff-zero "$run/mine.patch"
+#   git diff --cached "$base"                    # read every hunk: each must be yours
+#   git hook run --ignore-missing pre-commit     # the checks git commit would run
+#   new=$(git commit-tree "$(git write-tree)" -p "$base" -m "…")
+#   unset GIT_INDEX_FILE
+#   git update-ref -m "commit: …" HEAD "$new" "$base"   # refuses if HEAD moved: start over from the new HEAD
+#   git reset -q -- <path>                       # resync the shared index to the new HEAD,
+#   [ -s "$run/theirs.patch" ] && git apply --cached --unidiff-zero "$run/theirs.patch"  # then restage theirs
+#   rm -rf "$run"
+# (`git add -p` is interactive and unavailable to agents.)
 
-# 4) Re-check. This must print nothing before shipping.
+# 4) Re-check. Any remaining diff in these paths must be another agent's hunks only.
 git status --short -- "${SHIPPED_PATHS[@]}"
+git diff -- "${SHIPPED_PATHS[@]}"
 ```
 
-If the re-check still shows shipped paths dirty, stop and fix that before shipping. Do not proceed with a PR while the same work remains as uncommitted local `main` changes. This prevents the user from seeing the work both "shipped" and still dirty locally.
+If the re-check still shows any of your work uncommitted, stop and fix that before shipping. Do not proceed with a PR while the same work remains as uncommitted local `main` changes. This prevents the user from seeing the work both "shipped" and still dirty locally.
 
 Generated planning/review artifacts are not part of the shipped code unless the user explicitly requested them. If you created untracked artifacts while preparing the shipment (`.claude/wf/*`, `.agents/pr-review/*`, compiler crash dumps, logs), either remove your own artifacts or explicitly report them and get approval before leaving them behind.
 
 Resolve to a concrete list of SHAs in chronological order (oldest first):
 
 ```bash
-# Examples — pick the one that matches the user's intent:
-git rev-list --reverse origin/main..HEAD            # all commits on current branch ahead of origin/main
-git rev-list --reverse origin/main..main            # all commits on local main ahead of origin/main
-git rev-list --reverse <BASE>..<TIP>                # explicit range
-echo <SHA1> <SHA2>                                  # specific SHAs (already in order)
+echo <SHA1> <SHA2>                                  # your commits by SHA (already in order) — the default
+git rev-list --reverse <BASE>..<TIP>                # a range, only after checking every commit in it is yours
+git --no-pager log --oneline origin/main..main      # list what else sits on local main, to exclude and report
 ```
 
 Capture as an array, for the same zsh reason as `SHIPPED_PATHS`: `SHAS=($(git rev-list --reverse …))` or `SHAS=(abc123 def456)`. Verify they exist:
@@ -281,7 +295,7 @@ Then verify source-worktree hygiene for the shipped paths recorded in Step 1:
 git status --short -- "${SHIPPED_PATHS[@]}"   # array + quotes: see Step 1
 ```
 
-This must print nothing for work that was originally uncommitted on local `main`. If it prints shipped paths, the shipment is incomplete operationally: either the work was not committed before shipping, or the source worktree still contains duplicate local modifications. Do not silently leave that state. Clean only files you own and only after confirming they are represented by the shipped commits; otherwise stop and report the exact dirty paths.
+Any diff it still shows in those paths must be another agent's hunks only; none of your shipped work may remain uncommitted on local `main`. If your work still shows, the shipment is incomplete operationally: either the work was not committed before shipping, or the source worktree still contains duplicate local modifications. Do not silently leave that state. Clean only files you own and only after confirming they are represented by the shipped commits; otherwise stop and report the exact dirty paths.
 
 ### 8. Worktree disposition
 

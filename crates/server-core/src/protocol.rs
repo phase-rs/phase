@@ -3318,6 +3318,10 @@ mod tests {
         }
     }
 
+    /// `FormatConfig` gained `allow_experimental_dungeons`; a v89 peer fails
+    /// the flag closed to `false` and runs the game without the experimental
+    /// dungeon pool the host chose, so it must be refused before it receives
+    /// v90 state.
     /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
     /// serialized full-game state; a v88 peer would drop it silently and admit
     /// a printed-cost graveyard cast the permission forbids, so it must be
@@ -3332,8 +3336,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_89_for_graveyard_cast_methods() {
-        assert_eq!(PROTOCOL_VERSION, 89);
+    fn protocol_version_is_90_for_experimental_dungeon_pool() {
+        assert_eq!(PROTOCOL_VERSION, 90);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3344,7 +3348,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_89_for_graveyard_cast_methods` stays
+    /// `protocol_version_is_90_for_experimental_dungeon_pool` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

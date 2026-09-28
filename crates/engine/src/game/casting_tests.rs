@@ -29699,6 +29699,267 @@ fn will_scion_of_peace_reduces_white_blue_spells_by_life_gained() {
     );
 }
 
+/// CR 611.2a + CR 601.2f: a player-wide transient cost grant stops discounting
+/// the moment its duration lapses, even though the stored TCE is swept later.
+/// `ForAsLongAs`/`DuringYourTurn` flips the duration without touching the
+/// list, so the cast on the far side proves the liveness gate — not a sweep —
+/// refused the discount.
+#[test]
+fn transient_player_wide_grant_stops_when_its_duration_lapses() {
+    use crate::game::dungeon::dungeon_sentinel_id;
+    use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+
+    let mut state = GameState::new_two_player(42);
+    let spell = create_object(
+        &mut state,
+        CardId(10),
+        PlayerId(0),
+        "Discountable Spell".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.mana_cost = ManaCost::generic(3);
+        obj.base_mana_cost = ManaCost::generic(3);
+        obj.base_card_types.core_types.push(CoreType::Instant);
+        obj.card_types.core_types.push(CoreType::Instant);
+    }
+    let grant = ContinuousModification::GrantStaticAbility {
+        definition: Box::new(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(2),
+            spell_filter: None,
+            dynamic_count: None,
+            reach: CostReductionReach::SpillsToGeneric,
+        })),
+    };
+    state.add_transient_continuous_effect(
+        dungeon_sentinel_id(PlayerId(0)),
+        PlayerId(0),
+        Duration::ForAsLongAs {
+            condition: StaticCondition::DuringYourTurn,
+        },
+        TargetFilter::SpecificPlayer { id: PlayerId(0) },
+        vec![grant],
+        None,
+    );
+
+    let cost = |state: &GameState, id| {
+        apply_cost_modifiers_to_base(
+            state,
+            PlayerId(0),
+            id,
+            state.objects.get(&id).unwrap().mana_cost.clone(),
+        )
+        .expect("cost computed")
+    };
+    state.active_player = PlayerId(0);
+    assert_eq!(
+        cost(&state, spell),
+        ManaCost::generic(1),
+        "live duration discounts 3 by 2"
+    );
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "one stored grant before the boundary"
+    );
+    state.active_player = PlayerId(1);
+    assert_eq!(
+        cost(&state, spell),
+        ManaCost::generic(3),
+        "lapsed duration discounts nothing"
+    );
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "the TCE is still stored; the liveness gate — not a sweep — refused it"
+    );
+}
+
+/// CR 611.2c + CR 604.1: an object-bound transient grant is never read off
+/// the TCE — not even after its recipient leaves and stops supplying a
+/// functioning static. The functioning-static path owns it; the direct
+/// collector reads only player-wide grants, so no board-wide discount leaks
+/// onto unrelated spells.
+#[test]
+fn transient_object_bound_grant_is_ignored_after_its_recipient_leaves() {
+    use crate::game::layers::evaluate_layers;
+    use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+
+    let mut state = GameState::new_two_player(42);
+    let granter = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Granter".to_string(),
+        Zone::Battlefield,
+    );
+    let make_spell = |state: &mut GameState, id: u64, name: &str, core: CoreType| {
+        let s = create_object(state, CardId(id), PlayerId(0), name.to_string(), Zone::Hand);
+        let obj = state.objects.get_mut(&s).unwrap();
+        obj.mana_cost = ManaCost::generic(3);
+        obj.base_mana_cost = ManaCost::generic(3);
+        obj.base_card_types.core_types.push(core);
+        obj.card_types.core_types.push(core);
+        s
+    };
+    let instant = make_spell(&mut state, 10, "Matching Instant", CoreType::Instant);
+    let creature = make_spell(&mut state, 11, "Unrelated Creature", CoreType::Creature);
+    let grant = ContinuousModification::GrantStaticAbility {
+        definition: Box::new(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(2),
+            spell_filter: Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ])],
+                controller: None,
+                properties: vec![],
+            })),
+            dynamic_count: None,
+            reach: CostReductionReach::SpillsToGeneric,
+        })),
+    };
+    state.add_transient_continuous_effect(
+        granter,
+        PlayerId(0),
+        Duration::UntilEndOfTurn,
+        TargetFilter::SpecificObject { id: granter },
+        vec![grant],
+        None,
+    );
+    evaluate_layers(&mut state);
+
+    let cost = |state: &GameState, id| {
+        apply_cost_modifiers_to_base(
+            state,
+            PlayerId(0),
+            id,
+            state.objects.get(&id).unwrap().mana_cost.clone(),
+        )
+        .expect("cost computed")
+    };
+    // Control: with the recipient out, the grafted static discounts exactly
+    // once (double collection would floor to {0}) and the filter still binds.
+    assert_eq!(
+        cost(&state, instant),
+        ManaCost::generic(1),
+        "functioning graft discounts the matching spell once"
+    );
+    assert_eq!(
+        cost(&state, creature),
+        ManaCost::generic(3),
+        "the filter excludes the unrelated spell"
+    );
+
+    // The recipient leaves; no layer pass runs, so the TCE is still stored —
+    // exactly the state the direct collector must refuse.
+    state.battlefield.retain(|id| *id != granter);
+    state.objects.get_mut(&granter).unwrap().zone = Zone::Graveyard;
+    assert_eq!(
+        state.transient_continuous_effects.len(),
+        1,
+        "the grant is still stored after its recipient left"
+    );
+    assert_eq!(
+        cost(&state, instant),
+        ManaCost::generic(3),
+        "no functioning graft, no direct read: the matching spell pays full"
+    );
+    assert_eq!(
+        cost(&state, creature),
+        ManaCost::generic(3),
+        "the unrelated spell stays untouched"
+    );
+}
+
+/// CR 601.2f: the reduction-order prompt labels a transient grant's row by its
+/// source — the live object first, then the construction snapshot when the
+/// source changed zones (CR 400.7) or is a dungeon sentinel. A later dungeon
+/// must not rename the original room grant.
+#[test]
+fn transient_grant_display_name_keeps_the_source_snapshot() {
+    use crate::game::dungeon::{dungeon_sentinel_id, DungeonId, DungeonProgress};
+
+    let mut state = GameState::new_two_player(42);
+    let beacon = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Beacon".to_string(),
+        Zone::Battlefield,
+    );
+    state.dungeon_progress.insert(
+        PlayerId(0),
+        DungeonProgress {
+            current_dungeon: Some(DungeonId::BaldursGateWilderness),
+            current_room: 11,
+            ..Default::default()
+        },
+    );
+    state.add_transient_continuous_effect(
+        beacon,
+        PlayerId(0),
+        Duration::UntilEndOfTurn,
+        TargetFilter::SpecificPlayer { id: PlayerId(0) },
+        vec![],
+        None,
+    );
+    state.add_transient_continuous_effect(
+        dungeon_sentinel_id(PlayerId(0)),
+        PlayerId(0),
+        Duration::UntilEndOfTurn,
+        TargetFilter::SpecificPlayer { id: PlayerId(0) },
+        vec![],
+        None,
+    );
+
+    let tces = state.transient_continuous_effects.clone();
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[0]),
+        "Beacon",
+        "a live source names itself"
+    );
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[1]),
+        "Baldur's Gate Wilderness",
+        "a sentinel source uses its construction-time dungeon"
+    );
+
+    state
+        .dungeon_progress
+        .get_mut(&PlayerId(0))
+        .unwrap()
+        .current_dungeon = None;
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[1]),
+        "Baldur's Gate Wilderness",
+        "completing the dungeon must not erase the grant's label"
+    );
+    state
+        .dungeon_progress
+        .get_mut(&PlayerId(0))
+        .unwrap()
+        .current_dungeon = Some(DungeonId::Undercity);
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[1]),
+        "Baldur's Gate Wilderness",
+        "a later dungeon must not rename the grant"
+    );
+
+    // The snapshot leg: the source leaves the object map entirely, so only
+    // the construction-time name remains.
+    state.battlefield.retain(|id| *id != beacon);
+    state.objects.remove(&beacon);
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[0]),
+        "Beacon",
+        "a zoned-out source keeps its snapshotted name"
+    );
+}
+
 /// CR 601.2f: self-spell reductions and battlefield raises share one total
 /// cost calculation. A self reduction must not floor the spell to {0}
 /// before a battlefield tax is added.

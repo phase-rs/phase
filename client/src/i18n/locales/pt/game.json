@@ -1347,6 +1347,8 @@
     },
     "config": {
       "startingLife": "Vida Inicial",
+      "experimentalDungeons": "Masmorras experimentais",
+      "experimentalDungeonsHelp": "Oferecer Baldur's Gate Wilderness nas opções de masmorra e ao tomar a iniciativa. Experimental e não oficial.",
       "players": "Jogadores",
       "whoGoesFirst": "Quem Começa",
       "firstPlayer": {
@@ -2271,6 +2273,12 @@
     "no": "Não",
     "dontAskAgain": "Não perguntar novamente neste jogo",
     "dontAskAgainForSameCard": "Usar esta escolha para cada cópia desta carta neste jogo"
+  },
+  "keywordDetail": {
+    "selfManaCost": "seu custo de mana",
+    "selfManaValue": "seu valor de mana",
+    "manaCostReduced": "seu custo de mana reduzido em {{reduction}}",
+    "spliceOnto": "em {{subtype}} {{cost}}"
   },
   "resolutionOptionalPayment": {
     "title": "Escolha um pagamento opcional",

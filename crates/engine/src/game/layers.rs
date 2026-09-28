@@ -1363,6 +1363,13 @@ pub(crate) struct ConditionContext {
     /// still empty at that point — the attacker is not recorded until
     /// CR 508.1k — so this is the only anchor available there.
     pub declared_attack: Option<AttackTarget>,
+    /// CR 113.1b + CR 109.5: the PLAYER who has the ability being evaluated,
+    /// when that differs from the source object's controller — a permission a
+    /// resolved effect granted to a player ("target player gains \"During your
+    /// turn, …\""). "You"/"your" in that ability mean this player, so the
+    /// whose-turn leaves (`DuringYourTurn`, `DuringOpponentsTurn`) read it in
+    /// preference to the source object's controller. `None` everywhere else.
+    pub ability_holder: Option<PlayerId>,
 }
 
 impl ConditionContext {
@@ -1370,6 +1377,7 @@ impl ConditionContext {
     pub(crate) const NONE: Self = Self {
         recipient: None,
         declared_attack: None,
+        ability_holder: None,
     };
 
     /// CR 611.3a recipient anchor only.
@@ -1377,6 +1385,16 @@ impl ConditionContext {
         Self {
             recipient: Some(id),
             declared_attack: None,
+            ability_holder: None,
+        }
+    }
+
+    /// CR 113.1b + CR 109.5: the player-holder anchor only.
+    pub(crate) const fn ability_holder(player: PlayerId) -> Self {
+        Self {
+            recipient: None,
+            declared_attack: None,
+            ability_holder: Some(player),
         }
     }
 
@@ -2196,22 +2214,29 @@ fn evaluate_condition_inner(
         // opponents cast cost {1} more"). Bind to the source permanent's
         // controller directly so the gate is correct in every call path; fall
         // back to `controller` only when the source object is absent.
+        //
+        // CR 113.1b + CR 109.5: when the ability belongs to a PLAYER (a
+        // resolution-granted permission), "your turn" is that holder's turn.
         StaticCondition::DuringYourTurn => {
-            let source_controller = state
-                .objects
-                .get(&source_id)
-                .map(|obj| obj.controller)
-                .unwrap_or(controller);
+            let source_controller = context.ability_holder.unwrap_or_else(|| {
+                state
+                    .objects
+                    .get(&source_id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(controller)
+            });
             state.active_player == source_controller
         }
         // CR 102.3 + CR 805.4a: team-aware opponent relation. A teammate
         // holding `active_player` does not make this an opponent's turn.
         StaticCondition::DuringOpponentsTurn => {
-            let source_controller = state
-                .objects
-                .get(&source_id)
-                .map(|obj| obj.controller)
-                .unwrap_or(controller);
+            let source_controller = context.ability_holder.unwrap_or_else(|| {
+                state
+                    .objects
+                    .get(&source_id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(controller)
+            });
             super::players::is_opponent(state, source_controller, state.active_player)
         }
         // CR 103.1: True when the scoped player took the first turn of the
@@ -10035,6 +10060,45 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 113.1b + CR 109.5: a player-held ability's whose-turn leaves read the
+    /// HOLDER bound in `ConditionContext::ability_holder`, not the source object's
+    /// controller. With no holder bound they read the source controller.
+    #[test]
+    fn whose_turn_leaves_read_the_ability_holder_when_bound() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Grant Spell".to_string(),
+            Zone::Graveyard,
+        );
+        state.active_player = PlayerId(0);
+        let eval = |state: &GameState, condition: &StaticCondition, context| {
+            evaluate_condition_with_context(state, condition, PlayerId(1), source, context)
+        };
+        let holder = ConditionContext::ability_holder(PlayerId(1));
+
+        // Holder P1 on P0's turn.
+        assert!(!eval(&state, &StaticCondition::DuringYourTurn, holder));
+        assert!(eval(&state, &StaticCondition::DuringOpponentsTurn, holder));
+        // No holder: the source's controller (P0) is the reference.
+        assert!(eval(
+            &state,
+            &StaticCondition::DuringYourTurn,
+            ConditionContext::NONE
+        ));
+        assert!(!eval(
+            &state,
+            &StaticCondition::DuringOpponentsTurn,
+            ConditionContext::NONE
+        ));
+
+        state.active_player = PlayerId(1);
+        assert!(eval(&state, &StaticCondition::DuringYourTurn, holder));
+        assert!(!eval(&state, &StaticCondition::DuringOpponentsTurn, holder));
     }
 
     #[test]

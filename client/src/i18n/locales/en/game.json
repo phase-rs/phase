@@ -1385,6 +1385,8 @@
     },
     "config": {
       "startingLife": "Starting Life",
+      "experimentalDungeons": "Experimental Dungeons",
+      "experimentalDungeonsHelp": "Offer Baldur's Gate Wilderness on ventures and when taking the initiative. Experimental and unofficial.",
       "players": "Players",
       "whoGoesFirst": "Who Goes First",
       "firstPlayer": {
@@ -2309,6 +2311,12 @@
     "no": "No",
     "dontAskAgain": "Don't ask again this game",
     "dontAskAgainForSameCard": "Use this choice for every copy of this card this game"
+  },
+  "keywordDetail": {
+    "selfManaCost": "its mana cost",
+    "selfManaValue": "its mana value",
+    "manaCostReduced": "its mana cost reduced by {{reduction}}",
+    "spliceOnto": "onto {{subtype}} {{cost}}"
   },
   "resolutionOptionalPayment": {
     "title": "Choose an optional payment",

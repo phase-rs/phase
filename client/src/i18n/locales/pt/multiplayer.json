@@ -267,6 +267,8 @@
     "hostServerUnscored": "{{name}} — ainda sem classificação",
     "sandboxMode": "Modo Sandbox — permitir ações de depuração",
     "sandboxModeHelp": "O anfitrião pode manipular diretamente o estado do jogo (mover cartas, alterar vidas, modificar marcadores) e conceder permissão de depuração a outros jogadores. Use para testes ou jogo de sandbox — não para partidas competitivas. Esta configuração não pode ser alterada depois que o jogo começa.",
+    "experimentalDungeons": "Masmorras experimentais",
+    "experimentalDungeonsHelp": "Aventurar-se na masmorra oferece Baldur's Gate Wilderness junto das opções habituais, e tomar a iniciativa oferece-a como alternativa. Experimental e não oficial. Desativado por defeito. Esta definição não pode ser alterada depois de o jogo começar.",
     "setPassword": "Definir senha",
     "passwordPlaceholder": "Senha do jogo",
     "back": "Voltar",

@@ -267,6 +267,8 @@
     "hostServerUnscored": "{{name}} — noch nicht bewertet",
     "sandboxMode": "Sandbox-Modus — Debug-Aktionen erlauben",
     "sandboxModeHelp": "Der Host kann den Spielzustand direkt manipulieren (Karten verschieben, Leben ändern, Marken anpassen) und anderen Spielern Debug-Berechtigung erteilen. Zum Testen oder für Sandbox-Spiele nutzen — nicht für kompetitive Partien. Diese Einstellung kann nach dem Spielstart nicht mehr geändert werden.",
+    "experimentalDungeons": "Experimentelle Dungeons",
+    "experimentalDungeonsHelp": "Sich in den Dungeon wagen bietet Baldur's Gate Wilderness zusätzlich zu den üblichen Optionen an, und die Initiative zu ergreifen bietet es als Alternative zur Unterstadt an. Experimentell und inoffiziell. Standardmäßig deaktiviert. Diese Einstellung kann nach Spielbeginn nicht mehr geändert werden.",
     "setPassword": "Passwort festlegen",
     "passwordPlaceholder": "Spielpasswort",
     "back": "Zurück",

@@ -267,6 +267,8 @@
     "hostServerUnscored": "{{name}} — 未評価",
     "sandboxMode": "サンドボックスモード — デバッグ操作を許可",
     "sandboxModeHelp": "ホストはゲーム状態（カード移動、ライフ変更、カウンター変更）を直接操作し、他のプレイヤーにデバッグ権限を付与できます。テストやサンドボックスプレイ用であり、競技対戦には使わないでください。ゲーム開始後は変更できません。",
+    "experimentalDungeons": "実験的ダンジョン",
+    "experimentalDungeonsHelp": "ダンジョン探索とイニシアティブ取得で Baldur's Gate Wilderness を選択可能にします。実験的かつ非公式。この設定はゲーム開始後に変更できません。",
     "setPassword": "パスワードを設定",
     "passwordPlaceholder": "ゲームパスワード",
     "back": "戻る",

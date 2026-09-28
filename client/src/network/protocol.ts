@@ -106,6 +106,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  72 — game_setup and state_update carry GameState, whose FormatConfig gains
+ *       allow_experimental_dungeons, the per-session flag behind the
+ *       experimental dungeon pool. A v71 peer would fail the flag closed and
+ *       run the game without the pool the host chose, so first contact
+ *       rejects the skew instead. Bumped in lockstep with full-game protocol 90.
  *  71 — game_setup and state_update carry GameState, whose graveyard cast
  *       permissions can now require a casting method (required_cast_keyword),
  *       and casting-menu options carry the non-mana part of their cost
@@ -467,7 +472,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 71 as const;
+export const WIRE_PROTOCOL_VERSION = 72 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

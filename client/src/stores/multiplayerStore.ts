@@ -22,7 +22,10 @@ import type {
   TournamentUpdateReply,
 } from "../adapter/types";
 import { AdapterError, AdapterErrorCode, isCustomGameFormat } from "../adapter/types";
-import { isFormatConfigShape } from "../adapter/format-config-shape";
+import {
+  isFormatConfigShape,
+  rehydrateExperimentalDungeons,
+} from "../adapter/format-config-shape";
 import { findSavedCustomFormat } from "../services/customFormats";
 import { AI_DIFFICULTIES } from "../constants/ai";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
@@ -2358,7 +2361,12 @@ function normalizeCustomHostConfig(
   if (typeof savedCustomFormatId !== "string") return null;
   if (!findSavedCustomFormat(savedCustomFormatId)) return null;
 
-  const storedFormatConfig = persisted.formatConfig;
+  // Configs persisted before the experimental-dungeons axis existed lack the
+  // flag; the engine defaults it to false, so rehydrate it here — before the
+  // shape guard — rather than discarding the whole remembered setup.
+  // Non-boolean values reset to the default too: a capability flag must never
+  // rehydrate as truthy from corrupt data.
+  const storedFormatConfig = rehydrateExperimentalDungeons(persisted.formatConfig);
   if (!isFormatConfigShape(storedFormatConfig)) return null;
   // The blob must describe the format it is filed under. `isFormatConfigShape`
   // already ties `format` to `custom_rules.id`; this ties both to the key the
@@ -2409,6 +2417,10 @@ function normalizeBuiltInHostConfig(
     allow_debug_actions: typeof storedFormatConfig.allow_debug_actions === "boolean"
       ? storedFormatConfig.allow_debug_actions
       : defaults.allow_debug_actions,
+    allow_experimental_dungeons:
+      typeof storedFormatConfig.allow_experimental_dungeons === "boolean"
+        ? storedFormatConfig.allow_experimental_dungeons
+        : defaults.allow_experimental_dungeons,
   };
   return finalizeRememberedHostConfig(persisted, format, formatConfig, null);
 }

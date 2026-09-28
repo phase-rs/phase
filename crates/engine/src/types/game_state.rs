@@ -22225,7 +22225,7 @@ pub struct TransientContinuousEffect {
     /// serialization boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_permission: Option<EndEffectPermission>,
-    /// Snapshot of the originating object's name, captured at construction.
+    /// Snapshot of the originating object's or dungeon's name, captured at construction.
     /// The originating spell/ability typically moves to a new zone (graveyard,
     /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
     /// so live `state.objects[source_id]` lookup may not return the original
@@ -27493,12 +27493,27 @@ impl GameState {
         // pre-zone-change ObjectId — `lki_cache` is the canonical snapshot of
         // the source's characteristics at the moment it left. Falling back to
         // LKI mirrors the same name-resolution pattern used in `filter.rs`,
-        // `quantity.rs`, and `log.rs`.
+        // `quantity.rs`, and `log.rs`. Dungeon room triggers use a synthetic
+        // source id, so capture the active dungeon here as well; its grant can
+        // remain after the venture marker leaves or enters another dungeon.
         let source_name = self
             .objects
             .get(&source_id)
             .map(|o| o.name.clone())
             .or_else(|| self.lki_cache.get(&source_id).map(|lki| lki.name.clone()))
+            .or_else(|| {
+                if source_id != crate::game::dungeon::dungeon_sentinel_id(controller) {
+                    return None;
+                }
+                self.dungeon_progress
+                    .get(&controller)
+                    .and_then(|progress| progress.current_dungeon)
+                    .map(|dungeon| {
+                        crate::game::dungeon::get_definition(dungeon)
+                            .name
+                            .to_string()
+                    })
+            })
             .unwrap_or_default();
         // CR 611.2a + CR 400.7: an event deadline is matched against its source
         // as it was when the effect began, so the context is captured here and

@@ -694,9 +694,9 @@ pub(crate) fn player_control_count_compares(
 /// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: Read scalar `attr` for one
 /// candidate player DIRECTLY off the candidate `Player` (NOT via the
 /// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
-/// reads each player's own hand size / life total / life lost / graveyard /
-/// player-counter rather than the controller's. Returns `None` for any
-/// non-scalar `QuantityRef`; the parser
+/// reads each player's own hand size / life total / life lost or gained /
+/// graveyard / player-counter rather than the controller's. Returns `None` for
+/// any non-scalar `QuantityRef`; the parser
 /// invariant guarantees only the scalar subset reaches here, and `None` fails
 /// the candidate predicate closed.
 pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
@@ -706,6 +706,12 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
         // CR 119.3: life lost this turn is tracked per candidate player.
         QuantityRef::LifeLostThisTurn { .. } => Some(u32_to_i32_saturating(p.life_lost_this_turn)),
+        // CR 119.3: life gained this turn is tracked per candidate player — the
+        // gained-direction sibling of the arm above, read by the all-players
+        // "for each player who gained life this turn" population.
+        QuantityRef::LifeGainedThisTurn { .. } => {
+            Some(u32_to_i32_saturating(p.life_gained_this_turn))
+        }
         // CR 404.1: cards in the candidate's graveyard.
         QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
         // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
@@ -19231,10 +19237,22 @@ fn resolve_unless_payer(
         }
         // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
         // the payer is the player_scope iteration's scoped player, not a chosen
-        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player
-        // (bound per-iteration by the fan-out at effects/mod.rs:3015-3069).
+        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player,
+        // bound per-iteration by `split_player_scope_chain` /
+        // `set_scoped_player_recursive` in `resolve_chain_body`. Unlike every other
+        // payer here, `None` means that per-iteration binding was missed rather than
+        // that an event or a chosen target was absent, so it gets its own warn.
         TargetFilter::ScopedPlayer => {
-            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+            let resolved = crate::game::targeting::resolve_effect_player_ref(state, ability, payer);
+            if resolved.is_none() {
+                tracing::warn!(
+                    ?payer,
+                    source_id = ?ability.source_id,
+                    "scope-bound unless-payer resolved outside a player_scope iteration; \
+                     the payment is skipped and the unless-effect applies unconditionally"
+                );
+            }
+            resolved
         }
         // CR 115.1 + CR 118.12a: a payer DECLARED as a target inside the unless
         // clause ("unless target opponent/target player pays") resolves to the

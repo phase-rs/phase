@@ -1390,6 +1390,8 @@
     },
     "config": {
       "startingLife": "開始時のライフ",
+      "experimentalDungeons": "実験的ダンジョン",
+      "experimentalDungeonsHelp": "ダンジョン探索とイニシアティブ取得で Baldur's Gate Wilderness を選択可能にします。実験的かつ非公式。",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
       "firstPlayer": {
@@ -2314,6 +2316,12 @@
     "no": "いいえ",
     "dontAskAgain": "このゲームでは再度確認しない",
     "dontAskAgainForSameCard": "このゲームではこのカードのすべてのコピーにこの選択を使用"
+  },
+  "keywordDetail": {
+    "selfManaCost": "そのマナ・コスト",
+    "selfManaValue": "そのマナ総量",
+    "manaCostReduced": "そのマナ・コストから{{reduction}}少ないコスト",
+    "spliceOnto": "{{subtype}}へ {{cost}}"
   },
   "resolutionOptionalPayment": {
     "title": "任意の支払いを選択",

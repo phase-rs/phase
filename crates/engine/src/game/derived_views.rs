@@ -3350,6 +3350,75 @@ mod tests {
         assert_eq!(room.rooms.len(), 9);
     }
 
+    /// The experimental 19-room dungeon projects the same shape the map panel
+    /// reads: card identity for the art hook, the whole room graph, and one
+    /// marker per room. Pinned separately from the generic marker-table tests
+    /// because the badge renders `room_count` ("room 8 of 19") and the popover
+    /// indexes `rooms` by the marker's room — a short or misordered graph here
+    /// misplaces the marker with no other failure.
+    #[test]
+    fn dungeon_rooms_projects_baldurs_gate_wilderness_with_all_19_rooms() {
+        use crate::game::dungeon::{DungeonId, DungeonProgress};
+
+        let mut state = GameState::new_two_player(42);
+        state.dungeon_progress.insert(
+            PlayerId(0),
+            DungeonProgress {
+                current_dungeon: Some(DungeonId::BaldursGateWilderness),
+                current_room: 7,
+                ..Default::default()
+            },
+        );
+
+        let views = derive_views(&state, None);
+        let room = views
+            .dungeon_rooms
+            .get(&PlayerId(0))
+            .expect("venturing player is projected");
+
+        assert_eq!(room.dungeon, DungeonId::BaldursGateWilderness);
+        assert_eq!(room.dungeon_name, "Baldur's Gate Wilderness");
+        assert_eq!(room.room.index, 7);
+        assert_eq!(room.room.name, "Grymforge");
+        assert_eq!(
+            room.room.text,
+            "For each opponent, goad up to one target creature that player controls."
+        );
+        assert_eq!(room.room_count, 19);
+
+        // `layout: "normal"`, so the card table carries it by oracle id (the
+        // Undercity token-table fallback is not this dungeon's path).
+        assert_eq!(room.card.oracle_id, "06b9590d-01bf-4fae-9837-352c9e04267a");
+        assert_eq!(
+            room.card.scryfall_id,
+            "a9d56324-8293-4500-a9ad-fed351ccf966"
+        );
+        assert_eq!(room.card.face_name, "Baldur's Gate Wilderness");
+
+        assert_eq!(
+            room.rooms.len(),
+            19,
+            "the whole graph ships, not just the current room"
+        );
+        // CR 309.5a: Grymforge (index 7) leads to Last Light Inn and
+        // Reithwin Tollhouse.
+        let current = &room.rooms[7];
+        assert_eq!(current.room.name, "Grymforge");
+        assert_eq!(current.next_rooms, vec![9, 10]);
+        // The card's bottom row holds three terminal rooms (CR 309.5).
+        for bottommost in [16, 17, 18] {
+            assert!(
+                room.rooms[bottommost].next_rooms.is_empty(),
+                "room {bottommost} is terminal on the printed card"
+            );
+        }
+        assert_eq!(room.rooms[18].room.name, "Temple of Bhaal");
+        // Every room carries a marker inside the card face.
+        for node in &room.rooms {
+            assert!(node.marker.x_permille <= 1000 && node.marker.y_permille <= 1000);
+        }
+    }
+
     /// CR 309.7: a completed dungeon leaves a `current_dungeon: None` entry
     /// behind. The active dungeon — not the presence of the entry — gates the
     /// projection, so a player who finished a dungeon shows no badge.

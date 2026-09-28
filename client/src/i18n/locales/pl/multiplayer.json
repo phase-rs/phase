@@ -267,6 +267,8 @@
     "hostServerUnscored": "{{name}} — jeszcze nieoceniony",
     "sandboxMode": "Tryb piaskownicy — zezwól na akcje debugowania",
     "sandboxModeHelp": "Gospodarz może bezpośrednio manipulować stanem gry (przenosić karty, zmieniać życie, modyfikować znaczniki) i przyznawać uprawnienia debugowania innym graczom. Używaj do testów lub gry w piaskownicy — nie do meczów wyczynowych. Tego ustawienia nie można zmienić po rozpoczęciu gry.",
+    "experimentalDungeons": "Eksperymentalne lochy",
+    "experimentalDungeonsHelp": "Zapuszczanie się do lochu oferuje Baldur's Gate Wilderness obok zwykłych opcji, a przejęcie inicjatywy oferuje je jako alternatywę dla Podmiasta. Eksperymentalne i nieoficjalne. Domyślnie wyłączone. Tego ustawienia nie można zmienić po rozpoczęciu gry.",
     "setPassword": "Ustaw hasło",
     "passwordPlaceholder": "Hasło do gry",
     "back": "Wstecz",

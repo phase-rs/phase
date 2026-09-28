@@ -18,7 +18,9 @@ use crate::types::casting_costs::{
     CostReductionOutcome, ManaCarrier, ReductionProvenance, SettledTail,
 };
 use crate::types::events::{ActivatedAbilityKind, GameEvent};
-use crate::types::game_state::{AbilityActivationRecord, ActivationTargetFact, LKISnapshot};
+use crate::types::game_state::{
+    AbilityActivationRecord, ActivationTargetFact, LKISnapshot, TransientContinuousEffect,
+};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
     CastOfferKind, CastPaymentMode, CastingPermissionIndex, CastingVariant,
@@ -1543,11 +1545,12 @@ fn graveyard_spell_objects_available_to_cast(
     player: PlayerId,
     graveyard: &im::Vector<ObjectId>,
 ) -> Vec<ObjectId> {
-    let permission_sources = if state.active_player == player {
-        graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
-    } else {
-        Vec::new()
-    };
+    // CR 601.3 + CR 702.8a + CR 117.1a: no blanket whose-turn gate here. A
+    // permission that says "during your turn" / "during each of your turns"
+    // carries `StaticCondition::DuringYourTurn`, which `graveyard_permission_sources`
+    // evaluates through `active_static_definitions`. One without turn words lets a
+    // Flash or instant card be cast from the graveyard on any turn.
+    let permission_sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Cast));
     let mut keyword_objects = Vec::new();
     let mut permission_objects = Vec::new();
     let mut timed_permission_objects = Vec::new();
@@ -1601,7 +1604,7 @@ fn graveyard_spell_objects_available_to_cast(
 
         // CR 601.2a + CR 604.3: Cards in graveyard castable via static
         // permission from a battlefield permanent (Lurrus, Karador, etc.).
-        // CR 117.1c: "Each of your turns" — only during controller's turn.
+        // Any whose-turn restriction is the permission's own condition.
         if graveyard_object_castable_by_permission_sources(
             state,
             player,
@@ -3750,9 +3753,10 @@ pub(crate) fn castable_from_current_zone(
                     && has_effective_graveyard_cast_keyword(state, obj.id, obj))
                     || has_graveyard_timed_alt_cost_permission(state, obj, player))
                     && normal_cost_route())
-                // CR 601.2a + CR 117.1c: Graveyard cast via static permission (Lurrus, etc.).
+                // CR 601.2a + CR 601.3: Graveyard cast via static permission
+                // (Lurrus, etc.). Whose turn it must be is the permission's own
+                // condition, not a blanket gate here.
                 || (obj.zone == Zone::Graveyard
-                    && state.active_player == player
                     && graveyard_permission_source(state, player, obj.id).is_some())
                 // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static
                 // permission (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card
@@ -5581,6 +5585,23 @@ fn transient_graveyard_permission_sources(
                     if !graveyard_permission_play_mode_matches(play_mode, play_mode_filter) {
                         return None;
                     }
+                    // CR 113.1b + CR 109.5: a permission granted to a PLAYER is
+                    // that player's ability, so its "you"/"your" mean the
+                    // grantee. Evaluate only holder-bound conditions; other
+                    // leaves fail closed rather than reading the grantor.
+                    if let Some(condition) = definition.condition.as_ref() {
+                        if !holder_bound_condition_is_modeled(condition)
+                            || !super::layers::evaluate_condition_with_context(
+                                state,
+                                condition,
+                                player,
+                                tce.source_id,
+                                super::layers::ConditionContext::ability_holder(player),
+                            )
+                        {
+                            return None;
+                        }
+                    }
                     definition
                         .affected
                         .as_ref()
@@ -5608,6 +5629,84 @@ fn transient_graveyard_permission_sources(
                 },
             )
         })
+}
+
+/// CR 113.1b + CR 109.5: true when every leaf of a player-granted permission's
+/// condition evaluates against the ability's HOLDER once
+/// `ConditionContext::ability_holder` is bound. Today that's only the whose-turn
+/// leaves (`layers::evaluate_condition_inner` reads `ability_holder` there) and
+/// boolean compositions of them.
+///
+/// Every other leaf reads the source object or a source-derived filter context.
+/// For example, `IsPresent` builds `FilterContext::from_source`, so "you control
+/// a Zombie" would count the GRANTING spell's controller's Zombies. Those leaves
+/// are refused (fail closed) rather than evaluated for the wrong player.
+/// Exhaustive with no wildcard, so a new `StaticCondition` variant must be
+/// classified here.
+fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::DuringYourTurn | StaticCondition::DuringOpponentsTurn => true,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().all(holder_bound_condition_is_modeled)
+        }
+        StaticCondition::Not { condition } => holder_bound_condition_is_modeled(condition),
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => false,
+    }
 }
 
 fn graveyard_permission_play_mode_matches(
@@ -8588,10 +8687,10 @@ fn prepare_spell_cast_announced(
             KeywordKind::Escape,
         );
     let has_mayhem = mayhem_castable_from_graveyard(state, player, object_id);
-    // CR 601.2a + CR 117.1c: Graveyard cast via static permission (Lurrus, etc.)
-    // is possible on the caster's turn only; which permission authorizes it is
-    // resolved once the casting method is known (see `graveyard_authority`).
-    let graveyard_permission_route = obj.zone == Zone::Graveyard && state.active_player == player;
+    // CR 601.2a + CR 601.3: A graveyard grant's own condition controls whose
+    // turn permits the cast. The exact permission is resolved once the casting
+    // method is known (see `graveyard_authority`).
+    let graveyard_permission_route = obj.zone == Zone::Graveyard;
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
     let has_hand_alt_cost = has_hand_alt_cost_permission(state, obj, player);
     // CR 608.2g: A free-cast window (Invoke Calamity) or targeted
@@ -12363,6 +12462,38 @@ fn battlefield_cost_modifier_applies_before_targets(
     })
 }
 
+/// CR 604.1: presence gate for transient (duration-scoped) `ModifyCost`
+/// grants. The O(1) `static_mode_presence` index tracks only battlefield /
+/// command-zone printed statics, never TCE-borne `GrantStaticAbility` modes,
+/// so this small scan of `transient_continuous_effects` is the gate for the
+/// transient side — mirroring the split presence gate in
+/// `collect_static_activated_ability_cost_modifiers`.
+fn transient_modify_cost_present(state: &GameState) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        tce.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if matches!(definition.mode, StaticMode::ModifyCost { .. })
+            )
+        })
+    })
+}
+
+/// CR 601.2f: label a transient grant's row in the reduction-order prompt. A
+/// live source object names itself; a source that changed zones or is a
+/// dungeon sentinel uses the name snapshotted at construction (CR 400.7).
+/// Reading the current dungeon here would mislabel an earlier room's grant
+/// after its dungeon completes or the marker enters another dungeon.
+fn transient_grant_display_name(state: &GameState, tce: &TransientContinuousEffect) -> String {
+    state
+        .objects
+        .get(&tce.source_id)
+        .map(|obj| obj.name.clone())
+        .or_else(|| (!tce.source_name.is_empty()).then(|| tce.source_name.clone()))
+        .unwrap_or_default()
+}
+
 fn collect_battlefield_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
@@ -12394,8 +12525,16 @@ fn collect_battlefield_cost_modifiers(
     // a reduction's `saturating_sub` floor can never clamp generic to 0 ahead of a
     // later increase (which would overcharge the spell, order-dependently).
     let mut collected = Vec::new();
-    // CR 604.1: O(1) presence gate — no ModifyCost static means no cost modifiers.
-    if !static_kind_present(state, StaticModeKind::ModifyCost) {
+    // CR 604.1: presence gate — nothing to do unless a printed ModifyCost
+    // static (CR 611.3) OR a duration-scoped continuous ModifyCost grant
+    // (CR 611.2 — Moonrise Towers' transient "spells you cast this turn cost
+    // {3} less") is present. The O(1) `static_mode_presence` index covers only
+    // battlefield/command-zone printed statics, so the transient authority
+    // needs its own small TCE scan — the same split gate the activation-side
+    // collector uses for transient `ReduceAbilityCost`.
+    let has_static = static_kind_present(state, StaticModeKind::ModifyCost);
+    let has_transient = transient_modify_cost_present(state);
+    if !has_static && !has_transient {
         return collected;
     }
     crate::game::perf_counters::record_static_full_scan();
@@ -12512,6 +12651,151 @@ fn collect_battlefield_cost_modifiers(
                 },
                 display_name: src_obj.name.clone(),
             });
+        }
+    }
+
+    // CR 611.2 + CR 601.2f: duration-scoped continuous ModifyCost grants
+    // that are genuinely player-wide (Moonrise Towers' "spells you cast this
+    // turn cost {3} less", installed as a SpecificPlayer TCE layers never
+    // grafts onto any object). Installed by a resolving ability as a
+    // GenericEffect grant and read here, off the TCE, through the SAME gates
+    // as battlefield statics — there is no parallel reduction pathway.
+    // Mirrors the activation-side transient collector; the spell path simply
+    // never had one, so these grants silently did nothing. Object-bound
+    // grants stay on the functioning-static path above and are never read
+    // here (CR 611.2c).
+    if has_transient {
+        for tce in &state.transient_continuous_effects {
+            // CR 611.2a: a lapsed effect stays stored until a sweep, so list
+            // presence is not liveness — the shared authority decides whether
+            // this grant still applies before anything else reads it.
+            if !super::layers::transient_effect_is_live(state, tce) {
+                continue;
+            }
+            // CR 611.2c + CR 604.1: only player-wide grants are read off the
+            // TCE. An object-bound grant is grafted onto its recipient by the
+            // layer-6 apply, so `game_functioning_statics` already yields it
+            // and the static pass owns it — reading it here too double-counts
+            // (Will X=2 reducing {3} to {0}), and reading it after its
+            // recipient stops functioning would re-scope an object-bound
+            // definition into a board-wide discount on unrelated spells.
+            if !matches!(tce.affected, TargetFilter::SpecificPlayer { .. }) {
+                continue;
+            }
+            let grants =
+                tce.modifications
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ordinal, modification)| match modification {
+                        ContinuousModification::GrantStaticAbility { definition } => {
+                            match &definition.mode {
+                                StaticMode::ModifyCost { .. } => Some((ordinal, definition)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    });
+            for (ordinal, definition) in grants {
+                let Some(modifier) = definition.board_wide_cost_modifier() else {
+                    continue;
+                };
+                if !super::layers::transient_gate_conditions(tce).all(|condition| {
+                    super::layers::evaluate_condition(
+                        state,
+                        condition,
+                        tce.controller,
+                        tce.source_id,
+                    )
+                }) {
+                    continue;
+                }
+                if definition.condition.as_ref().is_some_and(|condition| {
+                    !evaluate_cost_mod_static_condition(
+                        state,
+                        condition,
+                        caster,
+                        tce.controller,
+                        tce.source_id,
+                        casting_variant,
+                    )
+                }) {
+                    continue;
+                }
+                if !modifier.caster_scope.admits(caster, tce.controller) {
+                    continue;
+                }
+                let BoardWideCostModifier {
+                    mode,
+                    amount,
+                    spell_filter,
+                    dynamic_count,
+                    caster_scope: _,
+                    condition: _,
+                    reach,
+                } = modifier;
+                let is_raise = matches!(mode, CostModifyMode::Raise);
+                // The spell itself is the filter context, not the TCE source:
+                // the matcher requires an existing source object and a
+                // sourceless grant (dungeon sentinel) has none, while the
+                // spell exists by construction and its controller IS the
+                // caster — which the caster-scope gate above already bound to
+                // the grantor. So "you" resolves to the right player either
+                // way, with no stale-source dependency.
+                let filter_analysis = spell_filter.map_or(
+                    PreTargetCostFilterAnalysis::TargetIndependentRelevant,
+                    |filter| {
+                        analyze_cost_filter_before_targets_for(
+                            state, caster, spell_id, filter, spell_id, fused,
+                        )
+                    },
+                );
+                if target_sensitive_only && !filter_analysis.is_target_dependent() {
+                    continue;
+                }
+                if selected_ability.is_none() && filter_analysis.is_target_dependent() {
+                    continue;
+                }
+                if let Some(filter) = spell_filter {
+                    let matches = if let Some(ability) = selected_ability {
+                        spell_matches_cost_filter_with_selected_targets_for(
+                            state, caster, spell_id, filter, spell_id, ability, fused,
+                        )
+                    } else {
+                        spell_matches_cost_filter_for(
+                            state, caster, spell_id, filter, spell_id, fused,
+                        )
+                    };
+                    if !matches {
+                        continue;
+                    }
+                }
+                let base_amount = amount.clone();
+                let multiplier = if let Some(qty_ref) = dynamic_count {
+                    let qty_expr = crate::types::ability::QuantityExpr::Ref {
+                        qty: qty_ref.clone(),
+                    };
+                    super::quantity::resolve_quantity(
+                        state,
+                        &qty_expr,
+                        tce.controller,
+                        tce.source_id,
+                    )
+                    .max(0) as u32
+                } else {
+                    1
+                };
+                collected.push(CostModification {
+                    is_raise,
+                    amount: base_amount,
+                    multiplier,
+                    reach,
+                    provenance: ReductionProvenance::TransientEffect {
+                        effect: tce.id,
+                        ordinal: ordinal.min(u8::MAX as usize) as u8,
+                    },
+                    display_name: transient_grant_display_name(state, tce),
+                });
+            }
         }
     }
 

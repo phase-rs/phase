@@ -267,6 +267,8 @@
     "hostServerUnscored": "{{name}} — non ancora valutato",
     "sandboxMode": "Modalità Sandbox — consenti azioni di debug",
     "sandboxModeHelp": "L'host può manipolare direttamente lo stato di gioco (spostare carte, cambiare punti vita, modificare segnalini) e concedere il permesso di debug ad altri giocatori. Da usare per i test o il gioco sandbox — non per partite competitive. Questa impostazione non può essere modificata una volta iniziata la partita.",
+    "experimentalDungeons": "Dungeon sperimentali",
+    "experimentalDungeonsHelp": "Avventurarsi nel dungeon offre Baldur's Gate Wilderness insieme alle opzioni abituali, e prendere l'iniziativa la offre come alternativa a Undercity. Sperimentale e non ufficiale. Disattivato per impostazione predefinita. Questa impostazione non può essere modificata dopo l'inizio della partita.",
     "setPassword": "Imposta password",
     "passwordPlaceholder": "Password della partita",
     "back": "Indietro",

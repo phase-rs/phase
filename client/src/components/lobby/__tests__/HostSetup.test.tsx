@@ -54,6 +54,7 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
       allow_debug_actions: false,
+      allow_experimental_dungeons: false,
       custom_rules: {
         id: 0,
         structural: {
@@ -591,7 +592,7 @@ describe("HostSetup", () => {
   });
 
   describe.each(["server", "p2p"] as const)("accessible hosting options (%s mode)", (connectionMode) => {
-    it("names every visible switch and associates only the sandbox help", () => {
+    it("names every visible switch and associates only the sandbox and experimental-dungeons help", () => {
       render(<HostSetup onHost={vi.fn()} onBack={vi.fn()} connectionMode={connectionMode} onConnectionModeChange={vi.fn()} />);
 
       // "List in lobby" is present in BOTH modes: a P2P room brokered by a
@@ -601,6 +602,7 @@ describe("HostSetup", () => {
         "List in lobby",
         "Start when full",
         "Sandbox Mode — allow debug actions",
+        "Experimental Dungeons",
         "Set password",
       ];
 
@@ -609,6 +611,8 @@ describe("HostSetup", () => {
         const control = screen.getByRole("switch", { name });
         if (name === "Sandbox Mode — allow debug actions") {
           expect(control).toHaveAccessibleDescription(enMultiplayer.hostSetup.sandboxModeHelp);
+        } else if (name === "Experimental Dungeons") {
+          expect(control).toHaveAccessibleDescription(enMultiplayer.hostSetup.experimentalDungeonsHelp);
         } else {
           expect(control).not.toHaveAttribute("aria-describedby");
           expect(control).not.toHaveAccessibleDescription();
@@ -673,6 +677,15 @@ describe("HostSetup", () => {
       expect(sandboxSwitch).not.toBeChecked();
       await user.keyboard("{Enter}");
       expect(sandboxSwitch).toBeChecked();
+
+      const experimentalSwitch = screen.getByRole("switch", { name: "Experimental Dungeons" });
+      await user.tab();
+      expect(experimentalSwitch).toHaveFocus();
+      expect(experimentalSwitch).not.toBeChecked();
+      await user.keyboard(" ");
+      expect(experimentalSwitch).toBeChecked();
+      await user.keyboard(" ");
+      expect(experimentalSwitch).not.toBeChecked();
 
       const passwordSwitch = screen.getByRole("switch", { name: "Set password" });
       await user.tab();
@@ -997,6 +1010,7 @@ describe("HostSetup", () => {
         sideboard_policy: { type: "Limited" as const, data: 15 },
         default_deck_copy_limit: { type: "UpTo" as const, data: 4 },
         allow_debug_actions: false,
+        allow_experimental_dungeons: false,
       };
 
       it("mounts and seeds the form from the format's own resolved config", () => {

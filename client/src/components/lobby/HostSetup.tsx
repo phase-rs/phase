@@ -1230,6 +1230,16 @@ export function HostSetup({
             onChange={(v) => setLocalFormatConfig((prev) => ({ ...prev, allow_debug_actions: v }))}
             accent={accentTone}
           />
+          {/* Experimental dungeons — capability flag, orthogonal to format;
+              offers Baldur's Gate Wilderness on ventures and initiative.
+              Off by default; immutable for the session. */}
+          <OptionRow
+            label={t("hostSetup.experimentalDungeons")}
+            desc={t("hostSetup.experimentalDungeonsHelp")}
+            on={formatConfig.allow_experimental_dungeons}
+            onChange={(v) => setLocalFormatConfig((prev) => ({ ...prev, allow_experimental_dungeons: v }))}
+            accent={accentTone}
+          />
           {!seed && (
             <div className="flex flex-col gap-2.5">
               <OptionRow
