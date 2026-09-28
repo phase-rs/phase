@@ -164,16 +164,29 @@ let comboTablePromise: Promise<ComboTableLoadOutcome> | null = null;
 
 function ensureComboTable(): Promise<ComboTableLoadOutcome> {
   if (!comboTablePromise) {
-    comboTablePromise = (async () => {
+    let definitiveMissing = false;
+    const pending: Promise<ComboTableLoadOutcome> = (async () => {
       try {
         const response = await fetch(__COMBO_TABLE_URL__);
-        if (!response.ok) return "unavailable";
+        if (response.status === 404) {
+          definitiveMissing = true;
+          return "unavailable";
+        }
+        if (!response.ok) {
+          throw new Error(`Failed to load combo-table.json (${response.status})`);
+        }
         await load_combo_table(await response.text());
         return "loaded";
       } catch {
         return "unavailable";
       }
     })();
+    comboTablePromise = pending;
+    void pending.then((outcome) => {
+      if (outcome === "unavailable" && !definitiveMissing && comboTablePromise === pending) {
+        comboTablePromise = null;
+      }
+    });
   }
   return comboTablePromise;
 }
@@ -714,6 +727,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "loadReplayForPlayback": {
+        // Replay reconstruction resolves the recorded decks again, so it must
+        // see the same combo floors as live-game initialization.
+        await ensureComboTable();
         result(msg.id, load_replay_for_playback(msg.replayJson));
         break;
       }

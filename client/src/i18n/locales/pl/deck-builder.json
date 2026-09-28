@@ -287,7 +287,10 @@
       },
       "check": {
         "fired": "Wymusza B{{tier}} {{label}}",
-        "clear": "Dodanie jeszcze {{remaining}} kart może pozwolić osiągnąć B{{tier}}",
+        "clear_one": "Dodanie jeszcze jednej karty może pozwolić osiągnąć B{{tier}}",
+        "clear_few": "Dodanie jeszcze {{count}} karty może pozwolić osiągnąć B{{tier}}",
+        "clear_many": "Dodanie jeszcze {{count}} kart może pozwolić osiągnąć B{{tier}}",
+        "clear_other": "Dodanie jeszcze {{count}} karty może pozwolić osiągnąć B{{tier}}",
         "clearMax": "Nie można osiągnąć B{{tier}} dodatkowymi dopasowaniami"
       },
       "outcome": {
