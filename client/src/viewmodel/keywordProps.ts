@@ -372,6 +372,9 @@ type KeywordAbilityCost = Parameters<typeof formatKnownCost>[0];
  * drops out of the text or turns into `formatCost`'s "Activate" fallback.
  */
 function formatKeywordAbilityCost(cost: KeywordAbilityCost): string | null {
+  // A sacrifice cost also names what and how many permanents to sacrifice.
+  // formatKnownCost only returns the verb, so its detail would be misleading.
+  if (cost.type === "Sacrifice") return null;
   if (cost.type === "Composite" || cost.type === "OneOf") {
     const legs = (cost.costs ?? []).map(formatKeywordAbilityCost);
     if (legs.length === 0 || !legs.every((leg): leg is string => leg !== null)) return null;

@@ -329,6 +329,11 @@ describe("keyword AbilityCost detail", () => {
   const payLife = { type: "PayLife", amount: { type: "Fixed", value: 3 } };
   // Aboroth's cost shape, which has no client rendering.
   const effectCost = { type: "EffectCost", effect: { type: "PutCounter" } };
+  const sacrificeLand = {
+    type: "Sacrifice",
+    target: { type: "Typed", type_filters: ["Land"] },
+    count: 1,
+  };
 
   it("joins a composite whose every sub-cost renders", () => {
     expect(getKeywordDetail(upkeep([mana, payLife]))).toBe("{1}{G}, Pay 3 life");
@@ -345,5 +350,16 @@ describe("keyword AbilityCost detail", () => {
       }),
       bare: getKeywordDetail({ CumulativeUpkeep: effectCost }),
     }).toEqual({ upkeep: null, flashback: null, bare: null });
+  });
+
+  it("does not show a sacrifice cost without its required subject", () => {
+    expect({
+      bare: getKeywordDetail({ CumulativeUpkeep: sacrificeLand }),
+      composite: getKeywordDetail(upkeep([mana, sacrificeLand])),
+      flashback: getKeywordDetail({
+        Flashback: { type: "NonMana", data: { type: "OneOf", costs: [mana, sacrificeLand] } },
+      }),
+    }).toEqual({ bare: null, composite: null, flashback: null });
+    expect(getKeywordDisplayText({ CumulativeUpkeep: sacrificeLand })).toBe("Cumulative Upkeep");
   });
 });
