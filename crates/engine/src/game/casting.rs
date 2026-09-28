@@ -6500,14 +6500,16 @@ pub fn graveyard_lands_playable_by_permission(
 /// them play, with the source and the frequency of the grant that admits it,
 /// source-major.
 ///
-/// A source whose Play grants admit the land two or more times, one of them
-/// once-per-turn, is skipped for that land: the per-turn ledger is keyed by
-/// source, so it can't tell which grant was used (the land twin of the cast
-/// side's shared-slot rule; see `graveyard_permission_candidates`). That board
-/// is unsupported and fails closed. Otherwise the admitting grant is unique,
-/// or every admitting grant is unlimited and spends nothing, so the frequency
-/// recorded for the play is the admitting grant's own, never another grant's
-/// on the same source.
+/// Only grants usable now (filter matches and per-turn slot available) are
+/// considered. Exactly one usable grant admits the land and its slot is spent.
+/// Two or more usable grants that are all unlimited admit it through the first
+/// (none spends a slot, so which is used changes nothing). Two or more usable
+/// grants with one once-per-turn are a real announcement (spend that slot or
+/// not) with no land-play prompt to make it, so the source is skipped for that
+/// land: unsupported and fails closed. The cast side asks instead (one menu
+/// option per grant; see `graveyard_permission_candidates`). So the frequency
+/// recorded for the play is always the admitting grant's own, never another
+/// grant's on the same source.
 fn graveyard_land_play_grants(
     state: &GameState,
     player: PlayerId,
@@ -6535,11 +6537,16 @@ fn graveyard_land_play_grants(
                 continue;
             }
             // CR 109.4 + CR 108.4a: owner-scoped, as in the sibling consumers --
-            // see `graveyard_permission_source`.
+            // see `graveyard_permission_source`. CR 604.2 + CR 110.4: only a grant
+            // whose per-turn slot is still available admits the land now (for
+            // `OncePerTurnPerPermanentType`, Muldrotha, the land slot is its own
+            // per-permanent-type entry), so a spent bounded grant doesn't hide a
+            // usable unlimited one beside it.
             let admitting: Vec<_> = sources
                 .iter()
                 .filter(|source| {
                     source.source_id == source_id
+                        && frequency_slot_available(state, source_id, land, source.frequency)
                         && super::filter::matches_target_filter_for_zone(
                             state,
                             land,
@@ -6555,12 +6562,7 @@ fn graveyard_land_play_grants(
                 [first, ..] if admitting.iter().all(|grant| !grant.is_bounded()) => *first,
                 _ => continue,
             };
-            // CR 604.2 + CR 110.4: per-source frequency slot; for
-            // `OncePerTurnPerPermanentType` (Muldrotha) the land slot is its own
-            // per-permanent-type entry.
-            if frequency_slot_available(state, source_id, land, grant.frequency) {
-                grants.push((land, source_id, grant.frequency));
-            }
+            grants.push((land, source_id, grant.frequency));
         }
     }
     grants

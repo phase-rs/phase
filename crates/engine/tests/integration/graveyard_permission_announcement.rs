@@ -1528,6 +1528,123 @@ fn a_land_spends_the_slot_of_the_grant_that_admitted_it() {
     );
 }
 
+/// A once-per-turn and an unlimited Play grant for lands on one source.
+fn bounded_and_unlimited_land_board() -> (GameRunner, ObjectId, ObjectId) {
+    use engine::types::ability::{CardPlayMode, TypedFilter};
+    land_board(vec![
+        land_permission(
+            CastFrequency::OncePerTurn,
+            CardPlayMode::Play,
+            TypedFilter::land(),
+        ),
+        land_permission(
+            CastFrequency::Unlimited,
+            CardPlayMode::Play,
+            TypedFilter::land(),
+        ),
+    ])
+}
+
+/// A source with a once-per-turn grant for permanent cards and an unlimited
+/// one for lands. Casting Grizzly Bears through the first spends the source's
+/// once-per-turn slot (without using the land drop); the Forest is then played
+/// through the unlimited grant, which is the only one still usable, and no
+/// further slot is spent.
+#[test]
+fn a_spent_bounded_grant_leaves_the_unlimited_one_usable_for_a_land() {
+    use engine::types::ability::{CardPlayMode, TypedFilter};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario
+        .add_creature(P0, "Land Permission Host", 1, 1)
+        .with_static_definition(land_permission(
+            CastFrequency::OncePerTurn,
+            CardPlayMode::Play,
+            TypedFilter::permanent(),
+        ))
+        .with_static_definition(land_permission(
+            CastFrequency::Unlimited,
+            CardPlayMode::Play,
+            TypedFilter::land(),
+        ))
+        .id();
+    let bears = add_bears_to_graveyard(&mut scenario, "Grizzly Bears");
+    let forest = scenario.add_land_to_graveyard(P0, "Forest").id();
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    add_mana(&mut runner, ManaType::Green, 2);
+
+    cast_from_graveyard(&mut runner, bears).expect("the Bears cast through the bounded grant");
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Stack);
+    assert!(once_used(&runner, host), "reach: the bounded slot is spent");
+    runner.resolve_top();
+    let before = (
+        runner.state().graveyard_cast_permissions_used.clone(),
+        per_type_used(&runner),
+    );
+
+    assert!(
+        land_offered(&runner, forest),
+        "the unlimited grant admits the Forest"
+    );
+    play_land(&mut runner, forest).expect("the land play is legal");
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Battlefield);
+    assert_eq!(
+        (
+            runner.state().graveyard_cast_permissions_used.clone(),
+            per_type_used(&runner),
+        ),
+        before,
+        "the unlimited grant spends no further slot"
+    );
+}
+
+/// Both grants usable: whether the play spends the once-per-turn slot is an
+/// announcement with no land-play prompt, so it fails closed.
+#[test]
+fn a_live_bounded_and_unlimited_land_grant_pair_plays_no_land() {
+    let (mut runner, host, forest) = bounded_and_unlimited_land_board();
+    assert!(!land_offered(&runner, forest));
+    assert!(play_land(&mut runner, forest).is_err());
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Graveyard);
+    assert!(!once_used(&runner, host));
+}
+
+const CRUCIBLE_OF_WORLDS: &str = "You may play lands from your graveyard.";
+
+/// No regression, and a known limitation: a graveyard Forest admitted by two
+/// DIFFERENT sources (Muldrotha, then Crucible of Worlds) is still offered and
+/// played, through the first source, as before this change, so Muldrotha's
+/// land slot is spent. The Muldrotha ruling lets the player announce Crucible
+/// instead; `PlayLand` carries no permission, so announcing which permission a
+/// land play uses is a follow-up.
+#[test]
+fn a_land_admitted_by_two_sources_still_plays_through_the_first() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let muldrotha = add_permission_source(
+        &mut scenario,
+        "Muldrotha, the Gravetide",
+        MULDROTHA,
+        &["Elemental", "Avatar"],
+    );
+    let crucible = scenario
+        .add_artifact_from_oracle(P0, "Crucible of Worlds", CRUCIBLE_OF_WORLDS)
+        .id();
+    let forest = scenario.add_land_to_graveyard(P0, "Forest").id();
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert!(
+        engine::game::casting::graveyard_lands_playable_by_permission(runner.state(), P0)
+            .contains(&(forest, crucible)),
+        "reach: Crucible admits the Forest too"
+    );
+    assert!(land_offered(&runner, forest));
+    play_land(&mut runner, forest).expect("the land play is legal");
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Battlefield);
+    assert_eq!(per_type_used(&runner), vec![(muldrotha, CoreType::Land)]);
+}
+
 // --- Identical grants are distinct permissions -------------------------------
 
 /// Two identical unlimited grants printed on one creature. (The layer system

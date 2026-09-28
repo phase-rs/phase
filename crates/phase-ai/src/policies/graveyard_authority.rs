@@ -75,13 +75,42 @@ impl Commitment {
             && mine.iter().zip(theirs.iter()).any(|(a, b)| a < b)
     }
 
-    /// What the option gives up, in card-equivalents. Mana is not counted: the
-    /// options compared share one method and face, whose mana cost no graveyard
-    /// permission changes (one whose extra cost replaces the mana cost is
-    /// refused by the engine), so it is equal across them; dominance still
-    /// compares it.
+    /// What the option gives up, in card-equivalents. Mana is not priced here:
+    /// phase-ai has no mana-to-card valuation. The options of one method and
+    /// face share the spell's mana cost, but a permission can add mana of its
+    /// own (`Additional(Mana)`), so `mana` carries both and dominance compares
+    /// it: an option costing more mana and nothing less is rejected.
     fn given_up(&self) -> f64 {
         self.extra + self.counter + self.slot + self.destination
+    }
+}
+
+/// The mana value of the mana legs of a permission's extra cost: a fixed mana
+/// cost, a dynamic generic amount, every leg of a composite, the cheapest
+/// alternative of a choice. Non-mana legs count 0 here.
+fn permission_mana(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &engine::types::ability::AbilityCost,
+) -> u32 {
+    use engine::types::ability::AbilityCost;
+    match cost {
+        AbilityCost::Mana { cost } => cost.mana_value(),
+        AbilityCost::ManaDynamic { quantity } => {
+            engine::game::quantity::resolve_quantity(state, quantity, player, object_id).max(0)
+                as u32
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .map(|leg| permission_mana(state, player, object_id, leg))
+            .sum(),
+        AbilityCost::OneOf { costs } => costs
+            .iter()
+            .map(|leg| permission_mana(state, player, object_id, leg))
+            .min()
+            .unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -102,6 +131,15 @@ fn commitment(
     // The permission's additional cost, priced by the shared self-cost
     // estimator (life per point, cards per discard, the permanent a sacrifice
     // consumes), so a cheaper rider is preferred over a dearer one.
+    // A permission's additional MANA is paid on top of the option's mana cost;
+    // phase-ai has no mana-to-card valuation to price it with, so it joins the
+    // mana axis dominance compares (and the self-cost estimator prices it 0).
+    let extra_mana = match &authority.extra_cost {
+        Some(extra) if extra.mode == CastCostMode::Additional => {
+            permission_mana(state, player, object_id, &extra.cost)
+        }
+        _ => 0,
+    };
     let extra = match &authority.extra_cost {
         Some(extra) if extra.mode == CastCostMode::Additional => {
             super::self_cost::real_self_cost(state, player, object_id, &extra.cost, penalties)
@@ -136,7 +174,7 @@ fn commitment(
     Some(Commitment {
         method,
         face: option.face,
-        mana: option.mana_cost.mana_value(),
+        mana: option.mana_cost.mana_value() + extra_mana,
         extra,
         counter,
         slot,
@@ -486,26 +524,26 @@ mod tests {
         );
     }
 
-    /// Two permissions whose extra costs differ only in amount (pay 10 life,
-    /// scanned first; pay 1 life, second): the AI announces the cheaper one.
-    #[test]
-    fn a_cheaper_extra_cost_is_announced_even_when_scanned_second() {
+    /// Two unlimited creature permissions on separate hosts whose extra costs
+    /// are `dear` (scanned first) and `cheap` (second), with Grizzly Bears in
+    /// the graveyard and plenty of green mana: the AI's announcement, and the
+    /// menu index of the cheap permission.
+    fn announce_between(
+        dear: engine::types::ability::AbilityCost,
+        cheap: engine::types::ability::AbilityCost,
+    ) -> (Option<GameAction>, usize) {
         use engine::game::scenario::{GameScenario, P0};
-        use engine::types::ability::{
-            AbilityCost, CardPlayMode, QuantityExpr, StaticDefinition, TargetFilter, TypedFilter,
-        };
+        use engine::types::ability::{CardPlayMode, StaticDefinition, TargetFilter, TypedFilter};
         use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
         use engine::types::phase::Phase;
         use engine::types::statics::{CastExtraCost, StaticMode};
-        let permission = |life| {
+        let permission = |cost| {
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
                 graveyard_destination_replacement: None,
                 extra_cost: Some(CastExtraCost {
-                    cost: AbilityCost::PayLife {
-                        amount: QuantityExpr::Fixed { value: life },
-                    },
+                    cost,
                     mode: CastCostMode::Additional,
                 }),
                 enters_with_counter: None,
@@ -517,10 +555,10 @@ mod tests {
         scenario.at_phase(Phase::PreCombatMain);
         scenario
             .add_creature(P0, "Dear Permission", 1, 1)
-            .with_static_definition(permission(10));
-        let cheap = scenario
+            .with_static_definition(permission(dear));
+        let cheap_host = scenario
             .add_creature(P0, "Cheap Permission", 1, 1)
-            .with_static_definition(permission(1))
+            .with_static_definition(permission(cheap))
             .id();
         let bears = scenario
             .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
@@ -530,7 +568,7 @@ mod tests {
             })
             .id();
         let mut runner = scenario.build();
-        for _ in 0..2 {
+        for _ in 0..8 {
             runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
                 ManaType::Green,
                 ObjectId(0),
@@ -557,13 +595,45 @@ mod tests {
                 option
                     .authority
                     .as_ref()
-                    .is_some_and(|a| a.announcement.permission.source == cheap)
+                    .is_some_and(|a| a.announcement.permission.source == cheap_host)
             })
             .expect("the cheap permission is offered");
         assert!(cheap_index > 0, "the cheap permission is scanned second");
-        assert_eq!(
+        (
             same_method_announcement(runner.state(), &weights(), P0),
-            Some(GameAction::ChooseCastingVariant { index: cheap_index })
+            cheap_index,
+        )
+    }
+
+    /// Two permissions whose extra costs differ only in amount (pay 10 life,
+    /// scanned first; pay 1 life, second): the AI announces the cheaper one.
+    #[test]
+    fn a_cheaper_extra_cost_is_announced_even_when_scanned_second() {
+        use engine::types::ability::{AbilityCost, QuantityExpr};
+        let life = |value| AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value },
+        };
+        let (chosen, cheap) = announce_between(life(10), life(1));
+        assert_eq!(
+            chosen,
+            Some(GameAction::ChooseCastingVariant { index: cheap })
+        );
+    }
+
+    /// The same with permission-imposed MANA ({5} scanned first, {1} second):
+    /// that mana is paid on top of the spell's cost, so the cheaper one is
+    /// announced.
+    #[test]
+    fn cheaper_permission_mana_is_announced_even_when_scanned_second() {
+        use engine::types::ability::AbilityCost;
+        use engine::types::mana::ManaCost;
+        let mana = |generic| AbilityCost::Mana {
+            cost: ManaCost::generic(generic),
+        };
+        let (chosen, cheap) = announce_between(mana(5), mana(1));
+        assert_eq!(
+            chosen,
+            Some(GameAction::ChooseCastingVariant { index: cheap })
         );
     }
 
