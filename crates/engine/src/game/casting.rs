@@ -4933,18 +4933,29 @@ fn exile_permission_timing_active(
 }
 
 /// CR 601.2a + CR 113.6b: Enumerate every battlefield permanent controlled by
-/// `player` whose `StaticMode::ExileCastPermission` static is currently
-/// functioning. The returned filter is owned by the static definition (via
+/// `player`, and every command-zone emblem owned by `player`, whose
+/// `StaticMode::ExileCastPermission` static is currently functioning. The
+/// returned filter is owned by the static definition (via
 /// `active_static_definitions`) and lives at least as long as the inferred
 /// borrow.
 ///
 /// Mirrors `graveyard_permission_sources` for the graveyard family — the
 /// per-source pool then carves out the eligible cards.
 fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePermissionSource<'_>> {
+    // CR 114.4 + CR 114.2: emblem abilities function in the command zone; an
+    // emblem is owned and controlled by the player who got it — mirrors
+    // `graveyard_permission_sources`.
+    let emblems = state.command_zone.iter().copied().filter(|&id| {
+        state
+            .objects
+            .get(&id)
+            .is_some_and(|obj| obj.is_emblem && obj.owner == player)
+    });
     state
         .battlefield
         .iter()
         .copied()
+        .chain(emblems)
         .filter_map(|source_id| {
             let obj = state.objects.get(&source_id)?;
             active_static_definitions(state, obj).find_map(|definition| match definition.mode {

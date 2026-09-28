@@ -5,7 +5,7 @@ use crate::types::game_state::{
     ExileLink, ExileLinkKind, ExiledStopInput, GameState, LibrarySearchDeliveryResume, LookGrant,
     RepeatUntilStopWitness,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -267,6 +267,20 @@ pub(crate) fn push_with_kind(
     source_id: ObjectId,
     kind: ExileLinkKind,
 ) {
+    if record_link(state, exiled_id, source_id, kind) {
+        mirror_link_to_linked_emblems(state, exiled_id, source_id);
+    }
+}
+
+/// The dedupe/upgrade body of [`push_with_kind`]. Returns `true` only when a
+/// new `(exiled_id, source_id)` link was pushed; an existing link (upgraded or
+/// not) returns `false`.
+fn record_link(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+    kind: ExileLinkKind,
+) -> bool {
     if let Some(existing) = state
         .exile_links
         .iter_mut()
@@ -277,7 +291,7 @@ pub(crate) fn push_with_kind(
         {
             existing.kind = kind;
         }
-        return;
+        return false;
     }
     state.exile_links.push(ExileLink {
         exiled_id,
@@ -285,6 +299,49 @@ pub(crate) fn push_with_kind(
         kind,
     });
     push_exiled_with_source_this_turn(state, exiled_id, source_id);
+    true
+}
+
+/// CR 400.7 + CR 113.7a: the incarnation of `source_id` that performed the
+/// exile being linked now — the resolving ability's push-time capture
+/// (`stack.rs` stamps it when the ability is put on the stack), so a source
+/// that left before resolution still names the object that activated it;
+/// otherwise the live object.
+pub(crate) fn exiling_source_incarnation(state: &GameState, source_id: ObjectId) -> Option<u64> {
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.source_id == source_id)
+        .and_then(|entry| entry.ability()?.source_incarnation)
+        .or_else(|| state.objects.get(&source_id).map(|obj| obj.incarnation))
+}
+
+/// CR 607.1d + CR 607.2a + CR 114.4: a card exiled by an object is also
+/// "exiled with" that object for every command-zone emblem that object
+/// created and whose abilities refer to cards exiled with it. The mirror
+/// link is keyed to the emblem, which never leaves the command zone
+/// (CR 114.5), so it survives the creator leaving the battlefield.
+fn mirror_link_to_linked_emblems(state: &mut GameState, exiled_id: ObjectId, source_id: ObjectId) {
+    let Some(incarnation) = exiling_source_incarnation(state, source_id) else {
+        return;
+    };
+    let creator = ObjectIncarnationRef::of(source_id, incarnation);
+    let emblems: Vec<ObjectId> = state
+        .command_zone
+        .iter()
+        .copied()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.is_emblem
+                    && obj.linked_ability_source == Some(creator)
+                    && source_contains_linked_exile_consumer(obj)
+            })
+        })
+        .collect();
+    for emblem_id in emblems {
+        // `record_link`, not `push_with_kind`: a mirror link never mirrors again.
+        record_link(state, exiled_id, emblem_id, ExileLinkKind::TrackedBySource);
+    }
 }
 
 /// CR 601.2a + CR 113.6b: Record an `exiled_id` as exiled "with" `source_id`
@@ -1511,5 +1568,166 @@ mod tests {
             !source_is_linked_exile_consumer(&state, unrelated),
             "an object with no ExiledBySource reference must not be a linked-exile consumer"
         );
+    }
+
+    // ── CR 607.1d emblem↔creator mirror ─────────────────────────────────
+
+    /// A creator object `S` on the battlefield and one command-zone emblem owned
+    /// by P0 whose static is (or is not) a linked-exile consumer, latched to
+    /// `(S, creator_incarnation)`.
+    fn mirror_fixture(
+        consumer: bool,
+        creator_incarnation_offset: u64,
+    ) -> (crate::types::game_state::GameState, ObjectId, ObjectId) {
+        use crate::game::effects::create_emblem::grant_emblem;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{CardPlayMode, StaticDefinition};
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::CardId;
+        use crate::types::statics::{
+            ExileCardPool, ExileCastCost, ExileCastGrantee, ExileCastTiming, StaticMode,
+        };
+
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creator".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().incarnation = 4;
+        let mode = if consumer {
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Play,
+                cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::Persistent,
+                timing: ExileCastTiming::AnyTime,
+                mana_spend_permission: None,
+                grants_flash: false,
+                extra_cost: None,
+                enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
+            }
+        } else {
+            StaticMode::CantLoseTheGame
+        };
+        let emblem = grant_emblem(
+            &mut state,
+            PlayerId(0),
+            vec![StaticDefinition::new(mode).affected(TargetFilter::Any)],
+            Vec::new(),
+            Vec::new(),
+        );
+        state
+            .objects
+            .get_mut(&emblem)
+            .unwrap()
+            .linked_ability_source = Some(ObjectIncarnationRef::of(
+            source,
+            4 + creator_incarnation_offset,
+        ));
+        (state, source, emblem)
+    }
+
+    fn exile_card(state: &mut crate::types::game_state::GameState) -> ObjectId {
+        crate::game::zones::create_object(
+            state,
+            crate::types::identifiers::CardId(9),
+            PlayerId(1),
+            "Exiled Card".to_string(),
+            Zone::Exile,
+        )
+    }
+
+    fn has_link(
+        state: &crate::types::game_state::GameState,
+        exiled: ObjectId,
+        source: ObjectId,
+    ) -> bool {
+        state
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == exiled && link.source_id == source)
+    }
+
+    /// CR 607.1d + CR 607.2a: a card exiled by the creator is mirrored to the
+    /// creator's consumer emblem when the incarnations match.
+    #[test]
+    fn mirror_links_exile_to_matching_creator_emblem() {
+        let (mut state, source, emblem) = mirror_fixture(true, 0);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source));
+        assert!(has_link(&state, card, emblem), "mirrored to the emblem");
+        assert_eq!(
+            state.exile_links.len(),
+            2,
+            "one source link plus exactly one mirror (no recursion)"
+        );
+    }
+
+    /// CR 400.7: an emblem created by an earlier or later object of the same
+    /// storage id is a different creator; no mirror.
+    #[test]
+    fn mirror_skips_emblem_of_other_incarnation() {
+        let (mut state, source, emblem) = mirror_fixture(true, 1);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "no mirror on mismatch");
+    }
+
+    /// CR 607.1d: only an emblem whose abilities refer to cards exiled with its
+    /// creator receives the mirror.
+    #[test]
+    fn mirror_skips_non_consumer_emblem() {
+        let (mut state, source, emblem) = mirror_fixture(false, 0);
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        assert!(has_link(&state, card, source), "reach: the source link");
+        assert!(!has_link(&state, card, emblem), "non-consumer emblem");
+
+        // Consumer twin: the same shape with the permission static mirrors.
+        let (mut twin, twin_source, twin_emblem) = mirror_fixture(true, 0);
+        let twin_card = exile_card(&mut twin);
+        push_tracked_by_source(&mut twin, twin_card, twin_source);
+        assert!(has_link(&twin, twin_card, twin_emblem));
+    }
+
+    /// CR 113.7a + CR 400.7: while an ability of the source resolves, its
+    /// push-time incarnation capture names the exiling object even after the
+    /// source changed zones; without a resolving entry the live object answers.
+    #[test]
+    fn exiling_source_incarnation_prefers_resolving_capture() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let (mut state, source, _) = mirror_fixture(true, 0);
+        assert_eq!(exiling_source_incarnation(&state, source), Some(4));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(4);
+        state.objects.get_mut(&source).unwrap().incarnation = 5;
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+        assert_eq!(exiling_source_incarnation(&state, source), Some(4));
+        state.resolving_stack_entry = None;
+        assert_eq!(exiling_source_incarnation(&state, source), Some(5));
     }
 }

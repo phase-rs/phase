@@ -1051,6 +1051,13 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emblem_source: Option<EmblemSource>,
 
+    /// CR 607.1d + CR 400.7: for an emblem, the exact object (storage id +
+    /// incarnation) that was the source of the ability that created it — the
+    /// object an emblem ability's "cards exiled with [that object]" refers to.
+    /// `None` for every non-emblem object. Written once in `create_emblem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_ability_source: Option<ObjectIncarnationRef>,
+
     /// CR 111.1: Whether this object is a token (not a card).
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_token: bool,
@@ -1522,6 +1529,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         is_renowned: _,
         is_emblem: _,
         emblem_source: _,
+        // omitted-safe-by-write-site: written once at emblem creation, immutable after.
+        linked_ability_source: _,
         is_token: _,
         is_copy: _,
         display_source: _,
@@ -2692,6 +2701,7 @@ impl GameObject {
             is_renowned: false,
             is_emblem: false,
             emblem_source: None,
+            linked_ability_source: None,
             is_token: false,
             is_copy: false,
             display_source: DisplaySource::Card,

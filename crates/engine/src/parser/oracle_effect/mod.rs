@@ -18634,13 +18634,34 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // A subject narrower than "mana" ("spend white mana as though …", False
     // Dawn; "spend blue mana …", Quicksilver Elemental) relaxes one kind of mana
     // only — the same gap the rider fold reports after a grant.
-    if let Some(single_kind) = mana_spend_concession_is_single_kind(&text.to_lowercase()) {
-        let gap = if single_kind {
-            UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
-        } else {
-            STANDALONE_MANA_SPEND_CONCESSION_GAP
-        };
-        return parsed_clause(Effect::unimplemented(gap, text));
+    {
+        let lower = text.to_lowercase();
+        if let Some(single_kind) = mana_spend_concession_is_single_kind(&lower) {
+            // CR 114.1 + CR 114.2: "[Player] gets an emblem with [ability]" puts
+            // an emblem with that ability into the command zone — the quoted text
+            // is the emblem's own ability, read by the emblem parser's trigger /
+            // static readers (which keep their own `EmblemStatic` fallback), not
+            // an instruction of this clause. An every-mana concession inside it
+            // ("You may play cards exiled with ~, and you may spend mana as though
+            // it were mana of any color to cast those spells", Tibalt, Cosmic
+            // Impostor) is the emblem's static, so emblem creation takes
+            // precedence over the standalone gap. Keyed on the emblem-creation
+            // parser itself — the detector `parse_clause_ast` uses — never on
+            // quoted text in general: a concession quoted in a granted or
+            // perpetually gained ability keeps its gap. A single-kind concession
+            // keeps the unrepresentable gap, emblem or not.
+            if !single_kind {
+                if let Some(emblem) = try_parse_emblem_creation(&lower, text) {
+                    return parsed_clause(emblem);
+                }
+            }
+            let gap = if single_kind {
+                UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+            } else {
+                STANDALONE_MANA_SPEND_CONCESSION_GAP
+            };
+            return parsed_clause(Effect::unimplemented(gap, text));
+        }
     }
 
     // CR 122.1 + CR 608.2d: shared-target counter choice — "put your choice of

@@ -73061,6 +73061,109 @@ fn standalone_mana_spend_concession_is_a_gap() {
     }
 }
 
+/// Tibalt, Cosmic Impostor's emblem clause, verbatim (full self-reference).
+const TIBALT_EMBLEM_CLAUSE: &str = "you get an emblem with \"You may play cards exiled with Tibalt, Cosmic Impostor, and you may spend mana as though it were mana of any color to cast those spells.\"";
+
+/// Row 4f's normalized clause with the one-word substitution "spend mana" →
+/// "spend white mana": a single-kind concession inside the emblem's quotes.
+const SINGLE_KIND_EMBLEM_CLAUSE: &str = "you get an emblem with \"You may play cards exiled with ~, and you may spend white mana as though it were mana of any color to cast those spells.\"";
+
+/// The persistent exile-play permission Tibalt's emblem grants.
+fn tibalt_emblem_permission() -> StaticMode {
+    StaticMode::ExileCastPermission {
+        frequency: CastFrequency::Unlimited,
+        play_mode: Play,
+        cost: crate::types::statics::ExileCastCost::PayNormalCost,
+        pool: crate::types::statics::ExileCardPool::Persistent,
+        timing: crate::types::statics::ExileCastTiming::AnyTime,
+        mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+        grants_flash: false,
+        extra_cost: None,
+        enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
+    }
+}
+
+/// CR 114.1 + CR 114.2: "you get an emblem with [ability]" creates an emblem
+/// whose ability is the quoted text. An every-mana concession inside the quotes
+/// is the emblem's own static, so the clause lowers to `CreateEmblem` instead of
+/// the standalone mana-spend concession gap.
+#[test]
+fn emblem_clause_with_any_color_concession_lowers_to_create_emblem() {
+    let normalized = crate::parser::oracle_util::normalize_card_name_refs(
+        TIBALT_EMBLEM_CLAUSE,
+        "Tibalt, Cosmic Impostor",
+    );
+    // Positive marker: production's `~` normalization reached the quoted name.
+    assert_eq!(
+        normalized,
+        "you get an emblem with \"You may play cards exiled with ~, and you may spend mana as though it were mana of any color to cast those spells.\""
+    );
+    let chain = parse_effect_chain(&normalized, AbilityKind::Spell);
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+        "no gap anywhere in the chain: {effects:?}"
+    );
+    let Effect::CreateEmblem { statics, triggers } = &*chain.effect else {
+        panic!("expected CreateEmblem, got {:?}", chain.effect);
+    };
+    assert!(triggers.is_empty(), "no emblem triggers: {triggers:?}");
+    assert_eq!(statics.len(), 1, "exactly one emblem static: {statics:?}");
+    assert_eq!(statics[0].mode, tibalt_emblem_permission());
+    assert_eq!(statics[0].affected, Some(TargetFilter::Any));
+    assert!(chain.sub_ability.is_none());
+}
+
+/// CR 609.4b: a concession that relaxes one kind of mana only ("spend white
+/// mana as though …") has no `ManaSpendPermission` shape; inside an emblem
+/// clause it keeps the unrepresentable concession gap rather than lowering to an
+/// emblem static.
+#[test]
+fn emblem_clause_with_single_kind_concession_keeps_unrepresentable_gap() {
+    // Reach markers: the twin carries a single-kind concession and the positive
+    // an every-mana one, so both reach the concession block.
+    assert_eq!(
+        mana_spend_concession_is_single_kind(&SINGLE_KIND_EMBLEM_CLAUSE.to_lowercase()),
+        Some(true)
+    );
+    let positive = crate::parser::oracle_util::normalize_card_name_refs(
+        TIBALT_EMBLEM_CLAUSE,
+        "Tibalt, Cosmic Impostor",
+    );
+    assert_eq!(
+        mana_spend_concession_is_single_kind(&positive.to_lowercase()),
+        Some(false)
+    );
+
+    let chain = parse_effect_chain(SINGLE_KIND_EMBLEM_CLAUSE, AbilityKind::Spell);
+    let effects = collect_chain_effects(&chain);
+    assert!(
+        matches!(
+            &*chain.effect,
+            Effect::Unimplemented { name, .. } if name == UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+        ),
+        "single-kind emblem body keeps the unrepresentable gap: {:?}",
+        chain.effect
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CreateEmblem { .. })),
+        "no emblem lowered: {effects:?}"
+    );
+
+    // Positive twin: the any-color clause reaches emblem creation from this seam.
+    let positive_chain = parse_effect_chain(&positive, AbilityKind::Spell);
+    assert!(
+        matches!(&*positive_chain.effect, Effect::CreateEmblem { .. }),
+        "the any-color twin lowers to CreateEmblem: {:?}",
+        positive_chain.effect
+    );
+}
+
 /// CR 609.4b: the rider modifies the grant it FOLLOWS. Without a cast grant
 /// directly before it nothing is folded and the clause is the standalone
 /// concession gap. A concession narrower than "mana" after a grant ("colorless

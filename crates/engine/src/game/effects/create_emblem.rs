@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
@@ -93,6 +93,16 @@ pub fn resolve(
             printed_ref: src.printed_ref.clone(),
         });
 
+    // CR 607.1d + CR 400.7: latch the creating object's exact incarnation — the
+    // ability's push-time capture when it has one (CR 113.7a: the source may
+    // have left before resolution), else the live object (an as-enters drain).
+    let linked_ability_source = state.objects.get(&ability.source_id).map(|src| {
+        ObjectIncarnationRef::of(
+            src.id,
+            ability.source_incarnation.unwrap_or(src.incarnation),
+        )
+    });
+
     // CR 114.1: Create the emblem via the single-authority helper. No activated
     // abilities for the planeswalker/spell emblem path — only statics + triggers.
     let emblem_id = grant_emblem(
@@ -103,8 +113,11 @@ pub fn resolve(
         Vec::new(),
     );
     // CR 114: set display-only provenance captured above (grant_emblem leaves it
-    // unset because it has no ability source of its own).
-    state.objects.get_mut(&emblem_id).unwrap().emblem_source = emblem_source;
+    // unset because it has no ability source of its own), and the CR 607.1d
+    // creator identity latched above.
+    let emblem = state.objects.get_mut(&emblem_id).unwrap();
+    emblem.emblem_source = emblem_source;
+    emblem.linked_ability_source = linked_ability_source;
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -506,5 +519,90 @@ mod tests {
             Some((emblem_id, CastFrequency::Unlimited)),
             "permission source should be the created emblem"
         );
+    }
+
+    /// CR 607.1d + CR 400.7 + CR 113.7a: the emblem latches the exact object that
+    /// created it — the ability's push-time incarnation capture when present,
+    /// else the live incarnation (an as-enters replacement drain has no stack
+    /// capture).
+    #[test]
+    fn create_emblem_latches_creator_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Tibalt, Cosmic Impostor".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_id).unwrap().incarnation = 3;
+        let mut ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![ninja_pump_static()],
+                triggers: Vec::new(),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let live = state.command_zone[0];
+        assert_eq!(
+            state.objects[&live].linked_ability_source,
+            Some(ObjectIncarnationRef::of(source_id, 3)),
+            "no stack capture: the live incarnation is latched"
+        );
+
+        ability.source_incarnation = Some(2);
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let captured = state.command_zone[1];
+        assert_eq!(
+            state.objects[&captured].linked_ability_source,
+            Some(ObjectIncarnationRef::of(source_id, 2)),
+            "the push-time capture wins over the live incarnation"
+        );
+    }
+
+    /// Serialized surface: persisted emblems written before the creator field
+    /// existed load with `None`, and a set field round-trips.
+    #[test]
+    fn emblem_creator_field_defaults_when_absent() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Tibalt, Cosmic Impostor".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![ninja_pump_static()],
+                triggers: Vec::new(),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let emblem = &state.objects[&state.command_zone[0]];
+        let expected = Some(ObjectIncarnationRef::from_object(
+            &state.objects[&source_id],
+        ));
+        assert_eq!(emblem.linked_ability_source, expected);
+
+        let mut json = serde_json::to_value(emblem).unwrap();
+        let round_trip: crate::game::GameObject = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(round_trip.linked_ability_source, expected);
+
+        let removed = json
+            .as_object_mut()
+            .unwrap()
+            .remove("linked_ability_source");
+        assert!(removed.is_some(), "the set field is serialized");
+        let legacy: crate::game::GameObject = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.linked_ability_source, None);
     }
 }

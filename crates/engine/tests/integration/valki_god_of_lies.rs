@@ -1184,3 +1184,887 @@ fn valki_real_card_export_has_no_unimplemented() {
         }
     ));
 }
+
+// ── Tibalt, Cosmic Impostor ─────────────────────────────────────────
+//
+// "As Tibalt enters, you get an emblem with "You may play cards exiled with
+// Tibalt, Cosmic Impostor, and you may spend mana as though it were mana of any
+// color to cast those spells.""
+// - CR 614.1c + CR 603.6d: an "As [this permanent] enters" instruction is a
+//   replacement effect that happens as part of the entering event (no stack).
+// - CR 114.2 + CR 114.4: "you get an emblem" puts an emblem owned and
+//   controlled by that player into the command zone; its abilities function
+//   there.
+// - CR 607.1d + CR 607.2a + CR 400.7: the emblem's "cards exiled with Tibalt"
+//   are the cards exiled by that Tibalt object, even after it leaves.
+// - CR 609.4b: the any-color spend concession applies to those spells only.
+
+/// Verbatim Oracle text of the back face (Scryfall / MTGJSON).
+const TIBALT_FULL: &str = "As Tibalt enters, you get an emblem with \"You may play cards exiled with Tibalt, Cosmic Impostor, and you may spend mana as though it were mana of any color to cast those spells.\"\n[+2]: Exile the top card of each player's library.\n[−3]: Exile target artifact or creature.\n[−8]: Exile all graveyards. Add {R}{R}{R}.";
+
+/// Verbatim Oracle texts of helper cards (Murder-class removal extended to
+/// planeswalkers; Unsummon-class bounce; Swords-class exile).
+const DESTROY_CREATURE_OR_PLANESWALKER: &str = "Destroy target creature or planeswalker.";
+const RETURN_TARGET_PERMANENT: &str = "Return target permanent to its owner's hand.";
+const EXILE_TARGET_CREATURE: &str = "Exile target creature.";
+
+const TIBALT_PLUS_TWO: usize = 0;
+const TIBALT_MINUS_THREE: usize = 1;
+const TIBALT_MINUS_EIGHT: usize = 2;
+
+fn fixture_db() -> &'static engine::database::card_db::CardDatabase {
+    crate::support::shared_card_db().expect("integration fixture must load")
+}
+
+fn shards(shards: &[ManaCostShard], generic: u32) -> ManaCost {
+    ManaCost::Cost {
+        shards: shards.to_vec(),
+        generic,
+    }
+}
+
+/// Mana for Tibalt's {5}{B}{R}.
+fn tibalt_mana() -> Vec<ManaUnit> {
+    let mut pool = vec![mana(ManaType::Black), mana(ManaType::Red)];
+    pool.extend((0..5).map(|_| mana(ManaType::Colorless)));
+    pool
+}
+
+/// Three-player main phase with the real Valki // Tibalt card in `owner`'s hand
+/// and `setup` applied; the card database is rehydrated so the modal back face
+/// is castable (CR 712.11b).
+fn tibalt_scenario(
+    owner: PlayerId,
+    setup: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId) {
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let db = fixture_db();
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let card = scenario.add_real_card(owner, "Valki, God of Lies", Zone::Hand, db);
+    scenario.with_mana_pool(owner, tibalt_mana());
+    setup(&mut scenario);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    (runner, card)
+}
+
+/// CR 712.11b: cast the modal back face.
+fn cast_tibalt(runner: &mut GameRunner, card: ObjectId) -> CastOutcome {
+    runner.cast(card).modal_back_face(true).resolve()
+}
+
+fn emblems_of(runner: &GameRunner, player: PlayerId) -> Vec<ObjectId> {
+    let state = runner.state();
+    state
+        .command_zone
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.is_emblem && obj.owner == player)
+        })
+        .collect()
+}
+
+fn the_emblem_of(runner: &GameRunner, player: PlayerId) -> ObjectId {
+    let emblems = emblems_of(runner, player);
+    assert_eq!(emblems.len(), 1, "exactly one emblem for {player:?}");
+    emblems[0]
+}
+
+fn linked(runner: &GameRunner, exiled: ObjectId, source: ObjectId) -> bool {
+    runner
+        .state()
+        .exile_links
+        .iter()
+        .any(|link| link.exiled_id == exiled && link.source_id == source)
+}
+
+fn can_cast(runner: &GameRunner, player: PlayerId, card: ObjectId) -> bool {
+    engine::game::casting::can_cast_object_now(runner.state(), player, card)
+}
+
+fn playable_exiled_lands(runner: &GameRunner, player: PlayerId) -> Vec<ObjectId> {
+    engine::game::casting::exile_lands_playable_by_permission(runner.state(), player)
+        .into_iter()
+        .map(|(land, _)| land)
+        .collect()
+}
+
+fn add_pool(runner: &mut GameRunner, player: PlayerId, kinds: &[ManaType]) {
+    for &kind in kinds {
+        let _ = runner.state_mut().add_mana_to_pool(player, mana(kind));
+    }
+}
+
+fn pool_count(runner: &GameRunner, player: PlayerId, kind: ManaType) -> usize {
+    runner.state().players[player.0 as usize]
+        .mana_pool
+        .mana
+        .iter()
+        .filter(|unit| unit.color == kind)
+        .count()
+}
+
+fn put_on_library_top(runner: &mut GameRunner, id: ObjectId, owner: PlayerId) {
+    let state = runner.state_mut();
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(state, id, Zone::Library, &mut events);
+    let player = state.players.iter_mut().find(|p| p.id == owner).unwrap();
+    player.library.retain(|card| *card != id);
+    player.library.insert(0, id);
+}
+
+/// An instant card of cost {2} in `player`'s hand (verbatim "Draw a card.").
+fn add_instant(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
+    let mut card = scenario.add_spell_to_hand_from_oracle(player, name, true, "Draw a card.");
+    card.with_mana_cost(generic_cost(2));
+    card.id()
+}
+
+/// Hand the priority window of a main phase to `player` (a new turn of theirs).
+fn begin_main_phase_of(runner: &mut GameRunner, player: PlayerId) {
+    let state = runner.state_mut();
+    state.active_player = player;
+    state.priority_player = player;
+    state.phase = Phase::PreCombatMain;
+    state.turn_number += 1;
+    state.waiting_for = WaitingFor::Priority { player };
+}
+
+/// Activate one of Tibalt's loyalty abilities and resolve it.
+fn activate_tibalt(runner: &mut GameRunner, tibalt: ObjectId, index: usize) {
+    runner.activate(tibalt, index).resolve();
+}
+
+/// CR 614.1c + CR 603.6d + CR 114.2 + CR 306.5b + CR 607.1d: casting the back
+/// face creates, as it enters, exactly one emblem owned and controlled by its
+/// caster, hosting the persistent any-color exile-play permission, and latched
+/// to the Tibalt object that entered. Tibalt enters with 5 loyalty.
+#[test]
+fn tibalt_back_face_cast_creates_one_emblem_owned_by_caster() {
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::statics::{
+        CastFrequency, ExileCardPool, ExileCastCost, ExileCastGrantee, ExileCastTiming, StaticMode,
+    };
+
+    // Verbatim Oracle text: the fixture's back face is the card under test.
+    let face = fixture_db()
+        .get_face_by_name("Tibalt, Cosmic Impostor")
+        .expect("the back face is in the fixture");
+    assert_eq!(face.oracle_text.as_deref(), Some(TIBALT_FULL));
+
+    let (mut runner, tibalt) = tibalt_scenario(P0, |_| {});
+    let outcome = cast_tibalt(&mut runner, tibalt);
+
+    // C5: no ReplacementChoice — the run reaches priority on an empty stack.
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    let state = runner.state();
+    assert!(state.stack.is_empty());
+    let object = &state.objects[&tibalt];
+    assert_eq!(object.zone, Zone::Battlefield);
+    assert_eq!(object.name, "Tibalt, Cosmic Impostor");
+    // B9 / CR 306.5b: enters with its printed loyalty.
+    assert_eq!(object.loyalty, Some(5));
+
+    // CR 114.2: only "you" gets the emblem.
+    assert_eq!(state.command_zone.len(), 1, "exactly one emblem in play");
+    assert!(emblems_of(&runner, P1).is_empty());
+    assert!(emblems_of(&runner, P2).is_empty());
+    let emblem = &runner.state().objects[&the_emblem_of(&runner, P0)];
+    assert_eq!(emblem.zone, Zone::Command);
+    assert_eq!(emblem.owner, P0);
+    assert_eq!(emblem.controller, P0);
+    assert_eq!(emblem.static_definitions.len(), 1);
+    let permission = &emblem.static_definitions[0];
+    assert_eq!(
+        permission.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: engine::types::ability::CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: Some(engine::types::ability::ManaSpendPermission::AnyColor),
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: ExileCastGrantee::SourceController,
+        }
+    );
+    assert!(permission.active_zones.contains(&Zone::Command));
+    // P3: the latched creator is the Tibalt object now on the battlefield.
+    assert_eq!(
+        emblem.linked_ability_source,
+        Some(ObjectIncarnationRef::from_object(object))
+    );
+
+    // CR 603.6d: nothing but the spell itself was put on the stack — the
+    // emblem is created by the replacement, not by a triggered ability.
+    let pushed: Vec<ObjectId> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::StackPushed { object_id } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        pushed.iter().all(|id| *id == tibalt),
+        "no triggered ability was stacked: {pushed:?}"
+    );
+}
+
+/// B9 reach-guard (CR 712.8f): casting the front face consults only Valki's
+/// abilities — its ETB trigger fires and no emblem is created.
+#[test]
+fn valki_front_face_cast_creates_no_emblem() {
+    // Each opponent holds a non-creature card, so the reveal has something to
+    // show and no card choice is parked.
+    let (mut runner, valki) = tibalt_scenario(P0, |scenario| {
+        add_instant(scenario, P1, "P1 Hand Instant");
+        add_instant(scenario, P2, "P2 Hand Instant");
+    });
+    let outcome = runner.cast(valki).modal_back_face(false).resolve();
+    let mut events = outcome.events().to_vec();
+    settle(&mut runner, &mut events);
+    assert_eq!(zone(&runner, valki), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&valki].name, "Valki, God of Lies");
+    // Reach-guard: Valki's ETB reached the stack and revealed each opponent's hand.
+    let revealed = revealed_players(&events);
+    assert!(
+        revealed.contains(&P1) && revealed.contains(&P2),
+        "{revealed:?}"
+    );
+    assert!(runner.state().command_zone.is_empty(), "no emblem");
+}
+
+/// CR 614.1c + CR 603.6d + CR 119.3: the class building block — "As this
+/// creature enters, you lose 2 life." happens as the creature enters, for its
+/// controller only, with nothing put on the stack.
+#[test]
+fn as_enters_one_shot_life_loss_applies_as_permanent_enters() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Entry Tax",
+            2,
+            2,
+            "As this creature enters, you lose 2 life.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(creature).resolve();
+    assert_eq!(outcome.zone_of(creature), Zone::Battlefield);
+    outcome.assert_life_delta(P0, -2);
+    // Reach-guard: "you" resolved to the controller, not an opponent.
+    outcome.assert_life_delta(P1, 0);
+    assert!(
+        outcome.events().iter().all(
+            |event| !matches!(event, GameEvent::StackPushed { object_id } if *object_id != creature)
+        ),
+        "no triggered ability was stacked"
+    );
+}
+
+/// CR 614.1c + CR 603.6d + CR 119.3: "you gain 3 life" under the drain's
+/// injected entrant target still resolves "you" from the context.
+#[test]
+fn as_enters_one_shot_life_gain_applies_as_permanent_enters() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Entry Gift",
+            2,
+            2,
+            "As this creature enters, you gain 3 life.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(creature).resolve();
+    assert_eq!(outcome.zone_of(creature), Zone::Battlefield);
+    outcome.assert_life_delta(P0, 3);
+    outcome.assert_life_delta(P1, 0);
+    assert!(
+        outcome.events().iter().all(
+            |event| !matches!(event, GameEvent::StackPushed { object_id } if *object_id != creature)
+        ),
+        "no triggered ability was stacked"
+    );
+}
+
+/// The +2 fixture: library tops are a {1}{G} creature (P0), a {2} instant (P1)
+/// and a basic Forest (P2); P1 and P2 each hold a {2} instant and two mana, so a
+/// grantee negative is not a mana failure. P0 holds the helper spells the
+/// hostile rows cast; P1 holds an instant-speed removal spell.
+struct PlusTwoFixture {
+    runner: GameRunner,
+    tibalt: ObjectId,
+    emblem: ObjectId,
+    creature: ObjectId,
+    instant: ObjectId,
+    forest: ObjectId,
+    p1_hand_instant: ObjectId,
+    p2_hand_instant: ObjectId,
+    destroy: ObjectId,
+    bounce: ObjectId,
+    exile_creature: ObjectId,
+    opp_creature: ObjectId,
+}
+
+struct HandIds {
+    creature: ObjectId,
+    instant: ObjectId,
+    forest: ObjectId,
+    p1_hand_instant: ObjectId,
+    p2_hand_instant: ObjectId,
+    destroy: ObjectId,
+    bounce: ObjectId,
+    exile_creature: ObjectId,
+    opp_creature: ObjectId,
+}
+
+/// Build the +2 fixture up to (not including) casting Tibalt.
+fn plus_two_setup() -> (GameRunner, ObjectId, HandIds) {
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let mut ids = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        let db = fixture_db();
+        let creature = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+        let instant = add_instant(scenario, P1, "Opp Instant");
+        let forest = scenario.add_real_card(P2, "Forest", Zone::Hand, db);
+        let p1_hand_instant = add_instant(scenario, P1, "P1 Hand Instant");
+        let p2_hand_instant = add_instant(scenario, P2, "P2 Hand Instant");
+        let destroy = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Walker Removal",
+                false,
+                DESTROY_CREATURE_OR_PLANESWALKER,
+            )
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(P0, "Bounce", false, RETURN_TARGET_PERMANENT)
+            .id();
+        let exile_creature = scenario
+            .add_spell_to_hand_from_oracle(P0, "Exile Probe", false, EXILE_TARGET_CREATURE)
+            .id();
+        let opp_creature = {
+            let mut card = scenario.add_creature(P1, "Opp Guard", 2, 2);
+            card.with_mana_cost(generic_cost(2));
+            card.id()
+        };
+        scenario.with_mana_pool(
+            P1,
+            vec![mana(ManaType::Colorless), mana(ManaType::Colorless)],
+        );
+        scenario.with_mana_pool(
+            P2,
+            vec![mana(ManaType::Colorless), mana(ManaType::Colorless)],
+        );
+        // Cards under each exiled top, so a "Draw a card." never decks anyone.
+        for player in [P0, P1, P2] {
+            scenario.with_library_top(player, &["Library Filler A", "Library Filler B"]);
+        }
+        ids = Some(HandIds {
+            creature,
+            instant,
+            forest,
+            p1_hand_instant,
+            p2_hand_instant,
+            destroy,
+            bounce,
+            exile_creature,
+            opp_creature,
+        });
+    });
+    let ids = ids.expect("setup ran");
+    put_on_library_top(&mut runner, ids.creature, P0);
+    put_on_library_top(&mut runner, ids.instant, P1);
+    put_on_library_top(&mut runner, ids.forest, P2);
+    (runner, tibalt, ids)
+}
+
+fn tibalt_after_plus_two() -> PlusTwoFixture {
+    let (mut runner, tibalt, ids) = plus_two_setup();
+    cast_tibalt(&mut runner, tibalt);
+    let emblem = the_emblem_of(&runner, P0);
+    activate_tibalt(&mut runner, tibalt, TIBALT_PLUS_TWO);
+    PlusTwoFixture {
+        runner,
+        tibalt,
+        emblem,
+        creature: ids.creature,
+        instant: ids.instant,
+        forest: ids.forest,
+        p1_hand_instant: ids.p1_hand_instant,
+        p2_hand_instant: ids.p2_hand_instant,
+        destroy: ids.destroy,
+        bounce: ids.bounce,
+        exile_creature: ids.exile_creature,
+        opp_creature: ids.opp_creature,
+    }
+}
+
+/// CR 607.1d + CR 607.2a + CR 114.2 + CR 114.4 + CR 305.1: +2 exiles each
+/// player's top card face up; the emblem's owner — and only its owner — may
+/// play them.
+#[test]
+fn tibalt_plus_two_cards_playable_only_by_emblem_owner() {
+    let mut fx = tibalt_after_plus_two();
+    for card in [fx.creature, fx.instant, fx.forest] {
+        let object = &fx.runner.state().objects[&card];
+        assert_eq!(object.zone, Zone::Exile, "{}", object.name);
+        assert!(!object.face_down, "{}", object.name);
+        // B7: the exile recorded Tibalt's own link; the mirror added the emblem's.
+        assert!(linked(&fx.runner, card, fx.tibalt), "{}", object.name);
+        assert!(linked(&fx.runner, card, fx.emblem), "{}", object.name);
+    }
+    add_pool(
+        &mut fx.runner,
+        P0,
+        &[ManaType::Green, ManaType::Green, ManaType::Colorless],
+    );
+    assert!(can_cast(&fx.runner, P0, fx.creature));
+    assert!(can_cast(&fx.runner, P0, fx.instant));
+    assert!(playable_exiled_lands(&fx.runner, P0).contains(&fx.forest));
+
+    // Grantee negatives (CR 114.2): P1 and P2 could pay for an identical
+    // instant from hand, but the exiled one is not theirs to play.
+    assert!(can_cast(&fx.runner, P1, fx.p1_hand_instant));
+    assert!(!can_cast(&fx.runner, P1, fx.instant));
+    assert!(can_cast(&fx.runner, P2, fx.p2_hand_instant));
+    assert!(!can_cast(&fx.runner, P2, fx.instant));
+    assert!(!playable_exiled_lands(&fx.runner, P1).contains(&fx.forest));
+    assert!(!playable_exiled_lands(&fx.runner, P2).contains(&fx.forest));
+}
+
+/// CR 607.1d + CR 114.5: after Tibalt dies its own links are gone, but the
+/// emblem's mirror links remain, so the cards stay playable.
+#[test]
+fn tibalt_emblem_still_grants_after_tibalt_dies() {
+    let mut fx = tibalt_after_plus_two();
+    cast_spell_targeting(&mut fx.runner, fx.destroy, fx.tibalt);
+    assert_eq!(zone(&fx.runner, fx.tibalt), Zone::Graveyard);
+
+    // B5 premise, observed directly.
+    assert!(!linked(&fx.runner, fx.creature, fx.tibalt));
+    assert!(linked(&fx.runner, fx.creature, fx.emblem));
+    assert_eq!(
+        zone(&fx.runner, fx.emblem),
+        Zone::Command,
+        "CR 114.5: the emblem stays"
+    );
+    add_pool(&mut fx.runner, P0, &[ManaType::Green, ManaType::Green]);
+    assert!(can_cast(&fx.runner, P0, fx.creature));
+}
+
+/// CR 609.4b: the emblem's concession lets P0 cast P1's {G}{G} card with only
+/// {R}{R}{B}; the same pool cannot cast an identical card from hand.
+#[test]
+fn tibalt_emblem_any_color_mana_casts_opponents_gg_card() {
+    let mut twin = None;
+    let mut gg = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        let mut card = scenario.add_creature_to_hand(P1, "Opp GG Beast", 3, 3);
+        card.with_mana_cost(shards(&[ManaCostShard::Green, ManaCostShard::Green], 0));
+        gg = Some(card.id());
+        let mut card = scenario.add_creature_to_hand(P0, "Own GG Beast", 3, 3);
+        card.with_mana_cost(shards(&[ManaCostShard::Green, ManaCostShard::Green], 0));
+        twin = Some(card.id());
+    });
+    let (gg, twin) = (gg.unwrap(), twin.unwrap());
+    put_on_library_top(&mut runner, gg, P1);
+    cast_tibalt(&mut runner, tibalt);
+    activate_tibalt(&mut runner, tibalt, TIBALT_PLUS_TWO);
+    assert_eq!(zone(&runner, gg), Zone::Exile);
+    add_pool(
+        &mut runner,
+        P0,
+        &[ManaType::Red, ManaType::Red, ManaType::Black],
+    );
+    // Scoping twin: the concession belongs to the permission, not the player.
+    assert!(!can_cast(&runner, P0, twin));
+    assert!(can_cast(&runner, P0, gg));
+    runner.cast(gg).resolve();
+    assert_eq!(zone(&runner, gg), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&gg].controller, P0);
+    assert_eq!(
+        runner.state().players[0].mana_pool.mana.len(),
+        1,
+        "two of the three mana paid the {{G}}{{G}}"
+    );
+}
+
+/// CR 305.2 + CR 305.1: an exiled land is playable through the emblem only
+/// while P0 has a land drop left; the permission itself persists.
+#[test]
+fn tibalt_emblem_exiled_land_playable_only_with_land_drop() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let mut forest = None;
+    let mut hand_land = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        let db = fixture_db();
+        forest = Some(scenario.add_real_card(P1, "Forest", Zone::Hand, db));
+        hand_land = Some(scenario.add_real_card(P0, "Forest", Zone::Hand, db));
+    });
+    let (forest, hand_land) = (forest.unwrap(), hand_land.unwrap());
+    put_on_library_top(&mut runner, forest, P1);
+    cast_tibalt(&mut runner, tibalt);
+    activate_tibalt(&mut runner, tibalt, TIBALT_PLUS_TWO);
+    assert_eq!(zone(&runner, forest), Zone::Exile);
+
+    let play_forest = GameAction::PlayLand {
+        object_id: forest,
+        card_id: runner.state().objects[&forest].card_id,
+    };
+    assert!(playable_exiled_lands(&runner, P0).contains(&forest));
+    assert!(engine::ai_support::legal_actions(runner.state()).contains(&play_forest));
+    let mut clone = GameRunner::from_state(runner.state().clone());
+    clone
+        .act(play_forest.clone())
+        .expect("the exiled Forest is playable while a land drop remains");
+    assert_eq!(zone(&clone, forest), Zone::Battlefield);
+
+    runner
+        .act(GameAction::PlayLand {
+            object_id: hand_land,
+            card_id: runner.state().objects[&hand_land].card_id,
+        })
+        .expect("the land drop from hand");
+    assert!(!engine::ai_support::legal_actions(runner.state()).contains(&play_forest));
+    assert!(
+        runner.act(play_forest).is_err(),
+        "CR 305.2: no land drop left"
+    );
+    // Reach-guard: the permission persists; only CR 305.2 stops the play.
+    assert!(playable_exiled_lands(&runner, P0).contains(&forest));
+}
+
+/// CR 607.2a: −3's exile feeds the emblem too.
+#[test]
+fn tibalt_minus_three_exile_is_playable_via_emblem() {
+    let mut victim = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        let mut card = scenario.add_creature(P1, "Opp Bear", 2, 2);
+        card.with_mana_cost(generic_cost(2));
+        victim = Some(card.id());
+    });
+    let victim = victim.unwrap();
+    cast_tibalt(&mut runner, tibalt);
+    let emblem = the_emblem_of(&runner, P0);
+    runner
+        .activate(tibalt, TIBALT_MINUS_THREE)
+        .target_object(victim)
+        .resolve();
+    assert_eq!(zone(&runner, victim), Zone::Exile);
+    assert!(
+        linked(&runner, victim, tibalt),
+        "B7 reach: Tibalt's own link"
+    );
+    assert!(linked(&runner, victim, emblem));
+    add_pool(&mut runner, P0, &[ManaType::Colorless, ManaType::Colorless]);
+    assert!(can_cast(&runner, P0, victim));
+}
+
+/// Set Tibalt's loyalty to `loyalty` (field and counters together, CR 306.5b).
+fn set_loyalty(runner: &mut GameRunner, tibalt: ObjectId, loyalty: u32) {
+    use engine::types::counter::CounterType;
+
+    let object = runner.state_mut().objects.get_mut(&tibalt).unwrap();
+    object.loyalty = Some(loyalty);
+    object.counters.insert(CounterType::Loyalty, loyalty);
+}
+
+/// CR 607.2a + CR 106.4: −8 exiles every graveyard into the emblem's pool and
+/// adds {R}{R}{R} — even when there is nothing to exile.
+#[test]
+fn tibalt_minus_eight_exiles_graveyards_playable_and_adds_rrr() {
+    let mut cards = Vec::new();
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        for (player, name) in [(P0, "Own Grave Bear"), (P1, "Opp Grave Bear")] {
+            let mut card = scenario.add_creature_to_hand(player, name, 2, 2);
+            card.with_mana_cost(generic_cost(2));
+            cards.push((card.id(), player));
+        }
+    });
+    for &(card, owner) in &cards {
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(runner.state_mut(), card, Zone::Graveyard, &mut events);
+        assert_eq!(zone(&runner, card), Zone::Graveyard, "{owner:?}");
+    }
+    cast_tibalt(&mut runner, tibalt);
+    let emblem = the_emblem_of(&runner, P0);
+    set_loyalty(&mut runner, tibalt, 8);
+    let red_before = pool_count(&runner, P0, ManaType::Red);
+    activate_tibalt(&mut runner, tibalt, TIBALT_MINUS_EIGHT);
+    assert_eq!(pool_count(&runner, P0, ManaType::Red), red_before + 3);
+    add_pool(&mut runner, P0, &[ManaType::Colorless, ManaType::Colorless]);
+    for &(card, _) in &cards {
+        assert_eq!(zone(&runner, card), Zone::Exile);
+        assert!(linked(&runner, card, emblem));
+        assert!(can_cast(&runner, P0, card));
+    }
+
+    // Ruling twin: with empty graveyards −8 still adds {R}{R}{R}.
+    let (mut runner, tibalt) = tibalt_scenario(P0, |_| {});
+    cast_tibalt(&mut runner, tibalt);
+    set_loyalty(&mut runner, tibalt, 8);
+    let red_before = pool_count(&runner, P0, ManaType::Red);
+    activate_tibalt(&mut runner, tibalt, TIBALT_MINUS_EIGHT);
+    assert_eq!(pool_count(&runner, P0, ManaType::Red), red_before + 3);
+}
+
+/// CR 400.7: a new Tibalt object (bounced and recast) is a different creator;
+/// its exiles feed only its own new emblem, not the old one.
+#[test]
+fn new_tibalt_object_does_not_extend_old_emblem() {
+    let mut fx = tibalt_after_plus_two();
+    let old_emblem = fx.emblem;
+    // Next library tops for the second +2.
+    let mut next_tops = Vec::new();
+    for owner in [P0, P1, P2] {
+        let id = engine::game::zones::create_object(
+            fx.runner.state_mut(),
+            engine::types::identifiers::CardId(7000 + owner.0 as u64),
+            owner,
+            format!("Second Top {}", owner.0),
+            Zone::Library,
+        );
+        put_on_library_top(&mut fx.runner, id, owner);
+        next_tops.push(id);
+    }
+
+    cast_spell_targeting(&mut fx.runner, fx.bounce, fx.tibalt);
+    assert_eq!(zone(&fx.runner, fx.tibalt), Zone::Hand);
+    add_pool(
+        &mut fx.runner,
+        P0,
+        &tibalt_mana().iter().map(|u| u.color).collect::<Vec<_>>(),
+    );
+    cast_tibalt(&mut fx.runner, fx.tibalt);
+    let emblems = emblems_of(&fx.runner, P0);
+    assert_eq!(emblems.len(), 2);
+    let new_emblem = *emblems.iter().find(|id| **id != old_emblem).unwrap();
+    let old_creator = fx.runner.state().objects[&old_emblem]
+        .linked_ability_source
+        .unwrap();
+    let new_creator = fx.runner.state().objects[&new_emblem]
+        .linked_ability_source
+        .unwrap();
+    assert_eq!(
+        old_creator.object_id, new_creator.object_id,
+        "same storage id"
+    );
+    assert_ne!(old_creator.incarnation, new_creator.incarnation);
+
+    activate_tibalt(&mut fx.runner, fx.tibalt, TIBALT_PLUS_TWO);
+    for card in next_tops {
+        assert_eq!(zone(&fx.runner, card), Zone::Exile);
+        assert!(linked(&fx.runner, card, new_emblem));
+        assert!(!linked(&fx.runner, card, old_emblem));
+    }
+    // Reach: the first batch is still linked to the old emblem.
+    assert!(linked(&fx.runner, fx.creature, old_emblem));
+}
+
+/// CR 114.2 + CR 607.1d: P1's own Tibalt gives P1 its own emblem; the cards it
+/// exiles are P1's to play, never P0's.
+#[test]
+fn opponents_tibalt_emblem_grants_only_its_owner() {
+    let mut ids = None;
+    let (mut runner, tibalt) = tibalt_scenario(P1, |scenario| {
+        let top = add_instant(scenario, P0, "P0 Top Instant");
+        let p0_hand = add_instant(scenario, P0, "P0 Hand Instant");
+        ids = Some((top, p0_hand));
+    });
+    let (top, p0_hand) = ids.unwrap();
+    put_on_library_top(&mut runner, top, P0);
+    begin_main_phase_of(&mut runner, P1);
+    cast_tibalt(&mut runner, tibalt);
+    let p1_emblem = the_emblem_of(&runner, P1);
+    assert!(emblems_of(&runner, P0).is_empty(), "P0 got no emblem");
+    activate_tibalt(&mut runner, tibalt, TIBALT_PLUS_TWO);
+    assert_eq!(zone(&runner, top), Zone::Exile);
+    assert!(linked(&runner, top, p1_emblem), "reach: P1's emblem link");
+
+    add_pool(&mut runner, P1, &[ManaType::Colorless, ManaType::Colorless]);
+    add_pool(&mut runner, P0, &[ManaType::Colorless, ManaType::Colorless]);
+    assert!(can_cast(&runner, P1, top));
+    // Grantee negative, paired with an identical payable card in P0's hand.
+    assert!(can_cast(&runner, P0, p0_hand));
+    assert!(!can_cast(&runner, P0, top));
+}
+
+/// CR 400.7 + CR 607.1d: control of Tibalt changing is not a new object — the
+/// exiles of the stolen Tibalt still feed its original controller's emblem.
+#[test]
+fn stolen_tibalt_exiles_still_feed_original_emblem() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    let mut ids = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        let db = fixture_db();
+        let confiscate = scenario.add_real_card(P1, "Confiscate", Zone::Hand, db);
+        let top = add_instant(scenario, P1, "P1 Top Instant");
+        let p0_hand = add_instant(scenario, P0, "P0 Hand Instant");
+        let p1_hand = add_instant(scenario, P1, "P1 Hand Instant");
+        ids = Some((confiscate, top, p0_hand, p1_hand));
+    });
+    let (confiscate, top, p0_hand, p1_hand) = ids.unwrap();
+    put_on_library_top(&mut runner, top, P1);
+    cast_tibalt(&mut runner, tibalt);
+    let p0_emblem = the_emblem_of(&runner, P0);
+
+    begin_main_phase_of(&mut runner, P1);
+    add_pool(
+        &mut runner,
+        P1,
+        &[
+            ManaType::Blue,
+            ManaType::Blue,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ],
+    );
+    runner.cast(confiscate).target_object(tibalt).resolve();
+    assert_eq!(runner.state().objects[&tibalt].controller, P1);
+    activate_tibalt(&mut runner, tibalt, TIBALT_PLUS_TWO);
+    assert_eq!(zone(&runner, top), Zone::Exile);
+    assert!(linked(&runner, top, p0_emblem));
+    assert!(emblems_of(&runner, P1).is_empty(), "P1 has no emblem");
+
+    // On P0's priority, P0 may cast it.
+    {
+        let state = runner.state_mut();
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    add_pool(&mut runner, P0, &[ManaType::Colorless, ManaType::Colorless]);
+    add_pool(&mut runner, P1, &[ManaType::Colorless, ManaType::Colorless]);
+    assert!(can_cast(&runner, P0, p0_hand));
+    assert!(can_cast(&runner, P0, top));
+    // P1 activated the ability but has no emblem: grantee negative, paired.
+    assert!(can_cast(&runner, P1, p1_hand));
+    assert!(!can_cast(&runner, P1, top));
+}
+
+/// CR 113.7a + CR 400.7: Tibalt destroyed in response to its +2 — the ability
+/// still resolves, and its exiles feed the emblem of the object that
+/// activated it.
+#[test]
+fn tibalt_destroyed_in_response_plus_two_still_feeds_emblem() {
+    let mut ids = None;
+    let (mut runner, tibalt) = tibalt_scenario(P0, |scenario| {
+        let removal = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Opp Walker Removal",
+                true,
+                DESTROY_CREATURE_OR_PLANESWALKER,
+            )
+            .id();
+        let top = add_instant(scenario, P1, "P1 Top Instant");
+        ids = Some((removal, top));
+    });
+    let (removal, top) = ids.unwrap();
+    put_on_library_top(&mut runner, top, P1);
+    cast_tibalt(&mut runner, tibalt);
+    let emblem = the_emblem_of(&runner, P0);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: tibalt,
+            ability_index: TIBALT_PLUS_TWO,
+        })
+        .expect("+2 activation");
+    assert_eq!(runner.state().stack.len(), 1, "+2 on the stack");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes with +2 on the stack");
+    runner.cast(removal).target_object(tibalt).commit();
+    assert_eq!(runner.state().stack.len(), 2, "removal above the +2");
+    runner.resolve_top();
+    // Reach: Tibalt left before the +2 resolved.
+    assert_eq!(zone(&runner, tibalt), Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1, "+2 still waiting");
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+
+    assert_eq!(zone(&runner, top), Zone::Exile);
+    assert!(linked(&runner, top, emblem));
+    add_pool(&mut runner, P0, &[ManaType::Colorless, ManaType::Colorless]);
+    assert!(can_cast(&runner, P0, top));
+}
+
+/// CR 607.2a: a card exiled by an unrelated source is not "exiled with
+/// Tibalt".
+#[test]
+fn card_exiled_by_other_source_not_playable_via_emblem() {
+    let mut fx = tibalt_after_plus_two();
+    cast_spell_targeting(&mut fx.runner, fx.exile_creature, fx.opp_creature);
+    assert_eq!(zone(&fx.runner, fx.opp_creature), Zone::Exile);
+    assert!(!linked(&fx.runner, fx.opp_creature, fx.emblem));
+    add_pool(
+        &mut fx.runner,
+        P0,
+        &[ManaType::Green, ManaType::Green, ManaType::Colorless],
+    );
+    assert!(!can_cast(&fx.runner, P0, fx.opp_creature));
+    // Reach: a +2 card in the same state is castable.
+    assert!(can_cast(&fx.runner, P0, fx.creature));
+}
+
+/// CR 400.7 + CR 607.2a: a card that left exile is a new object and is no
+/// longer "exiled with" Tibalt. (Leave-exile route: P0 casts the exiled
+/// instant through the emblem; it resolves into its owner's graveyard. The
+/// "Put target face-up exiled card into its owner's graveyard." helper offers
+/// only player targets today, so it cannot move the card.)
+#[test]
+fn card_that_left_exile_not_playable_via_emblem() {
+    let mut fx = tibalt_after_plus_two();
+    add_pool(
+        &mut fx.runner,
+        P0,
+        &[
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Green,
+            ManaType::Green,
+        ],
+    );
+    assert!(
+        can_cast(&fx.runner, P0, fx.instant),
+        "reach: castable via the emblem"
+    );
+    fx.runner.cast(fx.instant).resolve();
+    assert_eq!(zone(&fx.runner, fx.instant), Zone::Graveyard);
+    assert_eq!(fx.runner.state().objects[&fx.instant].owner, P1);
+    assert!(
+        !fx.runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == fx.instant),
+        "no link survives the card leaving exile"
+    );
+    assert!(!can_cast(&fx.runner, P0, fx.instant));
+    // Reach: the other +2 card is still castable.
+    add_pool(&mut fx.runner, P0, &[ManaType::Green, ManaType::Green]);
+    assert!(can_cast(&fx.runner, P0, fx.creature));
+}
