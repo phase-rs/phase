@@ -1330,7 +1330,7 @@ fn a_granted_counter_rider_is_latched_when_the_grant_ends_mid_payment() {
     engine::game::layers::flush_layers(runner.state_mut());
     add_mana(&mut runner, ManaType::Green, 2);
     assert!(
-        runner.state().objects[&host].static_definitions.len() > 0,
+        !runner.state().objects[&host].static_definitions.is_empty(),
         "reach: the host holds the granted permission"
     );
     let card_id = runner.state().objects[&bears].card_id;
