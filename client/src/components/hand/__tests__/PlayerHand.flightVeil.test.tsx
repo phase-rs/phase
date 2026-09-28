@@ -115,6 +115,20 @@ describe.each(surfaces)("PlayerHand flight veil: $name", ({ id, selector, remove
     expect(node(container)).not.toBeNull();
     expect(node(container)!.style.visibility).toBe("hidden");
   });
+
+  it("shows again once it re-enters mid-exit and the flight releases it", () => {
+    useAnimationStore.getState().veilFlight(id);
+    const { container } = render(<PlayerHand />);
+    const surface = node(container);
+
+    act(() => remove());
+    act(() => setGraveyardWingState());
+    act(() => useAnimationStore.getState().unveilFlight(id));
+
+    // Same node: the re-added card reused the exiting instance.
+    expect(node(container)).toBe(surface);
+    expect(node(container)!.style.visibility).toBe("");
+  });
 });
 
 describe("PlayerHand flight veil: per-object keying", () => {

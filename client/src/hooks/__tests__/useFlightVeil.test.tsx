@@ -77,6 +77,20 @@ describe("useFlightVeil", () => {
     expect(hiddenAttr()).toBe("true");
   });
 
+  it("releases the exit latch when the surface re-enters mid-exit", () => {
+    useAnimationStore.getState().veilFlight(OBJECT_ID);
+    const { rerender } = render(<Host show />);
+    const surface = screen.getByTestId("surface");
+
+    rerender(<Host show={false} />);
+    rerender(<Host show />);
+    act(() => useAnimationStore.getState().unveilFlight(OBJECT_ID));
+
+    // Same node: framer reused the exiting instance, so its latch was set.
+    expect(screen.getByTestId("surface")).toBe(surface);
+    expect(hiddenAttr()).toBe("false");
+  });
+
   it("stays visible through an exit that began unveiled", () => {
     const { rerender } = render(<Host show />);
 
