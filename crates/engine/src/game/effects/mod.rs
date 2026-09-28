@@ -18070,7 +18070,38 @@ fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
         AbilityCost::OneOf { costs } => {
             !costs.is_empty() && costs.iter().all(unless_cost_is_unpayable)
         }
-        _ => false,
+        AbilityCost::Waterbend { cost }
+        | AbilityCost::NinjutsuFamily {
+            mana_cost: cost, ..
+        } => *cost == ManaCost::NoCost,
+        AbilityCost::PerCounter { base, .. } => unless_cost_is_unpayable(base),
+        AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => false,
     }
 }
 
@@ -26116,6 +26147,20 @@ mod tests {
             costs: vec![no_cost],
         }));
         assert!(!unless_cost_is_unpayable(&payable));
+        assert!(unless_cost_is_unpayable(&AbilityCost::Waterbend {
+            cost: ManaCost::NoCost,
+        }));
+        assert!(unless_cost_is_unpayable(&AbilityCost::NinjutsuFamily {
+            variant: crate::types::ability::NinjutsuVariant::Ninjutsu,
+            mana_cost: ManaCost::NoCost,
+        }));
+        assert!(unless_cost_is_unpayable(&AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mana {
+                cost: ManaCost::NoCost,
+            }),
+        }));
     }
 
     #[test]
