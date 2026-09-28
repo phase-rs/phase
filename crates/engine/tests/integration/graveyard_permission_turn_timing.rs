@@ -319,12 +319,23 @@ fn once_each_turn_disjunctive_permission_works_on_any_turn() {
     scenario.at_phase(Phase::End);
     scenario.add_enchantment_from_oracle(P0, "Test Relic", TEXT);
     let flash = flash_creature_in_graveyard(&mut scenario, P0, "Flash Bear");
+    let second = flash_creature_in_graveyard(&mut scenario, P0, "Second Flash Bear");
     let mut runner = scenario.build();
 
     to_turn_with_priority(&mut runner, P1, P0);
     assert!(offered_to(&runner, P0, flash), "offered on P1's turn");
+    assert!(
+        offered_to(&runner, P0, second),
+        "reach: both offered before"
+    );
     let outcome = runner.cast(flash).resolve();
     assert_eq!(outcome.zone_of(flash), Zone::Battlefield);
+    // CR 601.2a: the off-turn cast was made under this permission, so it spent
+    // the permission's once-per-turn slot.
+    assert!(
+        !offered_to(&runner, P0, second),
+        "\"once each turn\": the slot is spent"
+    );
 }
 
 // ── Player-scoped (transient) grants: the holder is the grantee ─────────────
