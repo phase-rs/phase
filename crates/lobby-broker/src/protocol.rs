@@ -2083,6 +2083,7 @@ mod tests {
                         .collect(),
                 })),
             }],
+            hosted: Default::default(),
             created_at: 1_000,
             last_activity_at: 2_000,
         }
