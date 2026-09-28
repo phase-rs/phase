@@ -847,6 +847,22 @@ pub enum GameEvent {
         augmenting_id: ObjectId,
         controller: PlayerId,
     },
+    /// CR 701.42a + CR 712.4a: The two cards of a meld pair were put onto the
+    /// battlefield back faces up and combined, as a single permanent represented
+    /// by both cards. Emitted only once the melded permanent has entered the
+    /// battlefield — never for a meld that fails (CR 701.42c). `object_id` is the
+    /// melded permanent, which keeps the instigating card's `ObjectId`;
+    /// `partner_id` is the other card of the pair, now its second component.
+    ///
+    /// Distinct from `Mutated`: melding enters a new object onto the battlefield
+    /// (CR 701.42a), whereas a CR 730.2b merge is not a battlefield entry. No
+    /// printed card triggers on melding, so this event dispatches no trigger key;
+    /// it drives the game log and the frontend's meld animation.
+    Melded {
+        object_id: ObjectId,
+        partner_id: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
     /// cast, so this is a distinct event from `SpellCast` — copy-sensitive
     /// triggers (Magecraft, "whenever you copy a spell") fire on this, while
@@ -1556,6 +1572,17 @@ pub enum GameEvent {
         player_id: PlayerId,
         sides: u8,
         result: Option<u8>,
+    },
+    /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
+    /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never
+    /// touch an ignored roll). Display mirror ONLY: it must never be read as
+    /// a roll by triggers, results tables, aggregates, snapshots, or AI —
+    /// an ignored roll "is considered to have never happened". Emitted
+    /// alongside the survivors so the UI can show what the lowest roll was.
+    DieRollIgnored {
+        player_id: PlayerId,
+        sides: u8,
+        result: u8,
     },
     /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
     /// authoritative structured event so the contest can be rendered round by

@@ -1143,6 +1143,16 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     return this.fallback!.evaluateDeckCompatibility(request);
   }
 
+  /** The engine's canonical spelling of each of `names`, index-aligned, `null` where it has none. */
+  async canonicalCardNames(names: string[]): Promise<(string | null)[]> {
+    await this.initialize();
+    await this.requireCardDb();
+    const answer = this.engine
+      ? await this.engine.canonicalCardNames(names)
+      : await this.fallback!.canonicalCardNames(names);
+    return answer as (string | null)[];
+  }
+
   /**
    * ENFORCING deck/format check. Always returns a DEFINITE verdict —
    * `{ compatible: boolean, reasons: string[] }`, never a tri-state — backed by
@@ -1485,6 +1495,7 @@ interface MainThreadFallback {
   getCardFaceData(cardName: string): Promise<unknown>;
   getCardParseDetails(cardName: string): Promise<unknown>;
   getCardRulings(cardName: string): Promise<unknown>;
+  canonicalCardNames(names: string[]): Promise<unknown>;
 }
 
 type RestoredFallbackResult = {
@@ -1817,5 +1828,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     getCardRulings: (cardName: string) =>
       enqueue(() => wasm.get_card_rulings(cardName)),
+
+    canonicalCardNames: (names: string[]) =>
+      enqueue(() => wasm.canonicalCardNames(names)),
   };
 }

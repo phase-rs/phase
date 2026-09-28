@@ -66,6 +66,13 @@
     "discard": "Scarta",
     "saveAndContinue": "Salva e continua"
   },
+  "saveConflict": {
+    "title": "Mazzo modificato altrove",
+    "bodyChanged": "\"{{name}}\" è stato modificato altrove da quando questo editor l'ha aperto o salvato l'ultima volta, quindi non è stato salvato nulla. Carica la versione salvata per vederla (le modifiche non salvate andranno perse) oppure salva comunque la tua versione.",
+    "bodyDeleted": "\"{{name}}\" è stato eliminato altrove da quando questo editor l'ha aperto o salvato l'ultima volta, quindi non è stato salvato nulla. Salva comunque la tua versione.",
+    "loadSaved": "Carica versione salvata",
+    "saveMine": "Salva la mia versione"
+  },
   "card": {
     "moveToSideboard": "Sposta una {{name}} nella sideboard",
     "moveToMain": "Sposta una {{name}} nel mazzo principale",

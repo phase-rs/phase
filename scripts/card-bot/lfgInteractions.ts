@@ -17,7 +17,7 @@ import {
   stringOption,
   type ThreadApi,
 } from "./discord";
-import { defaultSeats, findFormat, type LfgMode, seatCap } from "./formats";
+import { defaultSeats, findFormat, type LfgFormat, type LfgMode, seatCap } from "./formats";
 import type { Lfg, LfgStore, Outcome } from "./lfg";
 import {
   type LfgAction,
@@ -44,6 +44,8 @@ export interface LfgDeps {
   editOriginal: (appId: string, token: string, body: unknown) => Promise<void>;
   /** Game threads, or null when the bot runs without its token (no threads). */
   threads: ThreadApi | null;
+  /** Resolves the opt-in format role from Discord's guild role list. */
+  roles: { resolve(guildId: string, format: LfgFormat): Promise<string | undefined> } | null;
 }
 
 /** Wait before closing a thread whose End game click is being answered, so the
@@ -53,6 +55,7 @@ const THREAD_CLOSE_DELAY_MS = 1000;
 /** Discord caps autocomplete at 25 choices, each name at 100 chars. */
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 const MAX_CHOICE_NAME_LENGTH = 100;
+const MAX_DESCRIPTION_LENGTH = 500;
 
 /** A reply only the invoker sees. */
 function ephemeral(content: string): Response {
@@ -80,7 +83,7 @@ function resolveMode(modeOption: string | undefined, serverOption: string | unde
 }
 
 /** `/lfg`: validates the request and posts the public LFG, or refuses ephemerally. */
-export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
+export async function lfgCommand(i: CommandInteraction, deps: LfgDeps): Promise<Response> {
   const guildId = i.guild_id;
   const userId = invokerId(i);
   if (guildId === undefined || userId === undefined) {
@@ -98,6 +101,11 @@ export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
 
   const format = findFormat(stringOption(options, "format") ?? "");
   if (format === undefined) return ephemeral("Unknown format.");
+
+  const description = stringOption(options, "description")?.trim() || null;
+  if (description !== null && description.length > MAX_DESCRIPTION_LENGTH) {
+    return ephemeral(`Description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer.`);
+  }
 
   const cap = seatCap(format, mode);
   const seats = integerOption(options, "seats") ?? defaultSeats(format, mode);
@@ -128,14 +136,15 @@ export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
   }
 
   const result = deps.store.create(
-    { guildId, creatorId: userId, format, seats, mode, build, server },
+    { guildId, creatorId: userId, format, seats, mode, build, server, description },
     deps.now(),
   );
   if (result.kind === "refused") return ephemeral(refusalText(result.reason, format));
   console.log(`[lfg] create id=${result.lfg.id} format=${format.format} mode=${mode} build=${build}`);
+  const roleId = await deps.roles?.resolve(guildId, format);
   return jsonResponse({
     type: ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: renderLfg(result.lfg),
+    data: renderLfg(result.lfg, roleId),
   });
 }
 

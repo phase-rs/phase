@@ -3446,7 +3446,7 @@ fn resolve_sub_with_missing_forward_result(
     Ok(())
 }
 
-fn apply_parent_chain_context(
+pub(crate) fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
     effect_context_object: Option<&CostPaidObjectSnapshot>,
@@ -4359,6 +4359,8 @@ fn instruction_outlives_declined_gate(
         chosen_players: _,
         replacement_applied: _,
         parent_target_missing_reason: _,
+        activation_cost_reduction: _,
+        activation_record: _,
     } = node;
     let unbound = condition.is_none()
         && else_ability.is_none()
@@ -15714,6 +15716,24 @@ fn resolve_chain_body(
                     if let Ok(result) = resolve_effect(state, iter_effective, events) {
                         if iterations == 1 {
                             immediate_effect_result = result;
+                        }
+                    }
+                    // CR 601.2h + CR 608.2c: a staged Composite owns the
+                    // complete resolution root (including its rider). The
+                    // payment transaction either committed, paused, or
+                    // aborted the shadow; stop this outer walker so it cannot
+                    // execute the same sub-ability a second time.
+                    if state.payment_transaction_just_handled {
+                        // A successful or paused staged transaction already
+                        // owns the complete root and must stop this outer
+                        // walker. An aborted payment, however, only cancels
+                        // the payment clause: the generic condition/sibling
+                        // descent below still has to run an unconditional
+                        // printed sibling while suppressing IfYouDo/WhenYouDo.
+                        let payment_failed = state.cost_payment_failed_flag;
+                        state.payment_transaction_just_handled = false;
+                        if !payment_failed {
+                            return Ok(());
                         }
                     }
                 }

@@ -5643,6 +5643,88 @@ mod tests {
     }
 
     #[test]
+    fn slash_spellings_are_known_and_share_one_copy_count() {
+        let db_json = serde_json::json!({
+            "summon: choco/mog": {
+                "name": "Summon: Choco/Mog",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            "revival": {
+                "name": "Revival",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            "revenge": {
+                "name": "Revenge",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            // Supports the request's commander field so it does not itself
+            // register as unknown and pollute the assertion below.
+            "legal commander": {
+                "name": "Legal Commander",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            }
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+
+        let mut main = expand("Summon: Choco/Mog", 3);
+        main.extend(expand("Summon: Choco // Mog", 2));
+        main.extend(expand("Revival/Revenge", 3));
+        main.extend(expand("Revival // Revenge", 2));
+        main.extend(expand("Summon: Choco", 1));
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: None,
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let unknown: Vec<String> = collect_unknown_cards(&db, &request).into_iter().collect();
+        assert_eq!(unknown, vec!["Summon: Choco".to_string()]);
+
+        let counts = combined_copy_counts(&db, &request, CommandZoneNetting::NetAgainstMainDeck);
+        assert_eq!(counts.get("summon: choco/mog"), Some(&5));
+        assert_eq!(counts.get("revival"), Some(&5));
+
+        let violations = copy_limit_violations(&db, &counts, DeckCopyLimit::UpTo(4));
+        assert!(violations.contains("Summon: Choco/Mog (5 copies)"));
+        assert!(violations.contains("Revival (5 copies)"));
+        assert_eq!(
+            violations.len(),
+            2,
+            "exactly these two names exceed the cap"
+        );
+    }
+
+    #[test]
     fn commander_accepts_nine_nazgul_copies() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
         let mut main = expand("Nazgul", 9);

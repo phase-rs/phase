@@ -3318,18 +3318,17 @@ mod tests {
         }
     }
 
-    /// `Effect::AdditionalPhase.after` is now an `ExtraPhaseAnchor`,
-    /// `DelayedTriggerCondition` gained `AtBeginningOfAddedPhase`, and scheduled
-    /// extra phases carry a `TurnSegment`; a v81 peer cannot parse any of
-    /// these, so it must be refused before it receives v82 state.
+    /// `StateUpdate.events` can now carry the tagged `Melded` display event.
+    /// A v85 peer would silently omit the meld forge, so it must be refused
+    /// before receiving v86 event batches.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_82_for_added_phase_anchoring() {
-        assert_eq!(PROTOCOL_VERSION, 82);
+    fn protocol_version_is_86_for_melded_event() {
+        assert_eq!(PROTOCOL_VERSION, 86);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3340,7 +3339,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_82_for_added_phase_anchoring` stays
+    /// `protocol_version_is_86_for_melded_event` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

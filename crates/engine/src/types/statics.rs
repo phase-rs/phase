@@ -1334,6 +1334,18 @@ pub enum StaticMode {
         /// "abilities **of** <subject>" forms, whose scope lives in `affected`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         activator: Option<PlayerFilter>,
+        /// CR 115.9b + CR 602.2b: optional "that targets <filter>" gate for
+        /// activated-ability cost modifiers. This is evaluated against the
+        /// activation's committed targets, not against the ability source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        targets: Option<TargetFilter>,
+        /// CR 118.7 + CR 602.2b: how often qualifying activations can use this
+        /// adjustment. `None` = unlimited; `Some(OncePerTurn)` applies only to
+        /// the turn's first activation that satisfies every gate of this
+        /// modifier, read from the turn's activation journal (CR 611.3a: an
+        /// activation made before the modifier's source existed still counts).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frequency: Option<CastFrequency>,
     },
     /// CR 116.2 + CR 118.7a: Modifies the generic mana cost of a *special action*
     /// (plot per CR 116.2k / 702.170, unlock per CR 116.2m / 709.5e), in the
@@ -3721,6 +3733,8 @@ impl FromStr for StaticMode {
                             // compact signature form (as with dynamic_count /
                             // exemption); reconstitutes to the no-gate default here.
                             activator: None,
+                            targets: None,
+                            frequency: None,
                         }
                     } else {
                         StaticMode::Other(s.to_string())

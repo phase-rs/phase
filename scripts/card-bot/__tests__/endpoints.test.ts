@@ -64,6 +64,7 @@ describe("desktop link matches the desktop shell", () => {
       mode: "p2p" as const,
       build: "release" as const,
       server: null,
+      description: null,
       state: "ready" as const,
       code: "AB12CD",
       touchedMs: 0,

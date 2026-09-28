@@ -12,10 +12,19 @@ set -euo pipefail
 # token is all it needs):
 #   /etc/phase-card-bot.env  →  CARD_BOT_TOKEN   (secret, from the Discord portal)
 # The deploy refuses to replace the running container without a readable env
-# file. The server uses the token only for /lfg game threads (a
-# file without CARD_BOT_TOKEN runs the bot with threads off, pinging players
-# under the post instead). Threads need the bot's role to have Create Private
-# Threads, Send Messages in Threads and Manage Threads in the /lfg channel.
+# file. The server uses the token only for /lfg game threads and role pings,
+# and the lobby mirror (a file without CARD_BOT_TOKEN runs the bot with threads
+# and role pings off, pinging players under the post instead, and the mirror
+# off). Threads need the bot's
+# role to have Create Private Threads, Send Messages in Threads and Manage
+# Threads in the /lfg channel.
+#
+# Optional, in the same file:
+#   CARD_BOT_LOBBY_CHANNEL_ID  →  the channel public web-lobby rooms are mirrored
+#                                 into (unset: the mirror is off)
+# The mirror needs View Channel, Send Messages and Embed Links in that channel
+# (embeds posted with the bot token need Embed Links; interaction responses
+# did not).
 #
 # /lfg state persists across redeploys in the named volume phase-card-bot-data,
 # mounted at /data (the image's CARD_BOT_DB_PATH is /data/lfg.sqlite).

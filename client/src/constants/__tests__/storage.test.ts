@@ -106,6 +106,19 @@ describe("saved-deck bracket sidecar", () => {
     },
   );
 
+  it("keeps a printed name containing a bare \"/\" on read", () => {
+    const raw = JSON.stringify({
+      main: [{ count: 1, name: "Summon: Choco/Mog" }],
+      sideboard: [],
+      format: "Pauper",
+    });
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Slash Deck", raw);
+
+    const loaded = loadSavedDeck("Slash Deck");
+
+    expect(loaded?.main).toEqual([{ count: 1, name: "Summon: Choco/Mog" }]);
+  });
+
   it("materializes a traditional companion in the sideboard and clears its dedicated slot", () => {
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Legacy Modern",

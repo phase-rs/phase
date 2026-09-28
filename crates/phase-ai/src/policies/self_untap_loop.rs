@@ -421,6 +421,8 @@ mod tests {
                 dynamic_count: None,
                 exemption: ActivationExemption::ManaAbilities,
                 activator: None,
+                targets: None,
+                frequency: None,
             })
             .affected(TargetFilter::SelfRef);
             // Both lists, then the layer pass — `static_definitions` is rebuilt
