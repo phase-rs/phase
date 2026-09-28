@@ -18,8 +18,9 @@ state machine — MUST be implemented through the
 is not satisfied by reading the skill and editing by hand.
 
 The skill orchestrates the full pipeline — plan → review-plan → implement →
-review-engine-impl → commit — each step in a fresh agent context. The review loops are
-unbounded; "two rounds and ship" is not acceptable. This is how the repo keeps
+review-engine-impl → commit — each step in a fresh agent context. A review loop
+closes when a round has no behavior findings; the skill's run limits bound the
+rest by finding class and your budget. This is how the repo keeps
 ad-hoc edits from shipping plausible-but-wrong ASTs, special-cased logic that
 breaks the next card, and unverified CR annotations.
 
