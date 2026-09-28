@@ -1,4 +1,4 @@
-//! Valki, God of Lies (Kaldheim MDFC front face) — runtime coverage.
+//! Valki, God of Lies // Tibalt, Cosmic Impostor (Kaldheim MDFC) — runtime coverage.
 //!
 //! ETB: "When Valki enters, each opponent reveals their hand. For each opponent,
 //! exile a creature card they revealed this way until Valki leaves the
@@ -1651,7 +1651,7 @@ fn tibalt_plus_two_cards_playable_only_by_emblem_owner() {
     assert!(!playable_exiled_lands(&fx.runner, P2).contains(&fx.forest));
 }
 
-/// CR 607.1d + CR 114.5: after Tibalt dies its own links are gone, but the
+/// CR 607.1d + CR 114.4: after Tibalt dies its own links are gone, but the
 /// emblem's mirror links remain, so the cards stay playable.
 #[test]
 fn tibalt_emblem_still_grants_after_tibalt_dies() {

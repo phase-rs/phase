@@ -31607,8 +31607,7 @@ const TIBALT_FULL: &str = "As Tibalt enters, you get an emblem with \"You may pl
 /// Positive twin shared by the gate-negative reach-guards below.
 const AS_ENTERS_LOSE_TWO: &str = "As ~ enters, you lose 2 life.";
 
-/// The frame line of `oracle`, self-reference-normalized and lowercased, as the
-/// routing sites see it.
+/// `line`, self-reference-normalized and lowercased, as the routing sites see it.
 fn normalized_lower_frame_line(line: &str, card_name: &str) -> String {
     crate::parser::oracle_util::normalize_card_name_refs(line, card_name).to_lowercase()
 }
@@ -31667,7 +31666,7 @@ fn tibalt_as_enters_emblem_parses_as_moved_self_replacement() {
     );
 }
 
-/// Gate negative (CR 115.1): Phylactery Lich's as-enters body puts a counter
+/// Gate negative (CR 614.12a): Phylactery Lich's as-enters body puts a counter
 /// on an artifact you control — an object effect outside the kind allowlist — so
 /// its frame line keeps its prior `replacement_structure` gap.
 #[test]

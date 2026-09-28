@@ -261,6 +261,8 @@ pub(crate) fn reset_look_latches(state: &mut GameState, pile: &[ObjectId]) {
 /// Used by Hideaway (`ExileLinkKind::HideawayLookable`, CR 702.75a) to mark the
 /// exiled card as look-permitted for the link's lookers while keeping it
 /// discoverable by the kind-agnostic `ExiledBySource` companion-ability filter.
+/// A newly recorded link is also mirrored to every command-zone emblem the
+/// source created that consumes its exiles (CR 607.1d, `mirror_link_to_linked_emblems`).
 pub(crate) fn push_with_kind(
     state: &mut GameState,
     exiled_id: ObjectId,
@@ -319,8 +321,9 @@ pub(crate) fn exiling_source_incarnation(state: &GameState, source_id: ObjectId)
 /// CR 607.1d + CR 607.2a + CR 114.4: a card exiled by an object is also
 /// "exiled with" that object for every command-zone emblem that object
 /// created and whose abilities refer to cards exiled with it. The mirror
-/// link is keyed to the emblem, which never leaves the command zone
-/// (CR 114.5), so it survives the creator leaving the battlefield.
+/// link is keyed to the emblem — neither a card nor a permanent (CR 114.5),
+/// its abilities function in the command zone (CR 114.4) — so it survives the
+/// creator leaving the battlefield.
 fn mirror_link_to_linked_emblems(state: &mut GameState, exiled_id: ObjectId, source_id: ObjectId) {
     let Some(incarnation) = exiling_source_incarnation(state, source_id) else {
         return;
