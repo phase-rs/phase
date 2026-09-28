@@ -74444,12 +74444,21 @@ fn revealed_this_way_population_mismatch_is_declined() {
         .expect("exile clause");
     // Declined: the consumer keeps its own parsed object and its own
     // "For each player," population; it is never re-bound to the reveal's
-    // per-opponent iteration.
+    // per-opponent iteration. Provenance (claim A22): the expected node is the
+    // base parse of this same text (72c4f4a49, `parse_effect_chain` JSON) —
+    // `player_scope: All`, no `repeat_for`, target `Typed[Creature]`, not
+    // `ParentTarget` — so the decline path leaves the base shape untouched.
     assert_eq!(
         exile.effect.target_filter(),
         Some(&TargetFilter::Typed(TypedFilter::creature()))
     );
     assert_eq!(exile.player_scope, Some(PlayerFilter::All));
+    assert_eq!(exile.repeat_for, None);
+    assert_json_eq(
+        *exile,
+        r#"{"kind":"Spell","effect":{"type":"ChangeZone","origin":null,"destination":"Exile","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},"owner_library":false,"enter_transformed":false,"enter_tapped":false,"enters_attacking":false},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"target_choice_timing":"Resolution","forward_result":false,"player_scope":{"type":"All"},"sub_link":"SequentialSibling"}"#,
+        "the declined consumer",
+    );
 
     // Paired positive: the matching population binds (the 1f shape).
     let bound = parse_effect_chain(
@@ -74614,4 +74623,188 @@ fn bare_their_hand_binds_scope_or_subject() {
             ..
         }
     ));
+}
+
+// ── Possessive-shift subject: player-recipient binding (CR 608.2c / 109.4 / 115.1) ──
+
+/// Verbatim Oracle text (Scryfall).
+const DENIED: &str = "Choose a card name, then target spell's controller reveals their hand. If a card with the chosen name is revealed this way, counter that spell.";
+/// Verbatim Oracle text (Scryfall).
+const FRIENDLY_FIRE: &str = "Target creature's controller reveals a card at random from their hand. Friendly Fire deals damage to that creature and that player equal to the revealed card's mana value.";
+/// Verbatim Oracle text (Scryfall).
+const MISLEADING_MOTES: &str =
+    "Target creature's owner puts it on their choice of the top or bottom of their library.";
+/// Verbatim Oracle text (Scryfall).
+const MERCY_KILLING: &str = "Target creature's controller sacrifices it, then creates X 1/1 green and white Elf Warrior creature tokens, where X is that creature's power.";
+/// Grammar fixtures (not cards): one per player-recipient arm of the binding.
+const OWNER_REVEALS: &str = "Target creature's owner reveals their hand.";
+const DRAW_SHIFT: &str = "Target creature's controller draws a card.";
+const DISCARD_SHIFT: &str = "Target creature's controller discards a card.";
+const MILL_SHIFT: &str = "Target creature's controller mills two cards.";
+const SCRY_SHIFT: &str = "Target creature's controller scries 2.";
+const SURVEIL_SHIFT: &str = "Target creature's controller surveils 2.";
+
+/// The player a player-recipient instruction addresses (the slot the
+/// possessive-shift binding writes), or `None` for any other effect.
+fn player_recipient(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::RevealHand { target, .. }
+        | Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Scry { target, .. }
+        | Effect::Surveil { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// The chain node whose immediate `sub_ability` is `child`.
+fn parent_of<'a>(
+    root: &'a AbilityDefinition,
+    child: &AbilityDefinition,
+) -> Option<&'a AbilityDefinition> {
+    chain_nodes(root).into_iter().find(|node| {
+        node.sub_ability
+            .as_deref()
+            .is_some_and(|sub| std::ptr::eq(sub, child))
+    })
+}
+
+fn creature_target_only() -> Effect {
+    Effect::TargetOnly {
+        target: TargetFilter::Typed(TypedFilter::creature()),
+    }
+}
+
+/// F4a–F4c: "target <filter>'s controller/owner <player-verb>s …" — the
+/// possessive-shift subject names the ACTING player (CR 608.2c + CR 109.4), the
+/// targeted object's controller/owner (CR 115.1), never the caster.
+#[test]
+fn possessive_shift_subject_binds_hand_reveal_to_target_controller() {
+    // F4a: Denied! reveals the targeted spell's controller's hand.
+    let denied = parse_named_face(DENIED, "Denied!", &["Instant"]);
+    let root = &denied.abilities[0];
+    let nodes = chain_nodes(root);
+    assert!(nodes.len() >= 4, "reach-guard: the walk visited the chain");
+    assert_json_eq(
+        &*root.effect,
+        r#"{"type":"Choose","choice_type":"CardName","persist":true}"#,
+        "Denied!'s root",
+    );
+    let reveals: Vec<_> = nodes
+        .iter()
+        .filter(|node| matches!(&*node.effect, Effect::RevealHand { .. }))
+        .collect();
+    assert_eq!(reveals.len(), 1, "{root:#?}");
+    let reveal = *reveals[0];
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        ..
+    } = &*reveal.effect
+    else {
+        unreachable!();
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetController);
+    assert_eq!(*card_filter, TargetFilter::None);
+    // Reach-guard: the possessive-shift wrap produced the reveal's parent.
+    assert!(matches!(
+        &*parent_of(root, reveal).expect("the reveal's parent").effect,
+        Effect::TargetOnly {
+            target: TargetFilter::StackSpell
+        }
+    ));
+    // The helper touched only the reveal: the counter keeps its base shape.
+    assert_json_eq(
+        &*reveal.sub_ability.as_deref().expect("counter").effect,
+        r#"{"type":"Counter","target":{"type":"TriggeringSource"}}"#,
+        "Denied!'s counter",
+    );
+
+    // F4b: Friendly Fire's random reveal — same binding, count unchanged.
+    let friendly = parse_named_face(FRIENDLY_FIRE, "Friendly Fire", &["Instant"]);
+    let root = &friendly.abilities[0];
+    assert_eq!(
+        *root.effect,
+        creature_target_only(),
+        "reach-guard: the wrap"
+    );
+    let reveal = root.sub_ability.as_deref().expect("reveal");
+    let Effect::RevealHand {
+        target,
+        card_filter,
+        count,
+        ..
+    } = &*reveal.effect
+    else {
+        panic!("expected RevealHand, got {:?}", reveal.effect);
+    };
+    assert_eq!(*target, TargetFilter::ParentTargetController);
+    assert_eq!(*card_filter, TargetFilter::None);
+    assert_eq!(*count, None, "unchanged from base");
+
+    // F4c: the owner shift binds the owner; one grammar fixture per non-reveal
+    // arm binds the controller.
+    for (text, actor) in [
+        (OWNER_REVEALS, TargetFilter::ParentTargetOwner),
+        (DRAW_SHIFT, TargetFilter::ParentTargetController),
+        (DISCARD_SHIFT, TargetFilter::ParentTargetController),
+        (MILL_SHIFT, TargetFilter::ParentTargetController),
+        (SCRY_SHIFT, TargetFilter::ParentTargetController),
+        (SURVEIL_SHIFT, TargetFilter::ParentTargetController),
+    ] {
+        let root = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            *root.effect,
+            creature_target_only(),
+            "{text}: reach-guard: the possessive-shift wrap ran"
+        );
+        let inner = root.sub_ability.as_deref().expect("wrapped instruction");
+        assert_eq!(
+            player_recipient(&inner.effect),
+            Some(&actor),
+            "{text}: {inner:#?}"
+        );
+    }
+}
+
+/// F4d: object-recipient possessive-shift instructions are not player
+/// recipients, so nothing is rebound to the shifted actor.
+#[test]
+fn possessive_shift_object_recipient_is_not_rebound_to_the_actor() {
+    // Mercy Killing goes through the wrap arm (reach-guard) with an object
+    // recipient ("sacrifices it"): the sacrifice keeps its base `ParentTarget`.
+    let mercy = parse_named_face(MERCY_KILLING, "Mercy Killing", &["Instant"]);
+    let root = &mercy.abilities[0];
+    assert_eq!(
+        *root.effect,
+        creature_target_only(),
+        "reach-guard: the wrap"
+    );
+    let sacrifice = root.sub_ability.as_deref().expect("sacrifice");
+    assert_json_eq(
+        &*sacrifice.effect,
+        r#"{"type":"Sacrifice","target":{"type":"ParentTarget"},"count":{"type":"Fixed","value":1}}"#,
+        "Mercy Killing's sacrifice",
+    );
+
+    // Misleading Motes (the "owner puts it …" family) does not reach the wrap
+    // arm at all (its base root is the `PutOnTopOrBottom` itself); it is pinned
+    // to its base parse so the binding provably leaves the family untouched.
+    let motes = parse_named_face(MISLEADING_MOTES, "Misleading Motes", &["Instant"]);
+    assert_json_eq(
+        &motes.abilities[0],
+        r#"{"kind":"Spell","effect":{"type":"PutOnTopOrBottom","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]}},"cost":null,"sub_ability":null,"duration":null,"description":"Target creature's owner puts it on their choice of the top or bottom of their library.","target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}"#,
+        "Misleading Motes",
+    );
+
+    for root in [&mercy.abilities[0], &motes.abilities[0]] {
+        assert!(
+            chain_nodes(root).iter().all(|node| !matches!(
+                player_recipient(&node.effect),
+                Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner)
+            )),
+            "{root:#?}"
+        );
+    }
 }

@@ -5928,7 +5928,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         }
     }
 
-    /// Evidence with a `repeat_for` carrier but no activation-limit static. This
+    /// Parsed abilities with a `repeat_for` carrier but no activation-limit static. This
     /// distinguishes a real repeat-count parse from unsupported "rather than
     /// once" wording that must still be reported as dynamic quantity text.
     fn repeat_for_without_activation_limit_abilities() -> crate::parser::oracle::ParsedAbilities {
@@ -10698,7 +10698,7 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// is present somewhere in it, silently hiding the second, unrelated rider.
     ///
     /// Constructed directly against `detect_replacement` (mirroring the
-    /// `no_activation_limit_evidence` / `repeat_for_without_activation_limit_evidence`
+    /// `no_activation_limit_evidence` / `repeat_for_without_activation_limit_abilities`
     /// direct-`UnitEvidence` pattern above) rather than through `parse_named`: the
     /// real front-end recognizes at most one ability grammar per physical source
     /// line, so two unrelated cast-permission abilities cannot be forced onto one

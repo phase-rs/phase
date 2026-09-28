@@ -3457,8 +3457,19 @@ fn apply_parent_chain_context(
     // context wholesale, so preserve the node-local intent while inheriting
     // the remaining casting-time facts from its parent.
     let child_face_down_in_exile = child.context.face_down_in_exile;
+    // CR 610.3b: `check_exile_returns` latches a specified "until" event on the
+    // exact duration-bearing ChangeZone node it happened for (after the trigger,
+    // before that node's initial zone change). Like the face-down marker, the
+    // latch is node-local: a non-ChangeZone parent (a hand reveal, a target
+    // declaration) carries none, so the wholesale hand-off must not erase it.
+    let child_duration_events = std::mem::take(&mut child.context.duration_events);
     child.context = parent.context.clone();
     child.context.face_down_in_exile |= child_face_down_in_exile;
+    for event in child_duration_events {
+        if !child.context.duration_events.contains(&event) {
+            child.context.duration_events.push(event);
+        }
+    }
     // CR 120.1 + CR 608.2b: The damage-subject binding names the object THIS
     // hand-off supplies (or fails to supply) to the immediate child's damage
     // clause. It is one-hop by construction — a grandchild's subject slot is a
@@ -32409,6 +32420,91 @@ mod tests {
         assert!(scoped.sub_ability.is_none());
         let tail = tail.expect("without a choice the consumer detaches as the tail");
         assert!(matches!(tail.effect, Effect::ChangeZone { .. }));
+    }
+
+    /// CR 610.3b + CR 608.2c — the parent→child hand-off keeps the child's own
+    /// "until" latch. `check_exile_returns` records a specified event on the exact
+    /// duration-bearing ChangeZone node (node-local, like the face-down marker);
+    /// a non-ChangeZone parent (Kitesail Freebooter's / Valki's hand reveal)
+    /// carries none, so a wholesale context copy would erase it and the initial
+    /// exile would happen anyway. The parent's own latches are still inherited.
+    #[test]
+    fn parent_chain_handoff_keeps_the_childs_cr610_3b_latch() {
+        use crate::types::ability::{DurationEvent, ExileConcealment};
+
+        let reveal = || {
+            ResolvedAbility::new(
+                Effect::RevealHand {
+                    target: TargetFilter::Player,
+                    card_filter: TargetFilter::Typed(TypedFilter::creature()),
+                    count: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    choice_optional: false,
+                    reveal: true,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let exile_until_leaves = || {
+            let mut exile = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            exile.duration = Some(Duration::UntilHostLeavesPlay);
+            exile
+        };
+        let latched = vec![DurationEvent::SourceLeftBattlefield];
+        let mut state = GameState::new_two_player(42);
+
+        // (a) The child's own latch survives a parent that carries none.
+        let parent = reveal();
+        let mut child = exile_until_leaves();
+        child.context.duration_events = latched.clone();
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert_eq!(
+            child.context.duration_events, latched,
+            "the node-local CR 610.3b latch must survive the hand-off"
+        );
+
+        // (b) Reach-guard: the hand-off ran and still inherits the parent's latch.
+        let mut parent = reveal();
+        parent.context.duration_events = latched.clone();
+        let mut child = exile_until_leaves();
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert_eq!(child.context.duration_events, latched);
+
+        // (c) Both latched: the union carries the event once.
+        let mut child = exile_until_leaves();
+        child.context.duration_events = latched.clone();
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert_eq!(child.context.duration_events, latched);
+
+        // (d) The existing node-local precedent is not regressed.
+        let parent = reveal();
+        let mut child = exile_until_leaves();
+        child.context.face_down_in_exile = ExileConcealment::FaceDown;
+        child.context.duration_events = latched.clone();
+        apply_parent_chain_context(&mut child, &parent, None, &mut state);
+        assert!(child.context.face_down_in_exile.is_face_down());
+        assert_eq!(child.context.duration_events, latched);
     }
 
     /// CR 608.2c — building-block discriminator for the per-player reveal-anaphora

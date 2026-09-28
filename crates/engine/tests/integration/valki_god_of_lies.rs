@@ -16,12 +16,19 @@
 //! - CR 607.2a + CR 406.6: the pool is exactly the cards exiled with Valki.
 //! - CR 707.2: Valki becomes a copy of the chosen card; CR 707.4: a copying
 //!   permanent stays the same object, so the exile links persist.
+//!
+//! The "CR 610.3b: chain hand-off class regressions" section pins the fix Valki's
+//! bounced-in-response row depends on: the "until" latch recorded on the exile
+//! node below a non-ChangeZone parent survives the parent→child hand-off
+//! (Kitesail Freebooter's hand reveal, Shire Shirriff's reflexive trigger). Those
+//! card tests live here because this change's scope does not include
+//! `until_source_leaves_cr610_3b.rs`.
 
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, EffectKind};
+use engine::types::ability::{Effect, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
+use engine::types::game_state::{ExileLink, ExileLinkKind, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -118,6 +125,25 @@ fn settle(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
     }
 }
 
+/// Resolve a just-committed permanent spell, stopping as soon as `source` is on
+/// the battlefield with its ETB trigger on the stack — the response window.
+/// (`resolve_top` waits for the stack to get shorter, which the trigger
+/// replacing the spell on the stack never does, so it would pass through that
+/// window.)
+fn pass_until_etb_on_stack(runner: &mut GameRunner, source: ObjectId) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..16 {
+        if zone(runner, source) == Zone::Battlefield && !runner.state().stack.is_empty() {
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority must be accepted");
+        events.extend(result.events);
+    }
+    events
+}
+
 /// Upper bound on the `RevealChoice` prompts one Valki ETB may park. Two
 /// opponents give at most two; the headroom still bounds the loop, so an ETB
 /// that re-fires (its exile consumer lifted onto Valki itself) fails the test
@@ -174,13 +200,13 @@ fn cast_spell_targeting(runner: &mut GameRunner, spell: ObjectId, target: Object
     settle(runner, &mut events);
 }
 
-fn valki_links(runner: &GameRunner, valki: ObjectId) -> Vec<ExileLink> {
+fn until_leaves_links(runner: &GameRunner, source: ObjectId) -> Vec<ExileLink> {
     runner
         .state()
         .exile_links
         .iter()
         .filter(|link| {
-            link.source_id == valki && matches!(link.kind, ExileLinkKind::UntilSourceLeaves { .. })
+            link.source_id == source && matches!(link.kind, ExileLinkKind::UntilSourceLeaves { .. })
         })
         .cloned()
         .collect()
@@ -256,7 +282,7 @@ fn valki_etb_exiles_one_chosen_creature_card_per_opponent_until_valki_leaves() {
         "no battlefield permanent is exiled"
     );
     assert_eq!(zone(&runner, valki), Zone::Battlefield);
-    assert_eq!(valki_links(&runner, valki).len(), 2);
+    assert_eq!(until_leaves_links(&runner, valki).len(), 2);
 
     // CR 610.3: Valki leaving the battlefield returns both cards to their
     // owners' hands.
@@ -319,7 +345,7 @@ fn valki_etb_later_opponent_without_creature_cards_after_paused_pick() {
         "reach-guard: P2's iteration ran"
     );
     assert_eq!(zone(&runner, p1_bear), Zone::Exile);
-    assert_eq!(valki_links(&runner, valki).len(), 1);
+    assert_eq!(until_leaves_links(&runner, valki).len(), 1);
     assert_eq!(hand_len(&runner, P2), p2_hand_before);
     assert_eq!(zone(&runner, p2_permanent), Zone::Battlefield);
 }
@@ -370,7 +396,7 @@ fn valki_etb_later_opponent_with_empty_hand_after_paused_pick() {
         .collect();
     assert_eq!(pick_moves, vec![Zone::Exile]);
     assert_eq!(zone(&runner, p1_bear), Zone::Exile);
-    assert_eq!(valki_links(&runner, valki).len(), 1);
+    assert_eq!(until_leaves_links(&runner, valki).len(), 1);
     assert_eq!(zone(&runner, p2_permanent), Zone::Battlefield);
     assert_eq!(zone(&runner, valki), Zone::Battlefield);
 }
@@ -388,21 +414,8 @@ fn valki_etb_bounced_in_response_reveals_but_exiles_nothing() {
     let p2_ogre = add_hand_creature(&mut scenario, P2, "Opp Ogre", 3, 3, 3);
     let mut runner = scenario.build();
 
-    let mut events = Vec::new();
     runner.cast(valki).commit();
-    // Resolve the creature spell, stopping as soon as its ETB trigger is on the
-    // stack. (`resolve_top` waits for the stack to get shorter, which the
-    // trigger replacing Valki on the stack never does, so it would pass through
-    // the response window.)
-    for _ in 0..16 {
-        if zone(&runner, valki) == Zone::Battlefield && !runner.state().stack.is_empty() {
-            break;
-        }
-        let result = runner
-            .act(GameAction::PassPriority)
-            .expect("passing priority must be accepted");
-        events.extend(result.events);
-    }
+    let mut events = pass_until_etb_on_stack(&mut runner, valki);
     // Every precondition of the response cast window.
     assert_eq!(zone(&runner, valki), Zone::Battlefield);
     assert!(
@@ -427,7 +440,10 @@ fn valki_etb_bounced_in_response_reveals_but_exiles_nothing() {
         .expect("pass priority on the bounce");
     events.extend(result.events);
     let prompts = answer_reveal_choices(&mut runner, &mut events, |cards| cards[0]);
-    let _ = prompts;
+    assert!(
+        !prompts.is_empty(),
+        "reach-guard: the exile choice was reached, so the no-move is the CR 610.3b guard"
+    );
 
     assert_eq!(
         zone(&runner, valki),
@@ -442,6 +458,406 @@ fn valki_etb_bounced_in_response_reveals_but_exiles_nothing() {
     assert!(revealed.contains(&P1) && revealed.contains(&P2));
     assert_eq!(zone(&runner, p1_bear), Zone::Hand);
     assert_eq!(zone(&runner, p2_ogre), Zone::Hand);
+    assert!(until_leaves_links(&runner, valki).is_empty());
+}
+
+// ── CR 610.3b: chain hand-off class regressions (Kitesail Freebooter, Shire Shirriff) ──
+
+/// Verbatim Oracle text (Scryfall / MTGJSON).
+const KITESAIL_FULL: &str = "Flying\nWhen this creature enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until this creature leaves the battlefield.";
+/// Verbatim Oracle text (Scryfall / MTGJSON).
+const SHIRRIFF_FULL: &str = "Vigilance\nWhen this creature enters, you may sacrifice a token. When you do, exile target creature an opponent controls until this creature leaves the battlefield.";
+
+struct FreebooterFixture {
+    runner: GameRunner,
+    freebooter: ObjectId,
+    bounce: ObjectId,
+    p1_divination: ObjectId,
+    p1_bear: ObjectId,
+}
+
+/// Two players; Kitesail Freebooter ({1}{B} Bird Pirate 1/2, verbatim text) in
+/// P0's hand with the mana for it, a bounce instant in P0's hand, and one
+/// noncreature nonland card plus one creature card in P1's hand. Freebooter is
+/// cast and its ETB trigger (targeting P1) is left on the stack with P0 holding
+/// priority.
+fn freebooter_etb_on_stack() -> (FreebooterFixture, Vec<GameEvent>) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, vec![mana(ManaType::Black), mana(ManaType::Black)]);
+    let freebooter = {
+        let mut card = scenario.add_creature_to_hand_from_oracle(
+            P0,
+            "Kitesail Freebooter",
+            1,
+            2,
+            KITESAIL_FULL,
+        );
+        card.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Bird", "Pirate"]);
+        card.id()
+    };
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bounce Probe", true, RETURN_TARGET_CREATURE)
+        .id();
+    let p1_divination = {
+        let mut card =
+            scenario.add_spell_to_hand_from_oracle(P1, "Opp Divination", false, "Draw two cards.");
+        card.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        });
+        card.id()
+    };
+    let p1_bear = add_hand_creature(&mut scenario, P1, "Opp Bear", 2, 2, 2);
+    let mut runner = scenario.build();
+
+    runner.cast(freebooter).target_player(P1).commit();
+    let events = pass_until_etb_on_stack(&mut runner, freebooter);
+    assert_response_window(&runner, freebooter);
+    (
+        FreebooterFixture {
+            runner,
+            freebooter,
+            bounce,
+            p1_divination,
+            p1_bear,
+        },
+        events,
+    )
+}
+
+/// Every precondition of the response cast window: `source` is on the
+/// battlefield, its ETB trigger is the only stack object, and P0 holds priority.
+fn assert_response_window(runner: &GameRunner, source: ObjectId) {
+    assert_eq!(zone(runner, source), Zone::Battlefield);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "P0 holds priority with the ETB trigger on the stack: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "only the ETB trigger is on the stack"
+    );
+    assert_eq!(runner.state().stack[0].source_id, source);
+}
+
+/// Every exile link, of any kind, whose source is `source`.
+fn links_from(runner: &GameRunner, source: ObjectId) -> Vec<ExileLink> {
+    runner
+        .state()
+        .exile_links
+        .iter()
+        .filter(|link| link.source_id == source)
+        .cloned()
+        .collect()
+}
+
+/// CR 610.3b (Kitesail Freebooter ruling: "If Kitesail Freebooter leaves the
+/// battlefield before its enters-the-battlefield ability resolves, the opponent
+/// will reveal their hand, but no card will be exiled."): the latch sits on the
+/// exile node below the hand-reveal parent, so it must survive the parent→child
+/// hand-off.
+#[test]
+fn kitesail_freebooter_bounced_before_etb_resolves_reveals_but_exiles_nothing() {
+    let (fixture, mut events) = freebooter_etb_on_stack();
+    let FreebooterFixture {
+        mut runner,
+        freebooter,
+        bounce,
+        p1_divination,
+        p1_bear,
+    } = fixture;
+
+    runner.cast(bounce).target_object(freebooter).commit();
+    let result = runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority on the bounce");
+    events.extend(result.events);
+    let prompts = answer_reveal_choices(&mut runner, &mut events, |cards| cards[0]);
+
+    assert_eq!(
+        zone(&runner, freebooter),
+        Zone::Hand,
+        "reach-guard: Freebooter was bounced"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach-guard: the ETB resolved"
+    );
+    assert!(
+        revealed_players(&events).contains(&P1),
+        "reach-guard: P1's hand is still revealed"
+    );
+    assert!(
+        prompts.len() <= 1,
+        "at most the one choice from P1's hand: {prompts:?}"
+    );
+    assert_eq!(zone(&runner, p1_divination), Zone::Hand);
+    assert_eq!(zone(&runner, p1_bear), Zone::Hand);
+    assert!(
+        links_from(&runner, freebooter).is_empty(),
+        "no card is exiled with Freebooter"
+    );
+}
+
+/// CR 701.20a + CR 610.3: positive twin — not bounced, the chosen noncreature,
+/// nonland card is exiled until Freebooter leaves, then returns.
+#[test]
+fn kitesail_freebooter_etb_exiles_chosen_card_until_it_leaves() {
+    let (fixture, mut events) = freebooter_etb_on_stack();
+    let FreebooterFixture {
+        mut runner,
+        freebooter,
+        bounce,
+        p1_divination,
+        p1_bear,
+    } = fixture;
+
+    let prompts = answer_reveal_choices(&mut runner, &mut events, |cards| cards[0]);
+    assert_eq!(
+        prompts,
+        vec![(P0, vec![p1_divination])],
+        "P0 chooses from P1's noncreature, nonland cards only"
+    );
+    assert!(revealed_players(&events).contains(&P1));
+    assert_eq!(zone(&runner, p1_divination), Zone::Exile);
+    assert_eq!(zone(&runner, p1_bear), Zone::Hand);
+    assert_eq!(until_leaves_links(&runner, freebooter).len(), 1);
+
+    cast_spell_targeting(&mut runner, bounce, freebooter);
+    assert_eq!(zone(&runner, freebooter), Zone::Hand);
+    assert_eq!(
+        zone(&runner, p1_divination),
+        Zone::Hand,
+        "CR 610.3: the card returns when Freebooter leaves"
+    );
+}
+
+struct ShirriffFixture {
+    runner: GameRunner,
+    shirriff: ObjectId,
+    bounce: ObjectId,
+    p0_token: ObjectId,
+    p1_bear: ObjectId,
+}
+
+/// Two players; Shire Shirriff ({1}{W} Halfling Soldier 2/2, verbatim text) in
+/// P0's hand with the mana for it, a bounce instant in P0's hand, exactly one
+/// token creature under P0's control and one creature under P1's control.
+/// Shirriff is cast and its ETB trigger is left on the stack with P0 holding
+/// priority.
+fn shirriff_etb_on_stack() -> (ShirriffFixture, Vec<GameEvent>) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, vec![mana(ManaType::White), mana(ManaType::White)]);
+    let shirriff = {
+        let mut card =
+            scenario.add_creature_to_hand_from_oracle(P0, "Shire Shirriff", 2, 2, SHIRRIFF_FULL);
+        card.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        })
+        .with_subtypes(vec!["Halfling", "Soldier"]);
+        card.id()
+    };
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bounce Probe", true, RETURN_TARGET_CREATURE)
+        .id();
+    let p0_token = scenario.add_creature(P0, "Soldier Token", 1, 1).id();
+    let p1_bear = scenario.add_creature(P1, "Opp Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&p0_token)
+        .unwrap()
+        .is_token = true;
+
+    runner.cast(shirriff).commit();
+    let events = pass_until_etb_on_stack(&mut runner, shirriff);
+    assert_response_window(&runner, shirriff);
+    (
+        ShirriffFixture {
+            runner,
+            shirriff,
+            bounce,
+            p0_token,
+            p1_bear,
+        },
+        events,
+    )
+}
+
+/// `id` is no longer on the battlefield (a sacrificed token ceases to exist,
+/// CR 111.7, so it may be gone from the object map entirely).
+fn left_battlefield(runner: &GameRunner, id: ObjectId) -> bool {
+    runner
+        .state()
+        .objects
+        .get(&id)
+        .is_none_or(|object| object.zone != Zone::Battlefield)
+}
+
+/// What driving Shirriff's ETB to an empty stack observed.
+struct ShirriffDrive {
+    /// Kinds of the prompts answered, in order.
+    prompts: Vec<&'static str>,
+    /// A Shirriff-sourced stack object targeting `victim` was seen after the
+    /// ETB resolved (the CR 603.12 reflexive trigger).
+    reflexive_targeted_victim: bool,
+}
+
+/// Drive Shirriff's ETB and the reflexive trigger it creates to an empty stack:
+/// accept "you may sacrifice a token", sacrifice `token`, and target `victim`.
+fn drive_shirriff_etb(
+    runner: &mut GameRunner,
+    events: &mut Vec<GameEvent>,
+    shirriff: ObjectId,
+    token: ObjectId,
+    victim: ObjectId,
+) -> ShirriffDrive {
+    let mut drive = ShirriffDrive {
+        prompts: Vec::new(),
+        reflexive_targeted_victim: false,
+    };
+    for _ in 0..32 {
+        drive.reflexive_targeted_victim |= runner.state().stack.iter().any(|entry| {
+            entry.source_id == shirriff
+                && matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if ability.targets.contains(&TargetRef::Object(victim))
+                )
+        });
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return drive,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                drive.prompts.push("OptionalEffectChoice");
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                drive.prompts.push("TriggerTargetSelection");
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(victim)),
+                }
+            }
+            other => panic!(
+                "unexpected prompt while driving Shirriff's ETB (token {token:?}): {other:?}"
+            ),
+        };
+        let result = runner
+            .act(action)
+            .expect("the Shirriff ETB prompt must accept the answer");
+        events.extend(result.events);
+    }
+    panic!(
+        "Shirriff's ETB did not settle: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 610.3b + CR 603.12 (Shire Shirriff ruling: "If Shire Shirriff leaves the
+/// battlefield before its last ability resolves, you can still sacrifice a
+/// token. However, when you do, the target creature won't be exiled when the
+/// "reflexive" triggered ability resolves."): the latch recorded on the
+/// reflexive exile node rides the reflexive trigger's hand-off onto its own
+/// stack object.
+#[test]
+fn shire_shirriff_bounced_before_etb_resolves_sacrifices_but_exiles_nothing() {
+    let (fixture, mut events) = shirriff_etb_on_stack();
+    let ShirriffFixture {
+        mut runner,
+        shirriff,
+        bounce,
+        p0_token,
+        p1_bear,
+    } = fixture;
+
+    runner.cast(bounce).target_object(shirriff).commit();
+    let result = runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority on the bounce");
+    events.extend(result.events);
+    let drive = drive_shirriff_etb(&mut runner, &mut events, shirriff, p0_token, p1_bear);
+    assert_eq!(
+        drive.prompts,
+        ["OptionalEffectChoice", "TriggerTargetSelection"],
+        "reach-guard: the \"you may sacrifice\" was accepted and the reflexive target chosen"
+    );
+
+    assert_eq!(
+        zone(&runner, shirriff),
+        Zone::Hand,
+        "reach-guard: Shirriff was bounced"
+    );
+    assert!(
+        left_battlefield(&runner, p0_token),
+        "reach-guard: the token was still sacrificed"
+    );
+    assert!(
+        drive.reflexive_targeted_victim,
+        "reach-guard: the reflexive trigger went on the stack targeting P1's creature (prompts {:?})",
+        drive.prompts
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach-guard: everything resolved"
+    );
+    assert_eq!(zone(&runner, p1_bear), Zone::Battlefield);
+    assert!(
+        links_from(&runner, shirriff).is_empty(),
+        "no creature is exiled with Shirriff"
+    );
+}
+
+/// CR 603.12 + CR 610.3: positive twin — not bounced, the reflexive trigger
+/// exiles the target until Shirriff leaves, then it returns.
+#[test]
+fn shire_shirriff_etb_sacrifice_exiles_target_until_it_leaves() {
+    let (fixture, mut events) = shirriff_etb_on_stack();
+    let ShirriffFixture {
+        mut runner,
+        shirriff,
+        bounce,
+        p0_token,
+        p1_bear,
+    } = fixture;
+
+    let drive = drive_shirriff_etb(&mut runner, &mut events, shirriff, p0_token, p1_bear);
+    assert_eq!(
+        drive.prompts,
+        ["OptionalEffectChoice", "TriggerTargetSelection"],
+        "reach-guard: the \"you may sacrifice\" was accepted and the reflexive target chosen"
+    );
+    assert!(
+        left_battlefield(&runner, p0_token),
+        "the token was sacrificed"
+    );
+    assert!(
+        drive.reflexive_targeted_victim,
+        "prompts {:?}",
+        drive.prompts
+    );
+    assert_eq!(zone(&runner, p1_bear), Zone::Exile);
+    assert_eq!(until_leaves_links(&runner, shirriff).len(), 1);
+
+    cast_spell_targeting(&mut runner, bounce, shirriff);
+    assert_eq!(zone(&runner, shirriff), Zone::Hand);
+    assert_eq!(
+        zone(&runner, p1_bear),
+        Zone::Battlefield,
+        "CR 610.3: the creature returns when Shirriff leaves"
+    );
 }
 
 // ── Row 2: {X} ─────────────────────────────────────────────────────────────
@@ -545,7 +961,7 @@ fn valki_x_becomes_copy_of_linked_exiled_card_with_mana_value_x() {
     );
     assert_eq!(zone(&runner, valki), Zone::Battlefield);
     // CR 707.4 + A8: same object — both links persist.
-    let linked: Vec<_> = valki_links(&runner, valki)
+    let linked: Vec<_> = until_leaves_links(&runner, valki)
         .iter()
         .map(|l| l.exiled_id)
         .collect();

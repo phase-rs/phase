@@ -24577,12 +24577,15 @@ fn lower_subject_predicate_ast(
             // `build_target_slots` requires it and the imperative effect's
             // `ParentTarget` anaphor ("it") — plus `ParentTargetController` in any
             // following clause ("that player may …") — resolve against it. Mirrors
-            // the player-target ChangeZone / Explore wrapping just below.
+            // the player-target ChangeZone / Explore wrapping just below. A
+            // player-recipient instruction at the imperative default binds to the
+            // shifted actor (Denied!).
             if matches!(
                 affected,
                 TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
             ) {
                 if let Some(object_target) = subject.target.clone() {
+                    bind_player_recipient_to_possessive_actor(&mut clause.effect, &affected);
                     let mut inner = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
                     inner.sub_ability = clause.sub_ability;
                     inner.multi_target = clause.multi_target;
@@ -26127,6 +26130,35 @@ fn sync_player_into_nested_shuffle_sub(
             _ => {}
         }
         next = sub.sub_ability.as_mut();
+    }
+}
+
+/// CR 608.2c + CR 109.4 + CR 115.1: in "target <filter>'s controller/owner
+/// <verb>s …" the ability targets <filter> and that object's controller/owner is
+/// the ACTING player. A player-recipient instruction still at the imperative's
+/// no-subject default (`Any` / `Controller`) names that actor — "target spell's
+/// controller reveals their hand" reveals the spell controller's hand (Denied!),
+/// never the caster's. Object recipients ("sacrifices it", "puts it on …") are
+/// not player recipients and are left to the wrap's `ParentTarget` anaphor.
+///
+/// This is a deliberate projection onto the player-only members of
+/// `inject_subject_target`'s player-recipient arm (CR 701.20a reveal, CR 121.1
+/// draw, CR 701.9a discard, CR 701.17a mill, CR 701.22a scry, CR 701.25a
+/// surveil), under the same unbound-default guard; every other `Effect` is
+/// intentionally left untouched by the `_` arm.
+fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &TargetFilter) {
+    match effect {
+        Effect::RevealHand { target, .. }
+        | Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Scry { target, .. }
+        | Effect::Surveil { target, .. }
+            if matches!(target, TargetFilter::Any | TargetFilter::Controller) =>
+        {
+            *target = actor.clone();
+        }
+        _ => {}
     }
 }
 
