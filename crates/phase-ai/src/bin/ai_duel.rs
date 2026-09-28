@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::deck_loading::{
     load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckPayload,
 };
@@ -28,6 +28,7 @@ use phase_ai::duel_suite::run::{
     resolve_matchup, run_suite, AttributionMode, ReportSink, SuiteOptions,
 };
 use phase_ai::duel_suite::{all_matchups, find_matchup};
+use phase_ai::harness_combo_table;
 use phase_ai::pod::feed::load_commander_decks;
 pub use phase_ai::pod::StopReason;
 use rand::rngs::StdRng;
@@ -139,6 +140,14 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let combos = match harness_combo_table::load(cli.combo_table.as_deref()) {
+        Ok(table) => table,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    harness_combo_table::print_provenance(&combos);
 
     let base_seed = cli.seed.unwrap_or_else(|| {
         SystemTime::now()
@@ -178,6 +187,7 @@ fn main() {
                 CommanderSuiteOptions {
                     cards_root: &path,
                     feed: &cli.feed,
+                    combos: &combos,
                     games_per_seat: games,
                     base_seed,
                     candidate_difficulty: cli.difficulty,
@@ -204,6 +214,7 @@ fn main() {
                 CommanderDuelOptions {
                     cards_root: &path,
                     feed: &cli.feed,
+                    combos: &combos,
                     p0: &p0,
                     p1: &p1,
                     games: cli.games.unwrap_or(4),
@@ -257,6 +268,7 @@ struct CliOptions {
     attribution: AttributionMode,
     harvest_output: Option<PathBuf>,
     feed: String,
+    combo_table: Option<PathBuf>,
     /// Diagnostic output only — never a stop condition. See `GameBudget`.
     trace: bool,
     /// Per-game wall budget. `None` means "not requested": a 1v1 run still gets
@@ -283,6 +295,7 @@ impl Default for CliOptions {
             attribution: AttributionMode::Disabled,
             harvest_output: None,
             feed: "feeds/mtggoldfish-commander.json".to_string(),
+            combo_table: None,
             trace: false,
             game_timeout: None,
             duel_p0: None,
@@ -469,6 +482,9 @@ fn parse_cli(args: &[String]) -> Result<CliOptions, String> {
                 cli.harvest_output = Some(PathBuf::from(take_value(&mut args, "--harvest")?));
             }
             "--feed" => cli.feed = take_value(&mut args, "--feed")?.clone(),
+            "--combo-table" => {
+                cli.combo_table = Some(PathBuf::from(take_value(&mut args, "--combo-table")?));
+            }
             unknown if unknown.starts_with("--") => {
                 return Err(format!("Unknown option: {unknown}"));
             }
@@ -676,6 +692,7 @@ fn run_game(
 struct CommanderSuiteOptions<'a> {
     cards_root: &'a std::path::Path,
     feed: &'a str,
+    combos: &'a ComboTable,
     games_per_seat: usize,
     base_seed: u64,
     candidate_difficulty: AiDifficulty,
@@ -710,8 +727,7 @@ fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
         ai_decks: vec![deck_lists[2].clone(), deck_lists[3].clone()],
         ..Default::default()
     };
-    // Duel decks carry no commander, so the estimator returns None on this path regardless of the table.
-    let payload = resolve_deck_list(db, &engine::database::ComboTable::default(), &deck_list);
+    let payload = resolve_deck_list(db, options.combos, &deck_list);
 
     let mut seat_rows = Vec::new();
     let mut all_games = Vec::new();
@@ -1282,6 +1298,7 @@ fn trace_progress_line(
 struct CommanderDuelOptions<'a> {
     cards_root: &'a std::path::Path,
     feed: &'a str,
+    combos: &'a ComboTable,
     p0: &'a str,
     p1: &'a str,
     games: usize,
@@ -1528,8 +1545,7 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
             ai_decks: Vec::new(),
             ..Default::default()
         };
-        // Duel decks carry no commander, so the estimator returns None on this path regardless of the table.
-        let payload = resolve_deck_list(db, &engine::database::ComboTable::default(), &deck_list);
+        let payload = resolve_deck_list(db, options.combos, &deck_list);
         let deck0_seat = PlayerId(u8::from(!deck0_first));
         let seed = paired_seed(options.base_seed, game_idx);
         if options.trace.is_some() {
@@ -1692,6 +1708,7 @@ fn print_usage() {
     eprintln!(
         "  --feed PATH        Feed under data-root (default: feeds/mtggoldfish-commander.json)"
     );
+    eprintln!("  --combo-table PATH Two-card combo artifact for bracket estimates");
     eprintln!("  --games N          Games per candidate seat (default: 4)");
     eprintln!(
         "  --output PATH      Write JSON report to PATH (default: target/commander-suite-results.json)"
@@ -1912,7 +1929,15 @@ mod tests {
 
     #[test]
     fn a_flag_missing_its_value_is_rejected() {
-        for flag in ["--p0", "--p1", "--seed", "--games", "--output", "--feed"] {
+        for flag in [
+            "--p0",
+            "--p1",
+            "--seed",
+            "--games",
+            "--output",
+            "--feed",
+            "--combo-table",
+        ] {
             let Err(err) = parse_cli(&args(&[flag])) else {
                 panic!("{flag} at the end of argv must be refused");
             };
@@ -1925,10 +1950,12 @@ mod tests {
         p1: &'a str,
         difficulty: AiDifficulty,
         baseline_difficulty: AiDifficulty,
+        combos: &'a ComboTable,
     ) -> CommanderDuelOptions<'a> {
         CommanderDuelOptions {
             cards_root: std::path::Path::new("."),
             feed: "feeds/test.json",
+            combos,
             p0,
             p1,
             games: 2,
@@ -2019,7 +2046,14 @@ mod tests {
     /// run, and cannot be reproduced from.
     #[test]
     fn the_duel_report_records_both_difficulties() {
-        let options = duel_options("deck0", "deck1", AiDifficulty::Hard, AiDifficulty::Easy);
+        let combos = ComboTable::default();
+        let options = duel_options(
+            "deck0",
+            "deck1",
+            AiDifficulty::Hard,
+            AiDifficulty::Easy,
+            &combos,
+        );
         let report = build_duel_report(&options, DuelTally::default(), Vec::new());
 
         assert_eq!(report["candidate_difficulty"], "Hard");
@@ -2033,7 +2067,14 @@ mod tests {
 
     #[test]
     fn the_duel_report_carries_the_tally_and_the_measured_play_split() {
-        let options = duel_options("deck0", "deck1", AiDifficulty::Medium, AiDifficulty::Medium);
+        let combos = ComboTable::default();
+        let options = duel_options(
+            "deck0",
+            "deck1",
+            AiDifficulty::Medium,
+            AiDifficulty::Medium,
+            &combos,
+        );
         let tally = DuelTally {
             p0_wins: 3,
             p1_wins: 1,

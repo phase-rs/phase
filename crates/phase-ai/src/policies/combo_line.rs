@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn reachable_lines_memo_never_changes_the_verdict() {
         let policy = ComboLinePolicy::new();
-        let state = make_state();
+        let (state, heliod_id, ballista_id) = heliod_ballista_state();
         let config = create_config(AiDifficulty::CEDH, Platform::Native);
         let context = context_with_plans(
             &state,
@@ -467,8 +467,11 @@ mod tests {
             &[(PlayerId(0), default_deck_plan())],
         );
         let candidate = CandidateAction {
-            action: GameAction::PassPriority,
-            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+            action: GameAction::ActivateAbility {
+                source_id: heliod_id,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
         };
         let decision = engine::ai_support::AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
@@ -476,31 +479,51 @@ mod tests {
         };
         let ctx = make_context(&state, &candidate, &decision, &config, &context);
 
-        let warm = policy.verdict(&ctx);
-        context
-            .session
-            .reachable_lines_cache
-            .write()
-            .unwrap()
-            .clear();
         let cold = policy.verdict(&ctx);
+        let warm = policy.verdict(&ctx);
 
-        match (warm, cold) {
+        match (&cold, &warm) {
             (
-                PolicyVerdict::Score {
-                    delta: warm_delta,
-                    reason: warm_reason,
-                },
                 PolicyVerdict::Score {
                     delta: cold_delta,
                     reason: cold_reason,
                 },
+                PolicyVerdict::Score {
+                    delta: warm_delta,
+                    reason: warm_reason,
+                },
             ) => {
+                assert_eq!(
+                    *cold_delta, config.policy_penalties.combo_progress_this_turn_bonus,
+                    "the cold lookup must exercise the positive combo path"
+                );
                 assert_eq!(warm_delta, cold_delta);
                 assert_eq!(warm_reason.kind, cold_reason.kind);
                 assert_eq!(warm_reason.facts, cold_reason.facts);
             }
             verdicts => panic!("expected two Score verdicts, got {verdicts:?}"),
+        }
+
+        let mut changed_state = state.clone();
+        changed_state.objects.remove(&ballista_id);
+        changed_state.battlefield.retain(|&id| id != ballista_id);
+        let changed_decision = engine::ai_support::AiDecisionContext {
+            waiting_for: changed_state.waiting_for.clone(),
+            candidates: vec![candidate.clone()],
+        };
+        let changed_ctx = make_context(
+            &changed_state,
+            &candidate,
+            &changed_decision,
+            &config,
+            &context,
+        );
+        match policy.verdict(&changed_ctx) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(delta, 0.0, "removing Ballista must break the combo line");
+                assert_eq!(reason.kind, "combo_line_no_match");
+            }
+            other => panic!("expected changed state to return Score, got {other:?}"),
         }
     }
 }

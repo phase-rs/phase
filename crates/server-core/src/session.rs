@@ -2095,15 +2095,7 @@ impl SessionManager {
         player_token: &str,
         action: GameAction,
     ) -> Result<ActionResult, String> {
-        // This transport has no runtime data artifacts; an explicit default
-        // keeps combo coverage unmeasured if a seat mutation reaches it.
-        self.handle_action_with_card_db(
-            game_code,
-            player_token,
-            action,
-            None,
-            &ComboTable::default(),
-        )
+        self.handle_action_with_card_db(game_code, player_token, action, None)
     }
 
     /// Handle a game action whose transport can resolve debug card names through
@@ -2116,9 +2108,8 @@ impl SessionManager {
         player_token: &str,
         action: GameAction,
         card_db: Option<&CardDatabase>,
-        combos: &ComboTable,
     ) -> Result<ActionResult, String> {
-        self.handle_action_with_card_db_outcome(game_code, player_token, action, card_db, combos)
+        self.handle_action_with_card_db_outcome(game_code, player_token, action, card_db)
             .map_err(SessionActionError::into_legacy_reason)
     }
 
@@ -2132,7 +2123,6 @@ impl SessionManager {
         player_token: &str,
         action: GameAction,
         card_db: Option<&CardDatabase>,
-        _combos: &ComboTable,
     ) -> Result<ActionResult, SessionActionError> {
         let session = self
             .sessions
@@ -4305,13 +4295,7 @@ mod tests {
             .unwrap();
 
         let result = mgr
-            .handle_action_with_card_db_outcome(
-                &code,
-                &other_token,
-                GameAction::PassPriority,
-                None,
-                &ComboTable::default(),
-            )
+            .handle_action_with_card_db_outcome(&code, &other_token, GameAction::PassPriority, None)
             .expect_err("action should be rejected while a takeback is pending");
         assert!(matches!(
             result,
@@ -5417,7 +5401,6 @@ mod tests {
                     nonlegendary: false,
                 }),
                 Some(&*db),
-                &ComboTable::default(),
             )
             .expect("server transport resolves a debug CreateCard batch through its card database");
 
@@ -6311,7 +6294,6 @@ mod tests {
                     nonlegendary: false,
                 }),
                 None,
-                &ComboTable::default(),
             )
             .expect_err("revoked guests cannot reach the server CreateCard path");
         assert_eq!(err, "You are not authorized to use debug actions.");
@@ -7079,7 +7061,6 @@ mod tests {
                 controller_damage: 0,
             },
             None,
-            &ComboTable::default(),
         );
         match illegal {
             Err(SessionActionError::Rejected(rejection)) => assert_eq!(
@@ -7211,7 +7192,6 @@ mod tests {
                 bands: vec![],
             },
             None,
-            &ComboTable::default(),
         );
         assert!(
             matches!(

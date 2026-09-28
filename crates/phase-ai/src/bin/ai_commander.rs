@@ -52,7 +52,9 @@ use std::panic::PanicHookInfo;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use engine::database::{CardDatabase, ComboTable};
+use engine::database::CardDatabase;
+#[cfg(test)]
+use engine::database::ComboTable;
 use engine::game::bracket_estimate::{CommanderBracketTier, ACCEPTED_BRACKET_LABELS};
 use engine::game::deck_loading::{
     load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
@@ -66,8 +68,9 @@ use phase_ai::auto_play::{run_driver_loop, DriverExit};
 use phase_ai::config::{
     create_config_for_players, AiConfig, AiDifficulty, Platform, ACCEPTED_DIFFICULTY_LABELS,
 };
+use phase_ai::harness_combo_table;
 use phase_ai::pod::feed::load_commander_decks;
-use phase_ai::pod::report::{self, PodGameRow, PodReport, PodSeatConfig};
+use phase_ai::pod::report::{self, PodComboTable, PodGameRow, PodReport, PodSeatConfig};
 use phase_ai::pod::{
     censored_observation, finish_measurement, pre_screen_measurement, PodEvidence, PodMeasurement,
     PodObservation, SeatCoverage,
@@ -448,18 +451,12 @@ fn run(cli: CliArgs) -> i32 {
             std::process::exit(1);
         }
     };
-    let combos = match combo_table {
-        Some(path) => match std::fs::read_to_string(&path)
-            .map_err(|error| error.to_string())
-            .and_then(|raw| ComboTable::from_json_str(&raw).map_err(|error| error.to_string()))
-        {
-            Ok(table) => table,
-            Err(error) => {
-                eprintln!("failed to load {}: {error}", path.display());
-                return 1;
-            }
-        },
-        None => ComboTable::default(),
+    let combos = match harness_combo_table::load(combo_table.as_deref()) {
+        Ok(table) => table,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
     };
 
     println!("=== 4-player Commander AI test ===");
@@ -487,14 +484,7 @@ fn run(cli: CliArgs) -> i32 {
         RunContext::Interactive => println!("ExecutionMode: interactive"),
         RunContext::Measurement => println!("ExecutionMode: measurement"),
     }
-    match combos.provenance() {
-        Some(provenance) => println!(
-            "combo table: {}, {} entries",
-            provenance.snapshot_date,
-            combos.len()
-        ),
-        None => println!("combo table: unmeasured"),
-    }
+    harness_combo_table::print_provenance(&combos);
 
     let cards_root = PathBuf::from(&cards_path);
     let feed_decks = if seat_overrides.iter().any(|seat| seat.deck.is_none()) {
@@ -549,6 +539,17 @@ fn run(cli: CliArgs) -> i32 {
         ..Default::default()
     };
     let payload: DeckPayload = resolve_deck_list(&db, &combos, &deck_list);
+    let mut resolved_state = GameState::new(FormatConfig::commander(), 4, seed);
+    load_and_hydrate_decks(&mut resolved_state, &payload, Some(&db));
+    let effective_tiers: [CommanderBracketTier; 4] = std::array::from_fn(|index| {
+        resolved_state
+            .deck_pools
+            .iter()
+            .find(|pool| pool.player == PlayerId(index as u8))
+            .expect("resolved Commander payload creates one pool per seat")
+            .effective_bracket_tier()
+            .tier()
+    });
 
     let (seat_coverage, pre_screen_shortfall) = pre_screen_decks(&db, &deck_lists, coverage_floor);
     let report_difficulty = batch_games
@@ -561,7 +562,16 @@ fn run(cli: CliArgs) -> i32 {
             .difficulty
             .unwrap_or(report_difficulty),
         tier: deck_lists[index].bracket_tier,
+        effective_tier: Some(effective_tiers[index]),
     });
+    let report_combo_table = combos
+        .provenance()
+        .map_or(PodComboTable::Unmeasured, |provenance| {
+            PodComboTable::Measured {
+                snapshot_date: provenance.snapshot_date.clone(),
+                table_version: provenance.table_version.clone(),
+            }
+        });
 
     // Post-resolution deck-count line (plan §3.9): `resolve_deck_list` silently
     // skips any name the card database doesn't recognize, so the pre-resolution
@@ -641,6 +651,7 @@ fn run(cli: CliArgs) -> i32 {
                 &["hash-object", export_path.to_string_lossy().as_ref()],
             ),
             artifact_feed_label(&feed),
+            report_combo_table,
             seat_configs,
             report_seeds,
             report_rows,

@@ -19,6 +19,12 @@ const DIFFICULTY_FIELDS: [&str; 4] = [
     "seat3_difficulty",
 ];
 const TIER_FIELDS: [&str; 4] = ["seat0_tier", "seat1_tier", "seat2_tier", "seat3_tier"];
+const EFFECTIVE_TIER_FIELDS: [&str; 4] = [
+    "seat0_effective_tier",
+    "seat1_effective_tier",
+    "seat2_effective_tier",
+    "seat3_effective_tier",
+];
 const DECK_FIELDS: [&str; 4] = ["seat0_deck", "seat1_deck", "seat2_deck", "seat3_deck"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +32,21 @@ pub struct PodSeatConfig {
     pub label: String,
     pub difficulty: AiDifficulty,
     pub tier: CommanderBracketTier,
+    #[serde(default)]
+    pub effective_tier: Option<CommanderBracketTier>,
+}
+
+/// Combo-table identity that can affect the estimator floor and therefore AI
+/// policy activation. `PodReport::combo_table` wraps this in `Option` solely to
+/// distinguish legacy reports that did not record the configuration at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "measurement", rename_all = "snake_case")]
+pub enum PodComboTable {
+    Unmeasured,
+    Measured {
+        snapshot_date: String,
+        table_version: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +56,8 @@ pub struct PodReport {
     pub card_data_hash: String,
     pub feed: String,
     pub coverage_authority: String,
+    #[serde(default)]
+    pub combo_table: Option<PodComboTable>,
     pub seats: [PodSeatConfig; 4],
     pub seeds: Vec<u64>,
     pub games: Vec<PodGameRow>,
@@ -69,6 +92,7 @@ impl PodReport {
         git_sha: String,
         card_data_hash: String,
         feed: String,
+        combo_table: PodComboTable,
         seats: [PodSeatConfig; 4],
         seeds: Vec<u64>,
         games: Vec<PodGameRow>,
@@ -80,6 +104,7 @@ impl PodReport {
             card_data_hash,
             feed,
             coverage_authority: COVERAGE_AUTHORITY.to_string(),
+            combo_table: Some(combo_table),
             seats,
             seeds,
             games,
@@ -128,6 +153,7 @@ pub fn compare(baseline: &PodReport, current: &PodReport) -> Result<PodCompariso
             current: current.schema_version,
         });
     }
+    guard_combo_table(&baseline.combo_table, &current.combo_table)?;
     guard(
         "seeds",
         baseline
@@ -155,6 +181,11 @@ pub fn compare(baseline: &PodReport, current: &PodReport) -> Result<PodCompariso
             TIER_FIELDS[index],
             baseline_seat.tier.to_string(),
             current_seat.tier.to_string(),
+        )?;
+        guard_optional_effective_tier(
+            EFFECTIVE_TIER_FIELDS[index],
+            baseline_seat.effective_tier,
+            current_seat.effective_tier,
         )?;
         guard(
             DECK_FIELDS[index],
@@ -222,6 +253,53 @@ fn guard(field: &'static str, baseline: String, current: String) -> Result<(), C
     }
 }
 
+fn guard_combo_table(
+    baseline: &Option<PodComboTable>,
+    current: &Option<PodComboTable>,
+) -> Result<(), CompareError> {
+    const FIELD: &str = "combo_table_provenance";
+    let render = |value: &PodComboTable| match value {
+        PodComboTable::Unmeasured => "unmeasured".to_string(),
+        PodComboTable::Measured {
+            snapshot_date,
+            table_version,
+        } => format!("snapshot={snapshot_date}, version={table_version}"),
+    };
+    match (baseline, current) {
+        (Some(baseline), Some(current)) => guard(FIELD, render(baseline), render(current)),
+        (baseline, current) => Err(CompareError::WorkloadMismatch {
+            field: FIELD,
+            baseline: baseline
+                .as_ref()
+                .map_or_else(|| "unknown (re-record the baseline)".to_string(), &render),
+            current: current
+                .as_ref()
+                .map_or_else(|| "unknown (re-record the baseline)".to_string(), render),
+        }),
+    }
+}
+
+fn guard_optional_effective_tier(
+    field: &'static str,
+    baseline: Option<CommanderBracketTier>,
+    current: Option<CommanderBracketTier>,
+) -> Result<(), CompareError> {
+    match (baseline, current) {
+        (Some(baseline), Some(current)) => guard(field, baseline.to_string(), current.to_string()),
+        (baseline, current) => Err(CompareError::WorkloadMismatch {
+            field,
+            baseline: baseline.map_or_else(
+                || "unknown (re-record the baseline)".to_string(),
+                |tier| tier.to_string(),
+            ),
+            current: current.map_or_else(
+                || "unknown (re-record the baseline)".to_string(),
+                |tier| tier.to_string(),
+            ),
+        }),
+    }
+}
+
 fn rows_by_seed(
     side: ReportSide,
     games: &[PodGameRow],
@@ -277,11 +355,13 @@ mod tests {
             label: label.to_string(),
             difficulty: AiDifficulty::Easy,
             tier: seat_tier,
+            effective_tier: Some(seat_tier),
         };
         PodReport::new(
             "sha".to_string(),
             "hash".to_string(),
             "feed.json".to_string(),
+            PodComboTable::Unmeasured,
             [
                 seat("A", CommanderBracketTier::Core),
                 seat("B", tier),
@@ -320,6 +400,71 @@ mod tests {
             }
         ));
         assert!(!refusal_markdown(&error).is_empty());
+    }
+
+    #[test]
+    fn compare_refuses_on_a_seat_effective_tier_change() {
+        let baseline = report(CommanderBracketTier::Core);
+        let mut current = report(CommanderBracketTier::Core);
+        current.seats[1].effective_tier = Some(CommanderBracketTier::Optimized);
+        let error = compare(&baseline, &current).expect_err("effective tier change must refuse");
+        assert!(matches!(
+            error,
+            CompareError::WorkloadMismatch {
+                field: "seat1_effective_tier",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compare_refuses_legacy_unknown_effective_tier() {
+        let mut baseline = report(CommanderBracketTier::Core);
+        baseline.seats[1].effective_tier = None;
+        let error = compare(&baseline, &report(CommanderBracketTier::Core))
+            .expect_err("legacy effective tier must require a new baseline");
+        assert!(matches!(
+            &error,
+            CompareError::WorkloadMismatch {
+                field: "seat1_effective_tier",
+                baseline,
+                ..
+            } if baseline.contains("re-record")
+        ));
+    }
+
+    #[test]
+    fn compare_refuses_legacy_unknown_combo_provenance() {
+        let mut baseline = report(CommanderBracketTier::Core);
+        baseline.combo_table = None;
+        let error = compare(&baseline, &report(CommanderBracketTier::Core))
+            .expect_err("legacy provenance must require a new baseline");
+        assert!(matches!(
+            &error,
+            CompareError::WorkloadMismatch {
+                field: "combo_table_provenance",
+                baseline,
+                ..
+            } if baseline.contains("re-record")
+        ));
+    }
+
+    #[test]
+    fn compare_refuses_combo_provenance_change() {
+        let baseline = report(CommanderBracketTier::Core);
+        let mut current = report(CommanderBracketTier::Core);
+        current.combo_table = Some(PodComboTable::Measured {
+            snapshot_date: "2026-09-27".to_string(),
+            table_version: "2".to_string(),
+        });
+        let error = compare(&baseline, &current).expect_err("provenance change must refuse");
+        assert!(matches!(
+            error,
+            CompareError::WorkloadMismatch {
+                field: "combo_table_provenance",
+                ..
+            }
+        ));
     }
 
     #[test]
