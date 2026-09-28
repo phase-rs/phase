@@ -285,6 +285,15 @@ fn complete_cost_payment(
                     state, player, pending, events,
                 );
             }
+            // CR 601.2f + CR 601.2h: collect evidence paid as a compound
+            // alternative cost's residual leaves the cast's other committed
+            // costs on the pending (an imposed tax for a spell targeting Terror
+            // of the Peaks); continue through the pending so they are paid.
+            if super::super::casting_costs::pending_carries_unpaid_committed_costs(&pending) {
+                return super::super::casting_costs::finish_pending_cost_or_cast(
+                    state, player, pending, events,
+                );
+            }
             let base_cost = pending.base_cost.clone();
             let lock = super::super::casting_costs::CostLockInput::from_pending(&pending);
             super::super::casting_costs::pay_and_push_with_lock(

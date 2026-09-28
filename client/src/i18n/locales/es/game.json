@@ -1958,6 +1958,8 @@
     "additionalExile": "+ Exiliar una carta",
     "additionalSacrifice": "+ Sacrificar un permanente",
     "additionalPayLife": "+ Pagar vidas",
+    "additionalPayLifeAmount": "+ Pagar {{amount}} vidas",
+    "additionalCollectEvidence": "+ Reunir pruebas {{amount}}",
     "additionalDiscard": "+ Descartar una carta",
     "additionalTapCreatures": "+ Girar criaturas",
     "additionalGeneric": "+ {{type}}"
@@ -2085,6 +2087,7 @@
     "variantForetell": "Lanzar desde Predecir",
     "variantOverload": "Lanzar con Sobrecargar",
     "variantBestow": "Lanzar con Otorgar",
+    "variantBlitz": "Lanzar con Blitz",
     "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
     "variantMutate": "Lanzar con Mutate",
@@ -2094,7 +2097,14 @@
     "variantMoreThanMeetsTheEye": "Cast Converted",
     "variantPrototype": "Lanzar con Prototipo",
     "variantFaceDown": "Lanzar boca abajo",
-    "variantFallback": "Lanzar con {{type}}"
+    "variantFallback": "Lanzar con {{type}}",
+    "viaSource": "mediante {{name}}",
+    "extraCostAdditional": "+ {{cost}}",
+    "extraCostAlternative": "en lugar de su coste de maná: {{cost}}",
+    "entersWithCounter": "entra con un contador de {{counter}}",
+    "slotPerType": "usa su espacio de {{type}}",
+    "slotChooseType": "elige un tipo de permanente",
+    "slotOncePerTurn": "una vez este turno"
   },
   "categoryChoice": {
     "title": "Elegir permanentes a conservar",
