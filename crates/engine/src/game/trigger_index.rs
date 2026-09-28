@@ -696,6 +696,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::DieRolled { .. } | GameEvent::CoinFlipped { .. } => {
             push(TriggerEventKey::DieOrCoin);
         }
+        // CR 706.6: an ignored (dropped) die is display-only, never a rules
+        // roll — "whenever you roll a die" must not see it, so no key.
+        GameEvent::DieRollIgnored { .. } => {}
         GameEvent::RingTemptsYou { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);

@@ -4797,8 +4797,18 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
         life_before,
         "neither the later life cost nor the rider may run before the typed mana root settles"
     );
+    assert!(
+        runner.state().payment_transaction.is_some(),
+        "the canonical state keeps the staged payment descriptor"
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the canonical state remains pre-payment while the composite is paused"
+    );
+    let shadow = engine::game::staged_payment_shadow_for_test(runner.state());
+    assert!(shadow.payment_transaction.is_none());
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        shadow.pending_cost_move_resume.as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }
@@ -4829,6 +4839,15 @@ fn effect_pay_cost_composite_mana_life_suffix_serializes_and_rides_once() {
             .count(),
         1,
         "the source's paid tap prefix is never replayed"
+    );
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::LifeChanged { amount: 1, .. }))
+            .count(),
+        1,
+        "the rider resumes exactly once after the unpaid suffix"
     );
     assert!(runner.state().pending_cost_move_resume.is_none());
 }
@@ -8793,12 +8812,16 @@ fn nested_composite_effect_cost_serializes_all_suffixes_and_rider_once() {
     let mut initial_events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
         .expect("the nested cost reaches the source's replacement pause");
+    assert!(runner.state().payment_transaction.is_some());
+    assert!(runner.state().pending_cost_move_resume.is_none());
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
     assert!(matches!(
-        runner.state().pending_cost_move_resume.as_ref(),
+        engine::game::staged_payment_shadow_for_test(runner.state())
+            .pending_cost_move_resume
+            .as_ref(),
         Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) if matches!(
             &pending.resume,
             ManaAbilityResume::EffectPayCost { cost: paused_cost, .. }

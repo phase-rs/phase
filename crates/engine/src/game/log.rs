@@ -491,6 +491,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CityBlessingGained { .. }
         | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
+        | GameEvent::DieRollIgnored { .. }
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
@@ -565,6 +566,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::SpeedChanged { .. }
         | GameEvent::ArmyAmassed { .. }
         | GameEvent::DieRolled { .. }
+        | GameEvent::DieRollIgnored { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::Firebend { .. }
@@ -998,6 +1000,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CityBlessingGained { .. }
         | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
+        | GameEvent::DieRollIgnored { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
@@ -1870,6 +1873,21 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             // CR 901.9d / CR 706.7: the symbolic planar die has no numeric face.
             None => vec![player_seg(state, *player_id), text(" rolls the planar die")],
         },
+
+        // CR 706.6: the ignored roll's natural value, for display only. The
+        // ignored roll never happened rules-wise; this line narrates what the
+        // lowest roll was so the replacement is visible.
+        GameEvent::DieRollIgnored {
+            player_id,
+            sides,
+            result,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" ignores the lowest d"),
+            num(*sides as i32),
+            text(" roll: "),
+            num(*result as i32),
+        ],
 
         GameEvent::CoinFlipped { player_id, won } => vec![
             player_seg(state, *player_id),

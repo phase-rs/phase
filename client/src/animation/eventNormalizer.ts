@@ -47,6 +47,9 @@ const NON_VISUAL_EVENTS = new Set([
   // Dice/coin are presented out-of-band by DiceRollOverlay (via flashDiceRoll),
   // not as queued animation steps — same pattern as TurnStarted → the turn banner.
   "DieRolled",
+  // CR 706.6: ignored rolls ride the same overlay as the survivors they were
+  // dropped from — never a queued step of their own.
+  "DieRollIgnored",
   "StartingPlayerContest",
   "CoinFlipped",
 ]);

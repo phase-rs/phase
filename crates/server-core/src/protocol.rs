@@ -3319,19 +3319,18 @@ mod tests {
     }
 
     /// `GraveyardCastPermission.required_cast_keyword` (CR 118.9b) is new in
-    /// serialized full-game state; a v84 peer would drop it silently and admit
+    /// serialized full-game state; a v85 peer would drop it silently and admit
     /// a printed-cost graveyard cast the permission forbids, so it must be
-    /// refused before it receives v85 state. The preceding v84 bump gave
-    /// `WaitingFor::ChooseDungeon` options required `card`, `rooms`, and
-    /// `room_count` fields, which a v83 peer cannot decode.
+    /// refused before it receives v86 state. The preceding v85 bump let
+    /// `StateUpdate.events` carry the tagged `DieRollIgnored` display event.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_85_for_graveyard_cast_methods() {
-        assert_eq!(PROTOCOL_VERSION, 85);
+    fn protocol_version_is_86_for_graveyard_cast_methods() {
+        assert_eq!(PROTOCOL_VERSION, 86);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3342,7 +3341,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_85_for_graveyard_cast_methods` stays
+    /// `protocol_version_is_86_for_graveyard_cast_methods` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

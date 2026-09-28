@@ -974,6 +974,8 @@ pub struct ClientGameStateRef<'a> {
     pub state: &'a GameState,
     pub derived: DerivedViews,
     display_visible_object_ids: Option<BTreeSet<ObjectId>>,
+    viewer: Option<PlayerId>,
+    already_filtered: bool,
 }
 
 impl Serialize for ClientGameStateRef<'_> {
@@ -987,8 +989,13 @@ impl Serialize for ClientGameStateRef<'_> {
             derived: &'a DerivedViews,
         }
 
-        let state = client_state_wire_value(self.state, self.display_visible_object_ids.as_ref())
-            .map_err(serde::ser::Error::custom)?;
+        let state = client_state_wire_value(
+            self.state,
+            self.display_visible_object_ids.as_ref(),
+            self.viewer,
+            self.already_filtered,
+        )
+        .map_err(serde::ser::Error::custom)?;
         ClientGameStateEnvelope {
             state: &state,
             derived: &self.derived,
@@ -1004,12 +1011,33 @@ impl Serialize for ClientGameStateRef<'_> {
 fn client_state_wire_value(
     state: &GameState,
     display_visible_object_ids: Option<&BTreeSet<ObjectId>>,
+    viewer: Option<PlayerId>,
+    already_filtered: bool,
 ) -> serde_json::Result<serde_json::Value> {
-    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    // CR 601.2h + CR 608.2c: direct client snapshots must pass through the
+    // same identity/knowledge redaction as the filtered-viewer path. An
+    // unscoped wire has no authenticated actor, so it must keep the canonical
+    // base and never materialize a staged shadow; wrap_filtered has already
+    // performed the viewer projection.
+    let payment_projected = match (viewer, already_filtered) {
+        (Some(viewer), false) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+        (Some(_), true) => state.clone(),
+        (None, false) => crate::game::visibility::filter_state_for_unseated_viewer(state),
+        (None, true) => state.clone(),
+    };
+    let projected_state =
+        crate::game::visibility::project_paid_cast_cleanup_authority(&payment_projected);
     let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
     };
+
+    // This JSON-only marker records provenance for persistence ingress. It is
+    // intentionally not a `GameState` field: client projections remain
+    // transportable, but a projection must never be accepted as a trusted
+    // restore authority. A positive marker avoids inferring provenance from
+    // mutable redaction lists or from private execution carriers.
+    root.insert("wire_projection".to_string(), serde_json::Value::Bool(true));
 
     if let Some(display_visible_object_ids) = display_visible_object_ids {
         if let Some(objects) = root
@@ -1091,23 +1119,24 @@ impl<'a> ClientGameStateRef<'a> {
     /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
     /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
-        let filtered_state =
-            viewer.map(|viewer| crate::game::visibility::filter_state_for_viewer(state, viewer));
-        let display_visible_object_ids = filtered_state.as_ref().map(|filtered| {
-            filtered
+        let filtered_state = match viewer {
+            Some(viewer) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+            None => crate::game::visibility::filter_state_for_unseated_viewer(state),
+        };
+        let display_visible_object_ids = Some(
+            filtered_state
                 .objects
                 .iter()
                 .filter_map(|(id, object)| object.display_visible_to_viewer.then_some(*id))
-                .collect()
-        });
-        let mut derived = derive_views(state, viewer);
-        if let Some(filtered) = filtered_state.as_ref() {
-            derived.visible_exile_object_ids = visible_exile_object_ids(filtered);
-        }
+                .collect(),
+        );
+        let derived = derive_filtered_views(state, &filtered_state, viewer);
         Self {
             state,
             derived,
             display_visible_object_ids,
+            viewer,
+            already_filtered: false,
         }
     }
 
@@ -1123,6 +1152,8 @@ impl<'a> ClientGameStateRef<'a> {
             state: filtered_state,
             derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
             display_visible_object_ids: None,
+            viewer,
+            already_filtered: true,
         }
     }
 }
@@ -5309,7 +5340,7 @@ mod tests {
                 source_id: trigger_source,
                 ability: Box::new(ability),
                 condition: None,
-                trigger_event: Some(trigger_event),
+                trigger_event: Some(trigger_event.clone()),
                 description: Some("hidden-zone trigger".to_string()),
                 source_name: "Watcher".to_string(),
                 subject_match_count: None,
@@ -5335,6 +5366,29 @@ mod tests {
             "trigger context must not bypass multiplayer hidden-card filtering"
         );
         assert!(label.contains("Hidden Card"));
+
+        // CR 400.2 + CR 402.3: each serialized event carrier and its derived
+        // display must honor the same hidden-object decision for seated and
+        // unseated observers.
+        state
+            .stack_trigger_event_batches
+            .insert(ObjectId(900), vec![trigger_event.clone()]);
+        state.resolving_stack_entry = state.stack.front().cloned();
+        state.current_trigger_event = Some(trigger_event.clone());
+        state.current_trigger_events.push(trigger_event);
+        for viewer in [None, Some(PlayerId(0))] {
+            let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer))
+                .expect("serialize client envelope");
+            assert!(
+                !wire.to_string().contains("Secret Card"),
+                "client envelope must not reveal the library card to {viewer:?}"
+            );
+            let wire_label = wire["derived"]["stack_entry_details"]["900"]["trigger_context"][0]
+                ["label"]
+                .as_str()
+                .expect("serialized trigger context label");
+            assert!(wire_label.contains("Hidden Card"));
+        }
     }
 
     /// Wire-format round-trip: the JSON produced from `ClientGameStateRef`

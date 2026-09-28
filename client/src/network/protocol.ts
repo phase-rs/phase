@@ -106,10 +106,14 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  67 — game_setup and state_update carry GameState, whose graveyard cast
+ *  68 — game_setup and state_update carry GameState, whose graveyard cast
  *       permissions can now require a casting method (required_cast_keyword),
  *       and casting-menu options carry the non-mana part of their cost
- *       (additional_cost). Bumped in lockstep with full-game protocol 85.
+ *       (additional_cost). Bumped in lockstep with full-game protocol 86.
+ *  67 — game_setup and state_update carry GameEvent[] and can now carry
+ *       DieRollIgnored { player_id, sides, result }. Older peers omit ignored
+ *       dice from the roll overlay; the exact-match first-contact gate rejects
+ *       the skew. Bumped in lockstep with full-game protocol 85.
  *  66 — WaitingFor.ChooseDungeon options gained required `card`, `rooms`, and
  *       `room_count`: the whole dungeon behind each choice, so the prompt
  *       previews each card instead of describing only its entry room. A PARSE
@@ -450,7 +454,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 67 as const;
+export const WIRE_PROTOCOL_VERSION = 68 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
