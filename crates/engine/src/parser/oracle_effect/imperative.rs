@@ -1909,7 +1909,7 @@ pub(super) fn parse_targeted_action_ast(
                 (
                     tag::<_, _, OracleError<'_>>(", "),
                     opt(tag("then ")),
-                    verify(rest, |tail: &&str| {
+                    verify(nom::combinator::rest, |tail: &&str| {
                         super::sequence::starts_clause_text_or_conjugated(tail)
                     }),
                 ),
