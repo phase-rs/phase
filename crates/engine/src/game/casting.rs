@@ -4932,6 +4932,21 @@ fn exile_permission_timing_active(
     }
 }
 
+/// CR 114.4 + CR 114.2: emblem abilities function in the command zone, and an
+/// emblem is owned and controlled by the player who got it. Yields every
+/// command-zone emblem owned by `player`, in command-zone order.
+fn owned_command_zone_emblems(
+    state: &GameState,
+    player: PlayerId,
+) -> impl Iterator<Item = ObjectId> + '_ {
+    state.command_zone.iter().copied().filter(move |&id| {
+        state
+            .objects
+            .get(&id)
+            .is_some_and(|obj| obj.is_emblem && obj.owner == player)
+    })
+}
+
 /// CR 601.2a + CR 113.6b: Enumerate every battlefield permanent controlled by
 /// `player`, and every command-zone emblem owned by `player`, whose
 /// `StaticMode::ExileCastPermission` static is currently functioning. The
@@ -4942,20 +4957,11 @@ fn exile_permission_timing_active(
 /// Mirrors `graveyard_permission_sources` for the graveyard family — the
 /// per-source pool then carves out the eligible cards.
 fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePermissionSource<'_>> {
-    // CR 114.4 + CR 114.2: emblem abilities function in the command zone; an
-    // emblem is owned and controlled by the player who got it — mirrors
-    // `graveyard_permission_sources`.
-    let emblems = state.command_zone.iter().copied().filter(|&id| {
-        state
-            .objects
-            .get(&id)
-            .is_some_and(|obj| obj.is_emblem && obj.owner == player)
-    });
     state
         .battlefield
         .iter()
         .copied()
-        .chain(emblems)
+        .chain(owned_command_zone_emblems(state, player))
         .filter_map(|source_id| {
             let obj = state.objects.get(&source_id)?;
             active_static_definitions(state, obj).find_map(|definition| match definition.mode {
@@ -5338,12 +5344,7 @@ fn graveyard_permission_sources(
     play_mode_filter: Option<CardPlayMode>,
 ) -> Vec<GraveyardPermissionSource<'_>> {
     let mut source_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
-    source_ids.extend(state.command_zone.iter().copied().filter(|&id| {
-        state
-            .objects
-            .get(&id)
-            .is_some_and(|obj| obj.is_emblem && obj.owner == player)
-    }));
+    source_ids.extend(owned_command_zone_emblems(state, player));
     if let Some(player_data) = state.players.iter().find(|p| p.id == player) {
         source_ids.extend(player_data.graveyard.iter().copied());
     }

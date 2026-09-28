@@ -1361,7 +1361,7 @@ fn tibalt_back_face_cast_creates_one_emblem_owned_by_caster() {
     let (mut runner, tibalt) = tibalt_scenario(P0, |_| {});
     let outcome = cast_tibalt(&mut runner, tibalt);
 
-    // C5: no ReplacementChoice — the run reaches priority on an empty stack.
+    // No ReplacementChoice — the run reaches priority on an empty stack.
     assert!(matches!(
         outcome.final_waiting_for(),
         WaitingFor::Priority { .. }
@@ -1371,7 +1371,7 @@ fn tibalt_back_face_cast_creates_one_emblem_owned_by_caster() {
     let object = &state.objects[&tibalt];
     assert_eq!(object.zone, Zone::Battlefield);
     assert_eq!(object.name, "Tibalt, Cosmic Impostor");
-    // B9 / CR 306.5b: enters with its printed loyalty.
+    // CR 306.5b: enters with its printed loyalty.
     assert_eq!(object.loyalty, Some(5));
 
     // CR 114.2: only "you" gets the emblem.
@@ -1400,7 +1400,7 @@ fn tibalt_back_face_cast_creates_one_emblem_owned_by_caster() {
         }
     );
     assert!(permission.active_zones.contains(&Zone::Command));
-    // P3: the latched creator is the Tibalt object now on the battlefield.
+    // CR 607.1d: the latched creator is the Tibalt object now on the battlefield.
     assert_eq!(
         emblem.linked_ability_source,
         Some(ObjectIncarnationRef::from_object(object))
@@ -1422,7 +1422,7 @@ fn tibalt_back_face_cast_creates_one_emblem_owned_by_caster() {
     );
 }
 
-/// B9 reach-guard (CR 712.8f): casting the front face consults only Valki's
+/// Reach-guard (CR 712.8f): casting the front face consults only Valki's
 /// abilities — its ETB trigger fires and no emblem is created.
 #[test]
 fn valki_front_face_cast_creates_no_emblem() {
@@ -1507,7 +1507,7 @@ fn as_enters_one_shot_life_gain_applies_as_permanent_enters() {
 /// The +2 fixture: library tops are a {1}{G} creature (P0), a {2} instant (P1)
 /// and a basic Forest (P2); P1 and P2 each hold a {2} instant and two mana, so a
 /// grantee negative is not a mana failure. P0 holds the helper spells the
-/// hostile rows cast; P1 holds an instant-speed removal spell.
+/// hostile tests cast; P1 holds an instant-speed removal spell.
 struct PlusTwoFixture {
     runner: GameRunner,
     tibalt: ObjectId,
@@ -1628,7 +1628,7 @@ fn tibalt_plus_two_cards_playable_only_by_emblem_owner() {
         let object = &fx.runner.state().objects[&card];
         assert_eq!(object.zone, Zone::Exile, "{}", object.name);
         assert!(!object.face_down, "{}", object.name);
-        // B7: the exile recorded Tibalt's own link; the mirror added the emblem's.
+        // Tibalt's exile recorded its own link; the mirror added the emblem's.
         assert!(linked(&fx.runner, card, fx.tibalt), "{}", object.name);
         assert!(linked(&fx.runner, card, fx.emblem), "{}", object.name);
     }
@@ -1659,7 +1659,7 @@ fn tibalt_emblem_still_grants_after_tibalt_dies() {
     cast_spell_targeting(&mut fx.runner, fx.destroy, fx.tibalt);
     assert_eq!(zone(&fx.runner, fx.tibalt), Zone::Graveyard);
 
-    // B5 premise, observed directly.
+    // Premise observed directly: Tibalt's own link is gone, the emblem's remains.
     assert!(!linked(&fx.runner, fx.creature, fx.tibalt));
     assert!(linked(&fx.runner, fx.creature, fx.emblem));
     assert_eq!(
@@ -1771,10 +1771,7 @@ fn tibalt_minus_three_exile_is_playable_via_emblem() {
         .target_object(victim)
         .resolve();
     assert_eq!(zone(&runner, victim), Zone::Exile);
-    assert!(
-        linked(&runner, victim, tibalt),
-        "B7 reach: Tibalt's own link"
-    );
+    assert!(linked(&runner, victim, tibalt), "reach: Tibalt's own link");
     assert!(linked(&runner, victim, emblem));
     add_pool(&mut runner, P0, &[ManaType::Colorless, ManaType::Colorless]);
     assert!(can_cast(&runner, P0, victim));

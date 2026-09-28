@@ -73064,7 +73064,7 @@ fn standalone_mana_spend_concession_is_a_gap() {
 /// Tibalt, Cosmic Impostor's emblem clause, verbatim (full self-reference).
 const TIBALT_EMBLEM_CLAUSE: &str = "you get an emblem with \"You may play cards exiled with Tibalt, Cosmic Impostor, and you may spend mana as though it were mana of any color to cast those spells.\"";
 
-/// Row 4f's normalized clause with the one-word substitution "spend mana" →
+/// Tibalt's normalized emblem clause with the one-word substitution "spend mana" →
 /// "spend white mana": a single-kind concession inside the emblem's quotes.
 const SINGLE_KIND_EMBLEM_CLAUSE: &str = "you get an emblem with \"You may play cards exiled with ~, and you may spend white mana as though it were mana of any color to cast those spells.\"";
 

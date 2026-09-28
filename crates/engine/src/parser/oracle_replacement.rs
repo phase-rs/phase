@@ -9947,7 +9947,7 @@ pub(crate) fn parse_as_enters_one_shot_replacement(
 /// CR 614.12a: a choice made as a permanent enters belongs to the as-enters
 /// choice arms. No choice-bearing kind is admitted.
 ///
-/// Allowlist: a kind is admitted only with a runtime row under the drain
+/// Allowlist: a kind is admitted only with a runtime test under the drain
 /// (`CreateEmblem`, `LoseLife`, `GainLife`). Unimplemented, conditional,
 /// optional and non-admitted bodies decline so coverage stays honest.
 fn as_enters_one_shot_is_admissible(execute: &AbilityDefinition) -> bool {
@@ -26668,7 +26668,7 @@ mod tests {
         ));
     }
 
-    /// T3f-1 (population): "destroy all creatures" would include the entrant in
+    /// Population: "destroy all creatures" would include the entrant in
     /// the post-entry drain.
     #[test]
     fn as_enters_one_shot_declines_population_destroy() {
@@ -26679,7 +26679,7 @@ mod tests {
         );
     }
 
-    /// T3f-2 (population): a counter on each creature you control would include
+    /// Population: a counter on each creature you control would include
     /// the entrant.
     #[test]
     fn as_enters_one_shot_declines_population_counters() {
@@ -26693,7 +26693,7 @@ mod tests {
         );
     }
 
-    /// T3f-3 (target): CR 115.1 — a replacement declares no target.
+    /// Target: CR 115.1 — a replacement declares no target.
     #[test]
     fn as_enters_one_shot_declines_targeted_body() {
         let body = assert_declined_with_twin("As ~ enters, destroy target artifact.", P_LOSE);
@@ -26709,7 +26709,7 @@ mod tests {
         );
     }
 
-    /// T3f-4 (entrant): a modification of the entering permanent belongs to the
+    /// Entrant: a modification of the entering permanent belongs to the
     /// counters / enters-with arms.
     #[test]
     fn as_enters_one_shot_declines_entrant_modification() {
@@ -26726,8 +26726,8 @@ mod tests {
         );
     }
 
-    /// T3f-5 (non-admitted player kinds): draw and token creation have no drain
-    /// runtime row, so they stay declined.
+    /// Non-admitted player kinds: draw and token creation have no drain
+    /// runtime test, so they stay declined.
     #[test]
     fn as_enters_one_shot_declines_unadmitted_player_kinds() {
         let draw = assert_declined_with_twin("As ~ enters, draw a card.", P_EMBLEM);
@@ -26739,14 +26739,14 @@ mod tests {
         assert!(matches!(*token.effect, Effect::Token { .. }), "{token:?}");
     }
 
-    /// T3f-6 (choice): CR 614.12a — as-enters choices belong to the choice arms.
+    /// Choice: CR 614.12a — as-enters choices belong to the choice arms.
     #[test]
     fn as_enters_one_shot_declines_choice() {
         let body = assert_declined_with_twin("As ~ enters, choose a color.", P_LOSE);
         assert!(matches!(*body.effect, Effect::Choose { .. }), "{body:?}");
     }
 
-    /// T3f-7 (node leg, condition).
+    /// Node leg: a conditional body declines.
     #[test]
     fn as_enters_one_shot_declines_conditional_body() {
         let body = assert_declined_with_twin(
@@ -26757,7 +26757,7 @@ mod tests {
         assert!(body.condition.is_some(), "{body:?}");
     }
 
-    /// T3f-8 (node leg, optional).
+    /// Node leg: an optional body declines.
     #[test]
     fn as_enters_one_shot_declines_optional_body() {
         let body = assert_declined_with_twin("As ~ enters, you may gain 3 life.", P_GAIN);
@@ -26765,7 +26765,7 @@ mod tests {
         assert!(body.optional, "{body:?}");
     }
 
-    /// T3f-9 (player scope): only "you" is admitted (CR 109.5).
+    /// Player scope: only "you" is admitted (CR 109.5).
     #[test]
     fn as_enters_one_shot_declines_other_players() {
         let body = assert_declined_with_twin("As ~ enters, each opponent loses 2 life.", P_LOSE);
@@ -26778,7 +26778,7 @@ mod tests {
         );
     }
 
-    /// T3f-10 (quantity leg, population read): an object count could count the
+    /// Quantity leg, population read: an object count could count the
     /// entrant in the post-entry drain.
     #[test]
     fn as_enters_one_shot_declines_object_count_amount() {
@@ -26795,7 +26795,7 @@ mod tests {
         );
     }
 
-    /// T3f-11 (emblem trigger): an emblem trigger could observe the entry it is
+    /// Emblem trigger: an emblem trigger could observe the entry it is
     /// created during.
     #[test]
     fn as_enters_one_shot_declines_emblem_with_trigger() {
@@ -26809,7 +26809,7 @@ mod tests {
         assert_eq!(triggers.len(), 1, "{body:?}");
     }
 
-    /// T3f-12 (unimplemented): Working Stiff (verbatim) stays an honest gap.
+    /// Unimplemented body: Working Stiff (verbatim) stays an honest gap.
     #[test]
     fn as_enters_one_shot_declines_unimplemented_body() {
         assert!(one_shot(P_LOSE).is_some(), "positive twin must be admitted");
@@ -26839,7 +26839,7 @@ mod tests {
         );
     }
 
-    /// T3f-13 (quantity leg, entry-sensitive player-axis read): hand size can
+    /// Quantity leg, entry-sensitive player-axis read: hand size can
     /// change with the entry (a card entering from its owner's hand).
     #[test]
     fn as_enters_one_shot_declines_hand_size_amount() {

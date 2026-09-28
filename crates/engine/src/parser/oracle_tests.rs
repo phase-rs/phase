@@ -31667,7 +31667,7 @@ fn tibalt_as_enters_emblem_parses_as_moved_self_replacement() {
     );
 }
 
-/// Gate negative (B2, CR 115.1): Phylactery Lich's as-enters body puts a counter
+/// Gate negative (CR 115.1): Phylactery Lich's as-enters body puts a counter
 /// on an artifact you control — an object effect outside the kind allowlist — so
 /// its frame line keeps its prior `replacement_structure` gap.
 #[test]
@@ -31707,10 +31707,10 @@ fn phylactery_lich_as_enters_object_effect_body_keeps_prior_shape() {
     assert!(parse_as_enters_one_shot_replacement(AS_ENTERS_LOSE_TWO, "Phylactery Lich").is_some());
 }
 
-/// Site A runs before Priority 8. Static-shaped frame lines that a Priority-8
-/// arm claims today (Thief of Blood's population counter removal, Arsenal
-/// Thresher's optional reveal) are declined by the gate and keep their
-/// Priority-8 replacement.
+/// The static-shaped routing site runs before Priority 8. Static-shaped frame
+/// lines that a Priority-8 arm claims today (Thief of Blood's population
+/// counter removal, Arsenal Thresher's optional reveal) are declined by the
+/// gate and keep their Priority-8 replacement.
 #[test]
 fn static_shaped_as_enters_lines_keep_priority_eight_replacement() {
     for (name, oracle, line, description, keywords, types, subtypes) in [
@@ -31749,7 +31749,7 @@ fn static_shaped_as_enters_lines_keep_priority_eight_replacement() {
             "{name}: {:?}",
             moved[0].execute
         );
-        // Reach-guard: site A sees the frame and the gate declines the body.
+        // Reach-guard: the static-shaped routing site sees the frame and the gate declines the body.
         assert!(
             is_as_self_enters_frame(&normalized_lower_frame_line(line, name)),
             "{name}"
@@ -31762,7 +31762,7 @@ fn static_shaped_as_enters_lines_keep_priority_eight_replacement() {
     }
 }
 
-/// B2 admitted face (CR 614.1c + CR 603.6d + CR 119.3): Lich's "As this
+/// Admitted class face (CR 614.1c + CR 603.6d + CR 119.3): Lich's "As this
 /// enchantment enters, you lose life equal to your life total." is a mandatory
 /// `Moved` self replacement losing the controller's life total.
 #[test]
