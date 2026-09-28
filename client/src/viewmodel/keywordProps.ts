@@ -1,5 +1,5 @@
-import type { Keyword } from "../adapter/types";
-import { SHARD_ABBREVIATION } from "./costLabel";
+import type { Keyword, ManaCost } from "../adapter/types";
+import { SHARD_ABBREVIATION, formatKnownCost } from "./costLabel";
 
 /**
  * Standard reminder text for common keywords, keyed by the display name
@@ -311,40 +311,62 @@ export function getKeywordName(kw: Keyword): string {
 /**
  * Format a ManaCost for keyword display.
  *
- * ManaCost uses externally-tagged serde (no #[serde(tag)]):
- *   NoCost      → "NoCost"
- *   SelfManaCost → "SelfManaCost"
- *   SelfManaValue → "SelfManaValue"
- *   Cost { shards, generic } → { "Cost": { "shards": [...], "generic": N } }
+ * ManaCost is internally tagged (`#[serde(tag = "type")]`), e.g.
+ * `{ type: "Cost", shards: ["Red"], generic: 2 }` → "{2}{R}".
  */
-export function formatKeywordManaCost(cost: unknown): string {
-  if (cost === "NoCost") return "{0}";
-  if (cost === "SelfManaCost") return "its mana cost";
-  if (cost === "SelfManaValue") return "its mana value";
-  if (cost && typeof cost === "object") {
-    const inner = (cost as Record<string, { shards?: string[]; generic?: number }>).Cost;
-    if (inner) {
+export function formatKeywordManaCost(cost: ManaCost): string {
+  switch (cost.type) {
+    case "NoCost":
+      return "{0}";
+    case "Cost": {
       const parts: string[] = [];
-      if (inner.generic) parts.push(`{${inner.generic}}`);
-      for (const shard of inner.shards ?? []) {
+      if (cost.generic) parts.push(`{${cost.generic}}`);
+      for (const shard of cost.shards) {
         parts.push(`{${SHARD_ABBREVIATION[shard] ?? shard}}`);
       }
       return parts.join("") || "{0}";
     }
+    case "SelfManaCost":
+      return "its mana cost";
+    case "SelfManaValue":
+      return "its mana value";
+    case "SelfManaCostReduced":
+      return `its mana cost reduced by {${cost.reduction}}`;
   }
-  return "";
 }
 
-/** Keywords parameterized with ManaCost. */
+/** Keywords whose payload is a bare ManaCost. */
 const MANA_COST_KEYWORDS = new Set([
-  "Kicker", "Cycling", "Flashback", "Equip", "Unearth", "Reconfigure",
-  "Bestow", "Embalm", "Eternalize", "Ninjutsu", "Prowl", "Morph",
-  "Megamorph", "Madness", "Dash", "Emerge", "Escape", "Evoke", "Foretell",
-  "Mutate", "Disturb", "Disguise", "Blitz", "Overload", "Spectacle",
-  "Surge", "Encore", "Buyback", "Echo", "Outlast", "Scavenge", "Fortify",
-  "Prototype", "Plot", "Craft", "Offspring", "Impending", "LevelUp",
-  "Warp", "Sneak", "WebSlinging", "Squad", "Cleave",
+  "Unearth", "Reconfigure", "Kicker", "Equip", "Ninjutsu", "CommanderNinjutsu",
+  "Prowl", "Morph", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
+  "Harmonize", "Foretell", "Mutate", "Disturb", "Blitz", "Overload",
+  "Spectacle", "Surge", "Encore", "Entwine", "Outlast", "Scavenge", "Fortify",
+  "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "Squad",
+  "Transmute", "Transfigure", "Recover", "Cleave", "Replicate",
+  "MoreThanMeetsTheEye", "Freerunning", "Specialize",
 ]);
+
+/**
+ * Keywords whose payload is a `{ type: "Mana", data: ManaCost }` or
+ * `{ type: "NonMana", data: AbilityCost }` cost (FlashbackCost and siblings).
+ */
+const MANA_OR_NON_MANA_COST_KEYWORDS = new Set([
+  "Bestow", "Embalm", "Eternalize", "Cycling", "Flashback", "Escape", "Evoke",
+  "Buyback", "Echo",
+]);
+
+/** Keywords whose payload is an AbilityCost. */
+const ABILITY_COST_KEYWORDS = new Set(["CumulativeUpkeep", "Escalate"]);
+
+function formatManaOrNonManaCost(val: { type: string; data: unknown }): string | null {
+  if (val.type === "Mana") return formatKeywordManaCost(val.data as ManaCost);
+  return formatKnownCost(val.data as Parameters<typeof formatKnownCost>[0]);
+}
+
+/** CR 702.168a: DisguiseCost is untagged — a bare ManaCost, or `{ cost, reduction }`. */
+function formatDisguiseCost(val: ManaCost | { cost: ManaCost }): string {
+  return formatKeywordManaCost("type" in val ? val : val.cost);
+}
 
 /** Keywords parameterized with a u32. */
 const U32_KEYWORDS = new Set([
@@ -370,14 +392,29 @@ export function getKeywordDetail(kw: Keyword): string | null {
   const key = Object.keys(kw)[0];
   const val = kw[key];
 
-  if (key === "Emerge") {
-    const manaCost = val && typeof val === "object" && "mana_cost" in val
-      ? val.mana_cost
-      : val;
-    return formatKeywordManaCost(manaCost);
-  }
-
   if (MANA_COST_KEYWORDS.has(key)) return formatKeywordManaCost(val);
+  if (MANA_OR_NON_MANA_COST_KEYWORDS.has(key)) return formatManaOrNonManaCost(val);
+  if (ABILITY_COST_KEYWORDS.has(key)) return formatKnownCost(val);
+  if (key === "Disguise") return formatDisguiseCost(val);
+  // CR 702.119a: EmergeCost carries the mana cost beside the sacrifice filter.
+  if (key === "Emerge") return formatKeywordManaCost(val.mana_cost);
+  if (key === "Typecycling" || key === "Craft") return formatKeywordManaCost(val.cost);
+  // CR 702.62a / CR 702.113a / CR 702.77a: "Suspend N—{cost}", "Awaken N—{cost}",
+  // "Reinforce N—{cost}".
+  if (key === "Suspend" || key === "Awaken" || key === "Reinforce") {
+    return `${val.count}—${formatKeywordManaCost(val.cost)}`;
+  }
+  // CR 702.176a: "Impending N—{cost}".
+  if (key === "Impending") return `${val.counters}—${formatKeywordManaCost(val.cost)}`;
+  // CR 702.47a: "Splice onto [subtype] {cost}".
+  if (key === "Splice") return `onto ${val.subtype} ${formatKeywordManaCost(val.cost)}`;
+  // CR 702.160a: "Prototype {cost} — P/T".
+  if (key === "Prototype") {
+    const cost = formatKeywordManaCost(val.cost);
+    return val.power != null && val.toughness != null
+      ? `${cost} — ${val.power}/${val.toughness}`
+      : cost;
+  }
   if (U32_KEYWORDS.has(key)) return String(val);
 
   // CR 702.122: Crew carries `{ power, once_per_turn }` — show the power.
@@ -390,7 +427,6 @@ export function getKeywordDetail(kw: Keyword): string | null {
   }
   if (key === "Protection") return formatProtection(val);
   if (key === "Ward") return formatWard(val);
-  if (key === "Typecycling") return formatKeywordManaCost(val?.cost);
   if (key === "EtbCounter") {
     const ct = val?.counter_type ?? "unknown";
     const count = val?.count ?? 0;
@@ -431,7 +467,7 @@ function formatProtection(val: unknown): string {
 function formatWard(val: unknown): string {
   if (!val || typeof val !== "object") return "";
   const w = val as { type: string; data?: unknown };
-  if (w.type === "Mana") return formatKeywordManaCost(w.data);
+  if (w.type === "Mana") return formatKeywordManaCost(w.data as ManaCost);
   if (w.type === "PayLife") return `pay ${w.data} life`;
   if (w.type === "DiscardCard") return "discard a card";
   if (w.type === "Sacrifice") {
@@ -439,7 +475,11 @@ function formatWard(val: unknown): string {
     const n = d?.count ?? 1;
     return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
   }
-  if (w.type === "Waterbend") return `waterbend ${formatKeywordManaCost(w.data)}`;
+  if (w.type === "Waterbend") return `waterbend ${formatKeywordManaCost(w.data as ManaCost)}`;
+  // CR 702.21a: a compound ward cost is every sub-cost, all paid.
+  if (w.type === "Compound") {
+    return (w.data as unknown[]).map(formatWard).filter(Boolean).join(", ");
+  }
   return "";
 }
 

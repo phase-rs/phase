@@ -6204,6 +6204,69 @@ mod tests {
         );
     }
 
+    /// The mana arm of every keyword cost type whose `payload_bearing_samples`
+    /// entry takes a non-mana arm: the `Mana(ManaCost)` side of the
+    /// FlashbackCost family, `DisguiseCost::Mana`, WardCost's mana-bearing
+    /// costs, and `AbilityCost::Mana` for the AbilityCost keywords. Plus the
+    /// "its mana cost reduced by {N}" placeholder, which the parser emits on
+    /// granted keywords (Dream Devourer's foretell) and which is resolved only
+    /// at lookup time, so it is a serialized keyword payload.
+    fn mana_arm_samples() -> Vec<Keyword> {
+        vec![
+            Keyword::Foretell(ManaCost::SelfManaCostReduced { reduction: 2 }),
+            Keyword::Bestow(BestowCost::Mana(mc("{3}{G}{G}"))),
+            Keyword::Embalm(EmbalmCost::Mana(mc("{3}{W}"))),
+            Keyword::Eternalize(EternalizeCost::Mana(mc("{4}{B}{B}"))),
+            Keyword::Cycling(CyclingCost::Mana(mc("{2}"))),
+            Keyword::Flashback(FlashbackCost::Mana(mc("{1}{U}"))),
+            Keyword::Escape(EscapeCost::Mana(mc("{2}{B}"))),
+            Keyword::Evoke(EvokeCost::Mana(mc("{2}{U}"))),
+            Keyword::Buyback(BuybackCost::Mana(mc("{3}"))),
+            Keyword::Echo(EchoCost::Mana(mc("{1}{R}"))),
+            Keyword::Disguise(DisguiseCost::Mana(mc("{1}{W/U}"))),
+            Keyword::Ward(WardCost::Mana(mc("{2}"))),
+            Keyword::Ward(WardCost::Waterbend(mc("{4}"))),
+            Keyword::Ward(WardCost::Compound(vec![
+                WardCost::Mana(mc("{2}")),
+                WardCost::PayLife(2),
+            ])),
+            Keyword::CumulativeUpkeep(AbilityCost::Mana { cost: mc("{1}") }),
+            Keyword::Escalate(AbilityCost::Mana { cost: mc("{1}{R}") }),
+        ]
+    }
+
+    /// Engine-authored wire golden for the client's keyword-detail formatter
+    /// (`client/src/viewmodel/keywordProps.ts`). The client once formatted a
+    /// hand-written, externally tagged `ManaCost` shape that the engine never
+    /// emits, and its tests agreed with themselves: every keyword mana cost
+    /// rendered blank. Serializing the real payloads here and failing on drift
+    /// keeps the client's fixture the engine's actual output.
+    #[test]
+    fn keyword_payload_wire_golden_matches_the_client_fixture() {
+        let mut samples = payload_bearing_samples();
+        samples.extend(mana_arm_samples());
+        let wire = serde_json::to_value(&samples).expect("keywords serialize");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../client/src/test/fixtures/keyword-payload-wire.json"
+        );
+        if std::env::var_os("UPDATE_WIRE_GOLDEN").is_some() {
+            std::fs::write(
+                path,
+                format!("{}\n", serde_json::to_string_pretty(&wire).unwrap()),
+            )
+            .expect("write the keyword payload golden");
+        }
+        let committed: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("committed keyword payload golden"),
+        )
+        .expect("the keyword payload golden parses");
+        assert_eq!(
+            wire, committed,
+            "the client's keyword payload golden drifted — re-run with UPDATE_WIRE_GOLDEN=1"
+        );
+    }
+
     /// The counterpart contract on this path: a payload the deserializer cannot
     /// decode is surfaced as an error rather than silently replaced with a
     /// constant. Substituting a default is what issue #7234 was — a malformed or

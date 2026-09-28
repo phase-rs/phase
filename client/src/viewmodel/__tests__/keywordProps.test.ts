@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { Keyword } from "../../adapter/types";
+import payloadWire from "../../test/fixtures/keyword-payload-wire.json";
+import { SHARD_ABBREVIATION } from "../costLabel";
 import {
   formatKeywordManaCost,
   getKeywordDetail,
@@ -44,7 +46,7 @@ describe("getKeywordName", () => {
   });
 
   it("handles Typecycling with subtype", () => {
-    expect(getKeywordName({ Typecycling: { cost: { Cost: { shards: ["White"], generic: 0 } }, subtype: "Plains" } })).toBe("Plainscycling");
+    expect(getKeywordName({ Typecycling: { cost: { type: "Cost", shards: ["White"], generic: 0 }, subtype: "Plains" } })).toBe("Plainscycling");
   });
 });
 
@@ -54,17 +56,18 @@ describe("getKeywordDetail", () => {
     expect(getKeywordDetail("Haste")).toBeNull();
   });
 
-  it("formats ManaCost params (externally-tagged serde)", () => {
-    expect(getKeywordDetail({ Equip: { Cost: { shards: ["White"], generic: 2 } } })).toBe("{2}{W}");
-    expect(getKeywordDetail({ Flashback: "NoCost" })).toBe("{0}");
-    expect(getKeywordDetail({ Flashback: "SelfManaCost" })).toBe("its mana cost");
+  it("formats ManaCost params (internally-tagged serde)", () => {
+    expect(getKeywordDetail({ Equip: { type: "Cost", shards: ["White"], generic: 2 } })).toBe("{2}{W}");
+    expect(getKeywordDetail({ Kicker: { type: "Cost", shards: [], generic: 4 } })).toBe("{4}");
+    expect(getKeywordDetail({ Flashback: { type: "Mana", data: { type: "NoCost" } } })).toBe("{0}");
+    expect(getKeywordDetail({ Flashback: { type: "Mana", data: { type: "SelfManaCost" } } })).toBe("its mana cost");
   });
 
   it("formats the mana cost nested in EmergeCost", () => {
     expect(
       getKeywordDetail({
         Emerge: {
-          mana_cost: { Cost: { shards: ["Black", "Black"], generic: 5 } },
+          mana_cost: { type: "Cost", shards: ["Black", "Black"], generic: 5 },
           sacrifice_filter: { type: "Typed", type_filters: ["Artifact"] },
         },
       }),
@@ -102,12 +105,12 @@ describe("getKeywordDetail", () => {
   });
 
   it("formats Ward variants (adjacently-tagged serde)", () => {
-    expect(getKeywordDetail({ Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } })).toBe("{2}");
+    expect(getKeywordDetail({ Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } } })).toBe("{2}");
     expect(getKeywordDetail({ Ward: { type: "PayLife", data: 3 } })).toBe("pay 3 life");
     expect(getKeywordDetail({ Ward: { type: "DiscardCard" } })).toBe("discard a card");
     expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 1, filter: { type: "Any" } } } })).toBe("sacrifice a permanent");
     expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 2, filter: { type: "Any" } } } })).toBe("sacrifice 2 permanents");
-    expect(getKeywordDetail({ Ward: { type: "Waterbend", data: { Cost: { shards: [], generic: 4 } } } })).toBe("waterbend {4}");
+    expect(getKeywordDetail({ Ward: { type: "Waterbend", data: { type: "Cost", shards: [], generic: 4 } } })).toBe("waterbend {4}");
   });
 
   it("formats EtbCounter", () => {
@@ -132,7 +135,7 @@ describe("getKeywordDetail", () => {
 
 describe("getKeywordDisplayText", () => {
   it("combines name and detail", () => {
-    expect(getKeywordDisplayText({ Equip: { Cost: { shards: [], generic: 3 } } })).toBe("Equip {3}");
+    expect(getKeywordDisplayText({ Equip: { type: "Cost", shards: [], generic: 3 } })).toBe("Equip {3}");
     expect(getKeywordDisplayText({ Protection: { Color: "Red" } })).toBe("Protection from red");
     expect(
       getKeywordDisplayText({
@@ -154,7 +157,7 @@ describe("getKeywordReminderText", () => {
   });
 
   it("returns reminder text by keyword name for parameterized keywords", () => {
-    expect(getKeywordReminderText({ Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } })).toContain("ward cost");
+    expect(getKeywordReminderText({ Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } } })).toContain("ward cost");
     expect(getKeywordReminderText({ Protection: { Color: "Red" } })).toContain("stated quality");
     expect(
       getKeywordReminderText({
@@ -178,8 +181,8 @@ describe("isGrantedKeyword", () => {
   });
 
   it("compares by name for parameterized keywords", () => {
-    const current: Keyword = { Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } };
-    const base: Keyword[] = [{ Ward: { type: "Mana", data: { Cost: { shards: [], generic: 1 } } } }];
+    const current: Keyword = { Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } } };
+    const base: Keyword[] = [{ Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 1 } } }];
     expect(isGrantedKeyword(current, base)).toBe(false);
   });
 });
@@ -200,26 +203,96 @@ describe("sortKeywords", () => {
 
 describe("formatKeywordManaCost", () => {
   it("formats generic-only cost", () => {
-    expect(formatKeywordManaCost({ Cost: { shards: [], generic: 3 } })).toBe("{3}");
+    expect(formatKeywordManaCost({ type: "Cost", shards: [], generic: 3 })).toBe("{3}");
   });
 
   it("formats shards-only cost", () => {
-    expect(formatKeywordManaCost({ Cost: { shards: ["White", "Blue"], generic: 0 } })).toBe("{W}{U}");
+    expect(formatKeywordManaCost({ type: "Cost", shards: ["White", "Blue"], generic: 0 })).toBe("{W}{U}");
   });
 
   it("formats mixed cost", () => {
-    expect(formatKeywordManaCost({ Cost: { shards: ["Red"], generic: 2 } })).toBe("{2}{R}");
+    expect(formatKeywordManaCost({ type: "Cost", shards: ["Red"], generic: 2 })).toBe("{2}{R}");
   });
 
-  it("formats NoCost (string variant)", () => {
-    expect(formatKeywordManaCost("NoCost")).toBe("{0}");
+  it("formats NoCost", () => {
+    expect(formatKeywordManaCost({ type: "NoCost" })).toBe("{0}");
   });
 
-  it("formats SelfManaCost (string variant)", () => {
-    expect(formatKeywordManaCost("SelfManaCost")).toBe("its mana cost");
+  it("formats the self-referential placeholders", () => {
+    expect(formatKeywordManaCost({ type: "SelfManaCost" })).toBe("its mana cost");
+    expect(formatKeywordManaCost({ type: "SelfManaValue" })).toBe("its mana value");
+    expect(formatKeywordManaCost({ type: "SelfManaCostReduced", reduction: 2 })).toBe(
+      "its mana cost reduced by {2}",
+    );
   });
 
   it("formats hybrid shards", () => {
-    expect(formatKeywordManaCost({ Cost: { shards: ["WhiteBlue"], generic: 0 } })).toBe("{W/U}");
+    expect(formatKeywordManaCost({ type: "Cost", shards: ["WhiteBlue"], generic: 0 })).toBe("{W/U}");
+  });
+});
+
+/**
+ * Driven by `keyword-payload-wire.json`, which the engine writes from its own
+ * serializer (`keyword_payload_wire_golden_matches_the_client_fixture` in
+ * crates/engine/src/types/keywords.rs fails when it drifts). Hand-written
+ * payloads here once used a shape the engine never emits.
+ */
+describe("keyword detail over the engine's keyword payload golden", () => {
+  type CostPayload = { type: "Cost"; shards: string[]; generic: number };
+  const samples = payloadWire as unknown as Keyword[];
+  const keyOf = (kw: Keyword) => Object.keys(kw)[0];
+  const payloadOf = (kw: Keyword) => (kw as Record<string, unknown>)[keyOf(kw)];
+
+  function manaCostsIn(node: unknown): CostPayload[] {
+    if (Array.isArray(node)) return node.flatMap(manaCostsIn);
+    if (!node || typeof node !== "object") return [];
+    const obj = node as Record<string, unknown>;
+    if (obj.type === "Cost" && Array.isArray(obj.shards) && typeof obj.generic === "number") {
+      return [obj as CostPayload];
+    }
+    return Object.values(obj).flatMap(manaCostsIn);
+  }
+
+  const pips = (c: CostPayload) =>
+    (c.generic ? `{${c.generic}}` : "") + c.shards.map((s) => `{${SHARD_ABBREVIATION[s]}}`).join("");
+
+  const manaBearing = samples.filter((kw) => manaCostsIn(payloadOf(kw)).length > 0);
+
+  it("reaches every mana-cost-bearing Keyword variant", () => {
+    // 41 bare ManaCost + 9 Mana/NonMana wrappers + 9 structs with a cost field
+    // + Disguise + Ward + 2 AbilityCost keywords.
+    expect(new Set(manaBearing.map(keyOf)).size).toBe(63);
+  });
+
+  it("renders every sample's mana cost in its detail", () => {
+    const failures = manaBearing.flatMap((kw) => {
+      const detail = getKeywordDetail(kw) ?? "";
+      return manaCostsIn(payloadOf(kw))
+        .map(pips)
+        .filter((p) => !detail.includes(p))
+        .map((p) => `${keyOf(kw)}: ${JSON.stringify(detail)} lacks ${p}`);
+    });
+    expect(failures).toEqual([]);
+  });
+
+  it("renders the count-bearing and compound forms as printed", () => {
+    const detailOf = (key: string, pick: (kw: Keyword) => boolean = () => true) => {
+      const kw = samples.find((s) => keyOf(s) === key && pick(s));
+      expect(kw, key).toBeDefined();
+      return getKeywordDisplayText(kw!);
+    };
+    const isType = (type: string) => (kw: Keyword) =>
+      (payloadOf(kw) as { type?: string }).type === type;
+    expect(detailOf("Suspend")).toBe("Suspend 2—{1}{R}");
+    expect(detailOf("Awaken")).toBe("Awaken 4—{5}{W}{W}{W}");
+    expect(detailOf("Reinforce")).toBe("Reinforce 3—{2}{G}");
+    expect(detailOf("Impending")).toBe("Impending 4—{2}{W}");
+    expect(detailOf("Splice")).toBe("Splice onto Arcane {1}{U}");
+    expect(detailOf("Prototype")).toBe("Prototype {1}{U} — 2/3");
+    expect(detailOf("Ward", isType("Compound"))).toBe("Ward {2}, pay 2 life");
+    expect(detailOf("Ward", isType("Waterbend"))).toBe("Ward waterbend {4}");
+    expect(detailOf("Foretell", isType("SelfManaCostReduced"))).toBe(
+      "Foretell its mana cost reduced by {2}",
+    );
   });
 });
