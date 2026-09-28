@@ -14631,9 +14631,20 @@ fn graveyard_cast_permission_scourge_of_nel_toth_self_ref() {
     // normalization). The `~` filter must lower to TargetFilter::SelfRef, NOT an
     // empty match-all Typed filter (which would grant permission to cast ANY
     // graveyard card).
-    let text = "You may cast ~ from your graveyard by paying {B}{B} \
+    //
+    // The printed alternative-cost rider ("by paying {B}{B} and sacrificing two
+    // creatures rather than paying its mana cost") is unmodelled, so that line
+    // now DECLINES (CR 601.3 + CR 118.9): an unconsumed residual fails closed
+    // rather than granting a cast at the printed cost. The self-reference
+    // lowering this test guards is pinned on the rider-free form.
+    let printed = "You may cast ~ from your graveyard by paying {B}{B} \
                     and sacrificing two creatures rather than paying its mana cost.";
-    let def = parse_static_line(text).expect("should parse Scourge of Nel Toth text");
+    assert!(
+        parse_static_line(printed).is_none(),
+        "an unmodelled alternative-cost rider declines the permission"
+    );
+    let text = "You may cast ~ from your graveyard.";
+    let def = parse_static_line(text).expect("should parse the self-ref permission");
     assert!(matches!(
         def.mode,
         StaticMode::GraveyardCastPermission {

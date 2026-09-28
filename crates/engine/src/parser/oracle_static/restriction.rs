@@ -1958,7 +1958,14 @@ pub(crate) fn try_parse_graveyard_cast_permission(
             "during each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard",
         )
     });
-    if muldrotha_alt.is_some() {
+    if let Some(remainder) = muldrotha_alt {
+        // CR 601.3: the fixed lead must END the sentence. Any gate or rider
+        // after it ("… from your graveyard if you control a Zombie.") isn't
+        // modelled here, and the populated turn condition would otherwise hide
+        // the swallowed-clause diagnostic, so decline (honest Unimplemented).
+        if !is_punctuation_only(remainder) {
+            return None;
+        }
         // Affected filter: any permanent (CR 110.4 — artifact, battle,
         // creature, enchantment, land, planeswalker). The downstream slot
         // picker enforces the per-permanent-type per-turn limit.
@@ -2170,13 +2177,6 @@ pub(crate) fn try_parse_graveyard_cast_permission(
             }),
         ),
     };
-    // CR 601.2a + CR 607.1: when the line carries a recognized CR 614.1a
-    // destination rider, everything before it must have been consumed by the
-    // modeled riders above — an unrecognized sentence (e.g. "It gains haste.")
-    // must decline rather than be emitted as an absent rider. Destination-free
-    // permissions keep their existing tail handling (the unmodeled
-    // alternative-cost rider class stays the plan's §8 deferral).
-    //
     // `.trim()` (not `.is_empty()`): a two-sentence "if X. If you do, Y."
     // permission leaves a whitespace-only residual (Undead Sprinter) that must
     // still be treated as fully consumed so the gate condition is not re-dropped.
@@ -2199,18 +2199,16 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         Err(_) if gate_present => return None,
         Err(_) => (None, trailing),
     };
-    if graveyard_destination_replacement.is_some() && !is_punctuation_only(residual) {
-        return None;
-    }
-    // CR 601.3 + CR 607.1: a trailing "If …" sentence that no modelled rider
-    // consumed ("If you cast a spell this way, that artifact enters tapped." —
-    // Edgar, Master Machinist; "If you do, it perpetually becomes …" —
-    // Mischievous Lookout) is an unmodelled linked rider. Emitting the
-    // permission without it is strictly more permissive than printed, so it
-    // declines like an unmodelled gate. It must not ride on a populated
-    // turn-restriction condition, which would otherwise discharge the
-    // swallowed-clause `Condition_If` expectation for the rider.
-    if parse_unconsumed_if_sentence(residual).is_ok() {
+    // CR 601.3 + CR 607.1: once the modelled lead, anchor, riders and gate are
+    // consumed, the rest of the line must be punctuation only. Any other residual
+    // is an unmodelled gate ("… unless you control a Zombie") or linked rider
+    // ("If you cast a spell this way, that artifact enters tapped." — Edgar,
+    // Master Machinist; "If you do, it perpetually becomes …" — Mischievous
+    // Lookout). Emitting the permission without it would be strictly more
+    // permissive than printed. And a populated turn-restriction condition would
+    // discharge the swallowed-clause expectation that used to flag the residual.
+    // So decline, and the line falls through to an honest Unimplemented.
+    if !is_punctuation_only(residual) {
         return None;
     }
 
@@ -2523,22 +2521,6 @@ fn is_punctuation_only(text: &str) -> bool {
     all_consuming(many0(tag::<_, _, OracleError<'_>>(".")))
         .parse(text.trim())
         .is_ok()
-}
-
-/// CR 607.1: a residual that opens (after sentence punctuation) with an "if"
-/// sentence, i.e. a linked rider none of the modelled rider parsers consumed.
-fn parse_unconsumed_if_sentence(residual: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        preceded(
-            many0(alt((
-                tag::<_, _, OracleError<'_>>("."),
-                tag::<_, _, OracleError<'_>>(" "),
-            ))),
-            tag("if "),
-        ),
-    )
-    .parse(residual)
 }
 
 /// CR 601.2a + CR 113.6b: True when `lower` opens with this module's

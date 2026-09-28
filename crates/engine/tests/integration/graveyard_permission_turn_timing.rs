@@ -684,3 +684,150 @@ fn unconsumed_if_rider_declines_the_permission() {
         "control: a consumed rider keeps the permission"
     );
 }
+
+// ── Unconsumed permission tails fail closed ──────────────────────────────────
+
+const MULDROTHA_IF: &str = "During each of your turns, you may play a land and cast a permanent spell of each permanent type from your graveyard if you control a Zombie.";
+const ONCE_UNLESS: &str = "Once during each of your turns, you may cast a creature spell from your graveyard unless you control a Zombie.";
+const COORDINATED_AS_LONG_AS: &str = "Until end of turn, you may play lands and cast spells from your graveyard as long as you control a Zombie.";
+const COORDINATED: &str =
+    "Until end of turn, you may play lands and cast spells from your graveyard.";
+
+fn warnings_of(text: &str, types: &[&str]) -> Vec<String> {
+    parse_oracle_text(text, "Tail Probe", &[], &strings(types), &[])
+        .parse_warnings
+        .iter()
+        .map(|w| format!("{w:?}"))
+        .collect()
+}
+
+/// A permission text with an unconsumed tail ("… if you control a Zombie",
+/// "… unless you control a Zombie") yields NO permission. That's an honest
+/// Unimplemented, not a grant carrying only the lead's turn restriction.
+/// Control: the exact printed Muldrotha / Karador text still yields the
+/// permission with `DuringYourTurn`.
+#[test]
+fn permission_with_an_unconsumed_tail_yields_no_grant() {
+    for (text, types) in [
+        (MULDROTHA_IF, &["Creature"][..]),
+        (ONCE_UNLESS, &["Creature"][..]),
+    ] {
+        let conditions = graveyard_permission_conditions(text, "Tail Probe", types);
+        assert!(
+            conditions.is_empty(),
+            "{text}: no permission, got {conditions:?}"
+        );
+        let parsed = parse_oracle_text(text, "Tail Probe", &[], &strings(types), &[]);
+        assert!(
+            serde_json::to_string(&parsed.abilities)
+                .unwrap()
+                .contains("Unimplemented"),
+            "{text}: honest Unimplemented; warnings {:?}",
+            warnings_of(text, types)
+        );
+    }
+    assert_eq!(
+        graveyard_permission_conditions(MULDROTHA, "Muldrotha, the Gravetide", &["Creature"]),
+        vec![Some(StaticCondition::DuringYourTurn)]
+    );
+    assert_eq!(
+        graveyard_permission_conditions(KARADOR, "Karador, Ghost Chieftain", &["Creature"]),
+        vec![Some(StaticCondition::DuringYourTurn)]
+    );
+}
+
+/// Full dispatch on the same board. The unconsumed-tail permissions offer no
+/// graveyard cast on their controller's own turn, while the printed sibling
+/// (Karador) does.
+#[test]
+fn permission_with_an_unconsumed_tail_offers_no_cast() {
+    for text in [MULDROTHA_IF, ONCE_UNLESS] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::End);
+        scenario.add_creature_from_oracle(P0, "Tail Probe", 2, 2, text);
+        let flash = flash_creature_in_graveyard(&mut scenario, P0, "Flash Bear");
+        let runner = scenario.build();
+        assert!(
+            !offered_to(&runner, P0, flash),
+            "{text}: nothing is granted"
+        );
+    }
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::End);
+    scenario
+        .add_creature_from_oracle(P0, "Karador, Ghost Chieftain", 3, 4, KARADOR)
+        .as_legendary();
+    let flash = flash_creature_in_graveyard(&mut scenario, P0, "Flash Bear");
+    let runner = scenario.build();
+    assert!(offered_to(&runner, P0, flash), "control: Karador grants it");
+}
+
+fn coordinated_grant_on_opponents_turn(text: &str) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::End);
+    let grant = scenario
+        .add_spell_to_hand_from_oracle(P0, "Will Probe", true, text)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let instant = instant_in_graveyard(&mut scenario, P0, "Graveyard Instant");
+    let mut runner = scenario.build();
+    to_turn_with_priority(&mut runner, P1, P0);
+    runner.cast(grant).resolve();
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        priority_holder(&runner),
+        Some(P0),
+        "reach: P0 priority on P1's turn"
+    );
+    (runner, instant)
+}
+
+/// CR 611.2a + CR 601.3: a coordinated "play lands and cast spells from your
+/// graveyard" grant whose sentence carries an unconsumed gate ("as long as you
+/// control a Zombie") grants NOTHING. Otherwise the gate is dropped and the
+/// grant admits an off-turn graveyard instant with no Zombie. Control: the
+/// ungated Yawgmoth's Will-style grant resolved the same way admits it, and the
+/// cast resolves.
+#[test]
+fn coordinated_grant_with_an_unconsumed_gate_grants_nothing() {
+    let (mut runner, instant) = coordinated_grant_on_opponents_turn(COORDINATED_AS_LONG_AS);
+    assert!(
+        runner.state().transient_continuous_effects.is_empty(),
+        "no grant is installed for the gated sentence"
+    );
+    assert!(!offered_to(&runner, P0, instant), "no Zombie, no cast");
+    assert_cast_rejected(&mut runner, instant);
+
+    let (mut runner, instant) = coordinated_grant_on_opponents_turn(COORDINATED);
+    assert_eq!(
+        runner.state().transient_continuous_effects.len(),
+        1,
+        "control: the ungated grant is installed"
+    );
+    assert!(
+        offered_to(&runner, P0, instant),
+        "control: offered off-turn"
+    );
+    let outcome = runner.cast(instant).resolve();
+    outcome.assert_life_delta(P0, 1);
+}
+
+/// Measurement pin: the gated coordinated sentence keeps its honest parse gap
+/// (an Unimplemented and a swallowed-clause warning), so coverage stays
+/// unsupported.
+#[test]
+fn coordinated_grant_with_an_unconsumed_gate_stays_unsupported() {
+    let parsed = parse_oracle_text(
+        COORDINATED_AS_LONG_AS,
+        "Will Probe",
+        &[],
+        &strings(&["Instant"]),
+        &[],
+    );
+    let json = serde_json::to_string(&parsed.abilities).unwrap();
+    assert!(
+        !json.contains("GraveyardCastPermission"),
+        "no permission is synthesized: {json}"
+    );
+    assert!(json.contains("Unimplemented"), "honest gap: {json}");
+}
