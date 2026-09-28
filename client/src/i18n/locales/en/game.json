@@ -2285,6 +2285,10 @@
     "dontAskAgain": "Don't ask again this game",
     "dontAskAgainForSameCard": "Use this choice for every copy of this card this game"
   },
+  "keywordDetail": {
+    "manaCostReduced": "its mana cost reduced by {{reduction}}",
+    "spliceOnto": "onto {{subtype}} {{cost}}"
+  },
   "resolutionOptionalPayment": {
     "title": "Choose an optional payment",
     "pay": "Pay {{cost}}",

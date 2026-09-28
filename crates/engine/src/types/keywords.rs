@@ -6235,6 +6235,32 @@ mod tests {
         ]
     }
 
+    /// Ward costs parsed from Oracle text (CR 702.21a), keyed by that text. The
+    /// first is Captain Howler, Sea Scourge's printed ward; the other two are
+    /// parser-accepted compound shapes whose non-mana leg the client cannot
+    /// render, which the client must show as no detail rather than as the
+    /// mana leg alone.
+    fn parsed_ward_samples() -> std::collections::BTreeMap<&'static str, Keyword> {
+        [
+            "Ward\u{2014}{2}, Pay 2 life.",
+            "Ward\u{2014}{2}, Pay life equal to this creature's power.",
+            "Ward\u{2014}{1}, Get a poison counter.",
+        ]
+        .into_iter()
+        .map(|oracle| {
+            let lower = oracle.to_lowercase();
+            let (kw, rest) = crate::parser::oracle_keyword::parse_keyword_line_core(&lower)
+                .unwrap_or_else(|| panic!("{oracle} parses as a keyword line"));
+            assert!(rest.is_empty(), "{oracle} left {rest:?} unconsumed");
+            assert!(
+                matches!(&kw, Keyword::Ward(WardCost::Compound(legs)) if legs.len() == 2),
+                "{oracle} parses as a two-leg compound ward, got {kw:?}"
+            );
+            (oracle, kw)
+        })
+        .collect()
+    }
+
     /// Engine-authored wire golden for the client's keyword-detail formatter
     /// (`client/src/viewmodel/keywordProps.ts`). The client once formatted a
     /// hand-written, externally tagged `ManaCost` shape that the engine never
@@ -6245,7 +6271,10 @@ mod tests {
     fn keyword_payload_wire_golden_matches_the_client_fixture() {
         let mut samples = payload_bearing_samples();
         samples.extend(mana_arm_samples());
-        let wire = serde_json::to_value(&samples).expect("keywords serialize");
+        let wire = serde_json::json!({
+            "samples": samples,
+            "parsed_ward": parsed_ward_samples(),
+        });
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../client/src/test/fixtures/keyword-payload-wire.json"

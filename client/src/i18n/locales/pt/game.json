@@ -2247,6 +2247,10 @@
     "dontAskAgain": "Não perguntar novamente neste jogo",
     "dontAskAgainForSameCard": "Usar esta escolha para cada cópia desta carta neste jogo"
   },
+  "keywordDetail": {
+    "manaCostReduced": "seu custo de mana reduzido em {{reduction}}",
+    "spliceOnto": "em {{subtype}} {{cost}}"
+  },
   "resolutionOptionalPayment": {
     "title": "Escolha um pagamento opcional",
     "pay": "Pagar {{cost}}",

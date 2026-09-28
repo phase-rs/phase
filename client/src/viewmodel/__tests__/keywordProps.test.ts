@@ -239,7 +239,11 @@ describe("formatKeywordManaCost", () => {
  */
 describe("keyword detail over the engine's keyword payload golden", () => {
   type CostPayload = { type: "Cost"; shards: string[]; generic: number };
-  const samples = payloadWire as unknown as Keyword[];
+  const wire = payloadWire as unknown as {
+    samples: Keyword[];
+    parsed_ward: Record<string, Keyword>;
+  };
+  const samples = wire.samples;
   const keyOf = (kw: Keyword) => Object.keys(kw)[0];
   const payloadOf = (kw: Keyword) => (kw as Record<string, unknown>)[keyOf(kw)];
 
@@ -294,5 +298,52 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     expect(detailOf("Foretell", isType("SelfManaCostReduced"))).toBe(
       "Foretell its mana cost reduced by {2}",
     );
+  });
+
+  // CR 702.21a: every leg of a compound ward is paid, so the detail is all the
+  // legs or none of them. Oracle text → engine parser → serde → this formatter.
+  it("renders a parsed compound ward only when every leg renders", () => {
+    const parsed = (oracle: string) => {
+      const kw = wire.parsed_ward[oracle];
+      expect(kw, oracle).toBeDefined();
+      return getKeywordDisplayText(kw);
+    };
+    expect(Object.keys(wire.parsed_ward)).toHaveLength(3);
+    expect({
+      supported: parsed("Ward—{2}, Pay 2 life."),
+      lifeEqualToPower: parsed("Ward—{2}, Pay life equal to this creature's power."),
+      playerCounters: parsed("Ward—{1}, Get a poison counter."),
+    }).toEqual({
+      supported: "Ward {2}, pay 2 life",
+      lifeEqualToPower: "Ward",
+      playerCounters: "Ward",
+    });
+  });
+});
+
+describe("keyword AbilityCost detail", () => {
+  const upkeep = (costs: unknown[]): Keyword => ({
+    CumulativeUpkeep: { type: "Composite", costs },
+  });
+  const mana = { type: "Mana", cost: { type: "Cost", shards: ["Green"], generic: 1 } };
+  const payLife = { type: "PayLife", amount: { type: "Fixed", value: 3 } };
+  // Aboroth's cost shape, which has no client rendering.
+  const effectCost = { type: "EffectCost", effect: { type: "PutCounter" } };
+
+  it("joins a composite whose every sub-cost renders", () => {
+    expect(getKeywordDetail(upkeep([mana, payLife]))).toBe("{1}{G}, Pay 3 life");
+    expect(
+      getKeywordDetail({ Flashback: { type: "NonMana", data: { type: "Composite", costs: [mana, payLife] } } }),
+    ).toBe("{1}{G}, Pay 3 life");
+  });
+
+  it("shows no detail when any sub-cost cannot render", () => {
+    expect({
+      upkeep: getKeywordDetail(upkeep([mana, effectCost])),
+      flashback: getKeywordDetail({
+        Flashback: { type: "NonMana", data: { type: "Composite", costs: [mana, effectCost] } },
+      }),
+      bare: getKeywordDetail({ CumulativeUpkeep: effectCost }),
+    }).toEqual({ upkeep: null, flashback: null, bare: null });
   });
 });

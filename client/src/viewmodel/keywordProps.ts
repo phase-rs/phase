@@ -1,4 +1,5 @@
 import type { Keyword, ManaCost } from "../adapter/types";
+import i18n from "../i18n";
 import { SHARD_ABBREVIATION, formatKnownCost } from "./costLabel";
 
 /**
@@ -331,7 +332,7 @@ export function formatKeywordManaCost(cost: ManaCost): string {
     case "SelfManaValue":
       return "its mana value";
     case "SelfManaCostReduced":
-      return `its mana cost reduced by {${cost.reduction}}`;
+      return i18n.t("game:keywordDetail.manaCostReduced", { reduction: `{${cost.reduction}}` });
   }
 }
 
@@ -360,7 +361,23 @@ const ABILITY_COST_KEYWORDS = new Set(["CumulativeUpkeep", "Escalate"]);
 
 function formatManaOrNonManaCost(val: { type: string; data: unknown }): string | null {
   if (val.type === "Mana") return formatKeywordManaCost(val.data as ManaCost);
-  return formatKnownCost(val.data as Parameters<typeof formatKnownCost>[0]);
+  return formatKeywordAbilityCost(val.data as KeywordAbilityCost);
+}
+
+type KeywordAbilityCost = Parameters<typeof formatKnownCost>[0];
+
+/**
+ * An AbilityCost as keyword detail. A Composite (all paid) or OneOf shows only
+ * when every sub-cost can be shown, so a leg the client cannot render never
+ * drops out of the text or turns into `formatCost`'s "Activate" fallback.
+ */
+function formatKeywordAbilityCost(cost: KeywordAbilityCost): string | null {
+  if (cost.type === "Composite" || cost.type === "OneOf") {
+    const legs = (cost.costs ?? []).map(formatKeywordAbilityCost);
+    if (legs.length === 0 || !legs.every((leg): leg is string => leg !== null)) return null;
+    return legs.join(cost.type === "Composite" ? ", " : " or ");
+  }
+  return formatKnownCost(cost);
 }
 
 /** CR 702.168a: DisguiseCost is untagged — a bare ManaCost, or `{ cost, reduction }`. */
@@ -394,10 +411,12 @@ export function getKeywordDetail(kw: Keyword): string | null {
 
   if (MANA_COST_KEYWORDS.has(key)) return formatKeywordManaCost(val);
   if (MANA_OR_NON_MANA_COST_KEYWORDS.has(key)) return formatManaOrNonManaCost(val);
-  if (ABILITY_COST_KEYWORDS.has(key)) return formatKnownCost(val);
+  if (ABILITY_COST_KEYWORDS.has(key)) return formatKeywordAbilityCost(val);
   if (key === "Disguise") return formatDisguiseCost(val);
   // CR 702.119a: EmergeCost carries the mana cost beside the sacrifice filter.
   if (key === "Emerge") return formatKeywordManaCost(val.mana_cost);
+  // Mana component only: Emerge's sacrifice filter and Craft's materials are not
+  // rendered; a complete text would need an engine-provided string.
   if (key === "Typecycling" || key === "Craft") return formatKeywordManaCost(val.cost);
   // CR 702.62a / CR 702.113a / CR 702.77a: "Suspend N—{cost}", "Awaken N—{cost}",
   // "Reinforce N—{cost}".
@@ -407,7 +426,12 @@ export function getKeywordDetail(kw: Keyword): string | null {
   // CR 702.176a: "Impending N—{cost}".
   if (key === "Impending") return `${val.counters}—${formatKeywordManaCost(val.cost)}`;
   // CR 702.47a: "Splice onto [subtype] {cost}".
-  if (key === "Splice") return `onto ${val.subtype} ${formatKeywordManaCost(val.cost)}`;
+  if (key === "Splice") {
+    return i18n.t("game:keywordDetail.spliceOnto", {
+      subtype: val.subtype,
+      cost: formatKeywordManaCost(val.cost),
+    });
+  }
   // CR 702.160a: "Prototype {cost} — P/T".
   if (key === "Prototype") {
     const cost = formatKeywordManaCost(val.cost);
@@ -476,9 +500,11 @@ function formatWard(val: unknown): string {
     return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
   }
   if (w.type === "Waterbend") return `waterbend ${formatKeywordManaCost(w.data as ManaCost)}`;
-  // CR 702.21a: a compound ward cost is every sub-cost, all paid.
+  // CR 702.21a: a compound ward cost is every sub-cost, all paid, so it shows
+  // only when every leg can be shown; one blank leg would hide a mandatory cost.
   if (w.type === "Compound") {
-    return (w.data as unknown[]).map(formatWard).filter(Boolean).join(", ");
+    const legs = (w.data as unknown[]).map(formatWard);
+    return legs.every(Boolean) ? legs.join(", ") : "";
   }
   return "";
 }

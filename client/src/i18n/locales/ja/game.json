@@ -2290,6 +2290,10 @@
     "dontAskAgain": "このゲームでは再度確認しない",
     "dontAskAgainForSameCard": "このゲームではこのカードのすべてのコピーにこの選択を使用"
   },
+  "keywordDetail": {
+    "manaCostReduced": "そのマナ・コストから{{reduction}}少ないコスト",
+    "spliceOnto": "{{subtype}}へ {{cost}}"
+  },
   "resolutionOptionalPayment": {
     "title": "任意の支払いを選択",
     "pay": "{{cost}}を支払う",
