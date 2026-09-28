@@ -39383,6 +39383,23 @@ pub mod tests {
         })
     }
 
+    /// CR 605.4a + CR 704.3: a paused accepted triggered-mana occurrence is part
+    /// of the mana ability that triggered it, so no player receives priority
+    /// (and no state-based action is checked) until its fixed point completes.
+    #[test]
+    fn a_paused_triggered_mana_fixed_point_withholds_priority() {
+        let mut state = setup();
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(!state.withholds_priority());
+        let node = crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+            crate::types::resolved_commands::SettlementNodeOrdinal(7),
+        );
+        state.pending_triggered_mana_resume = Some(triggered_mana_sidecar(&mut state, node));
+        assert!(state.withholds_priority());
+    }
+
     /// Round-20 closure map, "Why the carrier is not part of
     /// `resolution_completion_can_settle`": the settlement predicate takes the
     /// triggered-mana sidecar **and only that carrier**.

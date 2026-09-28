@@ -54,6 +54,13 @@ const lfgCommand = {
     },
     {
       type: OptionType.STRING,
+      name: "description",
+      description: "Game details, e.g. Commander bracket, power level, or deck preferences",
+      required: false,
+      max_length: 500,
+    },
+    {
+      type: OptionType.STRING,
       name: "mode",
       description: "Who hosts (default: p2p; server when a server is picked)",
       required: false,

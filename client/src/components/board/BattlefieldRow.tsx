@@ -9,9 +9,11 @@ import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 import {
   getGroupRenderMode,
+  groupCardScale,
   groupStaggerPx,
   type BattlefieldRowType,
   visibleCardSlotCount,
+  visibleCardSlotWidth,
   visibleStaggerCount,
 } from "./groupRenderMode.ts";
 
@@ -160,6 +162,13 @@ export function BattlefieldRow({
     (total, { group, renderMode }) => total + visibleCardSlotCount(renderMode, group),
     0,
   );
+  // Oversized (melded) cards are wider and taller than the row's card size, so
+  // the row reserves their extra width and fits their height.
+  const totalVisibleSlotWidth = renderedGroups.reduce(
+    (total, { group, renderMode }) => total + visibleCardSlotWidth(renderMode, group),
+    0,
+  );
+  const tallestCardScale = Math.max(1, ...renderedGroups.map(({ group }) => groupCardScale(group)));
   const totalVisibleStagger = renderedGroups.reduce(
     (total, { group, renderMode }) => total + visibleStaggerCount(renderMode, group) * groupStaggerPx(rowType),
     0,
@@ -183,8 +192,8 @@ export function BattlefieldRow({
       // Only the rendered height is clamped up to MIN_CARD_H, keeping the
       // decision independent of the clamp.
       const availableForCards = cw - Math.max(0, n - 1) * gap - totalVisibleStagger;
-      const widthPerGroup = n > 0 ? availableForCards / n : cw;
-      const naturalCardH = Math.min(ch, widthPerGroup / activeAr, MAX_CARD_H);
+      const widthPerGroup = n > 0 ? availableForCards / totalVisibleSlotWidth : cw;
+      const naturalCardH = Math.min(ch / tallestCardScale, widthPerGroup / activeAr, MAX_CARD_H);
       const singleRowCardH = Math.max(MIN_CARD_H, naturalCardH);
 
       if (naturalCardH >= MIN_CARD_H) {
@@ -205,10 +214,12 @@ export function BattlefieldRow({
         const rowGap = 12; // gap-y-3
         let bestH = MIN_CARD_H;
         for (let rows = 2; rows <= 4; rows++) {
-          const cardHFromHeight = (ch - (rows - 1) * rowGap) / rows;
+          const cardHFromHeight = (ch - (rows - 1) * rowGap) / rows / tallestCardScale;
           const groupsPerRow = Math.ceil(n / rows);
           const staggerPerRow = totalVisibleStagger / rows; // approximate
-          const cardW = (cw - (groupsPerRow - 1) * gap - staggerPerRow) / groupsPerRow;
+          // Conservatively assume every oversized card's extra width lands in one row.
+          const slotWidthPerRow = groupsPerRow + (totalVisibleSlotWidth - n);
+          const cardW = (cw - (groupsPerRow - 1) * gap - staggerPerRow) / slotWidthPerRow;
           const cardHFromWidth = cardW / activeAr;
           const cardH = Math.max(MIN_CARD_H, Math.min(cardHFromHeight, cardHFromWidth, MAX_CARD_H));
           if (cardH > bestH) {
@@ -225,7 +236,7 @@ export function BattlefieldRow({
       }
     } else {
       // Fallback before measurement
-      const creatureScale = getCreatureScale(totalVisibleCardSlots, battlefieldCardDisplay);
+      const creatureScale = getCreatureScale(Math.ceil(totalVisibleSlotWidth), battlefieldCardDisplay);
       rowStyle = {
         "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale) * ${creatureScale})`,
         "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale) * ${creatureScale} * 0.75)`,

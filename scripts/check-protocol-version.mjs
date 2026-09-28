@@ -25,8 +25,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // per-turn step counters with the `steps_started_this_turn` tally; v83 adds
 // target-gated activation costs (`ReduceAbilityCost { targets, frequency }`,
 // the per-turn activation journal and the target-settlement carrier fields);
-// v84 adds `WaitingFor::DeclareBlockers.block_capacities` (CR 509.1a +
-// CR 101.1). Keep the measured base so a future merge cannot collapse independent wire
+// v84 adds required dungeon choice card and room previews.
+// v85 adds the tagged ignored-die display event; v86 adds the tagged
+// GameEvent::Melded event; v87 adds `WaitingFor::DeclareBlockers.block_capacities`
+// (CR 509.1a + CR 101.1).
+// Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +10: upstream's v76 CR 601.2f caster-elected cost-reduction ordering, the
@@ -36,8 +39,11 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // cast election tag.
 // +11: the v82 CR 500.8–500.10 added-phase anchoring parse bump.
 // +12: the v83 target-gated activation costs.
-// +13: the v84 CR 509.1a + CR 101.1 block-capacities capability bump.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 13;
+// +13: the v84 dungeon choice card and room previews.
+// +14: the v85 ignored-die display event.
+// +15: the v86 Melded event tag.
+// +16: the v87 CR 509.1a + CR 101.1 block-capacities capability bump.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 16;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -71,8 +77,11 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +9: wire 63 moves with full-game v81 for the Surge cast election tag.
 // +10: wire 64 moves with full-game v82 for added-phase anchoring.
 // +11: wire 65 moves with full-game v83 for target-gated activation costs.
-// +12: wire 66 moves with full-game v84 for block-capacities.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 12;
+// +12: wire 66 moves with full-game v84 for dungeon choice previews.
+// +13: wire 67 moves with full-game v85 for ignored-die event batches.
+// +14: wire 68 moves with full-game v86 for the Melded event tag.
+// +15: wire 69 moves with full-game v87 for block-capacities.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 15;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

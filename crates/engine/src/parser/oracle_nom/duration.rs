@@ -694,7 +694,11 @@ fn parse_remains_face_up(input: &str) -> OracleResult<'_, Duration> {
 /// so no card-specific phrasing leaks in. (`SELF_REF_TYPE_PHRASES` is a runtime
 /// slice, so the closed set is folded by iteration rather than a fixed `alt()`
 /// tuple; each candidate is still matched with the nom `tag()` combinator.)
-fn parse_self_reference_subject(input: &str) -> OracleResult<'_, ()> {
+///
+/// `pub(crate)` so other trigger-head combinators (`oracle_trigger::
+/// parse_as_transforms_into_keyword`) share this exact authority instead of
+/// re-spelling the self-reference token as ad hoc grammar.
+pub(crate) fn parse_self_reference_subject(input: &str) -> OracleResult<'_, ()> {
     for phrase in std::iter::once(&"~").chain(crate::parser::oracle_util::SELF_REF_TYPE_PHRASES) {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
             return Ok((rest, ()));

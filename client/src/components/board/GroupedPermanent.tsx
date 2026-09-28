@@ -29,6 +29,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { type BlockerAssignments, useUiStore } from "../../stores/uiStore.ts";
 import { blockersByAttacker, blockTargetSelection, partitionBlockTargets } from "../../utils/combat.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
+import { MeldedCardFrame } from "./MeldedCardFrame.tsx";
 import { PermanentCard } from "./PermanentCard.tsx";
 import { type GroupRenderMode, groupStaggerPx, type BattlefieldRowType } from "./groupRenderMode.ts";
 
@@ -244,6 +245,13 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
             ∞
           </span>
         </div>
+      );
+    }
+    if (group.representative?.isMelded) {
+      return (
+        <MeldedCardFrame>
+          <PermanentCard objectId={group.ids[0]} />
+        </MeldedCardFrame>
       );
     }
     return <PermanentCard objectId={group.ids[0]} />;

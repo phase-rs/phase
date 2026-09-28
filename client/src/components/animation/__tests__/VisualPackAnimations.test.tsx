@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, GameState } from "../../../adapter/types.ts";
 import type { AnimationStep } from "../../../animation/types.ts";
+import { audioManager } from "../../../audio/AudioManager.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { currentSnapshot } from "../../../hooks/useGameDispatch.ts";
 import { useAnimationStore } from "../../../stores/animationStore.ts";
@@ -13,10 +14,12 @@ import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObj
 import { buildGameState, buildPlayers } from "../../../test/factories/gameStateFactory.ts";
 import { AnimationOverlay } from "../AnimationOverlay.tsx";
 import { CastArcAnimation } from "../CastArcAnimation.tsx";
+import type { ParticleCanvasHandle } from "../ParticleCanvas.tsx";
 import { MillRevealAnimation } from "../MillRevealAnimation.tsx";
 import { RippleRevealAnimation } from "../RippleRevealAnimation.tsx";
 import { RevealOverlay } from "../RevealOverlay.tsx";
 import { visibleAnimationImageSnapshot } from "../ResolvedAnimationImage.tsx";
+import { applyScreenShake } from "../ScreenShake.tsx";
 
 const imageMock = vi.hoisted(() => ({
   calls: [] as Array<[string, Record<string, unknown> | undefined]>,
@@ -42,7 +45,40 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
   }),
 }));
 
-vi.mock("../ParticleCanvas.tsx", () => ({ ParticleCanvas: () => null }));
+const motionState = vi.hoisted(() => ({ reduced: false }));
+
+vi.mock("framer-motion", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("framer-motion")>()),
+  useReducedMotion: () => motionState.reduced,
+}));
+
+const particles = vi.hoisted(() => ({
+  explosion: vi.fn(),
+  projectile: vi.fn(),
+  spellImpact: vi.fn(),
+  damageFlash: vi.fn(),
+  playerDamage: vi.fn(),
+  healEffect: vi.fn(),
+  summonBurst: vi.fn(),
+  blockClash: vi.fn(),
+  attackBurst: vi.fn(),
+  slamImpact: vi.fn(),
+  forgeStrike: vi.fn(),
+  forgeHeat: vi.fn(),
+  damageFlurry: vi.fn(),
+}) satisfies ParticleCanvasHandle);
+
+vi.mock("../ParticleCanvas.tsx", async () => {
+  const { forwardRef, useImperativeHandle } = await import("react");
+  return {
+    ParticleCanvas: forwardRef<ParticleCanvasHandle>((_props, ref) => {
+      useImperativeHandle(ref, () => particles);
+      return null;
+    }),
+  };
+});
+
+vi.mock("../ScreenShake.tsx", () => ({ applyScreenShake: vi.fn() }));
 
 const containerRef = { current: null } as RefObject<HTMLDivElement | null>;
 
@@ -93,6 +129,7 @@ beforeEach(() => {
   imageMock.calls.length = 0;
   imageMock.results.clear();
   currentSnapshot.clear();
+  motionState.reduced = false;
   usePreferencesStore.setState({ vfxQuality: "full", animationSpeedMultiplier: 1 });
 });
 
@@ -102,10 +139,117 @@ afterEach(() => {
   useGameStore.getState().reset();
   currentSnapshot.clear();
   vi.clearAllMocks();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
+const MELD_STEP_MS = 3200;
+
+/** Seeds a Gisela + Bruna → Brisela meld step, both fronts measured on the board. */
+function seedMeld() {
+  const gisela = visibleObject({
+    id: 50,
+    name: "Gisela, the Broken Blade",
+    printed_ref: { oracle_id: "gisela-oracle", face_name: "Gisela, the Broken Blade" },
+  });
+  const bruna = visibleObject({
+    id: 51,
+    name: "Bruna, the Fading Light",
+    printed_ref: { oracle_id: "bruna-oracle", face_name: "Bruna, the Fading Light" },
+  });
+  const melded = visibleObject({
+    ...gisela,
+    name: "Brisela, Voice of Nightmares",
+    merge_kind: "Meld",
+    merged_components: [gisela.id, bruna.id],
+    printed_ref: { oracle_id: "brisela-oracle", face_name: "Brisela, Voice of Nightmares" },
+  });
+  currentSnapshot.set(gisela.id, rect(10, 20));
+  currentSnapshot.set(bruna.id, rect(110, 20));
+  seedOverlay(
+    state([gisela, bruna]),
+    state([melded]),
+    step(
+      { type: "Melded", data: { object_id: gisela.id, partner_id: bruna.id, controller: 0 } },
+      MELD_STEP_MS,
+    ),
+  );
+  return { gisela, bruna };
+}
+
+/** Renders a seeded meld step and runs it up to (not past) the step's end. */
+function runMeldForge() {
+  vi.useFakeTimers();
+  const playSfx = vi.spyOn(audioManager, "playSfx").mockImplementation(() => undefined);
+  seedMeld();
+  const shakeTarget = { current: document.createElement("div") };
+  render(<AnimationOverlay containerRef={shakeTarget} />);
+  act(() => {
+    vi.advanceTimersByTime(MELD_STEP_MS - 1);
+  });
+  return { playSfx, shakeTarget };
+}
+
+const STRIKE_SOUNDS = [
+  ["DamageDealt", 0.7],
+  ["DamageDealt", 0.7],
+  ["DamageDealt", 1],
+];
+
 describe("visual-pack animation consumers", () => {
+  it("forges the pre-meld pair and reveals the melded permanent's combined face", () => {
+    const { gisela, bruna } = seedMeld();
+
+    render(<AnimationOverlay containerRef={containerRef} />);
+
+    expect(screen.getByTestId("meld-forge-animation")).toBeInTheDocument();
+    expect([...useAnimationStore.getState().veiledObjectIds].sort()).toEqual([gisela.id, bruna.id]);
+    const requested = vi.mocked(useCardImage).mock.calls.map(([, options]) => options?.oracleId);
+    expect(requested).toEqual(
+      expect.arrayContaining(["gisela-oracle", "bruna-oracle", "brisela-oracle"]),
+    );
+  });
+
+  it("heats, strikes, shakes, and bursts the forge at full motion", () => {
+    const { playSfx, shakeTarget } = runMeldForge();
+
+    expect(playSfx.mock.calls).toEqual(STRIKE_SOUNDS);
+    expect(particles.forgeHeat).toHaveBeenCalledTimes(1);
+    expect(particles.forgeStrike).toHaveBeenCalledTimes(3);
+    expect(particles.summonBurst).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(applyScreenShake).mock.calls.map(([target, intensity]) => [target, intensity]))
+      .toEqual([
+        [shakeTarget.current, "light"],
+        [shakeTarget.current, "light"],
+        [shakeTarget.current, "medium"],
+      ]);
+  });
+
+  it("keeps the three strike sounds but no moving effects under reduced motion", () => {
+    motionState.reduced = true;
+
+    const { playSfx } = runMeldForge();
+
+    expect(screen.getByTestId("meld-forge-animation")).toBeInTheDocument();
+    expect(playSfx.mock.calls).toEqual(STRIKE_SOUNDS);
+    expect(particles.forgeHeat).not.toHaveBeenCalled();
+    expect(particles.forgeStrike).not.toHaveBeenCalled();
+    expect(particles.summonBurst).not.toHaveBeenCalled();
+    expect(applyScreenShake).not.toHaveBeenCalled();
+  });
+
+  it("keeps the three strike sounds with no particles at minimal VFX", () => {
+    usePreferencesStore.setState({ vfxQuality: "minimal" });
+
+    const { playSfx } = runMeldForge();
+
+    expect(playSfx.mock.calls).toEqual(STRIKE_SOUNDS);
+    expect(particles.forgeHeat).not.toHaveBeenCalled();
+    expect(particles.forgeStrike).not.toHaveBeenCalled();
+    expect(particles.summonBurst).not.toHaveBeenCalled();
+    expect(applyScreenShake).not.toHaveBeenCalled();
+  });
+
   it("keeps a cast snapshot latched while advancing its exact normal source", () => {
     const object = visibleObject({
       id: 30,

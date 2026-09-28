@@ -706,6 +706,22 @@ fn tied_lowest_rolls_open_a_choice_limited_to_the_tied_indices() {
         1,
         "CR 706.6: exactly one surviving roll is emitted after the choice"
     );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::DieRollIgnored {
+                    player_id: P0,
+                    sides: 1,
+                    result: 1
+                }
+            ))
+            .count(),
+        1,
+        "CR 706.6: the ignored natural result reaches the display log after the choice"
+    );
 }
 
 /// V6 hostile — a submission naming a roll that is NOT among the tied-lowest set

@@ -80,6 +80,8 @@ export const discord = {
   appId: () => Bun.env.CARD_BOT_APP_ID || DEFAULT_APP_ID,
   /** Guild to register the command in (instant propagation, single-server bot). */
   guildId: () => Bun.env.CARD_BOT_GUILD_ID || DEFAULT_GUILD_ID,
+  /** Channel the lobby mirror posts public web-lobby rooms in; the mirror is off when unset. */
+  lobbyChannelId: () => Bun.env.CARD_BOT_LOBBY_CHANNEL_ID || undefined,
 };
 
 /** HTTP port the interactions server listens on (behind nginx on 127.0.0.1). */
