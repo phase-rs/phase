@@ -295,6 +295,8 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     expect(detailOf("Prototype")).toBe("Prototype {1}{U} — 2/3");
     expect(detailOf("Ward", isType("Compound"))).toBe("Ward {2}, pay 2 life");
     expect(detailOf("Ward", isType("Waterbend"))).toBe("Ward waterbend {4}");
+    expect(detailOf("Blitz", isType("NonMana"))).toBe("Blitz Pay 3 life");
+    expect(detailOf("Blitz", isType("Mana"))).toBe("Blitz {2}{R}");
     expect(detailOf("Foretell", isType("SelfManaCostReduced"))).toBe(
       "Foretell its mana cost reduced by {2}",
     );
@@ -339,6 +341,9 @@ describe("keyword AbilityCost detail", () => {
     expect(getKeywordDetail(upkeep([mana, payLife]))).toBe("{1}{G}, Pay 3 life");
     expect(
       getKeywordDetail({ Flashback: { type: "NonMana", data: { type: "Composite", costs: [mana, payLife] } } }),
+    ).toBe("{1}{G}, Pay 3 life");
+    expect(
+      getKeywordDetail({ Blitz: { type: "NonMana", data: { type: "Composite", costs: [mana, payLife] } } }),
     ).toBe("{1}{G}, Pay 3 life");
   });
 

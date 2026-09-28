@@ -340,7 +340,7 @@ export function formatKeywordManaCost(cost: ManaCost): string {
 const MANA_COST_KEYWORDS = new Set([
   "Unearth", "Reconfigure", "Kicker", "Equip", "Ninjutsu", "CommanderNinjutsu",
   "Prowl", "Morph", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
-  "Harmonize", "Foretell", "Mutate", "Disturb", "Blitz", "Overload",
+  "Harmonize", "Foretell", "Mutate", "Disturb", "Overload",
   "Spectacle", "Surge", "Encore", "Entwine", "Outlast", "Scavenge", "Fortify",
   "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "Squad",
   "Transmute", "Transfigure", "Recover", "Cleave", "Replicate",
@@ -353,7 +353,7 @@ const MANA_COST_KEYWORDS = new Set([
  */
 const MANA_OR_NON_MANA_COST_KEYWORDS = new Set([
   "Bestow", "Embalm", "Eternalize", "Cycling", "Flashback", "Escape", "Evoke",
-  "Buyback", "Echo",
+  "Buyback", "Echo", "Blitz",
 ]);
 
 /** Keywords whose payload is an AbilityCost. */

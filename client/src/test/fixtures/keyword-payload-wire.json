@@ -431,11 +431,14 @@
     },
     {
       "Blitz": {
-        "generic": 2,
-        "shards": [
-          "Red"
-        ],
-        "type": "Cost"
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
       }
     },
     {
@@ -989,6 +992,18 @@
       "Echo": {
         "data": {
           "generic": 1,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Blitz": {
+        "data": {
+          "generic": 2,
           "shards": [
             "Red"
           ],

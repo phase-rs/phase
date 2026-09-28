@@ -6250,6 +6250,7 @@ mod tests {
             Keyword::Evoke(EvokeCost::Mana(mc("{2}{U}"))),
             Keyword::Buyback(BuybackCost::Mana(mc("{3}"))),
             Keyword::Echo(EchoCost::Mana(mc("{1}{R}"))),
+            Keyword::Blitz(BlitzCost::Mana(mc("{2}{R}"))),
             Keyword::Disguise(DisguiseCost::Mana(mc("{1}{W/U}"))),
             Keyword::Ward(WardCost::Mana(mc("{2}"))),
             Keyword::Ward(WardCost::Waterbend(mc("{4}"))),
