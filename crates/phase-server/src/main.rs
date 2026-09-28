@@ -28,7 +28,7 @@ use engine::ai_support::{
     legal_actions_full as engine_legal_actions_full,
     mana_payment_shortcut_actions as engine_mana_payment_shortcut_actions,
 };
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::derived_views::derive_filtered_views;
 use engine::game::interaction::{derive_viewer_interaction, object_action_payloads};
 use engine::game::validate_name_deck_for_format_full;
@@ -99,6 +99,7 @@ type SharedState = Arc<Mutex<SessionManager>>;
 type SharedConnections =
     Arc<Mutex<HashMap<String, HashMap<PlayerId, mpsc::UnboundedSender<ServerMessage>>>>>;
 type SharedDb = Arc<CardDatabase>;
+type SharedComboTable = Arc<ComboTable>;
 type SharedAiDeckManifest = Arc<AiDeckManifest>;
 /// The lobby registry, wrapped in the WASM-safe [`Broker`]. LobbyOnly broker
 /// dispatch goes through `Broker::handle`/`on_disconnect`/`reap_expired`;
@@ -194,10 +195,14 @@ type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<
 /// hopped onto a purpose-sized 16 MiB thread; against a 32 MiB runtime owner
 /// that is a *downgrade* on the one platform that reported the overflow, so
 /// both arms are gone and the restore runs inline.
-fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
+fn restore_persisted_session(
+    json: &str,
+    db: SharedDb,
+    combos: &ComboTable,
+) -> Result<GameSession, String> {
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
-    GameSession::from_persisted(persisted, &db)
+    GameSession::from_persisted(persisted, &db, combos)
 }
 
 /// Admit a persisted draft row only when its SQLite key names the enclosed
@@ -2111,6 +2116,37 @@ async fn serve() {
     };
     info!(cards = card_db.card_count(), "card database loaded");
     let db: SharedDb = Arc::new(card_db);
+    let combo_table_path = data_path.join("combo-table.json");
+    let combo_table = if combo_table_path.is_file() {
+        match std::fs::read_to_string(&combo_table_path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| ComboTable::from_json_str(&raw).map_err(|error| error.to_string()))
+        {
+            Ok(table) => table,
+            Err(error) => {
+                warn!(
+                    path = %combo_table_path.display(),
+                    %error,
+                    "failed to load combo table; combo floors are unmeasured"
+                );
+                ComboTable::default()
+            }
+        }
+    } else {
+        info!(
+            path = %combo_table_path.display(),
+            "combo table absent; combo floors are unmeasured"
+        );
+        ComboTable::default()
+    };
+    if let Some(provenance) = combo_table.provenance() {
+        info!(
+            entries = combo_table.len(),
+            snapshot_date = %provenance.snapshot_date,
+            "combo table loaded"
+        );
+    }
+    let combos: SharedComboTable = Arc::new(combo_table);
     let ai_deck_manifest: SharedAiDeckManifest =
         Arc::new(load_ai_deck_manifest(data_path).unwrap_or_else(|message| fatal_startup(message)));
     server_context.ai_deck_manifest = ai_deck_manifest;
@@ -2206,7 +2242,7 @@ async fn serve() {
                         }
                     };
                     info!(game = %game_code, bytes = json.len(), "restoring persisted session");
-                    match restore_persisted_session(&json, db.clone()) {
+                    match restore_persisted_session(&json, db.clone(), &combos) {
                         Ok(session) => match finish_restored_full_startup(
                             &mut mgr, &game_db, snapshot, session,
                         ) {
@@ -2624,6 +2660,7 @@ async fn serve() {
         draft_pools,
         connections,
         db,
+        combos,
         lobby,
         lobby_subscribers,
         player_count,
@@ -3426,7 +3463,7 @@ mod restored_draft_startup_tests {
 mod restored_full_startup_tests {
     use std::sync::Arc;
 
-    use engine::database::CardDatabase;
+    use engine::database::{CardDatabase, ComboTable};
     use engine::game::deck_loading::PlayerDeckPayload;
     use engine::types::game_state::WaitingFor;
     use engine::types::player::PlayerId;
@@ -3465,6 +3502,7 @@ mod restored_full_startup_tests {
         GameSession::from_persisted(
             snapshot.persisted.clone(),
             &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
         )
         .expect("persisted test session restores")
     }
@@ -3871,6 +3909,7 @@ struct AppState {
     draft_pools: SharedDraftPools,
     connections: SharedConnections,
     db: SharedDb,
+    combos: SharedComboTable,
     lobby: SharedLobby,
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
@@ -3955,6 +3994,7 @@ async fn ws_handler(
                 app_state.draft_pools,
                 app_state.connections,
                 app_state.db,
+                app_state.combos,
                 app_state.lobby,
                 app_state.lobby_subscribers,
                 app_state.player_count,
@@ -4054,6 +4094,7 @@ async fn handle_socket(
     draft_pools: SharedDraftPools,
     connections: SharedConnections,
     db: SharedDb,
+    combos: SharedComboTable,
     lobby: SharedLobby,
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
@@ -4173,6 +4214,7 @@ async fn handle_socket(
                             &draft_pools,
                             &connections,
                             &db,
+                            &combos,
                             &lobby,
                             &lobby_subscribers,
                             &player_count,
@@ -4899,8 +4941,10 @@ struct MultiplayerSessionRequest {
 /// describes it. `Err` refuses the create, matching every other deck failure
 /// in the handler this replaces the inline loop in — a seat whose deck cannot
 /// be resolved has no honest provenance to record.
+#[allow(clippy::too_many_arguments)]
 fn ai_seat_setups(
     db: &engine::database::CardDatabase,
+    combos: &ComboTable,
     ai_seats: &[server_core::protocol::AiSeatRequest],
     pc: u8,
     format_config: Option<&engine::types::format::FormatConfig>,
@@ -5044,7 +5088,7 @@ fn ai_seat_setups(
                 ));
             }
         }
-        let resolved = resolve_deck(db, &effective)?;
+        let resolved = resolve_deck(db, combos, &effective)?;
         setups.push(server_core::session::AiSeatSetup {
             seat_index: seat.seat_index,
             difficulty: seat.difficulty,
@@ -5639,6 +5683,7 @@ async fn maybe_spawn_draft_matches(
     draft_state: &SharedDraftState,
     game_state: &SharedState,
     db: &SharedDb,
+    combos: &SharedComboTable,
     game_db: &SharedGameDb,
     connections: &SharedConnections,
 ) {
@@ -5658,7 +5703,7 @@ async fn maybe_spawn_draft_matches(
             .get(draft_code)
             .map(|s| s.session.current_round)
             .unwrap_or(1);
-        match draft_mgr.spawn_match_games_for_round(draft_code, &mut game_mgr, db, round) {
+        match draft_mgr.spawn_match_games_for_round(draft_code, &mut game_mgr, db, combos, round) {
             Ok(spawned) => spawned
                 .into_iter()
                 .filter_map(|spawn| {
@@ -5947,6 +5992,7 @@ fn should_rearm_pick_timer(
 
 struct ServerDeckResolver<'a> {
     db: &'a CardDatabase,
+    combos: &'a ComboTable,
     manifest: &'a AiDeckManifest,
     format_config: &'a engine::types::format::FormatConfig,
     occupied: Vec<phase_ai::pod_selection::PodSeatOccupant>,
@@ -5973,7 +6019,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
         // table with `SeatDeckMissing`, naming a seat rather than the deck
         // that caused it. Validating here causes the reducer to return `Err`,
         // which phase-server then surfaces to the client.
-        server_core::resolve_deck(self.db, &deck)?;
+        server_core::resolve_deck(self.db, self.combos, &deck)?;
         Ok(engine::game::deck_loading::PlayerDeckList {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
@@ -6692,6 +6738,7 @@ async fn handle_full_game_submission(
     socket: &mut NegotiatedSocket,
     state: &SharedState,
     db: &SharedDb,
+    combos: &SharedComboTable,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
     tx: &mpsc::UnboundedSender<ServerMessage>,
@@ -6766,6 +6813,7 @@ async fn handle_full_game_submission(
                 &player_token,
                 action,
                 Some(db.as_ref()),
+                combos,
             ),
             GameSubmission::Interaction(submission) => {
                 mgr.handle_interaction_with_rejection(&game_code, &player_token, submission)
@@ -7353,6 +7401,7 @@ async fn handle_client_message(
     draft_pools: &SharedDraftPools,
     connections: &SharedConnections,
     db: &SharedDb,
+    combos: &SharedComboTable,
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
     player_count: &SharedPlayerCount,
@@ -7529,7 +7578,7 @@ async fn handle_client_message(
                 }
                 return;
             }
-            let resolved = match resolve_deck(db, &deck) {
+            let resolved = match resolve_deck(db, combos, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
                     error!(error = %e, "CreateGame: deck resolve failed");
@@ -7653,7 +7702,7 @@ async fn handle_client_message(
                 return;
             }
 
-            let resolved = match resolve_deck(db, &deck) {
+            let resolved = match resolve_deck(db, combos, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
                     error!(game = %game_code, error = %e, "JoinGame: deck resolve failed");
@@ -7880,6 +7929,7 @@ async fn handle_client_message(
                 socket,
                 state,
                 db,
+                combos,
                 draft_state,
                 connections,
                 tx,
@@ -7896,6 +7946,7 @@ async fn handle_client_message(
                 socket,
                 state,
                 db,
+                combos,
                 draft_state,
                 connections,
                 tx,
@@ -8293,7 +8344,7 @@ async fn handle_client_message(
                 }
             };
 
-            let resolved = match resolve_deck(db, &deck) {
+            let resolved = match resolve_deck(db, combos, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
                     error!(error = %e, "CreateGameWithSettings: deck resolve failed");
@@ -8355,6 +8406,7 @@ async fn handle_client_message(
             let ai_pod_seed = rand::random::<u64>();
             let ai_requests = match ai_seat_setups(
                 db,
+                combos,
                 &ai_seats,
                 pc,
                 format_config.as_ref(),
@@ -9107,7 +9159,7 @@ async fn handle_client_message(
                 }
             }
 
-            let resolved = match resolve_deck(db, &deck) {
+            let resolved = match resolve_deck(db, combos, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
                     error!(game = %game_code, error = %e, "JoinGameWithPassword: deck resolve failed");
@@ -9629,6 +9681,7 @@ async fn handle_client_message(
                         &player_token,
                         engine::types::actions::GameAction::Concede { player_id },
                         None,
+                        combos,
                     ) {
                         Ok(result) => {
                             let session = mgr
@@ -10386,6 +10439,7 @@ async fn handle_client_message(
                     let format_config = seat_state.format.clone();
                     let resolver = ServerDeckResolver {
                         db: db.as_ref(),
+                        combos,
                         manifest: &context.ai_deck_manifest,
                         format_config: &format_config,
                         occupied,
@@ -10417,7 +10471,7 @@ async fn handle_client_message(
                     })
                     .collect::<Vec<_>>();
 
-                session.apply_seat_delta(seat_state, &delta, db.as_ref());
+                session.apply_seat_delta(seat_state, &delta, db.as_ref(), combos);
                 // Issue #1506: a `SeatMutate` is an *explicit* host edit (Start,
                 // Kick, Remove, add-AI). Only `SeatMutation::Start` — surfaced as
                 // `delta.now_started` — may begin the game here. Folding in an
@@ -11019,6 +11073,7 @@ async fn handle_client_message(
                         draft_state,
                         state,
                         db,
+                        combos,
                         game_db,
                         connections,
                     )
@@ -12489,8 +12544,12 @@ mod full_socket_authority_tests {
             .pop()
             .expect("persisted Full session");
         let json = serde_json::to_string(&persisted.persisted).expect("serialize persisted state");
-        let mut restored = restore_persisted_session(&json, Arc::new(CardDatabase::default()))
-            .expect("restore persisted Full session");
+        let mut restored = restore_persisted_session(
+            &json,
+            Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .expect("restore persisted Full session");
         restored.full_runtime = Some(FullRuntime {
             key: persisted.key.clone(),
             activation_epoch: persisted.activation_epoch,
@@ -13750,6 +13809,7 @@ mod issue_4548_full_create_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db: Arc::new(CardDatabase::default()),
+            combos: Arc::new(ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -16333,7 +16393,7 @@ mod ai_seat_setups_tests {
     use std::collections::BTreeMap;
 
     use engine::ai_deck_manifest::AiDeckManifest;
-    use engine::database::CardDatabase;
+    use engine::database::{CardDatabase, ComboTable};
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType, Supertype};
     use engine::types::format::FormatConfig;
@@ -16498,6 +16558,7 @@ mod ai_seat_setups_tests {
 
         let setups = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &[request(Some(list(&["Forest"])), None)],
             2,
             None,
@@ -16512,7 +16573,7 @@ mod ai_seat_setups_tests {
             panic!("expected a recorded list, got {:?}", setups[0].choice);
         };
         assert_eq!(
-            server_core::deck_resolve::resolve_deck(&db, recorded)
+            server_core::deck_resolve::resolve_deck(&db, &ComboTable::default(), recorded)
                 .expect("the recorded choice re-resolves")
                 .main_deck
                 .len(),
@@ -16526,6 +16587,7 @@ mod ai_seat_setups_tests {
 
         let result = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &[request(Some(list(&["Nonexistent Card"])), None)],
             2,
             None,
@@ -16548,6 +16610,7 @@ mod ai_seat_setups_tests {
 
         let setups = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &[request(None, Some("Red Deck Wins"))],
             2,
             None,
@@ -16570,6 +16633,7 @@ mod ai_seat_setups_tests {
         let (db, manifest) = commander_fixture();
         let setups = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &random_requests(3),
             4,
             Some(&FormatConfig::commander()),
@@ -16600,6 +16664,7 @@ mod ai_seat_setups_tests {
         let db = db_with(&names);
         let setups = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &random_requests(1),
             2,
             Some(&FormatConfig::standard()),
@@ -16622,6 +16687,7 @@ mod ai_seat_setups_tests {
         let select = || {
             ai_seat_setups(
                 &db,
+                &ComboTable::default(),
                 &random_requests(3),
                 4,
                 Some(&FormatConfig::commander()),
@@ -16656,6 +16722,7 @@ mod ai_seat_setups_tests {
         ];
         let setups = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &requests,
             4,
             Some(&FormatConfig::commander()),
@@ -16864,6 +16931,7 @@ mod admin_auth_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -17034,6 +17102,7 @@ mod compression_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -17535,6 +17604,7 @@ mod p2p_backup_delete_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -17816,7 +17886,7 @@ mod metrics_tests {
 
     use axum::routing::get;
     use axum::Router;
-    use engine::database::CardDatabase;
+    use engine::database::{CardDatabase, ComboTable};
     use engine::game::deck_loading::PlayerDeckPayload;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
@@ -17848,6 +17918,7 @@ mod metrics_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db: Arc::new(CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -18420,8 +18491,12 @@ mod metrics_tests {
                 .expect("the room is live")
                 .to_persisted()
         };
-        GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
-            .expect("the snapshot restores")
+        GameSession::from_persisted(
+            persisted,
+            &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .expect("the snapshot restores")
     }
 
     /// Both legacy seat installs must record the unresolved deck they were

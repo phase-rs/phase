@@ -266,8 +266,12 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 /// The `bracket_tier` is taken from `list.bracket_tier`, while the estimator's
 /// floor is computed from the complete `PlayerDeckList`. Callers that need a
 /// specific declared tier set it on the list before calling.
-pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
-    let estimated_bracket_tier = estimate_tier_for_seat(db, list, "player");
+pub fn resolve_player_deck_list(
+    db: &CardDatabase,
+    combos: &ComboTable,
+    list: &PlayerDeckList,
+) -> PlayerDeckPayload {
+    let estimated_bracket_tier = estimate_tier_for_seat(db, combos, list, "player");
     PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
@@ -286,16 +290,16 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
 
 fn estimate_tier_for_seat(
     db: &CardDatabase,
+    combos: &ComboTable,
     list: &PlayerDeckList,
     seat: &str,
 ) -> Option<CommanderBracketTier> {
-    // No combo table is loaded here, so the estimated tier the AI acts on excludes the combo floors — follow-up: load the table on this path.
-    let estimated =
-        estimate_bracket(list, db, &ComboTable::default()).map(|estimate| estimate.tier);
+    let estimated = estimate_bracket(list, db, combos).map(|estimate| estimate.tier);
     tracing::debug!(
         seat,
         declared_tier = %list.bracket_tier,
         estimated_tier = ?estimated,
+        combo_coverage = ?combos.coverage(),
         "resolved Commander bracket estimate"
     );
     estimated
@@ -307,9 +311,9 @@ fn estimate_tier_for_seat(
 /// Each declaration is forwarded and each estimator floor is computed from the
 /// corresponding complete `PlayerDeckList`. Old payloads that omit either field
 /// deserialize with `CommanderBracketTier::Core` and `None`, respectively.
-pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
-    let player_estimate = estimate_tier_for_seat(db, &list.player, "player");
-    let opponent_estimate = estimate_tier_for_seat(db, &list.opponent, "opponent");
+pub fn resolve_deck_list(db: &CardDatabase, combos: &ComboTable, list: &DeckList) -> DeckPayload {
+    let player_estimate = estimate_tier_for_seat(db, combos, &list.player, "player");
+    let opponent_estimate = estimate_tier_for_seat(db, combos, &list.opponent, "opponent");
     DeckPayload {
         player: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
@@ -355,7 +359,12 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 sticker_sheets: deck.sticker_sheets.clone(),
                 signature_spell: resolve_names(db, &deck.signature_spell),
                 bracket_tier: deck.bracket_tier,
-                estimated_bracket_tier: estimate_tier_for_seat(db, deck, &format!("ai_{index}")),
+                estimated_bracket_tier: estimate_tier_for_seat(
+                    db,
+                    combos,
+                    deck,
+                    &format!("ai_{index}"),
+                ),
             })
             .collect(),
         // ai_difficulties is carried through from the DeckList so the caller's
@@ -2475,7 +2484,7 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &ComboTable::default(), &list);
         assert_eq!(payload.player.commander.len(), 1);
         assert_eq!(
             payload.player.commander[0].card.name,

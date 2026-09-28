@@ -52,7 +52,7 @@ use std::panic::PanicHookInfo;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::bracket_estimate::{CommanderBracketTier, ACCEPTED_BRACKET_LABELS};
 use engine::game::deck_loading::{
     load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
@@ -134,6 +134,7 @@ fn main() {
 /// move across the `thread::spawn` boundary, not eight.
 struct CliArgs {
     cards_path: String,
+    combo_table: Option<PathBuf>,
     feed: String,
     seed: u64,
     difficulty: AiDifficulty,
@@ -187,6 +188,7 @@ enum RunContext {
 /// instead, exactly mirroring the direct-exit message each replaces.
 fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> {
     let mut cards_path: Option<String> = None;
+    let mut combo_table: Option<PathBuf> = None;
 
     let mut seed: u64 = 42;
     let mut difficulty = AiDifficulty::Easy;
@@ -232,6 +234,12 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
                     feed = v.clone();
                 }
             }
+            "--combo-table" => match args_iter.next() {
+                Some(value) if !value.trim().is_empty() && !value.starts_with("--") => {
+                    combo_table = Some(PathBuf::from(value));
+                }
+                Some(_) | None => return Err("error: --combo-table requires a path".to_string()),
+            },
             "--games-file" => match args_iter.next() {
                 Some(v) => games_file = Some(v.clone()),
                 None => return Err("error: --games-file requires a path".to_string()),
@@ -376,6 +384,7 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
 
     Ok(CliArgs {
         cards_path,
+        combo_table,
         feed,
         seed,
         difficulty,
@@ -415,6 +424,7 @@ struct GameRunContext<'a> {
 fn run(cli: CliArgs) -> i32 {
     let CliArgs {
         cards_path,
+        combo_table,
         feed,
         seed,
         difficulty,
@@ -437,6 +447,19 @@ fn run(cli: CliArgs) -> i32 {
             eprintln!("failed to load {}: {e}", export_path.display());
             std::process::exit(1);
         }
+    };
+    let combos = match combo_table {
+        Some(path) => match std::fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| ComboTable::from_json_str(&raw).map_err(|error| error.to_string()))
+        {
+            Ok(table) => table,
+            Err(error) => {
+                eprintln!("failed to load {}: {error}", path.display());
+                return 1;
+            }
+        },
+        None => ComboTable::default(),
     };
 
     println!("=== 4-player Commander AI test ===");
@@ -463,6 +486,14 @@ fn run(cli: CliArgs) -> i32 {
     match run_context {
         RunContext::Interactive => println!("ExecutionMode: interactive"),
         RunContext::Measurement => println!("ExecutionMode: measurement"),
+    }
+    match combos.provenance() {
+        Some(provenance) => println!(
+            "combo table: {}, {} entries",
+            provenance.snapshot_date,
+            combos.len()
+        ),
+        None => println!("combo table: unmeasured"),
     }
 
     let cards_root = PathBuf::from(&cards_path);
@@ -517,7 +548,7 @@ fn run(cli: CliArgs) -> i32 {
         ai_decks: vec![deck_lists[2].clone(), deck_lists[3].clone()],
         ..Default::default()
     };
-    let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
+    let payload: DeckPayload = resolve_deck_list(&db, &combos, &deck_list);
 
     let (seat_coverage, pre_screen_shortfall) = pre_screen_decks(&db, &deck_lists, coverage_floor);
     let report_difficulty = batch_games
@@ -1570,7 +1601,7 @@ mod tests {
             ai_decks: vec![seat.clone(), seat],
             ..Default::default()
         };
-        let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
+        let payload: DeckPayload = resolve_deck_list(&db, &ComboTable::default(), &deck_list);
 
         // Calls the same setup function `main()` uses — if `build_game_state`
         // ever drops back to a loader that skips the card-name pool, this test

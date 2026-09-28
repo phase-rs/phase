@@ -550,6 +550,17 @@ thread_local! {
     static AI_PROPOSALS: RefCell<AiProposalRegistry> = RefCell::new(AiProposalRegistry::default());
 }
 
+/// Runs a resolver against the loaded combo artifact. Browsers that have not
+/// loaded the optional artifact use an explicit unmeasured table, so bracket
+/// estimates remain honest about the unavailable combo floors.
+fn with_combo_table<R>(f: impl FnOnce(&ComboTable) -> R) -> R {
+    COMBO_TABLE.with(|cell| {
+        let combos = cell.borrow();
+        let unmeasured = ComboTable::default();
+        f(combos.as_deref().unwrap_or(&unmeasured))
+    })
+}
+
 #[derive(Debug, Clone)]
 struct StoredAiProposal {
     generation: u64,
@@ -1195,7 +1206,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             commander: Vec::new(),
             ..Default::default()
         };
-        let payload = resolve_player_deck_list(db, &list);
+        let payload = with_combo_table(|combos| resolve_player_deck_list(db, combos, &list));
         let profile = DeckProfile::analyze(&payload.main_deck);
         Ok(to_js(&DeckProfileResult::from(&profile)))
     })
@@ -1435,11 +1446,7 @@ fn estimate_bracket_inner(request: &BracketEstimateRequest) -> Option<BracketEst
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let db = db.as_ref()?;
-        COMBO_TABLE.with(|combo_cell| {
-            let combos = combo_cell.borrow();
-            let empty = ComboTable::default();
-            estimate_bracket_for_request(request, db, combos.as_deref().unwrap_or(&empty))
-        })
+        with_combo_table(|combos| estimate_bracket_for_request(request, db, combos))
     })
 }
 
@@ -2008,7 +2015,7 @@ fn initialize_game_impl(
             // `deck_pools.is_empty()`-style invariants below — and the
             // per-player library check at game start — will surface it as
             // a hard error instead of a silently-wrong-format game.
-            let payload = resolve_deck_list(db, &deck_list);
+            let payload = with_combo_table(|combos| resolve_deck_list(db, combos, &deck_list));
 
             load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
@@ -2037,7 +2044,7 @@ fn initialize_game_impl(
             let cedh_error: Option<Vec<String>> = CARD_DB.with(|cell| {
                 let borrow = cell.borrow();
                 let db = borrow.as_ref().expect("CARD_DB presence checked above");
-                let payload = resolve_deck_list(db, &deck_list);
+                let payload = with_combo_table(|combos| resolve_deck_list(db, combos, &deck_list));
                 let all_decks: Vec<_> = std::iter::once(&payload.player)
                     .chain(std::iter::once(&payload.opponent))
                     .chain(payload.ai_decks.iter())
@@ -3417,7 +3424,7 @@ pub fn load_replay_for_playback(json_str: &str) -> Result<u32, JsValue> {
     let player = CARD_DB
         .with(|cell| {
             let db = cell.borrow();
-            ReplayPlayer::load(log, db.as_ref())
+            with_combo_table(|combos| ReplayPlayer::load(log, db.as_ref(), combos))
         })
         .map_err(|e| JsValue::from_str(&format!("Engine error: {e}")))?;
     let len = player.len();
@@ -4188,6 +4195,38 @@ mod bracket_estimate_tests {
         let estimate = estimate_bracket_inner(&combo_request()).expect("estimate present");
         assert_eq!(estimate.combo_coverage, ComboCoverage::Measured);
         assert_eq!(estimate.combos.len(), 1);
+
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn resolve_player_deck_list_uses_the_loaded_combo_table() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+        let list = combo_request().deck;
+
+        let unmeasured = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().expect("card database loaded");
+            with_combo_table(|combos| resolve_player_deck_list(db, combos, &list))
+        });
+        assert_eq!(
+            unmeasured.estimated_bracket_tier,
+            Some(CommanderBracketTier::Core)
+        );
+
+        load_combo_table(&one_row_combo_table_json()).expect("combo table loads");
+        let measured = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().expect("card database loaded");
+            with_combo_table(|combos| resolve_player_deck_list(db, combos, &list))
+        });
+        assert_eq!(
+            measured.estimated_bracket_tier,
+            Some(CommanderBracketTier::Optimized)
+        );
 
         reset_bracket_thread_locals();
     }

@@ -1,5 +1,6 @@
 //! End-to-end carriage of Commander bracket estimates into game-state deck pools.
 
+use engine::database::ComboTable;
 use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::game::deck_loading::{
     load_deck_into_state, resolve_deck_list, DeckList, PlayerDeckList,
@@ -36,7 +37,7 @@ fn list_with_declaration(declared: CommanderBracketTier) -> DeckList {
 
 fn resolved_pool(list: &DeckList) -> Option<engine::types::game_state::PlayerDeckPool> {
     let db = shared_db()?;
-    let payload = resolve_deck_list(db, list);
+    let payload = resolve_deck_list(db, &ComboTable::default(), list);
     let mut state = GameState::new_two_player(42);
     load_deck_into_state(&mut state, &payload);
     Some(state.deck_pools[0].clone())

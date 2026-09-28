@@ -15,7 +15,7 @@ pub const PINNED_DATA_MANIFEST_PUBLIC_KEY: &str =
 const RELEASE_MANIFEST_BASE_URL: &str = "https://data.phase-rs.dev/desktop";
 const PREVIEW_MANIFEST_URL: &str = "https://data.phase-rs.dev/desktop/preview-server.json";
 const REQUIRED_DATA_FILES: [&str; 1] = ["card-data.json"];
-const BEST_EFFORT_DATA_FILES: [&str; 1] = ["draft-pools.json"];
+const BEST_EFFORT_DATA_FILES: [&str; 2] = ["draft-pools.json", "combo-table.json"];
 
 #[derive(Debug)]
 pub struct BootstrapError(String);

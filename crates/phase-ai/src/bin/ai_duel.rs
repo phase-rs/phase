@@ -710,7 +710,8 @@ fn run_commander_suite(db: &CardDatabase, options: CommanderSuiteOptions<'_>) {
         ai_decks: vec![deck_lists[2].clone(), deck_lists[3].clone()],
         ..Default::default()
     };
-    let payload = resolve_deck_list(db, &deck_list);
+    // Duel decks carry no commander, so the estimator returns None on this path regardless of the table.
+    let payload = resolve_deck_list(db, &engine::database::ComboTable::default(), &deck_list);
 
     let mut seat_rows = Vec::new();
     let mut all_games = Vec::new();
@@ -1527,7 +1528,8 @@ fn run_commander_duel(db: &CardDatabase, options: CommanderDuelOptions<'_>) {
             ai_decks: Vec::new(),
             ..Default::default()
         };
-        let payload = resolve_deck_list(db, &deck_list);
+        // Duel decks carry no commander, so the estimator returns None on this path regardless of the table.
+        let payload = resolve_deck_list(db, &engine::database::ComboTable::default(), &deck_list);
         let deck0_seat = PlayerId(u8::from(!deck0_first));
         let seed = paired_seed(options.base_seed, game_idx);
         if options.trace.is_some() {
@@ -1821,6 +1823,7 @@ mod tests {
         };
         resolve_deck_list(
             db,
+            &engine::database::ComboTable::default(),
             &DeckList {
                 player: seat.clone(),
                 opponent: seat,

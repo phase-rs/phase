@@ -135,6 +135,7 @@ mod combat_target_support;
 mod combo_floors;
 mod combo_infinite_pile;
 mod combo_table;
+mod combo_table_on_resolve;
 mod combustible_gearhulk;
 mod come_back_wrong_finality_counter;
 mod comeuppance;

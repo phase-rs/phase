@@ -307,6 +307,7 @@ mod tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
     apply_with_rejection,
@@ -937,7 +937,13 @@ impl GameSession {
         self.state.debug_permitted.clear();
     }
 
-    pub fn apply_seat_delta(&mut self, new_state: SeatState, delta: &SeatDelta, db: &CardDatabase) {
+    pub fn apply_seat_delta(
+        &mut self,
+        new_state: SeatState,
+        delta: &SeatDelta,
+        db: &CardDatabase,
+        combos: &ComboTable,
+    ) {
         if self.ai_driver_fault.is_some() {
             return;
         }
@@ -1063,7 +1069,7 @@ impl GameSession {
                 Some(SeatKind::Ai { deck, .. }) => deck.clone(),
                 _ => DeckChoice::Random,
             };
-            match crate::resolve_deck(db, &deck_data) {
+            match crate::resolve_deck(db, combos, &deck_data) {
                 Ok(payload) => self.set_seat_deck(*seat_idx as usize, payload, Some(choice)),
                 Err(err) => {
                     warn!(
@@ -1406,7 +1412,11 @@ impl GameSession {
     /// The fresh seed also resets `rng_word_pos` — a `#[serde(default)]` field, not a skipped
     /// one. It is the saved high-water of the stream the old seed generated, and has no
     /// meaning against the new one.
-    pub fn from_persisted(ps: PersistedSession, db: &Arc<CardDatabase>) -> Result<Self, String> {
+    pub fn from_persisted(
+        ps: PersistedSession,
+        db: &Arc<CardDatabase>,
+        combos: &ComboTable,
+    ) -> Result<Self, String> {
         let mut state = ps
             .state
             .prepare_for_restore(
@@ -1507,7 +1517,7 @@ impl GameSession {
                         // seat stays empty and `start_game` refuses the table.
                         DeckChoice::Random => return None,
                     };
-                    match crate::resolve_deck(db, &data) {
+                    match crate::resolve_deck(db, combos, &data) {
                         Ok(payload) => Some(payload),
                         Err(error) => {
                             warn!(
@@ -2085,7 +2095,15 @@ impl SessionManager {
         player_token: &str,
         action: GameAction,
     ) -> Result<ActionResult, String> {
-        self.handle_action_with_card_db(game_code, player_token, action, None)
+        // This transport has no runtime data artifacts; an explicit default
+        // keeps combo coverage unmeasured if a seat mutation reaches it.
+        self.handle_action_with_card_db(
+            game_code,
+            player_token,
+            action,
+            None,
+            &ComboTable::default(),
+        )
     }
 
     /// Handle a game action whose transport can resolve debug card names through
@@ -2098,8 +2116,9 @@ impl SessionManager {
         player_token: &str,
         action: GameAction,
         card_db: Option<&CardDatabase>,
+        combos: &ComboTable,
     ) -> Result<ActionResult, String> {
-        self.handle_action_with_card_db_outcome(game_code, player_token, action, card_db)
+        self.handle_action_with_card_db_outcome(game_code, player_token, action, card_db, combos)
             .map_err(SessionActionError::into_legacy_reason)
     }
 
@@ -2113,6 +2132,7 @@ impl SessionManager {
         player_token: &str,
         action: GameAction,
         card_db: Option<&CardDatabase>,
+        _combos: &ComboTable,
     ) -> Result<ActionResult, SessionActionError> {
         let session = self
             .sessions
@@ -2856,8 +2876,8 @@ mod tests {
         let persisted = mgr.sessions.get(&code).unwrap().to_persisted();
 
         let db = Arc::new(CardDatabase::default());
-        let restored =
-            GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
+        let restored = GameSession::from_persisted(persisted, &db, &ComboTable::default())
+            .expect("supported persisted format config");
 
         assert_eq!(
             restored.state.interaction_session_id,
@@ -2884,11 +2904,13 @@ mod tests {
         let mut persisted = mgr.sessions.get(&code).unwrap().to_persisted();
         persisted.player_count = 5;
 
-        let error = GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
-            .err()
-            .expect(
-                "a persisted player_count outside the format's registry range must be rejected",
-            );
+        let error = GameSession::from_persisted(
+            persisted,
+            &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .err()
+        .expect("a persisted player_count outside the format's registry range must be rejected");
         assert!(error.contains("player_count"));
     }
 
@@ -2908,9 +2930,13 @@ mod tests {
             }));
         persisted.state = PersistedGameState::capture(state);
 
-        let error = GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
-            .err()
-            .expect("limited range must remain disabled at the restore boundary");
+        let error = GameSession::from_persisted(
+            persisted,
+            &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .err()
+        .expect("limited range must remain disabled at the restore boundary");
 
         assert!(error.contains("not supported"));
     }
@@ -3102,11 +3128,15 @@ mod tests {
             .expect("an undeclared config at 4 seats must resolve to a format that admits them");
 
         let persisted = mgr.sessions.get(&code).unwrap().to_persisted();
-        let restored = GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
-            .expect(
-                "a session created undeclared at 4 seats must restore cleanly: its resolved \
+        let restored = GameSession::from_persisted(
+            persisted,
+            &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .expect(
+            "a session created undeclared at 4 seats must restore cleanly: its resolved \
                  format's own registry range already admits 4 players",
-            );
+        );
         assert_eq!(
             restored.state.format_config.format,
             engine::types::format::GameFormat::FreeForAll
@@ -3315,10 +3345,12 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .apply_seat_delta(seat_state, &delta, &db);
+        mgr.sessions.get_mut(&code).unwrap().apply_seat_delta(
+            seat_state,
+            &delta,
+            &db,
+            &ComboTable::default(),
+        );
         mgr.unindex_tokens(&delta.invalidated_tokens);
 
         assert_eq!(delta.invalidated_tokens, vec![token2.clone()]);
@@ -4094,8 +4126,8 @@ mod tests {
             )
             .expect("parser fixture must contain Witherbloom Apprentice"),
         );
-        let legacy_restored =
-            GameSession::from_persisted(legacy, &db).expect("supported persisted format config");
+        let legacy_restored = GameSession::from_persisted(legacy, &db, &ComboTable::default())
+            .expect("supported persisted format config");
         assert!(matches!(
             legacy_restored.state.waiting_for,
             WaitingFor::Priority { player } if player == P0
@@ -4107,8 +4139,8 @@ mod tests {
         )
         .expect("trusted persisted session remains decodable");
         assert!(matches!(&trusted.state, PersistedGameState::Trusted(_)));
-        let trusted_restored =
-            GameSession::from_persisted(trusted, &db).expect("supported persisted format config");
+        let trusted_restored = GameSession::from_persisted(trusted, &db, &ComboTable::default())
+            .expect("supported persisted format config");
         let fresh_epoch = match trusted_restored.state.waiting_for {
             WaitingFor::PrecastCopyShortcutOffer { epoch, .. } => epoch,
             ref other => panic!("trusted restore must reissue its offer, got {other:?}"),
@@ -4273,7 +4305,13 @@ mod tests {
             .unwrap();
 
         let result = mgr
-            .handle_action_with_card_db_outcome(&code, &other_token, GameAction::PassPriority, None)
+            .handle_action_with_card_db_outcome(
+                &code,
+                &other_token,
+                GameAction::PassPriority,
+                None,
+                &ComboTable::default(),
+            )
             .expect_err("action should be rejected while a takeback is pending");
         assert!(matches!(
             result,
@@ -5379,6 +5417,7 @@ mod tests {
                     nonlegendary: false,
                 }),
                 Some(&*db),
+                &ComboTable::default(),
             )
             .expect("server transport resolves a debug CreateCard batch through its card database");
 
@@ -5820,7 +5859,7 @@ mod tests {
         )
         .unwrap();
         let session = mgr.sessions.get_mut(&code).unwrap();
-        session.apply_seat_delta(seat_state, &delta, &db);
+        session.apply_seat_delta(seat_state, &delta, &db, &ComboTable::default());
 
         // Re-derived at the NEW seat count, not carried stale from 3 seats.
         assert_eq!(session.player_count, 2);
@@ -5849,8 +5888,8 @@ mod tests {
         let mut origin = SessionManager::new();
         let code = single_ai_opponent_game(&mut origin);
         let persisted = origin.sessions.get(&code).unwrap().to_persisted();
-        let restored =
-            GameSession::from_persisted(persisted, &db).expect("supported persisted format config");
+        let restored = GameSession::from_persisted(persisted, &db, &ComboTable::default())
+            .expect("supported persisted format config");
         assert_eq!(
             restored.hosting,
             HostingMode::Shared,
@@ -5882,7 +5921,8 @@ mod tests {
     fn round_trip_through_disk(session: &GameSession, db: &Arc<CardDatabase>) -> GameSession {
         let json = serde_json::to_string(&session.to_persisted()).unwrap();
         let persisted: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
-        GameSession::from_persisted(persisted, db).expect("supported persisted format config")
+        GameSession::from_persisted(persisted, db, &ComboTable::default())
+            .expect("supported persisted format config")
     }
 
     #[test]
@@ -6038,8 +6078,8 @@ mod tests {
              policy and not a lost field",
         );
 
-        let mut restored =
-            GameSession::from_persisted(blob, &db).expect("supported persisted format config");
+        let mut restored = GameSession::from_persisted(blob, &db, &ComboTable::default())
+            .expect("supported persisted format config");
 
         assert_ne!(
             restored.state.rng_seed, saved_seed,
@@ -6271,6 +6311,7 @@ mod tests {
                     nonlegendary: false,
                 }),
                 None,
+                &ComboTable::default(),
             )
             .expect_err("revoked guests cannot reach the server CreateCard path");
         assert_eq!(err, "You are not authorized to use debug actions.");
@@ -7038,6 +7079,7 @@ mod tests {
                 controller_damage: 0,
             },
             None,
+            &ComboTable::default(),
         );
         match illegal {
             Err(SessionActionError::Rejected(rejection)) => assert_eq!(
@@ -7169,6 +7211,7 @@ mod tests {
                 bands: vec![],
             },
             None,
+            &ComboTable::default(),
         );
         assert!(
             matches!(
@@ -7855,9 +7898,12 @@ mod tests {
         let revision_before = session.state_revision;
         let persisted = session.to_persisted();
 
-        let mut restored =
-            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
-                .expect("the snapshot restores");
+        let mut restored = GameSession::from_persisted(
+            persisted,
+            &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .expect("the snapshot restores");
 
         assert!(
             restored.state.stack_resolution_session.is_some(),
@@ -7959,9 +8005,12 @@ mod tests {
         session.state.resolve_all_consent_run = None;
         let persisted = session.to_persisted();
 
-        let mut restored =
-            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
-                .expect("the snapshot restores");
+        let mut restored = GameSession::from_persisted(
+            persisted,
+            &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .expect("the snapshot restores");
 
         assert!(matches!(
             restored.state.waiting_for,
@@ -7993,9 +8042,12 @@ mod tests {
         let (mgr, game_code, _) = ai_table_awaiting_one_consent();
         let session = mgr.sessions.get(&game_code).expect("session exists");
         let persisted = session.to_persisted();
-        let mut restored =
-            GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
-                .expect("ordinary state restores");
+        let mut restored = GameSession::from_persisted(
+            persisted,
+            &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .expect("ordinary state restores");
         let revision_before = restored.state_revision;
 
         let resumed = restored.resume_restored_stack_automation();
@@ -8111,10 +8163,12 @@ mod tests {
         };
         let mut seat_state = mgr.sessions.get(code).unwrap().seat_state();
         let delta = seat_reducer::apply(&mut seat_state, mutation, &ctx).expect("legal mutation");
-        mgr.sessions
-            .get_mut(code)
-            .unwrap()
-            .apply_seat_delta(seat_state, &delta, db);
+        mgr.sessions.get_mut(code).unwrap().apply_seat_delta(
+            seat_state,
+            &delta,
+            db,
+            &ComboTable::default(),
+        );
         delta
     }
 
@@ -8178,10 +8232,12 @@ mod tests {
         // The durability contract, not a state transition: an empty delta
         // still produces a snapshot that must clear the persistence fence.
         let seat_state = mgr.sessions.get(&code).unwrap().seat_state();
-        mgr.sessions
-            .get_mut(&code)
-            .unwrap()
-            .apply_seat_delta(seat_state, &SeatDelta::empty(), &db);
+        mgr.sessions.get_mut(&code).unwrap().apply_seat_delta(
+            seat_state,
+            &SeatDelta::empty(),
+            &db,
+            &ComboTable::default(),
+        );
 
         assert!(mgr.sessions.get(&code).unwrap().state_revision > before);
     }
@@ -8342,7 +8398,7 @@ mod tests {
         let (code, _token) = mgr.create_game(make_deck(), None);
         mgr.join_game_with_name_and_reservation(
             &code,
-            crate::resolve_deck(&db, &data).unwrap(),
+            crate::resolve_deck(&db, &ComboTable::default(), &data).unwrap(),
             Some(DeckChoice::DeckList(Box::new(data.clone()))),
             "Guest".to_string(),
             None,
@@ -8367,7 +8423,7 @@ mod tests {
         let (code, _token) = mgr.create_game(make_deck(), None);
         mgr.join_game_with_name_and_reservation(
             &code,
-            crate::resolve_deck(&db, &data).unwrap(),
+            crate::resolve_deck(&db, &ComboTable::default(), &data).unwrap(),
             Some(DeckChoice::DeckList(Box::new(data))),
             "Guest".to_string(),
             None,
@@ -8382,7 +8438,7 @@ mod tests {
             );
         };
         assert_eq!(
-            main_deck_names(&crate::resolve_deck(&db, &recorded).unwrap()),
+            main_deck_names(&crate::resolve_deck(&db, &ComboTable::default(), &recorded).unwrap(),),
             main_deck_names(session.decks[1].as_ref().unwrap())
         );
     }
@@ -8418,7 +8474,7 @@ mod tests {
             seat_index: 1,
             difficulty: AiDifficulty::Hard,
             choice: DeckChoice::DeckList(Box::new(data.clone())),
-            resolved: crate::resolve_deck(&db, &data).unwrap(),
+            resolved: crate::resolve_deck(&db, &ComboTable::default(), &data).unwrap(),
         });
 
         assert_eq!(
@@ -8467,7 +8523,7 @@ mod tests {
         let mut mgr = SessionManager::new();
         let (code, _token) = mgr
             .create_game_n_players(
-                crate::resolve_deck(db, data).unwrap(),
+                crate::resolve_deck(db, &ComboTable::default(), data).unwrap(),
                 Some(DeckChoice::DeckList(Box::new(data.clone()))),
                 "Host".to_string(),
                 None,
@@ -8487,7 +8543,7 @@ mod tests {
         let (mut mgr, code) = hosted_room(db, data);
         mgr.join_game_with_name_and_reservation(
             &code,
-            crate::resolve_deck(db, data).unwrap(),
+            crate::resolve_deck(db, &ComboTable::default(), data).unwrap(),
             Some(DeckChoice::DeckList(Box::new(data.clone()))),
             "Guest".to_string(),
             None,
@@ -8508,7 +8564,7 @@ mod tests {
             seat_index: 1,
             difficulty,
             choice,
-            resolved: crate::resolve_deck(db, data).unwrap(),
+            resolved: crate::resolve_deck(db, &ComboTable::default(), data).unwrap(),
         });
     }
 
@@ -8579,7 +8635,8 @@ mod tests {
         assert!(persisted.deck_choices.iter().any(Option::is_some));
         persisted.game_started = true;
 
-        let restored = GameSession::from_persisted(persisted, &db).expect("the snapshot restores");
+        let restored = GameSession::from_persisted(persisted, &db, &ComboTable::default())
+            .expect("the snapshot restores");
         assert!(
             restored.decks.iter().all(Option::is_none),
             "a started restore re-resolved decks that nothing will read"
@@ -8697,7 +8754,7 @@ mod tests {
 
         assert_eq!(
             main_deck_names(restored.decks[1].as_ref().expect("named seat restored")),
-            main_deck_names(&crate::resolve_deck(&db, &starter).unwrap())
+            main_deck_names(&crate::resolve_deck(&db, &ComboTable::default(), &starter).unwrap(),)
         );
     }
 
@@ -8798,7 +8855,7 @@ mod tests {
 
         let persisted: crate::persist::PersistedSession =
             serde_json::from_value(json).expect("a pre-field snapshot still decodes");
-        let restored = GameSession::from_persisted(persisted, &db).unwrap();
+        let restored = GameSession::from_persisted(persisted, &db, &ComboTable::default()).unwrap();
 
         assert!(restored.decks.iter().all(Option::is_none));
         assert_eq!(restored.deck_choices.len(), restored.player_count as usize);
@@ -8871,10 +8928,13 @@ mod tests {
         let db = lands_db();
         let data = name_deck("Forest", 40);
         let mut mgr = SessionManager::new();
-        let (code, _token) = mgr.create_game(crate::resolve_deck(&db, &data).unwrap(), None);
+        let (code, _token) = mgr.create_game(
+            crate::resolve_deck(&db, &ComboTable::default(), &data).unwrap(),
+            None,
+        );
         mgr.join_game_with_name_and_reservation(
             &code,
-            crate::resolve_deck(&db, &data).unwrap(),
+            crate::resolve_deck(&db, &ComboTable::default(), &data).unwrap(),
             Some(DeckChoice::DeckList(Box::new(data.clone()))),
             "Guest".to_string(),
             None,
