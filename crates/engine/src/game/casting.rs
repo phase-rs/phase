@@ -3,11 +3,11 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
     AdditionalCost, BoardWideCostModifier, CardPlayMode, CardSelectionMode, CardTypeSetSource,
     CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType, CombatRelationSubject,
-    ContinuousModification, ControllerRef, CostObjectCount, CostPaidObjectSnapshot, CostReduction,
-    CounterCostSelection, Duration, Effect, EffectKind, FilterProp, GameRestriction,
-    ModalSelectionCondition, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
-    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
-    RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
+    ContinuousModification, ControllerRef, CostMoveOutcome, CostObjectCount,
+    CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect, EffectKind,
+    FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope, ParsedCondition,
+    PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
+    RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
     TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
@@ -23137,10 +23137,6 @@ fn has_self_ref_discard_cost(cost: &AbilityCost) -> bool {
     }
 }
 
-/// CR 117.1 + CR 400.7j + CR 608.2k: Self-discard activation costs move the
-/// source out of hand before the ability resolves, so ability-scoped filters
-/// like Transmute's same-mana-value search need a public-characteristics
-/// snapshot attached to the resolving ability before cost payment.
 /// CR 118.3 + CR 608.2k + CR 400.7j: Bind the cost-paid referent for a
 /// deterministic "exile the top N cards of your library" activation cost BEFORE
 /// the payment moves them.
@@ -23157,9 +23153,9 @@ pub(crate) fn stamp_top_library_exile_cost_paid_object(
     player: PlayerId,
     ability: &mut ResolvedAbility,
     cost: &AbilityCost,
-) {
+) -> Vec<ObjectId> {
     let Some(count) = top_library_exile_cost_count(cost) else {
-        return;
+        return Vec::new();
     };
     let Some(top) = state.players.get(player.0 as usize).map(|p| {
         p.library
@@ -23168,18 +23164,23 @@ pub(crate) fn stamp_top_library_exile_cost_paid_object(
             .take(count as usize)
             .collect::<Vec<_>>()
     }) else {
-        return;
+        return Vec::new();
     };
     if top.len() < count as usize {
-        return;
+        return Vec::new();
     }
-    if let Some(obj) = top.first().and_then(|id| state.objects.get(id)) {
-        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
-            obj,
-            obj.snapshot_for_mana_spent(),
-        ));
+    let snapshots = top
+        .iter()
+        .map(|id| {
+            let obj = state.objects.get(id).expect("library object must exist");
+            CostPaidObjectSnapshot::capture(obj, obj.snapshot_for_mana_spent())
+        })
+        .collect::<Vec<_>>();
+    if let Some(snapshot) = snapshots.first() {
+        ability.set_cost_paid_object_recursive(snapshot.clone());
     }
-    ability.add_cost_paid_object_ids_recursive(&top);
+    ability.add_cost_paid_objects_recursive(&snapshots);
+    top
 }
 
 /// The deterministic top-of-library exile shape, recursing into `Composite` so a
@@ -23196,6 +23197,10 @@ fn top_library_exile_cost_count(cost: &AbilityCost) -> Option<u32> {
     }
 }
 
+/// CR 117.1 + CR 400.7j + CR 608.2k: Self-discard activation costs move the
+/// source out of hand before the ability resolves, so ability-scoped filters
+/// like Transmute's same-mana-value search need a public-characteristics
+/// snapshot attached to the resolving ability before cost payment.
 pub(crate) fn stamp_self_ref_discard_cost_paid_object(
     state: &GameState,
     source_id: ObjectId,
@@ -26848,7 +26853,8 @@ fn activate_with_cost_carrier(
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-        stamp_top_library_exile_cost_paid_object(state, player, &mut resolved, cost);
+        let top_library_exile_cost_ids =
+            stamp_top_library_exile_cost_paid_object(state, player, &mut resolved, cost);
         if let Some(waiting) = try_finalize_activation_mana_payment(
             state,
             player,
@@ -26884,22 +26890,12 @@ fn activate_with_cost_carrier(
             }
             return Ok(state.waiting_for.clone());
         }
+        resolved.settle_cost_paid_provenance_recursive(
+            state,
+            &top_library_exile_cost_ids,
+            CostMoveOutcome::Relocation,
+        );
     }
-
-    // CR 400.7 + CR 608.2k: every cost object move for this activation is complete
-    // here, so re-pin the cost-paid referent to the incarnation the cost's own move
-    // produced. The binding seams above capture BEFORE the move (their `lki` must
-    // record pre-move characteristics — CR 608.2h), so without this the reference
-    // reads stale against the object its own cost just moved (Thought Lash: exile
-    // the top card of your library as a cost, then refer to that exiled card).
-    //
-    // The replacement-paused path already re-pins at its completion
-    // (`casting_costs::finish_cost_object_moves`) and returns above, so it never
-    // reaches here and cannot double-re-pin. This is the direct path's matching
-    // authority, placed ahead of BOTH consumers below — the plot special action's
-    // immediate `grant_permission::resolve` and the stack push — so neither can
-    // read a stale incarnation. A no-op when no cost stamped an object.
-    resolved.repin_cost_paid_object_recursive(state);
 
     // CR 702.170b + CR 116.2k: Exiling a card using its plot ability is a
     // SPECIAL ACTION that doesn't use the stack. The self-exile cost paid above

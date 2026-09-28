@@ -6690,7 +6690,7 @@ pub(super) fn push_activated_ability_to_stack(
         // payment moves the card. Self-gating: `top_library_exile_cost_count`
         // yields `None` for any cost with no `Zone::Library` exile leg (recursing
         // into `Composite`), so this is a no-op for every other cost shape.
-        super::casting::stamp_top_library_exile_cost_paid_object(
+        let top_library_exile_cost_ids = super::casting::stamp_top_library_exile_cost_paid_object(
             state,
             player,
             &mut resolved,
@@ -6740,21 +6740,12 @@ pub(super) fn push_activated_ability_to_stack(
             super::planeswalker::record_loyalty_activation(state, source_id, player);
             pending_loyalty_activation_player = None;
         }
+        resolved.settle_cost_paid_provenance_recursive(
+            state,
+            &top_library_exile_cost_ids,
+            CostMoveOutcome::Relocation,
+        );
     }
-
-    // CR 400.7 + CR 608.2k: the target-first boundary is the THIRD activation
-    // payment route, alongside the direct path and the replacement-paused
-    // completion, and like both of those it must re-pin the cost-paid referent once
-    // the cost's own moves are complete. The binding seams above capture BEFORE the
-    // move (their `lki` must hold pre-move characteristics — CR 608.2h), so without
-    // this the pin still names a pre-move incarnation,
-    // `CostPaidObjectSnapshot::live_object_id` yields `None` against the object the
-    // cost itself moved, and every live-object consumer of "the exiled card"
-    // silently affects nothing. Placed after payment and ahead of every consumer
-    // below — the plot special action's early return and the stack push. The paused
-    // branch returns above, so it cannot double-re-pin. A no-op when no cost
-    // stamped an object.
-    resolved.repin_cost_paid_object_recursive(state);
 
     // CR 702.170b: Plot is a special action that never uses the stack. Its
     // self-exile is still an activation cost, so it must be paid above before
