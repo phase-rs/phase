@@ -27,6 +27,40 @@ use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+/// CR 201.2 + CR 201.2a: "not named <name>" — a NAME predicate, lowered to
+/// `Not(Named)`. It's never a self-exclusion (`Another`): a different object
+/// with the excluded name is excluded too, and an object with no name is "not
+/// named" anything, so it passes.
+///
+/// The name span ends at the shared named-filter clause boundary
+/// (`oracle_target::named_filter_name_end`), so comma-bearing names survive
+/// ("Ebondeath, Dracolich"). Any text after that boundary is returned as the
+/// remainder, and a caller that requires the whole subject to be consumed can
+/// fail closed on it. The input is the lowercase shadow, so the name is stored
+/// lowercase and compared case-insensitively at evaluation.
+///
+/// Fails on an empty name, and on a name carrying the `~` self-reference token
+/// (CR 201.5). `Named{"~"}` would match no object, so its negation would accept
+/// every object.
+pub(crate) fn parse_not_named_suffix(input: &str) -> OracleResult<'_, FilterProp> {
+    let (name_text, _) = tag("not named ").parse(input)?;
+    let name_end = crate::parser::oracle_target::named_filter_name_end(name_text);
+    let name = name_text[..name_end].trim();
+    if name.is_empty() || name.contains('~') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((
+        &name_text[name_end..],
+        FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: name.to_string(),
+            }),
+        },
+    ))
+}
 /// Parse a zone filter phrase from Oracle text.
 ///
 /// Matches "on the battlefield", "in your graveyard", "in your hand",
