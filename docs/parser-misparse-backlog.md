@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4582
-- **Total card appearances across root causes:** 4615 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4576
+- **Total card appearances across root causes:** 4609 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -26,7 +26,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 182 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 167 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 152 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
-| 12 | Modal 'choose one/N' parsed as independent abilities | 138 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
+| 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 129 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 94 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 83 | oracle_target.rs strip_optional_target_prefix — preserve MultiTargetSpec and optional_targeting |
@@ -45,7 +45,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2438/4615 ≈ 53% of all misparse appearances; the top 10 cover 3429/4615 ≈ 74%. Fix these first.
+> The top **5** root causes cover 2438/4609 ≈ 53% of all misparse appearances; the top 10 cover 3429/4609 ≈ 74%. Fix these first.
 
 ## Full card lists per root cause
 
@@ -3751,9 +3751,30 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 12. Modal 'choose one/N' parsed as independent abilities  (138 cards)
+### 12. Modal 'choose one/N' parsed as independent abilities  (132 cards)
 
 **Signature.** Modal header (Choose one/two/one-or-both) not detected; bullet modes emitted as flat independent Spell abilities with no ChooseOneOf/Modal wrapper, so all modes resolve.
+
+> **The stated signature above is unreliable — do not re-open this category on it (measured 2026-09-13).**
+> A spell-level modal is wrapped by the sibling card-level `modal` field, NOT by
+> anything inside `abilities`, so the clustering pass that produced this category
+> read only `abilities` and mislabelled correct parses as "flat independent
+> abilities". `oracle_modal.rs` is 5293 lines (measured) and already carries
+> `ConditionalMaxChoices`, `mode_costs`, `allow_repeat_modes`,
+> `selection: TargetSelectionMode::Random` and `dynamic_max_choices`. This is
+> NOT a claim that the category is fixed: the residue is real, but it is OTHER
+> shapes wearing this label. The "gets <P/T> or <P/T>" resolution-time P/T
+> disjunction was one such shape — a choice offered by a resolving ability
+> (CR 608.2d), not a modal spell header. Its SIX listed cards (Brightling,
+> Shorecrasher Elemental, Multiform Wonder, Pemmin's Aura, Shaper Parasite and
+> Liliana of the Dark Realms) were removed from the list below on 2026-09-13; the
+> two other cards that print the same clause, Endling and Greater Morphling,
+> appeared nowhere in this file (verified by grep over the whole file,
+> 2026-09-13). Liliana was found only by RE-SCANNING the corpus with an X-AWARE
+> P/T token (`[+-]?[0-9X]+/[+-]?[0-9X]+`): her "+X/+X or -X/-X" is invisible to a
+> digit-only token, and she is the EIGHTH member of the class, not the seventh. Re-triage the remaining
+> entries by reading the whole parsed card, `modal` field included, before
+> treating any of them as a modal-dispatch defect.
 
 **Fix hint.** oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf
 
@@ -3776,7 +3797,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Azula Always Lies
 - Blood on the Snow
 - Branching Bolt
-- Brightling
 - Buccaneer's Bravado
 - Butcher of the Horde
 - Casualties of War
@@ -3832,18 +3852,15 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Let's Play a Game
 - Library of Lat-Nam
 - Lich's Mastery
-- Liliana of the Dark Realms
 - Lonely End
 - Lunar Avenger
 - Mercurial Transformation
 - Molten Collapse
-- Multiform Wonder
 - Nasty End
 - Nature's Blessing
 - Ojutai's Command
 - Ooze Flux
 - Pawpatch Formation
-- Pemmin's Aura
 - Pharika's Libation
 - Plow Through
 - Profane Command
@@ -3866,9 +3883,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Season of Gathering
 - See Double
 - Settle Beyond Reality
-- Shaper Parasite
 - Shifting Ceratops
-- Shorecrasher Elemental
 - Sigil Blessing
 - Sigurd, Jarl of Ravensthorpe
 - Skullscorch

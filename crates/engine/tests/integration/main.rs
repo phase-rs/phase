@@ -107,6 +107,7 @@ mod brainspoil;
 mod brass_knuckles_equipment_threshold;
 mod breathless_knight_graveyard_origin;
 mod breeches_blastmaker_coin_flip_copy;
+mod brightling_pt_disjunction_choice;
 mod brigid_mana_ability;
 mod bring_the_ending_corrupted_instead_branch_5683;
 mod bring_to_light_free_cast_2880;

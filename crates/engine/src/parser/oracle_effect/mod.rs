@@ -8259,6 +8259,13 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     if let Some((_, _, partner)) = &live_meld_fields {
         ctx.pending_meld_partner = Some(partner.clone());
     }
+    // CR 611.2a: a peeled trailing window supersedes the enclosing leading
+    // window while this body is lowered. Preserve the leading window when no
+    // trailing one was peeled; both positions use the shared context channel.
+    let restore_duration = peel_ctx
+        .duration()
+        .cloned()
+        .map(|duration| ctx.stated_clause_duration.replace(duration));
     let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
     // Trial-parse fallback: peeling may have removed disambiguation signal
     // a specialized parser depends on (e.g., `the next spell you cast this
@@ -8266,8 +8273,14 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     // retry with the original text. The shell is conservative — when in
     // doubt, leave the slot on the text and let the body parser handle it.
     if matches!(clause.effect, Effect::Unimplemented { .. }) {
+        if let Some(previous) = restore_duration {
+            ctx.stated_clause_duration = previous;
+        }
         let fallback = parse_effect_clause_inner(text, ctx);
         return attach_unless_slots(fallback, unless_condition, unless_pay_deferred);
+    }
+    if let Some(previous) = restore_duration {
+        ctx.stated_clause_duration = previous;
     }
     peel_ctx.apply_optional(&mut clause.optional);
     // Duration: route through `with_clause_duration` so
