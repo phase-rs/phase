@@ -303,7 +303,8 @@
     "lostCoinFlip": "{{name}} lost the flip",
     "turnOrder": "Turn order",
     "turnOrderItem": "Turn {{turn}}: {{name}}",
-    "youTakeTurn": "You take turn {{turn}}"
+    "youTakeTurn": "You take turn {{turn}}",
+    "ignoredDie": "Ignored"
   },
   "chrome": {
     "back": "Back",

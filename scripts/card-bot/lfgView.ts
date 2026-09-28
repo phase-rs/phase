@@ -9,7 +9,7 @@
 // Desktop grammar is Phase E's (client /open-desktop trampoline → desktop shell):
 //   desktop: <site>/open-desktop?to=<phase://open?site=<build>&path=</multiplayer?… of the web link>>
 
-import { BUILD_ENDPOINTS } from "./config";
+import { type Build, BUILD_ENDPOINTS } from "./config";
 import { ButtonStyle, ComponentType, MessageFlags, ResponseType } from "./discord";
 import type { LfgFormat } from "./formats";
 import { GAME_THREAD_MAX_MS, LFG_IDLE_MS, type Lfg, type Refusal } from "./lfg";
@@ -79,12 +79,32 @@ export function hostLink(lfg: Lfg): string {
   return `${BUILD_ENDPOINTS[lfg.build].site}/multiplayer?${params}`;
 }
 
+/** The build's web link that joins room `code` at `serverUrl`. */
+export function joinLink(build: Build, code: string, serverUrl: string): string {
+  const params = new URLSearchParams({ join: `${code}@${serverUrl}` });
+  return `${BUILD_ENDPOINTS[build].site}/multiplayer?${params}`;
+}
+
 /** A seated guest's link: the code at the game's server (the dedicated server,
  *  or the build's official lobby for P2P). */
 export function guestLink(lfg: Lfg): string {
-  const serverUrl = lfg.server?.url ?? BUILD_ENDPOINTS[lfg.build].lobbyWs;
-  const params = new URLSearchParams({ join: `${readyCode(lfg)}@${serverUrl}` });
-  return `${BUILD_ENDPOINTS[lfg.build].site}/multiplayer?${params}`;
+  return joinLink(lfg.build, readyCode(lfg), lfg.server?.url ?? BUILD_ENDPOINTS[lfg.build].lobbyWs);
+}
+
+/** Per-build embed color, so a preview post is never mistaken for a release one. */
+export const BUILD_COLORS: Readonly<Record<Build, number>> = {
+  release: 0x3b82f6,
+  preview: 0xf59e0b,
+};
+
+/** The build label shown in a post's title. */
+export function buildTag(build: Build): string {
+  return build.toUpperCase();
+}
+
+/** The description line naming the build and its site host. */
+export function siteLine(build: Build): string {
+  return `Site: ${build} (${new URL(BUILD_ENDPOINTS[build].site).host})`;
 }
 
 function actionButton(
@@ -101,18 +121,28 @@ function descriptionLines(lfg: Lfg): string[] {
     lfg.server === null
       ? `Peer-to-peer — hosted in <@${lfg.creatorId}>'s browser`
       : `Dedicated server: ${lfg.server.name}`;
-  const siteLine = `Site: ${lfg.build} (${new URL(BUILD_ENDPOINTS[lfg.build].site).host})`;
   const seatLines = lfg.seated.map((id) => (id === lfg.creatorId ? `<@${id}> (host)` : `<@${id}>`));
-  return [modeLine, siteLine, "", `**Players ${lfg.seated.length}/${lfg.seats}**`, ...seatLines];
+  return [
+    modeLine,
+    siteLine(lfg.build),
+    ...(lfg.description === null ? [] : ["", `**Details**\n${lfg.description}`]),
+    "",
+    `**Players ${lfg.seated.length}/${lfg.seats}**`,
+    ...seatLines,
+  ];
 }
 
 /** The public post. The room code never appears in it. */
-export function renderLfg(lfg: Lfg): {
+export function renderLfg(lfg: Lfg, pingRoleId?: string): {
+  content?: string;
   embeds: [Embed];
   components: ActionRow[];
-  allowed_mentions: { parse: [] };
+  allowed_mentions: { parse: [] } | { roles: string[] };
 } {
-  const embed: Embed = { title: `LFG · ${lfg.format.label}` };
+  const embed: Embed = {
+    title: `LFG · ${lfg.format.label} · ${buildTag(lfg.build)}`,
+    color: BUILD_COLORS[lfg.build],
+  };
   const lines = descriptionLines(lfg);
   let components: ActionRow[] = [];
   switch (lfg.state) {
@@ -154,7 +184,14 @@ export function renderLfg(lfg: Lfg): {
     }
   }
   embed.description = lines.join("\n");
-  return { embeds: [embed], components, allowed_mentions: { parse: [] } };
+  return pingRoleId === undefined
+    ? { embeds: [embed], components, allowed_mentions: { parse: [] } }
+    : {
+        content: `<@&${pingRoleId}>`,
+        embeds: [embed],
+        components,
+        allowed_mentions: { roles: [pingRoleId] },
+      };
 }
 
 /** The post after its row is gone (swept, or from another guild). */
@@ -176,7 +213,7 @@ export function desktopLink(lfg: Lfg, webLink: string): string {
   return `${BUILD_ENDPOINTS[lfg.build].site}/open-desktop?${new URLSearchParams({ to })}`;
 }
 
-function linkButton(label: string, url: string): LinkButton {
+export function linkButton(label: string, url: string): LinkButton {
   return { type: ComponentType.BUTTON, style: ButtonStyle.LINK, label, url };
 }
 

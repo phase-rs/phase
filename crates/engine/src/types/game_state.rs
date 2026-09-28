@@ -17,14 +17,14 @@ use super::ability::{
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator,
     ContinuousModification, ControlWindow, CopiableValues, CopyChooseScope, CopyScale,
     CopyTargetPurpose, CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition,
-    DigRestOrder, Duration, EffectKind, FaceDownProfile, GameRestriction, KeywordAction,
-    KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
-    ResolvedAbility, SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint,
-    StackAbilityKind, StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef,
-    ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    DigRestOrder, DigRestSplitScope, Duration, EffectKind, FaceDownProfile, GameRestriction,
+    KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode, PileSource,
+    QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchOrderingHint,
+    SearchSelectionConstraint, StackAbilityKind, StaticCondition, TapCreaturesSelectionMode,
+    TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
 };
-use super::actions::{DebugCardCreationKind, ResolveAllScope};
+use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
@@ -4269,6 +4269,30 @@ pub struct DebugCardEntrySource {
     pub face: CardFace,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back_face: Option<BackFaceData>,
+    /// Faces from outside the game this card can reach, bound with it so its
+    /// entry can extend `GameState::card_face_registry` without a database.
+    #[serde(default, skip_serializing_if = "OutsideGameFaces::is_empty")]
+    pub outside_game_faces: OutsideGameFaces,
+}
+
+/// Faces from outside the game one card can reach — a meld pair's combined
+/// back (CR 701.42a), and digital-only conjure and spellbook targets — split
+/// by the digital-only format gate, so a card that enters mid-game can extend
+/// `GameState::card_face_registry` the same way the game's starting cards did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideGameFaces {
+    /// Reachable in every format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paper: Vec<CardFace>,
+    /// Reachable only where the format admits digital-only cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub digital: Vec<CardFace>,
+}
+
+impl OutsideGameFaces {
+    pub fn is_empty(&self) -> bool {
+        self.paper.is_empty() && self.digital.is_empty()
+    }
 }
 
 /// CR 400.7 + CR 614.1: Remaining real battlefield entries for one debug
@@ -6270,6 +6294,14 @@ pub enum BatchCompletion {
         /// Reveal-until uses the serde-default Preserve value.
         #[serde(default)]
         rest_order: DigRestOrder,
+        /// CR 401.2 + CR 701.20e: Telling Time-class remainder split, carried
+        /// from `DigChoice` through the kept delivery so the routing decision
+        /// survives an arbitrary number of replacement re-parks. Consumed
+        /// exactly once, by the `DigDeliveryStage::Kept` arm, which swaps the
+        /// uniform rest-pile route for a `DigRestSplitChoice` pause. `None` on
+        /// every reveal-until and every non-splitting dig.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<usize>,
         /// CR 701.20b: reveal markers to clear once the cards have moved (the
         /// kept card plus the misses).
         clear_markers: Vec<ObjectId>,
@@ -7406,6 +7438,20 @@ pub enum DeferredLifeCostResume {
 }
 
 impl DeferredLifeCostResume {
+    /// CR 601.2h + CR 602.2b + CR 116.2: Whether the suspended payment belongs
+    /// to casting a spell, activating an ability or performing a special
+    /// action, rather than to a resolution. Exhaustive so a new owner has to
+    /// be classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            DeferredLifeCostResume::Cast { .. } => true,
+            // A resolution-time "pay any amount of life" choice (CR 608.2).
+            DeferredLifeCostResume::PayAmount { .. } => false,
+            // A mana payment's Phyrexian life; its outer root names the owner.
+            DeferredLifeCostResume::ManaRoot { resume, .. } => resume.withholds_priority(),
+        }
+    }
+
     pub fn resume_at_resolution_depth(&self) -> usize {
         match self {
             DeferredLifeCostResume::Cast {
@@ -7766,6 +7812,43 @@ pub enum PendingCostMoveResume {
     /// a replacement pause, which is exactly the shape that guard says to box
     /// rather than widen the budget for.
     RandomDiscardUnlessPayment(Box<RandomDiscardUnlessPaymentResume>),
+}
+
+impl PendingCostMoveResume {
+    /// CR 601.2h + CR 602.2b + CR 605.3b + CR 116.2h: Whether the paused cost
+    /// move belongs to casting a spell, activating an ability (a mana ability
+    /// included) or performing a special action, none of which gives a player
+    /// priority until it completes, rather than to a resolution or a
+    /// replacement's own optional cost. Exhaustive so a new owner has to be
+    /// classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::DelveManaPayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. } => true,
+            // CR 116.2h: foretelling is a special action; its {2} is paid before
+            // its exile move, which can then pause on a replacement.
+            PendingCostMoveResume::Foretell { .. } => true,
+            // Cast and activation payments keep their announcement; an
+            // optional payment made during a resolution does not.
+            PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.is_some(),
+            PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::Casting { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => true,
+                CollectEvidenceResume::Effect { .. } => false,
+            },
+            // Unless-costs and ward payments are made while an ability resolves
+            // (CR 118.12), and a replacement's optional cost belongs to that
+            // replacement (CR 614.1).
+            PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
+        }
+    }
 }
 
 /// CR 701.9b + CR 118.12 + CR 616.1: payload of
@@ -8269,6 +8352,33 @@ pub enum ManaAbilityResume {
     FinalizePendingManaPayment {
         player: PlayerId,
     },
+}
+
+impl ManaAbilityResume {
+    /// CR 601.2h + CR 602.2b + CR 116.2: Whether the outer payment root this
+    /// resumes is a cast, activation or special action (no priority until it
+    /// completes) rather than a resolution. Exhaustive so a new root has to be
+    /// classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            // CR 601.2g-h: the outer spell or ability cost is still being paid.
+            ManaAbilityResume::ManaPayment { .. }
+            | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::PhyrexianCastPayment { .. }
+            | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
+            // CR 116.2g / 116.2b / 116.2c: companion to hand, turning a
+            // permanent face up, and paying to end an effect are special actions.
+            ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::TurnFaceUp { .. }
+            | ManaAbilityResume::EndContinuousEffect { .. } => true,
+            // CR 118.12 / CR 608.2: payments made while an ability resolves.
+            ManaAbilityResume::UnlessPayment { .. } | ManaAbilityResume::EffectPayCost { .. } => {
+                false
+            }
+            // No outer process: the mana ability itself returns to priority.
+            ManaAbilityResume::Priority => false,
+        }
+    }
 }
 
 /// CR 605.3b + CR 106.1a: A pre-resolved choice that short-circuits the normal
@@ -9528,6 +9638,80 @@ pub struct CastingVariantChoiceOption {
     /// serde default: old paused menus cannot safely select a face by index.
     pub face: CastingVariantFace,
     pub mana_cost: ManaCost,
+    /// CR 601.2f-h: the non-mana part of an alternative cost this option pays
+    /// ("Discard a card" for a Blitz option), shown beside its mana cost.
+    /// `None` when the option pays mana only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_cost: Option<crate::types::ability::AbilityCost>,
+    /// CR 601.2a + CR 601.2b: the graveyard permission this option casts
+    /// under, announced with the option. `Some` for every cast from the
+    /// graveyard authorized by a graveyard-cast permission (printed cost,
+    /// Blitz, Bestow); `None` for every other option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<CastAuthorityChoice>,
+}
+
+/// CR 601.2a: which graveyard-cast permission grant authorizes a cast: the
+/// permission's source plus the grant on it, so two grants from one source are
+/// two permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GraveyardPermissionId {
+    pub source: ObjectId,
+    pub grant: PermissionGrant,
+}
+
+/// Where a graveyard-cast permission grant lives on its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PermissionGrant {
+    /// The definition's position in the source object's `static_definitions`.
+    Static { index: u32 },
+    /// The `GrantStaticAbility` at `modification` in the transient continuous
+    /// effect `effect_id` (a resolution-created grant: Yawgmoth's Will).
+    Transient { effect_id: u64, modification: u32 },
+}
+
+/// An opaque digest of a grant's full definition, compared only for equality,
+/// so a menu answer bound to a grant whose definition changed is refused.
+/// Serialized as a hex string so JavaScript peers keep all 64 bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GrantDigest(pub String);
+
+/// CR 601.2a + CR 601.2b: what the player announced for a graveyard-permission
+/// cast: the grant, its digest, and the per-type slot (CR 110.4, Muldrotha)
+/// when one has been chosen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncedGraveyardPermission {
+    pub permission: GraveyardPermissionId,
+    pub grant_digest: GrantDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_type: Option<super::card_type::CoreType>,
+}
+
+/// CR 601.2f + CR 601.2h + CR 614.1c: a graveyard permission's terms as they
+/// were when the cast was announced. The cast pays and applies these even if
+/// the permission's source leaves or loses the ability during casting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraveyardPermissionLatch {
+    pub permission: GraveyardPermissionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_cost: Option<crate::types::statics::CastExtraCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_with_counter: Option<crate::types::counter::CounterType>,
+}
+
+/// The engine-authored authority of a graveyard casting option: the
+/// announcement it commits to plus the permission's terms, for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastAuthorityChoice {
+    pub announcement: AnnouncedGraveyardPermission,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_cost: Option<crate::types::statics::CastExtraCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_with_counter: Option<crate::types::counter::CounterType>,
+    pub frequency: crate::types::statics::CastFrequency,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graveyard_destination_replacement: Option<Zone>,
 }
 
 /// CR 118.3 + CR 601.2b + CR 605.3b: Identifies the specific action to take
@@ -12037,15 +12221,22 @@ fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(
 /// before each option grew the room's printed name and room-ability text (CR 309.4b-c), so a save
 /// paused at either prompt cannot deserialize into the current shape.
 ///
+/// Protocol 81 / P2P 63: `DungeonPreview` gained the whole dungeon behind the choice — `card`,
+/// `rooms`, and `room_count` — so a save paused at `ChooseDungeon` between protocols 36 and 80
+/// carries options that are objects but lack those keys. Rebuilt wholesale from the option's
+/// `dungeon` key rather than patched in place, so the backfilled option equals what the engine
+/// emits at that position.
+///
 /// This migrates rather than rejects because the migration is TOTAL: the legacy scalars are
 /// exactly the keys into the static dungeon table. A `DungeonId` resolves its own topmost room
 /// (CR 309.4a) and a room index resolves that room's name and text, so the rebuilt preview equals
 /// what the engine emits at that position; `option_names` is dropped because `RoomPreview::name`
 /// carries it from the same authority. Rebuilt through `dungeon::dungeon_preview` /
 /// `dungeon::room_preview` rather than hand-written JSON, so it cannot drift from the shape the
-/// prompts emit. Idempotent: legacy options are scalars and current ones are objects, so a re-run
-/// matches nothing. An unknown `DungeonId` is a hard error — corrupt state, not a migratable
-/// shape.
+/// prompts emit. Idempotent: legacy options are scalars and current ones are objects, and
+/// protocol-70 objects lack `card`/`rooms`/`room_count` while current ones carry all three, so a
+/// re-run matches nothing. An unknown `DungeonId` is a hard error — corrupt state, not a
+/// migratable shape.
 fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Result<(), String> {
     use crate::game::dungeon::{dungeon_preview, room_preview, DungeonId};
     use std::str::FromStr;
@@ -12085,6 +12276,51 @@ fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Resu
                                 .iter()
                                 .map(|option| {
                                     let id = parse_dungeon(option, "options entry")?;
+                                    serde_json::to_value(dungeon_preview(id))
+                                        .map_err(|error| error.to_string())
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            data.insert("options".to_string(), serde_json::Value::Array(previews));
+                        }
+                        // Protocol 81: options are objects but predate the choice preview's
+                        // `card`/`rooms`/`room_count`. Runs after the scalar leg, which
+                        // rebuilds current-shape objects a re-run skips here.
+                        let needs_backfill = data
+                            .get("options")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|options| {
+                                options.iter().any(|option| {
+                                    option.as_object().is_some_and(|option| {
+                                        !option.contains_key("card")
+                                            || !option.contains_key("rooms")
+                                            || !option.contains_key("room_count")
+                                    })
+                                })
+                            });
+                        if needs_backfill {
+                            let options = data
+                                .get("options")
+                                .and_then(serde_json::Value::as_array)
+                                .expect("checked above")
+                                .clone();
+                            let previews = options
+                                .iter()
+                                .map(|option| {
+                                    let is_current = option.as_object().is_some_and(|option| {
+                                        option.contains_key("card")
+                                            && option.contains_key("rooms")
+                                            && option.contains_key("room_count")
+                                    });
+                                    if is_current {
+                                        return Ok(option.clone());
+                                    }
+                                    let id = parse_dungeon(
+                                        option.get("dungeon").ok_or_else(|| {
+                                            "protocol-70 dungeon option carries no dungeon key"
+                                                .to_string()
+                                        })?,
+                                        "options entry",
+                                    )?;
                                     serde_json::to_value(dungeon_preview(id))
                                         .map_err(|error| error.to_string())
                                 })
@@ -12555,6 +12791,89 @@ impl GameState {
         });
     }
 
+    /// A staged payment is a replay authority, not merely display data.  Keep
+    /// its player references inside the restored game's seat set before any
+    /// caller can finalize or replay it; otherwise a crafted raw snapshot can
+    /// smuggle an out-of-range actor/owner through serde and into the ordinary
+    /// action boundary.
+    fn validate_payment_transaction(&self) -> Result<(), String> {
+        let Some(transaction) = self.payment_transaction.as_deref() else {
+            return Ok(());
+        };
+        let valid = |player: PlayerId| (player.0 as usize) < self.players.len();
+        if !valid(transaction.owner) {
+            return Err(format!(
+                "owner {:?} is not a seat in the restored game",
+                transaction.owner
+            ));
+        }
+        for (label, waiting_for) in [
+            ("transaction base prompt", &transaction.base_waiting_for),
+            ("current prompt", &self.waiting_for),
+        ] {
+            if let Some(player) = waiting_for
+                .acting_players()
+                .into_iter()
+                .find(|player| !valid(*player))
+            {
+                return Err(format!(
+                    "{label} actor {:?} is not a seat in the restored game",
+                    player
+                ));
+            }
+        }
+
+        fn validate_ability(
+            ability: &ResolvedAbility,
+            valid: &impl Fn(PlayerId) -> bool,
+        ) -> Result<(), String> {
+            for (label, player) in [
+                ("controller", ability.controller),
+                (
+                    "original_controller",
+                    ability.original_controller.unwrap_or(ability.controller),
+                ),
+                (
+                    "scoped_player",
+                    ability.scoped_player.unwrap_or(ability.controller),
+                ),
+            ] {
+                if !valid(player) {
+                    return Err(format!("root {label} {:?} is not a seat", player));
+                }
+            }
+            if let Some(sub) = ability.sub_ability.as_deref() {
+                validate_ability(sub, valid)?;
+            }
+            if let Some(otherwise) = ability.else_ability.as_deref() {
+                validate_ability(otherwise, valid)?;
+            }
+            Ok(())
+        }
+
+        validate_ability(&transaction.root, &valid)?;
+        for (index, entry) in transaction.transcript.iter().enumerate() {
+            if crate::game::payment_transaction::is_outside_transaction(&entry.action) {
+                return Err(format!(
+                    "transcript[{index}] action is outside staged payment"
+                ));
+            }
+            if !valid(entry.authenticated_actor) {
+                return Err(format!(
+                    "transcript[{index}] authenticated actor {:?} is not a seat",
+                    entry.authenticated_actor
+                ));
+            }
+            if !valid(entry.semantic_owner) {
+                return Err(format!(
+                    "transcript[{index}] semantic owner {:?} is not a seat",
+                    entry.semantic_owner
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// CR 903.3 + CR 111.6 + CR 704.3 + CR 704.5d: a token cannot be the
     /// commander card named by a command-zone return choice. Older snapshots
     /// can retain such an impossible choice after a copied commander spell left
@@ -12660,6 +12979,8 @@ pub enum PersistedRestoreError {
     UnsupportedFormat(String),
     #[error("persisted state contains an unsupported stack object: {0}")]
     UnsupportedStackObject(&'static str),
+    #[error("persisted payment transaction is invalid: {0}")]
+    InvalidPaymentTransaction(String),
     #[error("persisted restore finalization policy mismatch: {0}")]
     FinalizationPolicyMismatch(&'static str),
     #[error("persisted state runtime rehydration failed: {0}")]
@@ -12854,6 +13175,9 @@ impl PersistedGameState {
         finalization: PersistedRestoreFinalization,
     ) -> Result<PreparedPersistedGameState, PersistedRestoreError> {
         let mut state = self.into_game_state_unchecked();
+        state
+            .validate_payment_transaction()
+            .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state
             .format_config
             .reject_unimplemented_range_of_influence()
@@ -13158,6 +13482,18 @@ pub enum WaitingFor {
             deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
         )]
         must_be_blocked_targets: HashMap<ObjectId, Vec<ObjectId>>,
+        /// CR 509.1a + CR 101.1: per creature able to block, how many
+        /// attackers it may block — `None` for any number. Display-only —
+        /// computed by `combat::block_capacity`; the declaration validator's
+        /// own authority is `combat::extra_block_limit`, the same function's
+        /// numeric form.
+        #[serde(
+            default,
+            skip_serializing_if = "HashMap::is_empty",
+            serialize_with = "crate::types::deterministic_serde::hash_map",
+            deserialize_with = "crate::types::deterministic_serde::deserialize_numeric_hash_map"
+        )]
+        block_capacities: HashMap<ObjectId, Option<u32>>,
     },
     /// CR 502.3: During the untap step, the active player may choose not to
     /// untap permanents with "You may choose not to untap..." static abilities.
@@ -13487,6 +13823,20 @@ pub enum WaitingFor {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class remainder
+        /// split. `Some(n)` routes the unkept pile into a follow-up
+        /// `DigRestSplitChoice` that puts exactly `n` of it on top of the
+        /// library and the remainder on the bottom, instead of moving the
+        /// whole pile uniformly to `rest_destination`.
+        ///
+        /// Already resolved from `Effect::Dig.rest_split_top_count`
+        /// (a `QuantityExpr`) at dig-resolution time, mirroring how this state
+        /// carries a resolved `keep_count: usize` for the effect's
+        /// `keep_count_expr: Option<QuantityExpr>`. CR 608.2c fixes the value
+        /// as the effect is applied, and the later completion site has no
+        /// `ResolvedAbility` to resolve an expression against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_split_top_count: Option<usize>,
         /// CR 400.5 + CR 608.2c: Ordering instruction for a library rest pile.
         #[serde(default)]
         rest_order: DigRestOrder,
@@ -13501,6 +13851,96 @@ pub enum WaitingFor {
         /// attacking rather than being declared as attackers.
         #[serde(default)]
         enters_attacking: bool,
+    },
+    /// CR 401.2 + CR 701.20e + CR 608.2c: After a `DigChoice`'s keep-selection
+    /// has been routed to its destination, a Telling Time-class dig partitions
+    /// the FIXED remainder pile between the top and the bottom of the SAME
+    /// library ("...one on top of your library, and one on the bottom of your
+    /// library"). CR 401.2 makes top and bottom the only two positions such an
+    /// instruction can name, so this variant's single axis of choice is
+    /// `LibraryPosition` within one already-fixed `Zone::Library` destination.
+    ///
+    /// Distinct from its two neighbours: `DigChoice` chooses a SUBSET to send
+    /// to one destination zone, and `SearchPartitionChoice` splits a set
+    /// between two different `Zone`s. Neither can express "same zone, two
+    /// positions", which is why this is a sibling rather than a parameter of
+    /// either.
+    DigRestSplitChoice {
+        /// The player this prompt is addressed to — the single acting player
+        /// for the decision `scope` names.
+        ///
+        /// For [`DigRestSplitScope::PartitionAndOrder`] and
+        /// [`DigRestSplitScope::PartitionOnly`] that is the dig's CHOOSER, the
+        /// player who looked at the cards and whom CR 608.2d gives the
+        /// partition to (CR 701.20e — the remainder is known only to them).
+        /// For [`DigRestSplitScope::OrderOnly`] it is `library_owner`, because
+        /// CR 401.4 gives the arrangement of a 2+ card pile to the owner of
+        /// those cards rather than to whoever the effect chose for.
+        player: PlayerId,
+        /// Owner of the library the pile is placed back into, and therefore
+        /// the CR 401.4 arranging authority for each resulting pile.
+        library_owner: PlayerId,
+        /// The fixed rest pile. Every id here ends up in `Zone::Library`; what
+        /// is undecided is each card's `LibraryPosition` (Top or Bottom) AND
+        /// the order of the cards within each position (CR 401.4).
+        ///
+        /// The response is `GameAction::SelectCards` carrying a full
+        /// PERMUTATION of this list — the same contract `RippleBottomOrder`
+        /// uses for its own "in any order" pile — not a subset. The first
+        /// `top_count` entries go on top, topmost first; the rest go to the
+        /// bottom in the submitted order. One payload therefore answers both
+        /// the CR 608.2d partition choice and the CR 401.4 arrangement of each
+        /// resulting pile.
+        cards: Vec<ObjectId>,
+        /// How many of the submitted arrangement's leading entries go on top;
+        /// the remainder go to the bottom. Exact, not "up to" — Telling Time's
+        /// split is forced. Already resolved against game state and clamped to
+        /// `0..=cards.len()` at park time, so a client never has to interpret a
+        /// `QuantityExpr`.
+        ///
+        /// May legally be `0` or `cards.len()`: a DEGENERATE partition still
+        /// parks this prompt whenever `cards.len() >= 2`, because CR 401.4
+        /// gives the owner the order of the 2+ cards landing in that single
+        /// position even though which-goes-where was never in question. Only a
+        /// pile of fewer than two cards skips the prompt entirely.
+        top_count: usize,
+        /// How many of the arrangement's TRAILING entries go to the bottom —
+        /// always `cards.len() - top_count`, computed once here by the engine.
+        ///
+        /// Redundant with `cards.len()` and `top_count` on purpose: the client
+        /// is a display layer and must not compute game quantities, so the
+        /// "and N on the bottom" half of the prompt's own description is
+        /// engine-supplied rather than derived in the modal. Both halves are
+        /// written by [`Self::new_dig_rest_split`], which is the only
+        /// constructor allowed to set them, so the two cannot drift.
+        #[serde(default)]
+        bottom_count: usize,
+        /// CR 608.2d vs CR 401.4: which of the split's two decisions this
+        /// prompt carries, and therefore whether `player` is the chooser or the
+        /// library's owner. See [`DigRestSplitScope`].
+        #[serde(default)]
+        scope: DigRestSplitScope,
+        source_id: Option<ObjectId>,
+        /// The deferred dig tail (reveal-marker cleanup, tracked-set publish,
+        /// continuation wiring, priority drain) carried verbatim across this
+        /// player pause and handed straight back to the zone pipeline as the
+        /// split batch's completion.
+        ///
+        /// Carried whole rather than re-derived from scalars because it is the
+        /// same typed `BatchCompletion` carrier the dig already threads through
+        /// `RevealRestPile` for exactly this purpose — rebuilding its fourteen
+        /// fields at the resume site would fork that tail into a second copy
+        /// that could drift. Engine-internal bookkeeping, not player
+        /// information: `game/visibility.rs` strips it from every client view.
+        ///
+        /// `Option` ONLY because that stripping needs a way to say "redacted";
+        /// a genuine pending split always carries one. The resolver therefore
+        /// treats `None` as an invalid state and rejects the submission BEFORE
+        /// moving any card, rather than completing the move and dropping the
+        /// dig's reveal-marker cleanup and tracked-set publication on the
+        /// floor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion: Option<Box<BatchCompletion>>,
     },
     SurveilChoice {
         player: PlayerId,
@@ -14189,6 +14629,11 @@ pub enum WaitingFor {
         #[serde(default)]
         payment_mode: CastPaymentMode,
         available_slots: Vec<super::card_type::CoreType>,
+        /// CR 601.2a: the graveyard permission grant the player announced for
+        /// this printed-cost cast, carried so the slot answer re-prepares that
+        /// exact grant. `None` only for a land play (CR 305.1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission: Option<AnnouncedGraveyardPermission>,
     },
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
@@ -15705,6 +16150,46 @@ pub enum NoActor {
 }
 
 impl WaitingFor {
+    /// CR 401.4 + CR 608.2d: the single constructor for
+    /// [`WaitingFor::DigRestSplitChoice`].
+    ///
+    /// Owns the two invariants a caller could otherwise get wrong:
+    ///
+    /// * `top_count` is clamped to the pile, and `bottom_count` is derived from
+    ///   the SAME clamped value, so the prompt's two halves always sum to
+    ///   `cards.len()` (the client displays both and derives neither);
+    /// * `player` is the acting authority implied by `scope` — the chooser for
+    ///   a partition prompt, and the library's OWNER for a CR 401.4
+    ///   arrangement prompt, which is the whole point of the `scope` axis.
+    pub fn new_dig_rest_split(
+        chooser: PlayerId,
+        library_owner: PlayerId,
+        cards: Vec<ObjectId>,
+        top_count: usize,
+        scope: DigRestSplitScope,
+        source_id: Option<ObjectId>,
+        completion: Option<Box<BatchCompletion>>,
+    ) -> Self {
+        let top_count = top_count.min(cards.len());
+        let bottom_count = cards.len() - top_count;
+        let player = match scope {
+            DigRestSplitScope::PartitionAndOrder | DigRestSplitScope::PartitionOnly => chooser,
+            // CR 401.4: "the owner of those cards may arrange them in any
+            // order" — not the player the effect gave the partition to.
+            DigRestSplitScope::OrderOnly => library_owner,
+        };
+        WaitingFor::DigRestSplitChoice {
+            player,
+            library_owner,
+            cards,
+            top_count,
+            bottom_count,
+            scope,
+            source_id,
+            completion,
+        }
+    }
+
     /// Canonical stable variant name (engine-owned labeler).
     ///
     /// Exhaustive over every `WaitingFor` variant — no wildcard fallback, so the
@@ -15752,6 +16237,7 @@ impl WaitingFor {
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DieKeepChoice { .. } => "DieKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
+            WaitingFor::DigRestSplitChoice { .. } => "DigRestSplitChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
@@ -15915,6 +16401,7 @@ impl WaitingFor {
             | WaitingFor::CoinFlipKeepChoice { player, .. }
             | WaitingFor::DieKeepChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }
+            | WaitingFor::DigRestSplitChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
             | WaitingFor::SearchChoice { player, .. }
@@ -16194,6 +16681,177 @@ impl WaitingFor {
         self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. })
     }
 
+    /// CR 605.3a + CR 605.3b: Whether this state continues a mana ability's
+    /// activation — one of its cost choices, or the choice of which mana it
+    /// adds. A mana ability doesn't use the stack and resolves immediately, so
+    /// no player receives priority until it has finished, whether it was
+    /// activated with priority or while paying a cost (CR 117.1d).
+    ///
+    /// A mana-color choice made while an *effect* resolves
+    /// (`ManaChoiceContext::ResolvingEffect`) is not a mana ability.
+    pub fn is_mana_ability_continuation(&self) -> bool {
+        match self {
+            WaitingFor::ChooseManaColor { context, .. } => match context {
+                ManaChoiceContext::ManaAbility(_) => true,
+                ManaChoiceContext::ResolvingEffect(_) => false,
+            },
+            WaitingFor::PayCost { resume, .. } => match resume {
+                CostResume::ManaAbility { .. } => true,
+                CostResume::Spell { .. }
+                | CostResume::SpellCost { .. }
+                | CostResume::Resolution => false,
+            },
+            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::ManaAbility { .. } => true,
+                CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
+                    false
+                }
+            },
+            WaitingFor::PayAmountChoice {
+                pending_mana_ability,
+                ..
+            } => pending_mana_ability.is_some(),
+            WaitingFor::PayManaAbilityMana { .. } => true,
+            // Every other prompt is not part of a mana ability's activation.
+            // Listed rather than `_` so a new prompt has to be classified.
+            WaitingFor::Priority { .. }
+            | WaitingFor::ResolveAllConsent { .. }
+            | WaitingFor::ResolveAllReady { .. }
+            | WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
+            | WaitingFor::MulliganDecision { .. }
+            | WaitingFor::OpeningHandBottomCards { .. }
+            | WaitingFor::ManaPayment { .. }
+            | WaitingFor::ManaSourceSelection { .. }
+            | WaitingFor::AssistChoosePlayer { .. }
+            | WaitingFor::AssistPayment { .. }
+            | WaitingFor::ChooseXValue { .. }
+            | WaitingFor::TargetSelection { .. }
+            | WaitingFor::DeclareAttackers { .. }
+            | WaitingFor::DeclareBlockers { .. }
+            | WaitingFor::UntapChoice { .. }
+            | WaitingFor::ChooseUntapSubset { .. }
+            | WaitingFor::ExertChoice { .. }
+            | WaitingFor::EnlistChoice { .. }
+            | WaitingFor::GameOver { .. }
+            | WaitingFor::ReplacementChoice { .. }
+            | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::OrderTriggers { .. }
+            | WaitingFor::CopyTargetChoice { .. }
+            | WaitingFor::ExploreChoice { .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
+            | WaitingFor::EquipTarget { .. }
+            | WaitingFor::CrewVehicle { .. }
+            | WaitingFor::StationTarget { .. }
+            | WaitingFor::SaddleMount { .. }
+            | WaitingFor::ScryChoice { .. }
+            | WaitingFor::RippleRevealChoice { .. }
+            | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::ArrangePlanarDeckTopChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
+            | WaitingFor::DieKeepChoice { .. }
+            | WaitingFor::DigChoice { .. }
+            | WaitingFor::DigRestSplitChoice { .. }
+            | WaitingFor::SurveilChoice { .. }
+            | WaitingFor::RevealChoice { .. }
+            | WaitingFor::SearchChoice { .. }
+            | WaitingFor::SearchPartitionChoice { .. }
+            | WaitingFor::OutsideGameChoice { .. }
+            | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::BeholdChoice { .. }
+            | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
+            | WaitingFor::ConniveDiscard { .. }
+            | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
+            | WaitingFor::LearnChoice { .. }
+            | WaitingFor::ManifestDreadChoice { .. }
+            | WaitingFor::TriggerTargetSelection { .. }
+            | WaitingFor::BetweenGamesSideboard { .. }
+            | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::NamedChoice { .. }
+            | WaitingFor::OpponentGuess { .. }
+            | WaitingFor::SpellbookDraft { .. }
+            | WaitingFor::DamageSourceChoice { .. }
+            | WaitingFor::ModeChoice { .. }
+            | WaitingFor::DiscardToHandSize { .. }
+            | WaitingFor::OptionalCostChoice { .. }
+            | WaitingFor::ChooseGiftRecipient { .. }
+            | WaitingFor::SpliceOffer { .. }
+            | WaitingFor::DefilerPayment { .. }
+            | WaitingFor::OrderCostReductions { .. }
+            | WaitingFor::CastOffer { .. }
+            | WaitingFor::ModalFaceChoice { .. }
+            | WaitingFor::AlternativeCastChoice { .. }
+            | WaitingFor::MutateMergeChoice { .. }
+            | WaitingFor::CipherEncodeChoice { .. }
+            | WaitingFor::CastingVariantChoice { .. }
+            | WaitingFor::ChoosePermanentTypeSlot { .. }
+            | WaitingFor::MultiTargetSelection { .. }
+            | WaitingFor::AbilityModeChoice { .. }
+            | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::ResolutionOptionalPaymentChoice { .. }
+            | WaitingFor::PairChoice { .. }
+            | WaitingFor::TributeChoice { .. }
+            | WaitingFor::MiracleReveal { .. }
+            | WaitingFor::OpponentMayChoice { .. }
+            | WaitingFor::LoopShortcut { .. }
+            | WaitingFor::RespondToShortcut { .. }
+            | WaitingFor::PrecastCopyShortcutOffer { .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { .. }
+            | WaitingFor::UnlessPayment { .. }
+            | WaitingFor::UnlessPaymentChooseCost { .. }
+            | WaitingFor::WardDiscardChoice { .. }
+            | WaitingFor::WardSacrificeChoice { .. }
+            | WaitingFor::UnlessBounceChoice { .. }
+            | WaitingFor::ChooseRingBearer { .. }
+            | WaitingFor::ChooseRoomDoor { .. }
+            | WaitingFor::ChooseDungeon { .. }
+            | WaitingFor::ChooseDungeonRoom { .. }
+            | WaitingFor::SpecializeColor { .. }
+            | WaitingFor::ActivationCostOneOfChoice { .. }
+            | WaitingFor::CostTypeChoice { .. }
+            | WaitingFor::BlightChoice { .. }
+            | WaitingFor::HarmonizeTapChoice { .. }
+            | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
+            | WaitingFor::TopOrBottomChoice { .. }
+            | WaitingFor::PopulateChoice { .. }
+            | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::ChooseFromZoneOpponentChooser { .. }
+            | WaitingFor::ChooseAnnouncingOpponent { .. }
+            | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::VoteChoice { .. }
+            | WaitingFor::SeparatePilesChooseOpponent { .. }
+            | WaitingFor::SeparatePilesPartition { .. }
+            | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::CompanionReveal { .. }
+            | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::CommanderZoneChoice { .. }
+            | WaitingFor::BattleProtectorChoice { .. }
+            | WaitingFor::ProliferateChoice { .. }
+            | WaitingFor::TimeTravelChoice { .. }
+            | WaitingFor::ChooseObjectsSelection { .. }
+            | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { .. }
+            | WaitingFor::KeepExactPermanentsChoice { .. }
+            | WaitingFor::CopyRetarget { .. }
+            | WaitingFor::AssignCombatDamage { .. }
+            | WaitingFor::AssignBlockerDamage { .. }
+            | WaitingFor::DistributeAmong { .. }
+            | WaitingFor::MoveCountersDistribution { .. }
+            | WaitingFor::RemoveCountersChoice { .. }
+            | WaitingFor::RetargetChoice { .. }
+            | WaitingFor::CombatTaxPayment { .. }
+            | WaitingFor::PhyrexianPayment { .. } => false,
+        }
+    }
+
     /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j / CR 310.11 /
     /// CR 703.1 + CR 117.3a + CR 704.3: the windows the ENGINE forces open before the
     /// next grant of priority. Two sources feed the class — the windows that open
@@ -16365,8 +17023,15 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
-                // CR 702.60a + CR 401.4: the bottom-order response is a
-                // permutation of the offered pile, verified by `apply()`.
+                // CR 401.2 + CR 401.4: the split response names which cards go
+                // on top, and when two or more do, their owner may arrange
+                // them in any order — a free permutation the combination
+                // enumerator does not list, so `apply()` is the real validator
+                // (it enforces the exact count, uniqueness, and membership).
+                | WaitingFor::DigRestSplitChoice { .. }
+                // CR 702.60a: the Ripple bottom-order response is a free
+                // permutation of the offered pile — the candidate enumerator
+                // only lists {identity}, so `apply()` is the real validator.
                 | WaitingFor::RippleBottomOrder { .. }
                 | WaitingFor::RevealUntilBottomOrder { .. }
         )
@@ -17296,6 +17961,58 @@ pub enum CastingVariant {
 impl CastingVariant {
     pub fn is_normal(&self) -> bool {
         *self == CastingVariant::Normal
+    }
+
+    /// CR 118.9b: the keyword that names this casting method, matched against
+    /// a permission that requires one ("You may cast this card from your
+    /// graveyard using its blitz ability."). `None` when no keyword names the
+    /// method: the printed cost and the permission routes, and the keyword
+    /// methods `KeywordKind` has no discriminant for. A permission that requires
+    /// a method admits a cast only when this is `Some` of that keyword.
+    pub fn cast_keyword(self) -> Option<crate::types::keywords::KeywordKind> {
+        use crate::types::keywords::KeywordKind;
+        match self {
+            CastingVariant::Warp => Some(KeywordKind::Warp),
+            CastingVariant::Escape => Some(KeywordKind::Escape),
+            CastingVariant::Retrace => Some(KeywordKind::Retrace),
+            CastingVariant::Harmonize => Some(KeywordKind::Harmonize),
+            CastingVariant::Mayhem => Some(KeywordKind::Mayhem),
+            CastingVariant::Flashback => Some(KeywordKind::Flashback),
+            CastingVariant::Aftermath => Some(KeywordKind::Aftermath),
+            CastingVariant::Disturb => Some(KeywordKind::Disturb),
+            CastingVariant::Sneak { .. } => Some(KeywordKind::Sneak),
+            CastingVariant::Miracle => Some(KeywordKind::Miracle),
+            CastingVariant::Madness => Some(KeywordKind::Madness),
+            CastingVariant::Dash => Some(KeywordKind::Dash),
+            CastingVariant::Blitz => Some(KeywordKind::Blitz),
+            CastingVariant::Suspend => Some(KeywordKind::Suspend),
+            CastingVariant::Plot => Some(KeywordKind::Plot),
+            CastingVariant::Foretell => Some(KeywordKind::Foretell),
+            CastingVariant::Bestow => Some(KeywordKind::Bestow),
+            CastingVariant::Awaken => Some(KeywordKind::Awaken),
+            CastingVariant::Cleave => Some(KeywordKind::Cleave),
+            CastingVariant::MoreThanMeetsTheEye => Some(KeywordKind::MoreThanMeetsTheEye),
+            CastingVariant::Mutate => Some(KeywordKind::Mutate),
+            CastingVariant::Freerunning => Some(KeywordKind::Freerunning),
+            CastingVariant::JumpStart => Some(KeywordKind::JumpStart),
+            CastingVariant::Fuse => Some(KeywordKind::Fuse),
+            CastingVariant::Normal
+            | CastingVariant::Adventure
+            | CastingVariant::Omen
+            | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::HandPermission { .. }
+            | CastingVariant::ExilePermission { .. }
+            | CastingVariant::WebSlinging { .. }
+            | CastingVariant::Evoke
+            | CastingVariant::Emerge
+            | CastingVariant::Spectacle
+            | CastingVariant::Overload
+            | CastingVariant::Impending
+            | CastingVariant::Prototype
+            | CastingVariant::Prowl
+            | CastingVariant::Surge
+            | CastingVariant::FaceDown => None,
+        }
     }
 
     /// CR 601.2a: The `ObjectId` of the `StaticMode::ExileCastPermission` source
@@ -18277,6 +18994,101 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
 pub struct LoopDetectSample {
     pub normalized: GameState,
     pub live: GameState,
+}
+
+/// CR 601.2h + CR 608.2c: authoritative descriptor for a resolution-time
+/// composite payment that crossed an interactive choice. The canonical state
+/// remains the pre-payment base while this descriptor is live; viewers and
+/// legal-action consumers materialize the shadow by replaying `root` and the
+/// submitted `transcript` against that base. Keeping the descriptor as a
+/// replayable root rather than a nested `GameState` snapshot avoids a second
+/// rules authority and keeps persistence/restore deterministic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolutionPaymentTransaction {
+    /// Descriptor wire version. This is independent from the resolution-frame
+    /// wire version because the transaction is a top-level optional carrier.
+    #[serde(default = "resolution_payment_transaction_wire_version")]
+    pub wire_version: u32,
+    /// Player who owns the payment decision. The live `WaitingFor` remains the
+    /// action-authorization authority; this field is provenance for audits and
+    /// restore validation.
+    pub owner: PlayerId,
+    /// The complete resolution root, including its printed rider chain.
+    pub root: Box<ResolvedAbility>,
+    /// Actions already accepted while the payment shadow was paused. The
+    /// authenticated actor is persisted alongside each action so replay cannot
+    /// silently substitute a different controller/submitter. Events are
+    /// deliberately not stored here; replay regenerates them and commit
+    /// publishes them exactly once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<ResolutionPaymentTranscriptEntry>,
+    /// Authoritative pre-payment waiting state. The live state may expose the
+    /// shadow prompt while this descriptor is active, but resource/object state
+    /// remains at this base until commit.
+    pub base_waiting_for: WaitingFor,
+    /// CR 608.2c + CR 608.2h: resolution-time trigger context captured at the
+    /// transaction boundary. A replay must restore this context before it
+    /// re-evaluates payer and quantity expressions after a pause/serde roundtrip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_trigger_context: Option<ResolvingTriggerContext>,
+}
+
+/// One admitted action in a staged payment transaction. Both halves of the
+/// original interaction boundary are durable: the authenticated submitter is
+/// retained for audit, while the semantic owner freezes the decision slot that
+/// was admitted. Replay uses that frozen owner instead of re-authorizing the
+/// historical submitter against a later control topology.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResolutionPaymentTranscriptEntry {
+    pub authenticated_actor: PlayerId,
+    pub semantic_owner: PlayerId,
+    pub action: GameAction,
+}
+
+impl<'de> Deserialize<'de> for ResolutionPaymentTranscriptEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            authenticated_actor: Option<PlayerId>,
+            #[serde(default)]
+            actor: Option<PlayerId>,
+            #[serde(default)]
+            semantic_owner: Option<PlayerId>,
+            action: GameAction,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let authenticated_actor = wire
+            .authenticated_actor
+            .or(wire.actor)
+            .ok_or_else(|| serde::de::Error::custom("payment transcript actor is missing"))?;
+        let semantic_owner = match wire.semantic_owner {
+            Some(owner) => owner,
+            // Protocol-1 payloads used `actor` as the single decision-owner
+            // field. Preserve that shape explicitly; a payload that carries
+            // only the newer authenticated actor cannot safely invent the
+            // semantic owner and is rejected at the wire boundary.
+            None if wire.authenticated_actor.is_none() => authenticated_actor,
+            None => {
+                return Err(serde::de::Error::custom(
+                    "payment transcript semantic_owner is missing",
+                ));
+            }
+        };
+        Ok(Self {
+            authenticated_actor,
+            semantic_owner,
+            action: wire.action,
+        })
+    }
+}
+
+fn resolution_payment_transaction_wire_version() -> u32 {
+    1
 }
 
 /// CR 104.1: the result of a game that has ended. `winner: None` is a draw (CR 104.4).
@@ -19964,6 +20776,16 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "ResolutionStack::is_empty")]
     pub resolution_stack: Box<ResolutionStack>,
 
+    /// CR 601.2h + CR 608.2c: staged resolution-time composite payment. The
+    /// descriptor is durable authority (base + replayable transaction), while
+    /// the two execution flags below are transient replay guards only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_transaction: Option<Box<ResolutionPaymentTransaction>>,
+    #[serde(skip)]
+    pub payment_transaction_replay: bool,
+    #[serde(skip)]
+    pub payment_transaction_just_handled: bool,
+
     /// Borrowed execution-local view of the active continuation's captured
     /// Aura host. The authoritative value remains inside
     /// `AbilityContinuationFrame`; this transient is installed only while its
@@ -21176,6 +21998,7 @@ impl GameStateDecode {
         if !value.is_object() {
             return Err("persisted game state must be a JSON object".to_string());
         }
+        crate::types::resolution::reject_wire_projection_marker(&value)?;
         match mode {
             // An UNVERSIONED raw payload carries no resolution-wire
             // discriminator. Raw persistence in general does: the engine's own
@@ -21551,6 +22374,10 @@ pub struct PostReplacementDrain {
     /// time. It is co-owned, not merely co-located. (The reading that it has an
     /// independent lifecycle comes from looking at the *instant* of the
     /// `combat_damage` clear rather than its *purpose*; that reading is wrong.)
+    ///
+    /// Since PR #9235, only the no-post-effect optional ACCEPT still clears (via
+    /// `abandon_active_post_replacement_drains`); a no-post-effect DECLINE
+    /// installs nothing and clears nothing (CR 614.6 + CR 616.1f).
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub applied: HashSet<AppliedReplacementKey>,
 
@@ -21593,11 +22420,20 @@ pub struct PostReplacementDrain {
 ///
 ///   * [`Self::KeepResident`] — `apply_single_replacement`'s stash: the *incoming*
 ///     continuation is discarded.
-///   * [`Self::Replace`] — the optional accept/decline path and the combat
-///     prevention riders: the *resident* continuation is overwritten.
+///   * [`Self::Replace`] — the optional accept/decline path when the chosen
+///     branch HAS a post-effect, and the combat prevention riders: the
+///     *resident* continuation is overwritten.
 ///
 /// Naming them is the point: today the policy is an accident of where the
 /// assignment happens to sit.
+///
+/// # A branch with no post-effect installs nothing
+///
+/// When the optional accept/decline path's chosen branch has no post-effect, no
+/// policy applies. On a DECLINE the resident drains are left untouched
+/// (CR 614.6 + CR 616.1f: a declined "may" replaces nothing, so an earlier
+/// replacement's rider on the same event still runs). On an ACCEPT they are
+/// still abandoned — the accept-side follow-up recorded on PR #9235.
 ///
 /// # What the `KeepResident` drop actually is — measured, not inferred
 ///
@@ -21620,7 +22456,11 @@ pub struct PostReplacementDrain {
 ///     exactly once, which is what CR 614.5 licenses — it grants one opportunity *per
 ///     event*, and there are two events. The applied-set dedup is fully wired
 ///     (`already_applied` gates candidate selection) and correctly declines to
-///     suppress here. Nothing is missing from this path.
+///     suppress here. Nothing is missing from this path. In that census both
+///     drops were sibling events; same-event collisions are also reachable (two
+///     Blood Scriveners; A → declined B → C) and lose a real rider, because the
+///     stack holds at most one Ready entry — the accept-side follow-up recorded
+///     on PR #9235.
 ///   * **The dropped continuation never runs — in either regime.** Dispatch counts are
 ///     identical with the drop and with the stack forced to nest: Wolverine dispatches
 ///     its continuation **zero** times ever (its heal is delivered by
@@ -21664,8 +22504,9 @@ pub enum ResidentDrainPolicy {
 
 /// CR 616.1g: the post-replacement continuations awaiting a drain.
 ///
-/// Depth is currently capped at one by [`ResidentDrainPolicy`] — this type
-/// reproduces the old single-slot behaviour exactly. It is a stack so that
+/// [`ResidentDrainPolicy`] keeps at most one Ready entry — this type reproduces
+/// the old single-slot behaviour exactly, except that a no-post-effect optional
+/// decline no longer clears it (PR #9235). It is a stack so that
 /// nesting can be turned on as an isolated, reviewable change rather than as a
 /// side effect of the bundling.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21886,7 +22727,10 @@ impl PostReplacementDrainStack {
         }
     }
 
-    /// CR 800.4a: abandon every pending continuation (player departure).
+    /// Abandon every pending continuation. Two callers: player departure via
+    /// `GameState::abandon_active_replacement_tails` (CR 800.4a), and the
+    /// no-post-effect optional ACCEPT via
+    /// `GameState::abandon_active_post_replacement_drains`.
     pub fn abandon_all(&mut self) {
         self.drains.clear();
     }
@@ -22772,6 +23616,46 @@ fn annotate_paused_exile_event(
 }
 
 impl GameState {
+    /// CR 704.3: Whether the game is inside a process that no player receives
+    /// priority during, so the state-based action check must wait until it
+    /// completes. There are four owners:
+    /// - **a cast or activation** (CR 601.2 + CR 602.2b; priority returns only
+    ///   at CR 601.2i): an inline cast carrier (`has_pending_cast`), or one
+    ///   parked in the external `pending_cast` carrier behind a prompt that
+    ///   doesn't carry it (Assist);
+    /// - **a cast, activation or special-action cost paused on a replacement**
+    ///   (CR 616.1; special actions per CR 116.2): a cost move awaiting its
+    ///   replacement, a life payment whose replacement is still running its
+    ///   interactive effect, or a cost discard. Those prompts
+    ///   (`ReplacementChoice`, `ChooseOneOfBranch`, ...) are shared with
+    ///   resolutions, so the owner is read from the typed resume instead;
+    /// - **a mana ability's activation** (CR 605.3b), with priority or while
+    ///   paying a cost;
+    /// - **a triggered mana ability** (CR 605.4a), which "resolves immediately
+    ///   after the mana ability that triggered it, without waiting for
+    ///   priority".
+    ///
+    /// Prompts owned by a resolution are deliberately not counted, so the
+    /// #962 safety net still ends a game stuck waiting on a player who has
+    /// already lost. Wider than [`WaitingFor::has_pending_cast`], the display
+    /// and `CancelCast` predicate.
+    pub fn withholds_priority(&self) -> bool {
+        self.pending_cast.is_some()
+            || self.waiting_for.has_pending_cast()
+            || self
+                .pending_cost_move_resume
+                .as_ref()
+                .is_some_and(PendingCostMoveResume::withholds_priority)
+            || self
+                .pending_deferred_life_cost_resume
+                .as_ref()
+                .is_some_and(DeferredLifeCostResume::withholds_priority)
+            // Both variants carry the cast being paid for.
+            || self.pending_discard_for_cost.is_some()
+            || self.waiting_for.is_mana_ability_continuation()
+            || self.pending_triggered_mana_resume.is_some()
+    }
+
     /// Returns the active continuation only when its typed frame is the stack
     /// top. A buried continuation is an invalid nesting dependency, not a
     /// fallback lookup opportunity.
@@ -24181,6 +25065,10 @@ impl GameState {
 
     /// Clears only the exact active general post-replacement authority. This
     /// preserves any independent active child that may be resolving above it.
+    ///
+    /// Its only production caller is `continue_replacement_impl`'s
+    /// no-post-effect ACCEPT; the no-post-effect DECLINE deliberately does not
+    /// call it (CR 614.6 + CR 616.1f).
     pub fn abandon_active_post_replacement_drains(&mut self) {
         if let Some(drains) = self.active_post_replacement_drains_mut() {
             drains.abandon_all();
@@ -25868,6 +26756,9 @@ impl GameState {
             public_revealed_cards: Box::default(),
             product_knowledge_state: Box::default(),
             resolution_stack: Box::default(),
+            payment_transaction: None,
+            payment_transaction_replay: false,
+            payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
             resolving_player_scope_linked_exile: None,
             merged_card_component_route: None,
@@ -28189,6 +29080,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         public_revealed_cards: _,
         product_knowledge_state: _,
         resolution_stack: _,
+        payment_transaction: _,
+        payment_transaction_replay: _,
+        payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
         resolving_player_scope_linked_exile: _,
         merged_card_component_route: _,
@@ -28535,6 +29429,7 @@ impl PartialEq for GameState {
             && self.public_revealed_cards == other.public_revealed_cards
             && self.product_knowledge_state == other.product_knowledge_state
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
+            && self.payment_transaction == other.payment_transaction
             && self.pending_resolution_completion == other.pending_resolution_completion
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing
@@ -29063,6 +29958,7 @@ mod forced_cascade_window_tests {
                     block_requirements: Default::default(),
                     blocker_constraints: Default::default(),
                     must_be_blocked_targets: Default::default(),
+                    block_capacities: Default::default(),
                 },
             ),
             (
@@ -31463,6 +32359,91 @@ mod tests {
         }
     }
 
+    /// Rewrites a captured `ChooseDungeon` prompt back to its protocol-70 payload:
+    /// options are `DungeonPreview` objects but predate `card`/`rooms`/`room_count`.
+    fn strip_dungeon_preview_graph_fields(persisted: &mut serde_json::Value) {
+        let state = if persisted.get("state").is_some() {
+            persisted
+                .get_mut("state")
+                .expect("trusted fixture has an inner state")
+        } else {
+            persisted
+        };
+        let options = state
+            .get_mut("waiting_for")
+            .expect("fixture is paused at a prompt")
+            .get_mut("data")
+            .and_then(|data| data.get_mut("options"))
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("dungeon prompts carry options");
+        for option in options {
+            let option = option
+                .as_object_mut()
+                .expect("protocol-70 options are objects");
+            option.remove("card");
+            option.remove("rooms");
+            option.remove("room_count");
+        }
+    }
+
+    /// Protocol 81: a save paused at `ChooseDungeon` between protocols 36 and 80
+    /// carries options without the choice preview's `card`/`rooms`/`room_count`.
+    /// The migration must rebuild them from each option's `dungeon` key rather
+    /// than fail to deserialize, through BOTH persistence ingresses.
+    #[test]
+    fn protocol_70_choose_dungeon_prompt_backfills_through_both_envelopes() {
+        use crate::game::dungeon::{dungeon_preview, DungeonId};
+
+        let mut state = GameState::new_two_player(42);
+        let expected: Vec<_> = [
+            DungeonId::LostMineOfPhandelver,
+            DungeonId::DungeonOfTheMadMage,
+            DungeonId::TombOfAnnihilation,
+        ]
+        .into_iter()
+        .map(dungeon_preview)
+        .collect();
+        state.waiting_for = WaitingFor::ChooseDungeon {
+            player: PlayerId(0),
+            options: expected.clone(),
+        };
+
+        let mut raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("serialize raw fixture");
+        let mut trusted =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("serialize trusted");
+        strip_dungeon_preview_graph_fields(&mut raw);
+        strip_dungeon_preview_graph_fields(&mut trusted);
+        let restored = [
+            serde_json::from_value::<PersistedGameState>(raw)
+                .expect("raw protocol-70 dungeon prompt migrates")
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract"),
+            serde_json::from_value::<PersistedGameState>(trusted)
+                .expect("trusted protocol-70 dungeon prompt migrates")
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract"),
+        ];
+
+        for restored in restored {
+            match &restored.waiting_for {
+                WaitingFor::ChooseDungeon { player, options } => {
+                    assert_eq!(*player, PlayerId(0));
+                    // Rebuilt from the static table, so it is not merely
+                    // parseable — it equals what the engine emits today.
+                    assert_eq!(options, &expected);
+                    // The backfill is the point of the rebuild: every option
+                    // carries the whole dungeon behind its entry room.
+                    for option in options {
+                        assert_eq!(option.rooms.len(), option.room_count as usize);
+                        assert!(!option.card.oracle_id.is_empty());
+                    }
+                }
+                other => panic!("expected ChooseDungeon, got {other:?}"),
+            }
+        }
+    }
+
     /// Protocol 36: a save paused at `ChooseDungeonRoom` predates `RoomPreview`,
     /// `dungeon_name`, and the removal of `option_names`. Room indices resolve
     /// their own name and printed effect (CR 309.4b-c), so the rebuild is total.
@@ -33068,33 +34049,16 @@ mod tests {
         }
     }
 
-    /// V12. Pins the premise `declare_raw_resolution_wire` rests on for the
-    /// entire client-wire population: `client_state_wire_value` must keep
-    /// emitting `resolution_stack`.
-    ///
-    /// That function redacts by an explicit, MUTABLE removal list. Nothing in the
-    /// type system ties it to the inference rule, so if it ever begins stripping
-    /// `resolution_stack`, every client-wire payload silently stops being
-    /// classifiable and no compiler signal fires. This assertion is the signal.
-    ///
-    /// It pins a SECOND premise of the same kind, and for the same reason: the
-    /// client wire must keep declaring NO `resolution_state_version`. Both are
-    /// premises about whether `declare_raw_resolution_wire` is REACHED at all —
-    /// its first statement early-returns on a declared version, and its guard's
-    /// first conjunct is `resolution_stack` present. That is why the version
-    /// premise lives here rather than in
-    /// `client_wire_removes_every_unconditional_projection_field`, whose subject
-    /// is the removal LIST, i.e. whether the guard FIRES once reached. If the
-    /// deferred write-time stamping lands at `client_state_wire_value` on its
-    /// own, every client-wire payload takes that early return, the projection
-    /// guard goes dead for its entire population, and without the assertion
-    /// below no row reddens.
+    /// V12. Pins the client-wire provenance contract: the shared fail-closed
+    /// projection removes the private `resolution_stack` carrier and the
+    /// writer emits a positive `wire_projection` marker. Persistence must
+    /// reject that marker before a declared-version early return.
     #[test]
-    fn client_wire_still_carries_resolution_stack() {
+    fn client_wire_marks_projection_and_redacts_resolution_stack() {
         let state = parked_spell_resolution_fixture();
         let bare = serde_json::to_value(&state).expect("the bare GameState serializes");
-        // `viewer: None` performs no viewer filtering, so no projection sentinel
-        // is stamped — the same constructor a client debug export comes through.
+        // `viewer: None` uses the unseated shared fail-closed projection — the
+        // same constructor a client debug export comes through.
         let wire = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
             &state, None,
         ))
@@ -33115,23 +34079,65 @@ mod tests {
             "the client redactor must have run — it removes next_delayed_trigger_token"
         );
 
-        assert!(
-            wire["state"].get("resolution_stack").is_some(),
-            "`client_state_wire_value` no longer preserves `resolution_stack`. \
-             `declare_raw_resolution_wire` (types/resolution.rs) keys on that field, \
-             and its inference rule silently stops applying to every client-wire \
-             payload if the redactor removes it. Fix the redactor or re-derive the \
-             rule — do not delete this assertion."
+        assert_eq!(
+            wire["state"].get("wire_projection"),
+            Some(&serde_json::Value::Bool(true)),
+            "the client wire must carry a positive projection provenance marker"
         );
-
         assert!(
             wire["state"].get("resolution_state_version").is_none(),
-            "`client_state_wire_value` now DECLARES a resolution wire version. \
-             `declare_raw_resolution_wire` (types/resolution.rs) early-returns on \
-             that key, so its client-wire projection guard is now dead for every \
-             payload this writer produces and no other row reddens. If this is the \
-             deferred write-time stamp landing, replace the absence fingerprint with \
-             a positive `wire_projection` check — do not delete this assertion."
+            "the client wire must not declare a persistence resolution version"
+        );
+        assert!(
+            wire["state"].get("resolution_stack").is_none(),
+            "the shared unseated projection must not expose private resolution frames"
+        );
+
+        for (label, persisted) in [
+            (
+                "bare GameState",
+                serde_json::to_value(&state).expect("bare state serializes"),
+            ),
+            (
+                "raw persistence writer",
+                serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+                    .expect("raw state serializes"),
+            ),
+            (
+                "trusted persistence writer",
+                serde_json::to_value(PersistedGameState::capture(state.clone()))
+                    .expect("trusted state serializes"),
+            ),
+        ] {
+            assert!(
+                persisted.get("wire_projection").is_none(),
+                "{label} must never emit the client-only projection marker"
+            );
+        }
+
+        let mut marked_versioned = wire["state"].clone();
+        marked_versioned
+            .as_object_mut()
+            .expect("the client state is a JSON object")
+            .insert(
+                "resolution_state_version".to_string(),
+                serde_json::Value::from(3_u64),
+            );
+        let raw_error = serde_json::from_value::<PersistedGameState>(marked_versioned.clone())
+            .expect_err("a marked versioned raw projection must be rejected before inference")
+            .to_string();
+        assert!(
+            raw_error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "raw marker rejection must precede version inference, got {raw_error}"
+        );
+        let trusted_error = serde_json::from_value::<PersistedGameState>(serde_json::json!({
+            "state": marked_versioned,
+        }))
+        .expect_err("a marked versioned trusted projection must be rejected")
+        .to_string();
+        assert!(
+            trusted_error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "trusted marker rejection must precede versioned restore, got {trusted_error}"
         );
     }
 
@@ -33172,10 +34178,9 @@ mod tests {
     }
 
     /// The redacted client-wire projection of the same state. `viewer: None`
-    /// performs no viewer filtering, so no `viewer_projection` sentinel is
-    /// stamped — this is the exact constructor a client debug export comes
-    /// through, and the population `reject_viewer_projection_as_authority`
-    /// cannot see.
+    /// uses the unseated shared fail-closed projection and carries the
+    /// JSON-only `wire_projection` provenance marker; the marker is what the
+    /// persistence gate sees before the typed state is materialized.
     fn client_wire_value(state: &GameState) -> serde_json::Value {
         serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
             state, None,
@@ -33194,11 +34199,14 @@ mod tests {
         value
     }
 
-    /// The same redacted payload with ONE fingerprint key restored, at the value
-    /// an absent key already decodes to: `next_delayed_trigger_token` carries a
-    /// plain `#[serde(default)]` (so absent means `0`), and
+    /// The same redacted payload with ONE legacy-fingerprint key restored, at
+    /// the value an absent key already decodes to: `next_delayed_trigger_token`
+    /// carries a plain `#[serde(default)]` (so absent means `0`), and
     /// `normalize_delayed_trigger_allocators` collapses both `0` and the absent
-    /// case to `1` for a payload with no install roots.
+    /// case to `1` for a payload with no install roots. The positive marker is
+    /// removed deliberately so this helper models an old, unmarked capture and
+    /// exercises the compatibility fingerprint rather than the new provenance
+    /// gate.
     ///
     /// So this payload is DECODE-IDENTICAL to the redacted one and differs only
     /// in whether the guard's conjunction holds. It measures what the same bytes
@@ -33206,12 +34214,32 @@ mod tests {
     /// is what makes the `!contains(…)` clauses below discriminated rather than
     /// vacuously true of any refusal.
     fn with_the_projection_guard_bypassed(mut wire: serde_json::Value) -> serde_json::Value {
+        let object = wire
+            .as_object_mut()
+            .expect("the client wire payload is a JSON object");
+        object.remove("wire_projection");
+        object.insert(
+            "next_delayed_trigger_token".to_string(),
+            serde_json::Value::from(0),
+        );
+        wire
+    }
+
+    /// The pre-marker client wire retained `resolution_stack`. Reinsert that
+    /// historical carrier when a test needs to exercise the legacy downstream
+    /// coherence refusal rather than the current positive provenance gate.
+    fn with_legacy_stack_and_projection_guard_bypassed(
+        state: &GameState,
+        wire: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut wire = with_the_projection_guard_bypassed(wire);
+        let stack = bare_value(state)
+            .get("resolution_stack")
+            .cloned()
+            .expect("the historical fixture carries resolution_stack");
         wire.as_object_mut()
             .expect("the client wire payload is a JSON object")
-            .insert(
-                "next_delayed_trigger_token".to_string(),
-                serde_json::Value::from(0),
-            );
+            .insert("resolution_stack".to_string(), stack);
         wire
     }
 
@@ -33268,10 +34296,9 @@ mod tests {
         state
     }
 
-    /// V14. Pins the OTHER half of the premise
-    /// `client_wire_still_carries_resolution_stack` pins: the four fields whose
-    /// absence `declare_raw_resolution_wire` reads as a client-wire redaction
-    /// fingerprint are removed by `client_state_wire_value` and by nothing else.
+    /// V14. Pins the legacy compatibility fingerprint: the four fields whose
+    /// absence `declare_raw_resolution_wire` reads as an unmarked client-wire
+    /// redaction are removed by `client_state_wire_value` and by nothing else.
     ///
     /// Mutation (i) — delete any one `root.remove(k)` for these four keys in
     /// `client_state_wire_value`. Reddens at the WIRE-ABSENT assertion for that
@@ -33354,13 +34381,14 @@ mod tests {
         }
     }
 
-    /// V15. The mechanism row: a payload that decodes cleanly on BOTH sides
-    /// today is newly refused on the redacted side, by name.
+    /// V15. The mechanism row: a client-wire payload is refused by its
+    /// positive provenance marker before any legacy wire inference, by name.
     ///
-    /// Mutation — delete the fingerprint guard in `declare_raw_resolution_wire`.
-    /// The wire payload is MEASURED `DECODE OK (Raw)` today, so with the guard
-    /// gone it decodes. Reddens at the `expect_err` on the wire payload; the
-    /// message `contains` below is never reached under that mutation.
+    /// Mutation — delete the positive-marker check in the persistence ingress.
+    /// The shared fail-closed projection has no resolution stack, so the legacy
+    /// fingerprint is not sufficient for this new wire; the expect-error then
+    /// reddens. The unmarked legacy fallback remains covered by the integration
+    /// capture tests.
     #[test]
     fn raw_ingress_refuses_a_redacted_client_wire_projection() {
         let state = parked_continuation_fixture(None);
@@ -33388,21 +34416,22 @@ mod tests {
         );
     }
 
-    /// V16. The discriminating row. UNREDACTED this state is REFUSED; redacted
-    /// it decoded silently, with the CR 603.2 ordinary vs CR 603.7 delayed
-    /// firing classification gone from the parked continuation. The guard
-    /// restores the refusal.
+    /// V16. The discriminating legacy-fallback row. UNREDACTED this state is
+    /// REFUSED; an unmarked redacted copy would decode silently, with the CR
+    /// 603.2 ordinary vs CR 603.7 delayed firing classification gone from the
+    /// parked continuation. The positive marker restores refusal for current
+    /// wires, while the helper below removes it to keep the fallback proven.
     ///
     /// The reach-guard is a REFUSAL, not an admission, and that is the point: the
     /// claim is not "a payload is refused", it is "the redaction converts a
     /// refusal into an acceptance". An admission guard would be FALSE for this
     /// fixture, so the row could not even be written that way.
     ///
-    /// Mutation A — delete the fingerprint guard. The wire payload is MEASURED
+    /// Mutation A — delete the legacy fingerprint guard. The helper's
+    /// deliberately unmarked payload is MEASURED
     /// `DECODE OK (Raw) continuation_firings=[None]` today, so it decodes.
-    /// Reddens at the `expect_err` on the wire payload. The reach-guard is
-    /// unaffected: the guard never fires on the bare payload, whose fingerprint
-    /// is fully present.
+    /// Reddens at the final `expect_err`; the current marked wire remains
+    /// protected by the positive marker independently.
     ///
     /// Mutation B (message only) — reword the guard's `Err` string. The
     /// `expect_err` still passes, so this reddens at the projection-message
@@ -33557,11 +34586,12 @@ mod tests {
 
         let wire = client_wire_value(&state);
 
-        // Measures the string the ingress produces with the guard bypassed, so
-        // the `!contains` clause below is a discriminated claim rather than a
+        // Measures the legacy downstream string with the positive marker
+        // removed and the historical stack carrier restored, so the
+        // `!contains` clause below is a discriminated claim rather than a
         // sentence that is true of any refusal whatsoever.
         let bypassed = serde_json::from_value::<PersistedGameState>(
-            with_the_projection_guard_bypassed(wire.clone()),
+            with_legacy_stack_and_projection_guard_bypassed(&state, wire.clone()),
         )
         .expect_err("the redaction strips every install root, so the payload is refused")
         .to_string();
@@ -37675,6 +38705,7 @@ mod tests {
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
             must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         }));
         variants.push(Box::new(WaitingFor::GameOver {
             winner: Some(PlayerId(0)),
@@ -37724,11 +38755,21 @@ mod tests {
             selectable_cards: vec![ObjectId(1)],
             kept_destination: None,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
             enters_attacking: false,
         }));
+        variants.push(Box::new(WaitingFor::new_dig_rest_split(
+            PlayerId(0),
+            PlayerId(0),
+            vec![ObjectId(1), ObjectId(2)],
+            1,
+            DigRestSplitScope::PartitionAndOrder,
+            None,
+            None,
+        )));
         variants.push(Box::new(WaitingFor::SurveilChoice {
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
@@ -37963,7 +39004,7 @@ mod tests {
             outcomes: Vec::new(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 40);
+        assert_eq!(variants.len(), 41);
     }
 
     #[test]
@@ -38084,7 +39125,8 @@ mod tests {
         // A PayCost with a ManaAbility resume carries PendingManaAbility, not
         // PendingCast. A mana ability activated inside a spell cast still routes
         // the cast through the outer ManaPayment state, so excluding this
-        // variant here does not lose mid-cast tracking.
+        // variant here does not lose mid-cast tracking. (The CR 704.3 gate reads
+        // `GameState::withholds_priority`, which does count it.)
         let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
             kind: PayCostKind::TapCreatures {
@@ -38118,6 +39160,129 @@ mod tests {
         };
         assert!(!tap_mana.has_pending_cast());
         assert!(tap_mana.pending_cast_ref().is_none());
+    }
+
+    /// CR 605.3b + CR 704.3: a mana ability's own prompts are part of its
+    /// activation, so no state-based action check runs there, even though they
+    /// aren't cast states for display or `CancelCast`.
+    #[test]
+    fn mana_ability_continuations_count_as_activating() {
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: ObjectId(1),
+            ability_index: Some(0),
+            rules_execution_node: None,
+            ability_snapshot: None,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            cost_move_resume: None,
+            chosen_tappers: None,
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(!state.withholds_priority());
+
+        state.waiting_for = WaitingFor::ChooseManaColor {
+            player: PlayerId(0),
+            choice: ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Black, ManaType::Green],
+            },
+            context: ManaChoiceContext::ManaAbility(Box::new(pending.clone())),
+        };
+        assert!(!state.waiting_for.has_pending_cast());
+        assert!(state.waiting_for.is_mana_ability_continuation());
+        assert!(state.withholds_priority());
+
+        state.waiting_for = WaitingFor::PayManaAbilityMana {
+            player: PlayerId(0),
+            options: vec![vec![ManaType::Black]],
+            pending_mana_ability: Box::new(pending),
+        };
+        assert!(state.withholds_priority());
+
+        // CR 702.132a: Assist parks the cast in the external carrier while the
+        // caster picks a helper; the cast is still in progress.
+        state.waiting_for = WaitingFor::AssistChoosePlayer {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1)],
+            max_generic: 1,
+            convoke_mode: None,
+        };
+        assert!(!state.waiting_for.has_pending_cast());
+        assert!(!state.withholds_priority());
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            ObjectId(2),
+            CardId(2),
+            ability,
+            ManaCost::zero(),
+        )));
+        assert!(state.withholds_priority());
+    }
+
+    /// CR 608.2 + CR 616.1: a replacement prompt left over from a resolution's
+    /// own life payment keeps the resolution's #962 safety net; the same prompt
+    /// during a cast's payment does not.
+    #[test]
+    fn cost_owner_decides_whether_priority_is_withheld() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 3,
+            resume_at_resolution_depth: 0,
+        });
+        assert!(!state.withholds_priority());
+
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::Cast {
+            player: PlayerId(0),
+            pending: None,
+            remaining_life_payments: Vec::new(),
+            resume_at_resolution_depth: 0,
+        });
+        assert!(state.withholds_priority());
+
+        // CR 601.2h + CR 616.1: a cost discard paused on a replacement carries
+        // its cast inside the resume, not in `pending_cast`.
+        state.pending_deferred_life_cost_resume = None;
+        assert!(!state.withholds_priority());
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
+            player: PlayerId(0),
+            pending: PendingCast::new(ObjectId(2), CardId(2), ability, ManaCost::zero()),
+            chosen: vec![ObjectId(3)],
+            paused_at_index: 0,
+        }));
+        assert!(state.withholds_priority());
     }
 
     #[test]

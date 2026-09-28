@@ -236,6 +236,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::SearchPartitionChoice { .. }
@@ -530,6 +531,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::SearchPartitionChoice { .. }
@@ -4161,6 +4163,7 @@ fn selection_projection(
         WaitingFor::DigChoice {
             selectable_cards, ..
         } => selectable_cards.len(),
+        WaitingFor::DigRestSplitChoice { cards, .. } => cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
         WaitingFor::RippleBottomOrder { cards, .. }
         | WaitingFor::RevealUntilBottomOrder { cards, .. } => cards.len(),
@@ -4517,6 +4520,21 @@ fn selection_projection(
                 source_id: *source_id,
             })
         }
+        // CR 401.2 + CR 401.4 + CR 608.2d: the whole remainder pile is offered
+        // and the player submits a full permutation of it — the leading
+        // `top_count` entries take the top, the rest take the bottom, each in
+        // the submitted order. Exact bounds of `cards.len()`, identical to the
+        // sibling `RippleBottomOrder` arrangement projection above; the client
+        // never computes a second list and never computes the split point
+        // (`top_count` is engine-supplied on the prompt).
+        WaitingFor::DigRestSplitChoice { cards, source_id, .. } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(cards.len(), cards.len()),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: *source_id,
+        }),
         WaitingFor::SearchChoice {
             cards,
             count,

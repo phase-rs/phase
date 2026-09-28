@@ -302,11 +302,9 @@
     "joinErrorCantJoinTitle": "Não é possível entrar nesta sala",
     "titleLobby": "Entre em uma mesa ou hospede uma.",
     "titleHostSetup": "Configure sua mesa.",
-    "titleDraftLobby": "Pod de Draft",
     "titleDeckSelect": "Escolha um deck.",
     "descriptionLobby": "Navegue pelas mesas disponíveis, entre por código ou hospede uma nova partida.",
     "descriptionHostSetup": "Ajuste o formato, a privacidade e o tempo antes de abrir a sala.",
-    "descriptionDraftLobby": "Aguardando os jogadores entrarem no pod de draft.",
     "descriptionDeckSelectFormat": "Escolha um deck para {{format}}.",
     "descriptionDeckSelect": "Escolha o deck que você quer levar para o online.",
     "offlineUnavailableTitle": "O modo multijogador não está disponível offline.",
@@ -333,15 +331,6 @@
     "updateFailedTitle": "Não foi possível atualizar automaticamente",
     "updateFailedMessage": "Atualize para obter a versão mais recente ou continue nesta. Jogadores em versões diferentes não podem entrar na mesma partida.",
     "continueAnyway": "Continuar mesmo assim"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Pod de Draft",
-    "connecting": "Conectando ao pod de draft...",
-    "connectionFailed": "Falha na conexão.",
-    "playersJoined": "{{joined}}/{{total}} jogadores entraram",
-    "seat": "Assento {{number}}",
-    "draftInProgress": "Draft em andamento. A tela de draft abrirá automaticamente.",
-    "leaveDraft": "Sair do Draft"
   },
   "deckLegalityChip": {
     "checking": "Verificando o deck em {{format}}…",

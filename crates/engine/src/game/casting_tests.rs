@@ -21,7 +21,9 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ManaChoice, ManaChoicePrompt, SpellCastRecord};
-use crate::types::keywords::{EmergeCost, EscapeCost, FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{
+    BlitzCost, EmergeCost, EscapeCost, FlashbackCost, Keyword, KeywordKind,
+};
 use crate::types::mana::{
     ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSourceSelection, ManaSpellGrant,
     ManaType, ManaUnit,
@@ -2657,6 +2659,7 @@ fn ordinary_cast_preparation_accepts_only_current_face() {
         CastingVariant::Normal,
         CastingVariantFace::Current,
         CastingMode::Actual,
+        None,
     )
     .expect("ordinary casts must accept their explicit Current face");
     assert_eq!(current.prepared.casting_variant, CastingVariant::Normal);
@@ -2670,6 +2673,7 @@ fn ordinary_cast_preparation_accepts_only_current_face() {
                 CastingVariant::Normal,
                 face,
                 CastingMode::Actual,
+                None,
             )
             .is_err(),
             "ordinary casts must reject the split-only {face:?} selector"
@@ -14739,6 +14743,7 @@ fn x_cost_alt_cost_max_and_charge_derive_from_alt_base() {
         spell,
         CastingVariant::Overload,
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut events,
     )
@@ -17549,7 +17554,8 @@ fn blitz_creature_offers_blitz_variant() {
         obj.base_card_types.core_types.push(CoreType::Creature);
         obj.mana_cost = ManaCost::generic(4);
         obj.base_mana_cost = ManaCost::generic(4);
-        obj.keywords.push(Keyword::Blitz(ManaCost::generic(2)));
+        obj.keywords
+            .push(Keyword::Blitz(BlitzCost::Mana(ManaCost::generic(2))));
     }
 
     assert!(
@@ -17595,7 +17601,7 @@ fn granted_blitz_offers_blitz_variant() {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.base_card_types.core_types.push(CoreType::Creature);
         let def = StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Blitz(ManaCost::generic(2)),
+            keyword: Keyword::Blitz(BlitzCost::Mana(ManaCost::generic(2))),
         })
         .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
         obj.static_definitions = vec![def].into();
@@ -17676,7 +17682,7 @@ fn granted_blitz_self_mana_cost_resolves_to_spell_mana_cost() {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.base_card_types.core_types.push(CoreType::Creature);
         let def = StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Blitz(ManaCost::SelfManaCost),
+            keyword: Keyword::Blitz(BlitzCost::Mana(ManaCost::SelfManaCost)),
         })
         .affected(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::Cmc {
@@ -18592,7 +18598,8 @@ fn blitz_full_cast_installs_riders_on_resolution() {
         obj.base_card_types.core_types.push(CoreType::Creature);
         obj.mana_cost = ManaCost::generic(4);
         obj.base_mana_cost = ManaCost::generic(4);
-        obj.keywords.push(Keyword::Blitz(ManaCost::generic(2)));
+        obj.keywords
+            .push(Keyword::Blitz(BlitzCost::Mana(ManaCost::generic(2))));
     }
 
     apply_as_current(
@@ -31543,6 +31550,7 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
             })
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );
@@ -31664,6 +31672,117 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
             .contains(&(source, CoreType::Artifact)),
         "the unselected Artifact slot must remain available"
     );
+}
+
+/// Muldrotha (per-type graveyard permission) on the battlefield and a {0}
+/// artifact creature card in the graveyard: two slots to choose from.
+fn muldrotha_and_graveyard_artifact_creature(state: &mut GameState) -> (ObjectId, ObjectId) {
+    let player = PlayerId(0);
+    let source = create_object(
+        state,
+        CardId(28_200),
+        player,
+        "Muldrotha, the Gravetide".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+                required_cast_keyword: None,
+            })
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
+        );
+    let spell = create_object(
+        state,
+        CardId(28_201),
+        player,
+        "Graveyard Artifact Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let object = state.objects.get_mut(&spell).unwrap();
+    object.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
+    object.base_card_types = object.card_types.clone();
+    object.mana_cost = ManaCost::generic(0);
+    object.base_mana_cost = object.mana_cost.clone();
+    (source, spell)
+}
+
+/// CR 110.4 + CR 601.2a: a printed cast through Muldrotha prepares awaiting its
+/// slot, and such a cast can't be announced or paid: `continue_with_prepared`
+/// refuses it before the spell is put on the stack.
+#[test]
+fn a_cast_awaiting_its_graveyard_slot_is_refused_before_announcement() {
+    let mut state = setup_game_at_main_phase();
+    let (_, spell) = muldrotha_and_graveyard_artifact_creature(&mut state);
+    let prepared = prepare_spell_cast(&state, PlayerId(0), spell).expect("the cast prepares");
+    assert!(
+        matches!(
+            prepared.graveyard_authority,
+            Some(GraveyardAuthorityResolution::AwaitingSlot { .. })
+        ),
+        "two slots available: the printed cast awaits its slot, got {:?}",
+        prepared.graveyard_authority
+    );
+    let mut events = Vec::new();
+    assert!(continue_with_prepared(&mut state, PlayerId(0), prepared, &mut events).is_err());
+    assert!(state.stack.is_empty(), "refused before announcement");
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.graveyard_cast_permissions_used_per_type.is_empty());
+}
+
+/// CR 110.4: `finalize_cast` refuses independently a per-type permission that
+/// reaches it with no slot, rather than spending none or guessing one.
+#[test]
+fn finalize_refuses_a_per_type_graveyard_authority_without_a_slot() {
+    let mut state = setup_game_at_main_phase();
+    let (source, spell) = muldrotha_and_graveyard_artifact_creature(&mut state);
+    let slotted = prepare_spell_cast_announced(
+        &state,
+        PlayerId(0),
+        spell,
+        Some(CastingVariant::GraveyardPermission {
+            source,
+            frequency: CastFrequency::OncePerTurnPerPermanentType,
+            slot_type: Some(CoreType::Artifact),
+            graveyard_destination_replacement: None,
+        }),
+        None,
+        None,
+        CastingMode::Actual,
+        None,
+    )
+    .expect("the slotted cast prepares");
+    let mut prepared = slotted;
+    let Some(GraveyardAuthorityResolution::Complete(mut authority)) =
+        prepared.graveyard_authority.take()
+    else {
+        panic!("a chosen slot resolves completely");
+    };
+    let unslotted = CastingVariant::GraveyardPermission {
+        source,
+        frequency: CastFrequency::OncePerTurnPerPermanentType,
+        slot_type: None,
+        graveyard_destination_replacement: None,
+    };
+    authority.variant = unslotted;
+    prepared.casting_variant = unslotted;
+    prepared.graveyard_authority = Some(GraveyardAuthorityResolution::Complete(authority));
+    let mut events = Vec::new();
+    let result = continue_with_prepared(&mut state, PlayerId(0), prepared, &mut events);
+    assert!(
+        result.is_err(),
+        "finalization refuses an unslotted per-type authority, got {result:?}"
+    );
+    assert!(state.graveyard_cast_permissions_used_per_type.is_empty());
 }
 
 #[test]
@@ -49127,6 +49246,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             frequency: CastFrequency::Unlimited,
         },
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut denied_events,
     );
@@ -49144,6 +49264,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             frequency: CastFrequency::Unlimited,
         },
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         CastPaymentMode::Auto,
         &mut allowed_events,
     )

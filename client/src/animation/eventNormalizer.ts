@@ -47,6 +47,9 @@ const NON_VISUAL_EVENTS = new Set([
   // Dice/coin are presented out-of-band by DiceRollOverlay (via flashDiceRoll),
   // not as queued animation steps — same pattern as TurnStarted → the turn banner.
   "DieRolled",
+  // CR 706.6: ignored rolls ride the same overlay as the survivors they were
+  // dropped from — never a queued step of their own.
+  "DieRollIgnored",
   "StartingPlayerContest",
   "CoinFlipped",
 ]);
@@ -55,6 +58,7 @@ const NON_VISUAL_EVENTS = new Set([
 const OWN_STEP_TYPES = new Set([
   "SpellCast",
   "TurnStarted",
+  "Melded",
 ]);
 
 /** Events that merge into the preceding step rather than starting a new one. */
@@ -116,6 +120,43 @@ const GROUPING_STRATEGIES: Map<string, GroupingStrategy> = new Map([
   ["CreatureDestroyed", sameTypeGrouping],
   ["PermanentSacrificed", sameTypeGrouping],
 ]);
+
+/**
+ * CR 701.42a: a meld exiles both cards of the pair and returns them as one
+ * melded permanent. The `Melded` forge animation presents that whole sequence,
+ * so the pair's preceding exile and entry moves are not animated separately.
+ *
+ * CR 400.7j: a replacement can send either exile attempt to another public
+ * zone (or keep the card on the battlefield) and the meld still happens, so a
+ * component's meld moves are identified by their place in the sequence rather
+ * than by destination: walking back from `Melded`, the survivor's latest move
+ * onto the battlefield is its entry, and each card's latest move off the
+ * battlefield is its exile attempt. Earlier moves of either card stay animated.
+ */
+function meldPresentedZoneChanges(events: GameEvent[]): Set<number> {
+  const presented = new Set<number>();
+  events.forEach((event, meldIndex) => {
+    if (event.type !== "Melded") return;
+    const { object_id: survivor, partner_id: partner } = event.data;
+    for (const component of [survivor, partner]) {
+      let awaitingEntry = component === survivor;
+      for (let index = meldIndex - 1; index >= 0; index--) {
+        const candidate = events[index];
+        if (candidate.type !== "ZoneChanged" || candidate.data.object_id !== component) continue;
+        const { from, to } = candidate.data;
+        if (awaitingEntry && to === "Battlefield") {
+          presented.add(index);
+          awaitingEntry = false;
+          if (from !== "Battlefield") continue;
+        } else if (from === "Battlefield" && to !== "Battlefield") {
+          presented.add(index);
+        }
+        break;
+      }
+    }
+  });
+  return presented;
+}
 
 // ---------------------------------------------------------------------------
 // Step construction helpers
@@ -761,7 +802,7 @@ export function normalizeEvents(
   const replacementByAggregateIndex = new Map(
     aggregateReplacements.map((replacement) => [replacement.aggregateIndex, replacement]),
   );
-  const skipIndices = new Set<number>();
+  const skipIndices = meldPresentedZoneChanges(events);
   for (const replacement of aggregateReplacements) {
     for (const index of replacement.skipIndices) skipIndices.add(index);
   }

@@ -3366,7 +3366,7 @@ fn parse_clone_replacement(
 ///
 /// The verbs are leaf alternatives with no shared prefix, so each is scanned
 /// independently and the earliest match wins — this mirrors the earliest-match
-/// discipline used by `split_on_clone_source_zone` / `split_on_first_of`.
+/// discipline used by `split_on_clone_source_zone` / `become_copy_except::split_at_body_boundary`.
 fn find_copy_verb(norm_lower: &str) -> Option<(&str, &str, bool)> {
     let candidates: &[(&str, bool)] = &[
         ("enter tapped as a copy of ", true),
@@ -3429,8 +3429,9 @@ fn split_on_clone_source_zone(
         ),
     ];
     // Earliest-matching phrase wins — "in a graveyard" before "in any graveyard"
-    // when both appear; structurally equivalent to `split_on_first_of` but also
-    // returns the zone selector.
+    // when both appear; structurally equivalent to
+    // `become_copy_except::split_at_body_boundary` but also returns the zone
+    // selector.
     let mut best: Option<(usize, usize, Zone, Option<ControllerRef>)> = None;
     for (phrase, zone, owner_scope) in candidates {
         if let Ok((_, (before, _))) = nom_primitives::split_once_on(after_copy, phrase) {

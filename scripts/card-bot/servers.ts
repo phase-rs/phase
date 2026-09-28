@@ -23,8 +23,8 @@ const MAX_CHOICE_VALUE_LENGTH = 100;
  *  a non-ASCII character encodes to up to twelve. */
 const PLAIN_URL = /^[\x21-\x7e]+$/;
 
-/** Per-request timeout for the lobby's `/health` and `/servers`. */
-const REQUEST_TIMEOUT_MS = 5000;
+/** Per-request timeout for the lobby's `/health`, `/servers` and `/games`. */
+export const REQUEST_TIMEOUT_MS = 5000;
 
 export interface LobbyInfo {
   protocol_version: number;
@@ -82,11 +82,11 @@ export function eligibleServers(
     );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isFiniteNumber(value: unknown): value is number {
+export function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
