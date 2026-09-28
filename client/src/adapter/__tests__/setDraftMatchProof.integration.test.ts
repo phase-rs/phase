@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import initDraft, { start_quick_cube_draft } from "@wasm/draft";
-import initEngine, { get_game_state, initialize_game, load_card_database } from "@wasm/engine";
+import initEngine, { export_game_state_json, initialize_game, load_card_database } from "@wasm/engine";
 
 import fixture from "../../test/fixtures/draftMatchProof.json";
 import { DraftAdapter, type DraftPlayerView, type PoolInput } from "../draft-adapter";
@@ -79,8 +79,8 @@ function sorted(cards: string[]): string[] {
 }
 
 function installedDecks(): string[][] {
-  const envelope = get_game_state() as Record<string, unknown>;
-  const state = (envelope.state ?? envelope) as Record<string, unknown>;
+  const envelope = JSON.parse(export_game_state_json()) as { state: Record<string, unknown> };
+  const state = envelope.state;
   const players = state.players as Array<{ library: unknown[]; hand: unknown[] }>;
   const objects = state.objects as Record<string, { name: string }> | Map<unknown, { name: string }>;
   return players.map(({ library, hand }) => [...library, ...hand].map((id) => {

@@ -2997,6 +2997,7 @@ fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
             })
             .affected(TargetFilter::Any),
         );
@@ -11701,6 +11702,7 @@ fn grant_graveyard_creature_cast_and_bury(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                required_cast_keyword: None,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),

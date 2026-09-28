@@ -31,7 +31,7 @@ use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
 };
-use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::statics::CastFrequency;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
@@ -60,6 +60,7 @@ use super::mana_sources;
 use super::match_flow;
 use super::morph;
 use super::mulligan;
+use super::payment_transaction;
 use super::planechase;
 use super::planeswalker;
 use super::priority;
@@ -1268,7 +1269,14 @@ pub(crate) fn apply_interaction_for_prospective_simulation(
     semantic_owner: PlayerId,
     action: GameAction,
 ) -> Result<ProspectiveSimulationOutcome, EngineError> {
-    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        None,
+        true,
+    )?;
     let (action, lifecycle_facts) = finish_action_boundary_with_lifecycle(
         state,
         raw,
@@ -1290,7 +1298,14 @@ pub(crate) fn apply_interaction_pre_reconciliation_for_life_safety(
     semantic_owner: PlayerId,
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
-    let raw = apply_action_boundary_core(state, authenticated_actor, semantic_owner, action, None)?;
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        None,
+        true,
+    )?;
     let RawActionApplication {
         result, lifecycle, ..
     } = raw;
@@ -1350,6 +1365,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         semantic_owner,
         action,
         stack_resolution_limit,
+        true,
     )?;
     finish_action_boundary(state, raw, mode)
 }
@@ -1407,6 +1423,7 @@ fn apply_action_boundary_core(
     semantic_owner: PlayerId,
     action: GameAction,
     stack_resolution_limit: Option<u32>,
+    authorize_actor: bool,
 ) -> Result<RawActionApplication, EngineError> {
     let lifecycle = super::lifecycle::enter_action_frame();
     if let Err(error) = mana_sources::preflight_tap_land_action(state, authenticated_actor, &action)
@@ -1468,8 +1485,9 @@ fn apply_action_boundary_core(
     // defers to the next boundary at which the flag is clear. No "outermost"
     // depth test is added: gating on it would leave AI-probe clones unrepaired
     // while the real state is repaired.
-    let pre_recovery_pass_was_authorized = matches!(&action, GameAction::PassPriority)
-        && check_actor_authorization(state, authenticated_actor, &action).is_ok();
+    let pre_recovery_pass_was_authorized = !authorize_actor
+        || (matches!(&action, GameAction::PassPriority)
+            && check_actor_authorization(state, authenticated_actor, &action).is_ok());
     let recovered_terminal_rest_boundary = sweep_and_recover_priority_boundary_rest(state);
     let recovered_stale_priority_pass =
         recovered_terminal_rest_boundary && matches!(&action, GameAction::PassPriority);
@@ -1505,11 +1523,11 @@ fn apply_action_boundary_core(
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
     state.consumed_before_priority_trigger_events.clear();
-    if recovered_stale_priority_pass && !pre_recovery_pass_was_authorized {
+    if authorize_actor && recovered_stale_priority_pass && !pre_recovery_pass_was_authorized {
         lifecycle.discard();
         return Err(EngineError::WrongPlayer);
     }
-    if !recovered_stale_priority_pass {
+    if authorize_actor && !recovered_stale_priority_pass {
         if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
             lifecycle.discard();
             *state = boundary_snapshot;
@@ -1530,7 +1548,14 @@ fn apply_action_boundary_core(
             lifecycle,
         });
     }
-    let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
+    let mut result = match if payment_transaction::owns_action(state, &action) {
+        // All staged-payment actions enter through this admission point. The
+        // authenticated actor is recorded for deterministic replay; the
+        // transaction module remains the sole commit/abort authority.
+        payment_transaction::apply_pending_action(state, authenticated_actor, action)
+    } else {
+        apply_action(state, semantic_owner, action, stack_resolution_limit)
+    } {
         Ok(result) => result,
         // CR 601.2h + CR 733.1: a typed reversal, restored below like any other.
         Err(EngineError::ActivationReversed { player }) => {
@@ -2087,7 +2112,16 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // The predicate lives in `sba` so it shares the same CR 101.2 "can't lose"
     // exception as the real player-loss SBA checks, and stays narrower than the
     // full SBA loop to avoid unrelated mid-resolution SBA prompts.
-    if sba::has_pending_player_loss_sba(state) {
+    //
+    // CR 704.3 + CR 104.3b: not while the game is inside a process no player
+    // receives priority during: a cast or activation (CR 601.2h; CR 602.2b), a
+    // special action (CR 116.2), a mana ability (CR 605.3b) or a triggered
+    // mana ability (CR 605.4a). Paying life down to 0 is a legal payment
+    // (CR 119.4), so the 0-life check waits until that process ends and a
+    // player would next receive priority. Until then that player is still in
+    // the game, so waiting on their choices is not the #962 softlock; prompts
+    // owned by a resolution keep the net.
+    if sba::has_pending_player_loss_sba(state) && !state.withholds_priority() {
         sba::check_state_based_actions(state, &mut result.events);
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
@@ -8298,6 +8332,56 @@ pub fn apply_as_current(
     apply_as_current_with_mode(state, action, PublicFinalizeMode::Immediate)
 }
 
+/// Replays one action previously admitted by the outer action boundary. The
+/// transcript preserves the authenticated actor; semantic ownership is looked
+/// up from the same interaction/control state that authorized the original
+/// action, with the current WaitingFor actor as the legacy/test fallback.
+pub(crate) fn apply_recorded_action(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    let semantic_owner = match &action {
+        GameAction::Concede { player_id } => *player_id,
+        _ => interaction::semantic_owner_for_actor(state, authenticated_actor)
+            .or_else(|| state.waiting_for.acting_player())
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "staged payment replay: no semantic owner for recorded action".to_string(),
+                )
+            })?,
+    };
+    apply_action_boundary_for_semantic_owner(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        PublicFinalizeMode::Immediate,
+    )
+}
+
+/// Replays an action that already crossed the authenticated interaction
+/// boundary. The transcript supplies both halves of that boundary, so replay
+/// must not re-authorize the historical submitter against a later topology
+/// (for example after that controller concedes). New incoming actions still
+/// use [`apply_recorded_action`] or the public boundary and remain fail-closed.
+pub(crate) fn apply_admitted_recorded_action(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    let raw = apply_action_boundary_core(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        None,
+        false,
+    )?;
+    finish_action_boundary(state, raw, PublicFinalizeMode::Immediate)
+}
+
 /// Simulation-apply variant of [`apply_as_current`] for throwaway clones that
 /// are never rendered: either the caller discards the mutated state (the AI
 /// `SimulationFilter` legality oracle reads only `.is_ok()`) or it keeps the
@@ -10455,6 +10539,12 @@ fn apply_action(
         WaitingFor::RevealChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 701.20a + CR 608.2c: a revealed card "remains revealed for as
+            // long as necessary to complete the parts of the effect that card
+            // is relevant to", and a reveal-dig's remainder split is a later
+            // pause in the SAME instruction — so its cards stay public across
+            // it exactly as they do across the keep selection above.
+            | WaitingFor::DigRestSplitChoice { .. }
             // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
             // both the opponent's partition step and the controller's pile
             // choice — the cards remain public while both players interact.
@@ -11671,6 +11761,7 @@ fn apply_non_priority_pass_action(
                 source,
                 payment_mode,
                 available_slots,
+                permission,
             },
             GameAction::ChoosePermanentTypeSlot { slot },
         ) => {
@@ -11691,6 +11782,7 @@ fn apply_non_priority_pass_action(
                     *card_id,
                     *source,
                     slot,
+                    permission.as_ref(),
                     *payment_mode,
                     &mut events,
                 )?
@@ -16447,24 +16539,18 @@ pub(super) fn begin_pending_trigger_target_selection(
 ///   non-stack play-land path; the picker reads the live used-set so concurrent
 ///   frequency-bounded permissions are handled correctly.
 /// - `Unlimited` (Crucible-of-Worlds-with-no-rider): no tracking.
+///
+/// CR 601.2a: the frequency spent is that of the grant that admitted the land
+/// (`casting::graveyard_land_play_frequency`, captured before the move), never
+/// another graveyard grant on the same source.
 fn record_graveyard_play_permission(
     state: &mut GameState,
-    source: Option<ObjectId>,
+    grant: Option<(ObjectId, Option<CastFrequency>)>,
     played_object: ObjectId,
 ) {
-    let Some(source_id) = source else {
+    let Some((source_id, frequency)) = grant else {
         return;
     };
-    let Some(obj) = state.objects.get(&source_id) else {
-        return;
-    };
-    let frequency =
-        super::functioning_abilities::active_static_definitions(state, obj).find_map(|s| {
-            match s.mode {
-                StaticMode::GraveyardCastPermission { frequency, .. } => Some(frequency),
-                _ => None,
-            }
-        });
     match frequency {
         Some(crate::types::statics::CastFrequency::OncePerTurn) => {
             crate::game::ledger::consume_once_per_turn_permission(
@@ -16589,14 +16675,14 @@ fn finalize_committed_land_play(
     player: PlayerId,
     object_id: ObjectId,
     origin_zone: Zone,
-    graveyard_permission_source: Option<ObjectId>,
+    graveyard_permission_grant: Option<(ObjectId, Option<CastFrequency>)>,
     exile_play_authorization: Option<casting::ExileLandPlayAuthorization>,
     library_permission_source: Option<(ObjectId, CastFrequency)>,
     events: &mut Vec<GameEvent>,
 ) {
     state.lands_played_this_turn += 1;
     record_land_played_from_zone(state, player, object_id, origin_zone);
-    record_graveyard_play_permission(state, graveyard_permission_source, object_id);
+    record_graveyard_play_permission(state, graveyard_permission_grant, object_id);
     record_exile_play_permission(state, exile_play_authorization);
     if let Some((source_id, frequency)) = library_permission_source {
         record_top_of_library_land_permission(state, source_id, frequency);
@@ -16768,6 +16854,15 @@ fn handle_play_land(
             .find(|(obj_id, _)| *obj_id == object_id)
             .map(|(_, source_id)| *source_id);
     let in_graveyard_with_permission = gy_permission_source.is_some();
+    // CR 601.2a + CR 110.4: the frequency of the grant that admitted the land,
+    // captured before the land leaves the graveyard; it decides the slot prompt
+    // and the ledger the play spends.
+    let gy_permission_grant = gy_permission_source.map(|source| {
+        (
+            source,
+            super::casting::graveyard_land_play_frequency(state, player, object_id, source),
+        )
+    });
 
     // CR 401.5 + CR 305.1: Check top of library for
     // `TopOfLibraryCastPermission { play_mode: Play }` (Future Sight,
@@ -16843,21 +16938,10 @@ fn handle_play_land(
     // prompt the player to choose which permanent type slot to consume. Skip
     // if a slot was already chosen (pending_permanent_type_slot is set).
     if in_graveyard_with_permission && state.pending_permanent_type_slot.is_none() {
-        if let Some(source) = gy_permission_source {
-            if let Some(src_obj) = state.objects.get(&source) {
-                let is_per_type = super::functioning_abilities::active_static_definitions(
-                    state, src_obj,
-                )
-                .any(|s| {
-                    matches!(
-                        s.mode,
-                        StaticMode::GraveyardCastPermission {
-                            frequency:
-                                crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
-                            ..
-                        }
-                    )
-                });
+        if let Some((source, frequency)) = gy_permission_grant {
+            {
+                let is_per_type = frequency
+                    == Some(crate::types::statics::CastFrequency::OncePerTurnPerPermanentType);
                 if is_per_type {
                     let slots =
                         super::casting::available_permanent_type_slots(state, source, object_id);
@@ -16869,6 +16953,7 @@ fn handle_play_land(
                             source,
                             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                             available_slots: slots,
+                            permission: None,
                         });
                     }
                 }
@@ -17047,7 +17132,7 @@ fn handle_play_land(
                             player,
                             object_id,
                             origin_zone,
-                            gy_permission_source,
+                            gy_permission_grant,
                             exile_play_authorization,
                             library_permission_src,
                             events,
@@ -17096,7 +17181,7 @@ fn handle_play_land(
                     player,
                     object_id,
                     origin_zone,
-                    gy_permission_source,
+                    gy_permission_grant,
                     exile_play_authorization,
                     library_permission_src,
                     events,
@@ -17130,7 +17215,7 @@ fn handle_play_land(
                 player,
                 object_id,
                 origin_zone,
-                gy_permission_source,
+                gy_permission_grant,
                 exile_play_authorization,
                 library_permission_src,
                 events,
@@ -17151,7 +17236,7 @@ fn handle_play_land(
         player,
         object_id,
         origin_zone,
-        gy_permission_source,
+        gy_permission_grant,
         exile_play_authorization,
         library_permission_src,
         events,

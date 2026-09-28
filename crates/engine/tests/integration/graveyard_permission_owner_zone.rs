@@ -68,6 +68,7 @@ fn printed_graveyard_permission(
         graveyard_destination_replacement: None,
         extra_cost: None,
         enters_with_counter: None,
+        required_cast_keyword: None,
     })
     .affected(TargetFilter::Typed(TypedFilter {
         type_filters: types,
@@ -604,27 +605,20 @@ fn casting_another_players_stolen_then_buried_bestow_creature_is_still_refused()
     );
 }
 
-/// The bestow CAST from a graveyard is blocked by a defect unrelated to owner
-/// scoping; this row pins that blocker so it cannot regress silently and so the
-/// row above is not mistaken for cast-path coverage.
+/// CR 702.103d + CR 118.9b: a bestow card in the graveyard under a permission
+/// that admits only CREATURE cards can't be cast bestowed through it, because
+/// "only its characteristics as modified by the bestow ability are evaluated
+/// to determine if it can be cast", and a bestowed spell is an Aura enchantment,
+/// not a creature (CR 702.103b). Bestow is optional, though, so the printed
+/// creature cast the permission does authorize must still go ahead.
 ///
-/// `handle_bestow_cost_choice_with_payment_mode` calls `apply_bestow_aura_form`
-/// -- which per CR 702.103b strips the Creature core type -- BEFORE calling
-/// `prepare_spell_cast_with_variant_override`. That re-evaluates the graveyard
-/// permission, whose filter is `creature cards`, against a card that is no
-/// longer a creature, so the cast is refused with "Card is not in a castable
-/// zone".
-///
-/// CR 702.103b puts the form change "as a spell cast bestowed is put onto the
-/// stack" -- i.e. at CR 601.2a, AFTER the permission has authorized the cast --
-/// so re-deriving the permission from the post-change types is the defect.
-///
-/// Verified independent of this PR: the diff touches neither
-/// `apply_bestow_aura_form` nor any type filter, and the same refusal
-/// reproduces with an unconstrained permission whichever controller the card
-/// died under. Tracked separately rather than fixed here.
+/// This row used to pin the whole cast being refused with "Card is not in a
+/// castable zone": the graveyard bestow offer force-routed every such cast to
+/// bestow, so the bestowed form failed the creature filter and the legal printed
+/// cast was never reached. The offer now judges bestow on the bestowed form and
+/// falls back to the printed cast.
 #[test]
-fn bestow_cast_from_graveyard_is_blocked_by_the_aura_form_type_seam() {
+fn bestow_cast_from_graveyard_under_a_creature_permission_falls_back_to_the_printed_cast() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -680,16 +674,23 @@ fn bestow_cast_from_graveyard_is_blocked_by_the_aura_form_type_seam() {
         payment_mode: CastPaymentMode::Auto,
     });
 
-    // The SPECIFIC blocker, not a bare `is_err()`.
-    let message = match &result {
-        Err(err) => format!("{err:?}"),
-        Ok(_) => String::new(),
-    };
     assert!(
-        message.contains("Card is not in a castable zone"),
-        "the bestow/graveyard blocker must remain exactly this refusal -- if this row starts \
-         failing, the aura-form type seam was fixed and the consumer above should be \
-         promoted to a full cast-path regression, got {result:?}"
+        result.is_ok(),
+        "the printed creature cast is legal under a creature-card permission, so the \
+         cast must go ahead, got {result:?}"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the spell must be on the stack"
+    );
+    let spell = &runner.state().objects[&bestowed];
+    assert!(
+        spell.card_types.core_types.contains(&CoreType::Creature)
+            && !spell.card_types.subtypes.iter().any(|s| s == "Aura"),
+        "CR 702.103d: a creature-card permission can't admit the bestowed Aura, so this \
+         must be the printed creature cast, types: {:?}",
+        spell.card_types
     );
 }
 

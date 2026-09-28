@@ -26,9 +26,10 @@ use crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_r
 /// die, decide which are ignored from the NATURALS, and only THEN emit
 /// `DieRolled` — carrying the post-modifier value — for the survivors. An
 /// ignored roll "is considered to have never happened" (CR 706.6), so it must
-/// never reach the event log, which is also what keeps every events-slice reader
-/// correct: the die-roll trigger layer, `game/contraptions.rs`, and
-/// `game/effects/effect.rs`'s CR 611.2d snapshot.
+/// never emit `DieRolled`; only the display-only `DieRollIgnored` mirror reaches
+/// the event log. Rules-facing readers (`game/trigger_matchers.rs`,
+/// `game/contraptions.rs`, and the CR 611.2d snapshot in
+/// `game/effects/effect.rs`) exclude that mirror.
 ///
 /// `sides == 0` names no die and no distribution. `rand`'s `random_range`
 /// asserts on an empty range, so it would panic mid-resolution; callers are
@@ -486,8 +487,8 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
 /// the no-prompt fast path calls straight into here.
 ///
 /// `ignore_indices` names the rolls that "never happened" (CR 706.6): they emit
-/// no event, receive no modifier, run no results branch, and contribute nothing
-/// to the aggregate.
+/// only a display mirror, receive no modifier, run no results branch, and
+/// contribute nothing to the aggregate.
 ///
 /// Returns `Ok(Some(wf))` when a results branch re-suspended for another
 /// interactive choice, and `Ok(None)` when the whole instruction completed; the
@@ -542,8 +543,15 @@ pub fn resume_after_ignore(
         .skip(next_index.min(results.len()))
     {
         // CR 706.6: an ignored roll is considered never to have happened — no
-        // event, no modifier, no results branch, no aggregate contribution.
+        // modifier, no results branch, no aggregate contribution. It still
+        // emits a DISPLAY-ONLY `DieRollIgnored` mirror (natural value) so the
+        // UI can show what the lowest roll was; no rules consumer may read it.
         if ignore_indices.contains(&index) {
+            events.push(GameEvent::DieRollIgnored {
+                player_id: roller,
+                sides,
+                result: natural,
+            });
             continue;
         }
 
@@ -1480,6 +1488,65 @@ mod tests {
         assert!(
             rolls.iter().all(|r| (1..=6).contains(r)),
             "every die result must be in 1..=6, got {rolls:?}"
+        );
+    }
+
+    /// CR 706.6 display mirror: an ignored die emits `DieRollIgnored` carrying
+    /// its NATURAL value, alongside the survivors' `DieRolled` events.
+    /// Removing the mirror emission flips the ignored assertion; the survivor
+    /// assertions pin that the mirror changes nothing else.
+    #[test]
+    fn ignored_rolls_emit_display_mirror_alongside_survivors() {
+        let mut state = GameState::new_two_player(42);
+        let pending = PendingDieRoll {
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            targets: vec![],
+            sides: 20,
+            results: vec![4, 17],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: None,
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets: vec![],
+        };
+        let mut events = Vec::new();
+        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events).unwrap();
+        assert!(waiting.is_none(), "no branches means no suspension");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::DieRollIgnored {
+                    player_id: PlayerId(0),
+                    sides: 20,
+                    result: 4
+                }
+            )),
+            "the ignored lowest die must emit its natural value, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::DieRolled {
+                    player_id: PlayerId(0),
+                    sides: 20,
+                    result: Some(17)
+                }
+            )),
+            "the surviving die must still emit DieRolled, got {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::DieRolled { .. }))
+                .count(),
+            1,
+            "exactly one survivor event, got {events:?}"
         );
     }
 

@@ -22,6 +22,7 @@ use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::fetch_land_patience::FetchLandPatiencePolicy;
 use super::free_outlet_activation::FreeOutletActivationPolicy;
+use super::graveyard_authority::GraveyardAuthorityPolicy;
 use super::graveyard_types::GraveyardTypesPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::hold_mana_up::HoldManaUpForInteractionPolicy;
@@ -173,6 +174,9 @@ pub enum PolicyId {
     /// CR 205.3m: pick a creature type the AI actually has members of, instead
     /// of the alphabetically first option the engine offers.
     CreatureTypeChoice,
+    /// CR 601.2a + CR 601.2b: announce the graveyard permission whose
+    /// commitments (slot, extra cost, counter) give up least.
+    GraveyardAuthority,
     /// CR 700.3a: every eligible object goes in exactly one pile; split them
     /// into two piles of equal value, since the adversary chooses which pile
     /// the AI ends up with.
@@ -444,6 +448,7 @@ impl Default for PolicyRegistry {
             Box::new(super::discard_payoff::DiscardPayoffPolicy),
             Box::new(super::vehicle_deployment::VehicleDeploymentPolicy),
             Box::new(CreatureTypeChoicePolicy),
+            Box::new(GraveyardAuthorityPolicy),
             Box::new(super::pile_partition::PilePartitionPolicy),
             Box::new(super::ritual_sink::RitualSinkPolicy),
         ];

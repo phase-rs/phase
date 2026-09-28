@@ -866,6 +866,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             selection_mismatch(chosen, selectable_cards, exact)
                 || (*up_to && chosen.len() > *keep_count)
         }
+        // CR 401.2 + CR 401.4 + CR 608.2c: the response is a full ARRANGEMENT
+        // of the fixed remainder pile, not a subset of it — the leading
+        // `top_count` entries take the library top and the rest take the
+        // bottom. So the legality gate is "exactly the whole pile, no
+        // duplicates", the same gate the sibling `RippleBottomOrder`
+        // permutation uses.
+        (
+            WaitingFor::DigRestSplitChoice { cards, .. },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(cards.len())),
         (
             WaitingFor::CollectEvidenceChoice {
                 player: _, cards, ..
@@ -2337,6 +2347,15 @@ pub fn flat_priority_actions_with_probe(
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
+    // CR 601.2h + CR 608.2c: enumerate against the replayed payment shadow so
+    // the live choice remains actionable while canonical resources stay staged.
+    let payment_projected;
+    let state = if state.payment_transaction.is_some() {
+        payment_projected = crate::game::payment_transaction::project(state);
+        &payment_projected
+    } else {
+        state
+    };
     let priority_probe_storage;
     let flushed_storage;
     let (state, priority_probe) = match &state.waiting_for {

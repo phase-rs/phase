@@ -157,6 +157,37 @@ describe("uiStore", () => {
     expect(blockerAssignmentPairs(useUiStore.getState().blockerAssignments)).toEqual([[10, 101]]);
   });
 
+  it("setGroupBlockerAssignments replaces only in-group attackers, keeping out-of-group ones", () => {
+    act(() => {
+      useUiStore.getState().assignBlocker(10, 100);
+      useUiStore.getState().assignBlocker(10, 200);
+      useUiStore.getState().setGroupBlockerAssignments(10, [100, 101], [101]);
+    });
+
+    expect(blockerAssignmentPairs(useUiStore.getState().blockerAssignments).sort()).toEqual([
+      [10, 101],
+      [10, 200],
+    ].sort());
+  });
+
+  it("setGroupBlockerAssignments deletes the blocker's key when the result is empty", () => {
+    act(() => {
+      useUiStore.getState().assignBlocker(10, 100);
+      useUiStore.getState().setGroupBlockerAssignments(10, [100], []);
+    });
+
+    expect(useUiStore.getState().blockerAssignments.has(10)).toBe(false);
+  });
+
+  it("clearCombatSelection resets pendingBlocker", () => {
+    act(() => {
+      useUiStore.getState().setPendingBlocker(100);
+      useUiStore.getState().clearCombatSelection();
+    });
+
+    expect(useUiStore.getState().pendingBlocker).toBeNull();
+  });
+
   it("toggleDebugClickModeButtonVisible flips the pinned click-mode control", () => {
     expect(useUiStore.getState().debugClickModeButtonVisible).toBe(false);
     act(() => useUiStore.getState().toggleDebugClickModeButtonVisible());

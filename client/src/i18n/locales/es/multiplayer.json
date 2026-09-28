@@ -302,11 +302,9 @@
     "joinErrorCantJoinTitle": "No se puede unir a esta sala",
     "titleLobby": "Únete o hospeda una mesa.",
     "titleHostSetup": "Configura tu mesa.",
-    "titleDraftLobby": "Pod de draft",
     "titleDeckSelect": "Elige un mazo.",
     "descriptionLobby": "Explora las mesas disponibles, únete por código o hospeda una nueva partida.",
     "descriptionHostSetup": "Ajusta el formato, la privacidad y el tiempo antes de abrir la sala.",
-    "descriptionDraftLobby": "Esperando a que los jugadores se unan al pod de draft.",
     "descriptionDeckSelectFormat": "Elige un mazo para {{format}}.",
     "descriptionDeckSelect": "Elige el mazo que quieres llevar en línea.",
     "offlineUnavailableTitle": "El multijugador no está disponible sin conexión.",
@@ -333,15 +331,6 @@
     "updateFailedTitle": "No se pudo actualizar automáticamente",
     "updateFailedMessage": "Actualiza para obtener la última versión o continúa con esta. Los jugadores con versiones distintas no pueden unirse a la misma partida.",
     "continueAnyway": "Continuar de todos modos"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Pod de draft",
-    "connecting": "Conectando al pod de draft...",
-    "connectionFailed": "La conexión falló.",
-    "playersJoined": "{{joined}}/{{total}} jugadores se han unido",
-    "seat": "Asiento {{number}}",
-    "draftInProgress": "Draft en curso. La vista del draft se abrirá automáticamente.",
-    "leaveDraft": "Salir del draft"
   },
   "deckLegalityChip": {
     "checking": "Comprobando el mazo contra {{format}}…",

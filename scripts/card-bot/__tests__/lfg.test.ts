@@ -24,6 +24,7 @@ function input(overrides: Partial<NewLfg> = {}): NewLfg {
     mode: "p2p",
     build: "release",
     server: null,
+    description: null,
     ...overrides,
   };
 }
@@ -289,6 +290,13 @@ test("a server-mode LFG round-trips its server", () => {
   expect(lfg).toMatchObject({ mode: "server", server, build: "release", seats: 8 });
 });
 
+test("a game's description survives seat and state changes", () => {
+  const store = new LfgStore(":memory:");
+  const lfg = created(store, { seats: 2, description: "Bracket 3; precons welcome" });
+  expect(lfg.description).toBe("Bracket 3; precons welcome");
+  expect(lfgOf(store.join(lfg.id, GUILD, "b", T0 + 1)).description).toBe(lfg.description);
+});
+
 describe("game threads", () => {
   function readyWithThread(store: LfgStore): Lfg {
     const lfg = created(store, { seats: 2 });
@@ -313,7 +321,7 @@ describe("game threads", () => {
     expect(store.endGame(lfg.id, GUILD, "b", T0 + 2)).toMatchObject({ kind: "ending" });
   });
 
-  test("a database from before game threads gains the thread columns on open", () => {
+  test("an older database gains new optional columns on open", () => {
     const dir = mkdtempSync(join(tmpdir(), "lfg-migrate-"));
     try {
       const path = join(dir, "lfg.sqlite");
@@ -321,13 +329,16 @@ describe("game threads", () => {
       const lfg = created(first, { seats: 2 });
       first.join(lfg.id, GUILD, "b", T0 + 1);
       const raw = new Database(path);
-      for (const column of ["thread_id", "thread_end_ms", "thread_closed_ms"]) {
+      for (const column of ["description", "thread_id", "thread_end_ms", "thread_closed_ms"]) {
         raw.run(`ALTER TABLE lfg DROP COLUMN ${column}`);
       }
       raw.close();
 
       const reopened = new LfgStore(path);
-      expect(lfgOf(reopened.linkFor(lfg.id, GUILD, "b", T0 + 2)).thread).toBeNull();
+      expect(lfgOf(reopened.linkFor(lfg.id, GUILD, "b", T0 + 2))).toMatchObject({
+        description: null,
+        thread: null,
+      });
       reopened.attachThread(lfg.id, "t-1");
       expect(reopened.endGame(lfg.id, GUILD, "b", T0 + 3)).toEqual({ kind: "ending", threadId: "t-1" });
       reopened.markThreadClosed(lfg.id, T0 + 4);

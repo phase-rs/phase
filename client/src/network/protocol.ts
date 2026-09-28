@@ -106,6 +106,27 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  71 — game_setup and state_update carry GameState, whose graveyard cast
+ *       permissions can now require a casting method (required_cast_keyword),
+ *       and casting-menu options carry the non-mana part of their cost
+ *       (additional_cost) and the graveyard permission they announce
+ *       (authority; the slot prompt's permission; the cast's latched terms).
+ *       Bumped in lockstep with full-game protocol 89.
+ *  70 — game_setup and state_update carry GameState, whose DeclareBlockers
+ *       prompt can now carry block_capacities (CR 509.1a + CR 101.1). Both
+ *       peers are browsers and neither validates the shape, so a v69 peer
+ *       would take the new field with no decode error; first contact rejects
+ *       the skew instead. Bumped in lockstep with full-game protocol 88.
+ *  69 — game_setup and state_update can carry WaitingFor.DigRestSplitChoice
+ *       and Effect.Dig.rest_split_top_count. First contact refuses a peer
+ *       that cannot represent the split. Bumped with full-game protocol 87.
+ *  68 — game_setup and state_update can carry GameEvent::Melded. An older
+ *       guest cannot present the meld sequence, so first contact refuses the
+ *       skew. Bumped in lockstep with full-game protocol 86.
+ *  67 — game_setup and state_update carry GameEvent[] and can now carry
+ *       DieRollIgnored { player_id, sides, result }. Older peers omit ignored
+ *       dice from the roll overlay; the exact-match first-contact gate rejects
+ *       the skew. Bumped in lockstep with full-game protocol 85.
  *  66 — WaitingFor.ChooseDungeon options gained required `card`, `rooms`, and
  *       `room_count`: the whole dungeon behind each choice, so the prompt
  *       previews each card instead of describing only its entry room. A PARSE
@@ -446,7 +467,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 66 as const;
+export const WIRE_PROTOCOL_VERSION = 71 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
