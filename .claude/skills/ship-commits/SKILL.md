@@ -143,13 +143,14 @@ git status --short -- "${SHIPPED_PATHS[@]}"
 # A path whose whole diff is yours: git commit -- <those paths>
 # A path that also holds another agent's hunks: commit only your hunks, built in
 # a private index so neither their hunks nor anything they staged is swept in:
-#   git diff -U0 -- <path> > /tmp/mine.patch     # then delete the hunks that are not yours
-#   export GIT_INDEX_FILE="$(git rev-parse --git-path index.ship)"
-#   rm -f "$GIT_INDEX_FILE"; git read-tree HEAD
-#   git apply --cached --unidiff-zero /tmp/mine.patch
-#   git diff --cached --stat                     # verify: only your hunks
+#   run=$(mktemp -d)                             # per-run patch and index; agents run concurrently
+#   git diff -U0 HEAD -- <path> > "$run/mine.patch"   # against HEAD, so staged hunks are included;
+#                                                # then delete the hunks that are not yours
+#   export GIT_INDEX_FILE="$run/index"; git read-tree HEAD
+#   git apply --cached --unidiff-zero "$run/mine.patch"
+#   git diff --cached                            # read every hunk: each must be yours
 #   git commit -m "…"
-#   rm -f "$GIT_INDEX_FILE"; unset GIT_INDEX_FILE
+#   unset GIT_INDEX_FILE; rm -rf "$run"
 #   git reset -q -- <path>                       # resync the shared index to the new HEAD
 # (`git add -p` is interactive and unavailable to agents.)
 
