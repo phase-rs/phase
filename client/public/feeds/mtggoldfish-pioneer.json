@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-09-27T00:00:00Z",
+  "updated": "2026-09-28T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -298,35 +298,23 @@
       "main": [
         {
           "count": 4,
-          "name": "Burst Lightning"
+          "name": "Sunspine Lynx"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
         },
         {
           "count": 1,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 4,
-          "name": "Kumano Faces Kakkazan"
+          "name": "Sokenzan, Crucible of Defiance"
         },
         {
           "count": 4,
           "name": "Monastery Swiftspear"
         },
         {
-          "count": 4,
-          "name": "Monstrous Rage"
-        },
-        {
-          "count": 15,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Ramunap Ruins"
+          "count": 1,
+          "name": "Rockface Village"
         },
         {
           "count": 4,
@@ -334,57 +322,69 @@
         },
         {
           "count": 2,
-          "name": "Screaming Nemesis"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 3,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 3,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 2,
-          "name": "Screaming Nemesis"
+          "name": "Ramunap Ruins"
         },
         {
           "count": 4,
           "name": "Mutavault"
         },
         {
-          "count": 3,
-          "name": "Eidolon of the Great Revel"
+          "count": 14,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Monstrous Rage"
+        },
+        {
+          "count": 4,
+          "name": "Kumano Faces Kakkazan"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 1,
+          "name": "Den of the Bugbear"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 4,
+          "name": "Screaming Nemesis"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Scorching Shot"
+          "name": "Weathered Runestone"
+        },
+        {
+          "count": 2,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 2,
+          "name": "Redcap Melee"
         },
         {
           "count": 4,
           "name": "Magebane Lizard"
         },
         {
-          "count": 3,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 3,
-          "name": "Weathered Runestone"
-        },
-        {
           "count": 2,
-          "name": "The Legend of Roku"
+          "name": "Flowstone Infusion"
         },
         {
-          "count": 1,
-          "name": "Sunspine Lynx"
+          "count": 3,
+          "name": "Scorching Shot"
         }
       ]
     },
@@ -401,76 +401,32 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 2,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 1,
-          "name": "Pop Quiz"
-        },
-        {
-          "count": 3,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 3,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 3,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 4,
-          "name": "Divide by Zero"
-        },
-        {
           "count": 4,
           "name": "Jeskai Revelation"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
         },
         {
           "count": 2,
           "name": "Thor, God of Thunder"
         },
         {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
           "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 1,
-          "name": "Riverpyre Verge"
+          "name": "Deserted Beach"
         },
         {
           "count": 3,
           "name": "Great Hall of the Biblioplex"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Hallowed Fountain"
         },
         {
           "count": 3,
-          "name": "Island"
+          "name": "Riverglide Pathway"
         },
         {
-          "count": 1,
-          "name": "Deserted Beach"
+          "count": 2,
+          "name": "Riverpyre Verge"
         },
         {
           "count": 4,
@@ -482,53 +438,19 @@
         },
         {
           "count": 3,
-          "name": "Riverglide Pathway"
+          "name": "Accumulate Wisdom"
         },
         {
-          "count": 1,
-          "name": "Spell Pierce"
+          "count": 3,
+          "name": "Combustion Technique"
         },
         {
-          "count": 1,
-          "name": "Riverpyre Verge"
+          "count": 4,
+          "name": "Divide by Zero"
         },
         {
-          "count": 1,
-          "name": "Stock Up"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Improvisation Capstone"
-        },
-        {
-          "count": 1,
-          "name": "Teachings of the Archaics"
-        },
-        {
-          "count": 1,
-          "name": "Negate"
-        },
-        {
-          "count": 1,
-          "name": "Annul"
-        },
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Change the Equation"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
+          "count": 4,
+          "name": "Gran-Gran"
         },
         {
           "count": 1,
@@ -536,19 +458,41 @@
         },
         {
           "count": 1,
-          "name": "Accumulate Wisdom"
+          "name": "Stock Up"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
+        },
+        {
+          "count": 3,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 4,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 3,
+          "name": "It'll Quench Ya!"
         },
         {
           "count": 1,
-          "name": "Combustion Technique"
+          "name": "Pop Quiz"
         },
+        {
+          "count": 3,
+          "name": "Island"
+        }
+      ],
+      "sideboard": [
         {
           "count": 1,
           "name": "Sokka's Haiku"
         },
         {
           "count": 1,
-          "name": "Anger of the Gods"
+          "name": "Improvisation Capstone"
         },
         {
           "count": 1,
@@ -556,7 +500,51 @@
         },
         {
           "count": 1,
+          "name": "Teachings of the Archaics"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Anger of the Gods"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
           "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Negate"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 1,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Change the Equation"
         }
       ]
     },
@@ -577,64 +565,16 @@
           "name": "Bitter Triumph"
         },
         {
-          "count": 1,
-          "name": "Temple Garden"
+          "count": 4,
+          "name": "Concealed Courtyard"
         },
         {
-          "count": 1,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 1,
-          "name": "Brushland"
-        },
-        {
-          "count": 3,
-          "name": "Cache Grab"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
           "count": 2,
-          "name": "Collective Brutality"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 3,
-          "name": "Darkbore Pathway"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Esika's Chariot"
-        },
-        {
-          "count": 1,
-          "name": "Overlord of the Balemurk"
-        },
-        {
-          "count": 1,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
-        },
-        {
-          "count": 1,
-          "name": "Lush Portico"
-        },
-        {
-          "count": 4,
-          "name": "Formidable Speaker"
-        },
-        {
-          "count": 4,
-          "name": "Parhelion II"
+          "name": "Cache Grab"
         },
         {
           "count": 1,
@@ -642,35 +582,55 @@
         },
         {
           "count": 4,
+          "name": "Esika's Chariot"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
+          "name": "Greasefang, Okiba Boss"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Parhelion II"
+        },
+        {
+          "count": 4,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 4,
           "name": "Professor of Symbology"
         },
         {
           "count": 4,
-          "name": "Concealed Courtyard"
+          "name": "Blooming Marsh"
         },
         {
           "count": 1,
-          "name": "Takenuma, Abandoned Mire"
+          "name": "Collective Brutality"
         },
         {
           "count": 1,
           "name": "Boseiju, Who Endures"
         },
         {
-          "count": 2,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Thundering Broodwagon"
         },
         {
           "count": 1,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
+          "name": "Yathan Roadwatcher"
         },
         {
           "count": 1,
@@ -678,21 +638,61 @@
         },
         {
           "count": 1,
-          "name": "Underground Mortuary"
-        },
-        {
-          "count": 2,
-          "name": "Temple Garden"
+          "name": "Caves of Koilos"
         },
         {
           "count": 1,
-          "name": "Yathan Roadwatcher"
+          "name": "Agadeem's Awakening"
+        },
+        {
+          "count": 1,
+          "name": "Overlord of the Balemurk"
+        },
+        {
+          "count": 4,
+          "name": "Formidable Speaker"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
         }
       ],
       "sideboard": [
         {
           "count": 1,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 1,
+          "name": "Enter the Avatar State"
+        },
+        {
+          "count": 1,
+          "name": "Origin of Metalbending"
+        },
+        {
+          "count": 2,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 2,
           "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 2,
+          "name": "Pest Control"
+        },
+        {
+          "count": 1,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 1,
+          "name": "True Ancestry"
+        },
+        {
+          "count": 1,
+          "name": "Ruinous Waterbending"
         },
         {
           "count": 2,
@@ -700,39 +700,7 @@
         },
         {
           "count": 1,
-          "name": "Enter the Avatar State"
-        },
-        {
-          "count": 2,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Loran of the Third Path"
-        },
-        {
-          "count": 1,
-          "name": "Origin of Metalbending"
-        },
-        {
-          "count": 1,
-          "name": "Abrupt Decay"
-        },
-        {
-          "count": 2,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 2,
-          "name": "Temporary Lockdown"
-        },
-        {
-          "count": 1,
-          "name": "Ashiok, Dream Render"
-        },
-        {
-          "count": 1,
-          "name": "True Ancestry"
+          "name": "Ral Zarek, Guest Lecturer"
         }
       ]
     },
@@ -740,116 +708,72 @@
       "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "W"
+        "W",
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
           "count": 4,
-          "name": "Consult the Star Charts"
-        },
-        {
-          "count": 1,
-          "name": "Fountainport"
-        },
-        {
-          "count": 2,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "Field of Ruin"
-        },
-        {
-          "count": 4,
-          "name": "No More Lies"
-        },
-        {
-          "count": 1,
-          "name": "Narset, Parter of Veils"
-        },
-        {
-          "count": 3,
-          "name": "Restless Anchorage"
-        },
-        {
-          "count": 2,
-          "name": "Change the Equation"
-        },
-        {
-          "count": 4,
-          "name": "Temporary Lockdown"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 4,
-          "name": "March of Otherworldly Light"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Irrigated Farmland"
-        },
-        {
-          "count": 1,
-          "name": "Field of Ruin"
-        },
-        {
-          "count": 2,
-          "name": "Teferi, Hero of Dominaria"
+          "name": "Hallowed Fountain"
         },
         {
           "count": 4,
           "name": "Dovin's Veto"
         },
         {
-          "count": 1,
-          "name": "Castle Ardenvale"
+          "count": 4,
+          "name": "Teferi, Hero of Dominaria"
         },
         {
           "count": 4,
-          "name": "Hengegate Pathway"
+          "name": "Seachrome Coast"
         },
         {
           "count": 2,
           "name": "Hall of Storm Giants"
         },
         {
-          "count": 3,
-          "name": "Deserted Beach"
-        },
-        {
-          "count": 3,
-          "name": "The Wandering Emperor"
-        },
-        {
-          "count": 2,
+          "count": 4,
           "name": "Plains"
         },
         {
-          "count": 2,
+          "count": 4,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 4,
+          "name": "No More Lies"
+        },
+        {
+          "count": 4,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 4,
+          "name": "Memory Deluge"
+        },
+        {
+          "count": 6,
+          "name": "Island"
+        },
+        {
+          "count": 4,
           "name": "Glacial Fortress"
+        },
+        {
+          "count": 4,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 4,
+          "name": "Deserted Beach"
+        },
+        {
+          "count": 4,
+          "name": "Temporary Lockdown"
         },
         {
           "count": 2,
@@ -860,66 +784,54 @@
           "name": "Petrified Hamlet"
         },
         {
+          "count": 2,
+          "name": "Restless Anchorage"
+        },
+        {
           "count": 4,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 3,
-          "name": "Omen of the Sea"
-        },
-        {
-          "count": 1,
-          "name": "The Unagi of Kyoshi Island"
+          "name": "Get Out"
         },
         {
           "count": 2,
-          "name": "Ultima"
-        },
-        {
-          "count": 3,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 4,
           "name": "Get Lost"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Rest in Peace"
         },
         {
-          "count": 2,
-          "name": "Narset's Reversal"
-        },
-        {
-          "count": 1,
-          "name": "Yorion, Sky Nomad"
-        },
-        {
-          "count": 2,
-          "name": "High Noon"
+          "count": 4,
+          "name": "Plunder the Trollshaws"
         },
         {
           "count": 2,
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 1,
-          "name": "Farewell"
-        },
+          "count": 2,
+          "name": "Ultima"
+        }
+      ],
+      "sideboard": [
         {
           "count": 1,
-          "name": "Three Steps Ahead"
+          "name": "Yorion, Sky Nomad"
         },
         {
-          "count": 3,
+          "count": 2,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 2,
           "name": "Kutzil's Flanker"
         },
         {
-          "count": 1,
-          "name": "Narset, Parter of Veils"
+          "count": 4,
+          "name": "Three Steps Ahead"
+        },
+        {
+          "count": 4,
+          "name": "Mystical Dispute"
         }
       ]
     },
@@ -1180,105 +1092,97 @@
       ],
       "main": [
         {
+          "count": 3,
+          "name": "Zack Fair"
+        },
+        {
+          "count": 2,
+          "name": "Basri, Tomorrow's Champion"
+        },
+        {
+          "count": 2,
+          "name": "Kellan, Daring Traveler"
+        },
+        {
           "count": 4,
           "name": "Adeline, Resplendent Cathar"
         },
         {
           "count": 4,
-          "name": "Brave the Elements"
-        },
-        {
-          "count": 2,
-          "name": "Castle Ardenvale"
-        },
-        {
-          "count": 2,
-          "name": "Cavern of Souls"
+          "name": "Thalia, Guardian of Thraben"
         },
         {
           "count": 3,
-          "name": "Coppercoat Vanguard"
-        },
-        {
-          "count": 3,
-          "name": "Cosmogrand Zenith"
-        },
-        {
-          "count": 3,
-          "name": "Dauntless Bodyguard"
-        },
-        {
-          "count": 2,
           "name": "Eiganjo, Seat of the Empire"
         },
         {
           "count": 3,
-          "name": "Hopeful Initiate"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 10,
-          "name": "Plains"
-        },
-        {
-          "count": 3,
-          "name": "Recruitment Officer"
-        },
-        {
-          "count": 3,
-          "name": "Reluctant Role Model"
-        },
-        {
-          "count": 2,
-          "name": "Sheltered by Ghosts"
-        },
-        {
-          "count": 3,
-          "name": "Thalia, Guardian of Thraben"
+          "name": "Kytheon, Hero of Akros"
         },
         {
           "count": 4,
           "name": "Thalia's Lieutenant"
         },
         {
-          "count": 3,
-          "name": "Veteran Survivor"
+          "count": 10,
+          "name": "Plains"
         },
         {
           "count": 2,
-          "name": "Kytheon, Hero of Akros"
+          "name": "The Queen of Dale"
+        },
+        {
+          "count": 3,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 4,
+          "name": "Mox Amber"
+        },
+        {
+          "count": 4,
+          "name": "Dauntless Bodyguard"
+        },
+        {
+          "count": 3,
+          "name": "Erode"
+        },
+        {
+          "count": 2,
+          "name": "Extraction Specialist"
+        },
+        {
+          "count": 2,
+          "name": "Arachne, Psionic Weaver"
+        },
+        {
+          "count": 2,
+          "name": "Thalia, Heretic Cathar"
+        },
+        {
+          "count": 3,
+          "name": "Mutavault"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Containment Priest"
+          "name": "Scout for Survivors"
         },
         {
-          "count": 2,
-          "name": "Declaration in Stone"
-        },
-        {
-          "count": 2,
-          "name": "Get Lost"
-        },
-        {
-          "count": 2,
-          "name": "Portable Hole"
-        },
-        {
-          "count": 2,
-          "name": "Requisition Raid"
-        },
-        {
-          "count": 2,
-          "name": "Rest in Peace"
+          "count": 4,
+          "name": "Seam Rip"
         },
         {
           "count": 3,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 2,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 4,
           "name": "Wedding Announcement"
         }
       ]

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-09-27T00:00:00Z",
+  "updated": "2026-09-28T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -963,6 +963,10 @@
       ],
       "main": [
         {
+          "count": 2,
+          "name": "Archenemy's Charm"
+        },
+        {
           "count": 3,
           "name": "Bitter Triumph"
         },
@@ -1003,10 +1007,6 @@
           "name": "Harvester of Misery"
         },
         {
-          "count": 1,
-          "name": "Malboro"
-        },
-        {
           "count": 4,
           "name": "Requiting Hex"
         },
@@ -1015,15 +1015,15 @@
           "name": "Restless Reef"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Stock Up"
         },
         {
-          "count": 1,
-          "name": "Strategic Betrayal"
+          "count": 4,
+          "name": "Superior Spider-Man"
         },
         {
-          "count": 9,
+          "count": 10,
           "name": "Swamp"
         },
         {
@@ -1037,28 +1037,12 @@
         {
           "count": 2,
           "name": "Winternight Stories"
-        },
-        {
-          "count": 4,
-          "name": "Superior Spider-Man"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
           "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Ideation"
         },
         {
           "count": 2,
@@ -1070,7 +1054,7 @@
         },
         {
           "count": 1,
-          "name": "M.O.D.O.K."
+          "name": "Harvester of Misery"
         },
         {
           "count": 1,
@@ -1085,12 +1069,20 @@
           "name": "Qarsi Revenant"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Quantum Riddler"
         },
         {
           "count": 1,
           "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Wan Shi Tong, Librarian"
+        },
+        {
+          "count": 1,
+          "name": "Preacher of the Schism"
         }
       ]
     },
