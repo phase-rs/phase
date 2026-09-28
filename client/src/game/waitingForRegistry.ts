@@ -120,6 +120,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "CoinFlipKeepChoice",
     "DieKeepChoice",
     "DigChoice",
+    "DigRestSplitChoice",
     "SurveilChoice",
     "RevealChoice",
     "SearchChoice",
