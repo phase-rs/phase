@@ -1066,6 +1066,17 @@ fn room_11_moonrise_towers_discounts_only_instant_and_sorcery_spells() {
     enter_room(&mut runner, 11);
     drain(&mut runner);
 
+    let room_grant = runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .find(|effect| effect.source_id == dungeon_sentinel_id(P0))
+        .expect("Moonrise Towers installs a transient cost grant");
+    assert_eq!(
+        room_grant.source_name, "Baldur's Gate Wilderness",
+        "the production room trigger captures its dungeon name at installation"
+    );
+
     // The {2}{R} instant is reduced to {R}: exactly {R} casts it.
     runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
         ManaType::Red,

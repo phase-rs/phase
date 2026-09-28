@@ -12481,25 +12481,16 @@ fn transient_modify_cost_present(state: &GameState) -> bool {
 }
 
 /// CR 601.2f: label a transient grant's row in the reduction-order prompt. A
-/// live source object names itself; a source that changed zones falls back to
-/// the name snapshotted at construction (CR 400.7); a dungeon sentinel —
-/// which is neither an object nor a snapshot — falls back to the controller's
-/// active dungeon, the honest granularity available (the grant names no room,
-/// and the marker may since have moved on). Without the last leg a room grant
-/// renders a blank row next to every real reducer.
+/// live source object names itself; a source that changed zones or is a
+/// dungeon sentinel uses the name snapshotted at construction (CR 400.7).
+/// Reading the current dungeon here would mislabel an earlier room's grant
+/// after its dungeon completes or the marker enters another dungeon.
 fn transient_grant_display_name(state: &GameState, tce: &TransientContinuousEffect) -> String {
     state
         .objects
         .get(&tce.source_id)
         .map(|obj| obj.name.clone())
         .or_else(|| (!tce.source_name.is_empty()).then(|| tce.source_name.clone()))
-        .or_else(|| {
-            state
-                .dungeon_progress
-                .get(&tce.controller)
-                .and_then(|progress| progress.current_dungeon)
-                .map(|dungeon| super::dungeon::get_definition(dungeon).name.to_string())
-        })
         .unwrap_or_default()
 }
 

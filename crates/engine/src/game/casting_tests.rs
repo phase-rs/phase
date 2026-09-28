@@ -29876,11 +29876,11 @@ fn transient_object_bound_grant_is_ignored_after_its_recipient_leaves() {
 }
 
 /// CR 601.2f: the reduction-order prompt labels a transient grant's row by its
-/// source — the live object first, the construction snapshot when the source
-/// changed zones (CR 400.7), and the controller's active dungeon when the
-/// source is a sentinel with neither (a room grant otherwise renders blank).
+/// source — the live object first, then the construction snapshot when the
+/// source changed zones (CR 400.7) or is a dungeon sentinel. A later dungeon
+/// must not rename the original room grant.
 #[test]
-fn transient_grant_display_name_falls_back_to_the_active_dungeon() {
+fn transient_grant_display_name_keeps_the_source_snapshot() {
     use crate::game::dungeon::{dungeon_sentinel_id, DungeonId, DungeonProgress};
 
     let mut state = GameState::new_two_player(42);
@@ -29925,7 +29925,28 @@ fn transient_grant_display_name_falls_back_to_the_active_dungeon() {
     assert_eq!(
         super::transient_grant_display_name(&state, &tces[1]),
         "Baldur's Gate Wilderness",
-        "a sentinel source falls back to the active dungeon"
+        "a sentinel source uses its construction-time dungeon"
+    );
+
+    state
+        .dungeon_progress
+        .get_mut(&PlayerId(0))
+        .unwrap()
+        .current_dungeon = None;
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[1]),
+        "Baldur's Gate Wilderness",
+        "completing the dungeon must not erase the grant's label"
+    );
+    state
+        .dungeon_progress
+        .get_mut(&PlayerId(0))
+        .unwrap()
+        .current_dungeon = Some(DungeonId::Undercity);
+    assert_eq!(
+        super::transient_grant_display_name(&state, &tces[1]),
+        "Baldur's Gate Wilderness",
+        "a later dungeon must not rename the grant"
     );
 
     // The snapshot leg: the source leaves the object map entirely, so only
