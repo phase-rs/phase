@@ -135,7 +135,11 @@ fn attack_trigger_refuses_truncated_third_sacrifice_type() {
     // whether the first two types were folded here or by the base type grammar.
     for phrase in [
         "sacrifice another creature or an artifact or an enchantment",
+        "sacrifice another creature or an artifact or enchantment",
+        "sacrifice another creature or an artifact, or an enchantment",
         "sacrifice another creature or artifact or an enchantment",
+        "sacrifice another creature or an artifact, enchantment",
+        "sacrifice another creature or an artifact, a Vehicle",
     ] {
         let oracle = format!(
             "Whenever you attack, you may {phrase}. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking."

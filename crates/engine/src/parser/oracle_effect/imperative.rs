@@ -1887,9 +1887,9 @@ pub(super) fn parse_targeted_action_ast(
         }
         let base_was_typed = matches!(target, TargetFilter::Typed(_));
         let (target, folded_rest) = fold_article_led_type_union(target, rem);
-        // CR 608.2c: An already-folded, article-less union can also leave an
-        // article-led third leg. Refuse only unfinished union continuations;
-        // a comma introducing a separate instruction is not another type.
+        // CR 608.2c: A union can leave a third leg whether the base is already
+        // folded or the article-led fold declined a right-hand Or. Reject the
+        // unfinished connector even when the resulting target is only Typed.
         let unfinished_union = nom_parse_lower(&folded_rest.trim_start().to_lowercase(), |input| {
             value(
                 (),
@@ -1901,11 +1901,29 @@ pub(super) fn parse_targeted_action_ast(
             .parse(input)
         })
         .is_some();
-        if matches!(target, TargetFilter::Or { .. })
-            && (base_was_typed || unfinished_union)
-            && all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
-                .parse(folded_rest.trim())
-                .is_err()
+        // Only a comma followed by a recognized instruction can leave this
+        // filter intact. A bare comma may introduce an unsupported type leg.
+        let next_instruction = nom_parse_lower(&folded_rest.trim_start().to_lowercase(), |input| {
+            value(
+                (),
+                (
+                    tag::<_, _, OracleError<'_>>(", "),
+                    opt(tag("then ")),
+                    verify(rest, |tail: &&str| {
+                        super::sequence::starts_clause_text_or_conjugated(tail)
+                    }),
+                ),
+            )
+            .parse(input)
+        })
+        .is_some();
+        if unfinished_union
+            || (base_was_typed
+                && matches!(target, TargetFilter::Or { .. })
+                && !next_instruction
+                && all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+                    .parse(folded_rest.trim())
+                    .is_err())
         {
             return None;
         }
@@ -18308,7 +18326,11 @@ mod tests {
     fn parse_sacrifice_refuses_incomplete_article_led_union() {
         for text in [
             "sacrifice another creature or an artifact or an enchantment",
+            "sacrifice another creature or an artifact or enchantment",
+            "sacrifice another creature or an artifact, or an enchantment",
             "sacrifice another creature or artifact or an enchantment",
+            "sacrifice another creature or an artifact, enchantment",
+            "sacrifice another creature or an artifact, a Vehicle",
         ] {
             assert!(
                 parse_targeted_action_ast(text, text, &mut ParseContext::default()).is_none(),
@@ -18318,18 +18340,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_sacrifice_articleless_union_keeps_unrelated_clause_remainder() {
-        let text = "sacrifice another creature or artifact, then draw a card";
-        let ast = parse_targeted_action_ast(text, text, &mut ParseContext::default())
-            .expect("a separate comma-led instruction is not another union leg");
-        let Effect::Sacrifice {
-            target: TargetFilter::Or { filters },
-            ..
-        } = lower_targeted_action_ast(ast)
-        else {
-            panic!("expected complete two-leg sacrifice before next instruction");
-        };
-        assert_eq!(filters.len(), 2);
+    fn parse_sacrifice_union_keeps_unrelated_clause_remainder() {
+        for text in [
+            "sacrifice another creature or artifact, then draw a card",
+            "sacrifice another creature or an artifact, then draw a card",
+        ] {
+            let ast = parse_targeted_action_ast(text, text, &mut ParseContext::default())
+                .expect("a separate comma-led instruction is not another union leg");
+            let Effect::Sacrifice {
+                target: TargetFilter::Or { filters },
+                ..
+            } = lower_targeted_action_ast(ast)
+            else {
+                panic!("expected complete two-leg sacrifice before next instruction: {text}");
+            };
+            assert_eq!(filters.len(), 2, "{text}");
+        }
     }
 
     #[test]
