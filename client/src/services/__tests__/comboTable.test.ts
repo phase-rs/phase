@@ -29,21 +29,43 @@ afterEach(() => {
 
 describe("ensureComboTable", () => {
   it("resolves unavailable for a missing artifact", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+    vi.stubGlobal("fetch", fetchMock);
     const runtime = await loadRuntime();
 
     await expect(runtime.ensureComboTable()).resolves.toBe("unavailable");
+    await expect(runtime.ensureComboTable()).resolves.toBe("unavailable");
+    expect(fetchMock).toHaveBeenCalledOnce();
     expect(wasm.loadComboTable).not.toHaveBeenCalled();
   });
 
-  it("resolves unavailable when the WASM loader rejects malformed JSON", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not json", { status: 200 })));
-    wasm.loadComboTable.mockImplementation(() => {
-      throw new Error("invalid combo table");
-    });
+  it("retries after the WASM loader rejects malformed JSON", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(new Response("not json", { status: 200 })));
+    vi.stubGlobal("fetch", fetchMock);
+    wasm.loadComboTable
+      .mockRejectedValueOnce(new Error("invalid combo table"))
+      .mockResolvedValueOnce(0);
     const runtime = await loadRuntime();
 
     await expect(runtime.ensureComboTable()).resolves.toBe("unavailable");
+    await expect(runtime.ensureComboTable()).resolves.toBe("loaded");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(wasm.loadComboTable).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries after transient WASM initialization failure", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{\"entries\":[]}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    wasm.init.mockRejectedValueOnce(new Error("WASM unavailable")).mockResolvedValueOnce(undefined);
+    wasm.loadComboTable.mockResolvedValue(0);
+    const runtime = await loadRuntime();
+
+    await expect(runtime.ensureComboTable()).resolves.toBe("unavailable");
+    await expect(runtime.ensureComboTable()).resolves.toBe("loaded");
+    expect(wasm.init).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("loads once and memoizes success across callers", async () => {

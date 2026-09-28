@@ -98,18 +98,31 @@ export async function ensureCardDatabase(): Promise<number> {
  */
 export function ensureComboTable(): Promise<ComboTableLoadOutcome> {
   if (!comboTablePromise) {
-    comboTablePromise = (async () => {
+    let definitiveMissing = false;
+    const pending: Promise<ComboTableLoadOutcome> = (async () => {
       try {
         await ensureWasmInit();
         const engine = await loadEngineModule();
         const response = await fetch(__COMBO_TABLE_URL__);
-        if (!response.ok) return "unavailable";
+        if (response.status === 404) {
+          definitiveMissing = true;
+          return "unavailable";
+        }
+        if (!response.ok) {
+          throw new Error(`Failed to load combo-table.json (${response.status})`);
+        }
         await engine.load_combo_table(await response.text());
         return "loaded";
       } catch {
         return "unavailable";
       }
     })();
+    comboTablePromise = pending;
+    void pending.then((outcome) => {
+      if (outcome === "unavailable" && !definitiveMissing && comboTablePromise === pending) {
+        comboTablePromise = null;
+      }
+    });
   }
   return comboTablePromise;
 }

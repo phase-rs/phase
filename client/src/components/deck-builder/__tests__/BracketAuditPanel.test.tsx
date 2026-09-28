@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
+import { createInstance } from "i18next";
+import { I18nextProvider } from "react-i18next";
 import { BracketAuditPanel } from "../BracketAuditPanel";
 import type { BracketEstimate, ComboMatch } from "../../../types/bracket";
+import plDeckBuilder from "../../../i18n/locales/pl/deck-builder.json";
 
 afterEach(cleanup);
 
@@ -112,13 +115,24 @@ describe("BracketAuditPanel", () => {
     expect(screen.queryByText(/Combo data:/)).not.toBeInTheDocument();
   });
 
-  it("renders none-found plus attribution when measured with no matches", () => {
+  it("renders clear combo checks alongside none-found when measured with no matches", () => {
     render(
       <BracketAuditPanel
         estimate={{
           ...estimate,
           combos: [],
-          combo_checks: [],
+          combo_checks: [
+            {
+              trigger: { kind: "standalone_two_card" },
+              floor: "upgraded",
+              outcome: { kind: "clear", cards_until_fired: 1 },
+              official_line: "No intentional two-card infinite combos.",
+              source_document: "Introducing Commander Brackets Beta",
+              source_published: "2025-02-11",
+              source_url: "https://example.com/brackets",
+              evidence: [],
+            },
+          ],
           combo_coverage: "measured",
           combo_provenance: {
             snapshot_date: "2026-09-01",
@@ -146,8 +160,54 @@ describe("BracketAuditPanel", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
     expect(screen.getByText("No two-card infinite combos found in this deck")).toBeInTheDocument();
+    expect(screen.getByText("Adding 1 more card could reach B3")).toBeInTheDocument();
     expect(
       screen.getByText("Combo data: Commander Spellbook, snapshot 2026-09-01"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the Polish few plural for two cards", async () => {
+    const instance = createInstance();
+    await instance.init({
+      lng: "pl",
+      fallbackLng: false,
+      ns: ["deck-builder"],
+      defaultNS: "deck-builder",
+      resources: { pl: { "deck-builder": plDeckBuilder } },
+      interpolation: { escapeValue: false },
+    });
+
+    render(
+      <I18nextProvider i18n={instance}>
+        <BracketAuditPanel
+          estimate={{
+            ...estimate,
+            combos: [],
+            combo_checks: [
+              {
+                trigger: { kind: "standalone_two_card" },
+                floor: "optimized",
+                outcome: { kind: "clear", cards_until_fired: 2 },
+                official_line: "No intentional two-card infinite combos.",
+                source_document: "Introducing Commander Brackets Beta",
+                source_published: "2025-02-11",
+                source_url: "https://example.com/brackets",
+                evidence: [],
+              },
+            ],
+            combo_coverage: "measured",
+            combo_provenance: null,
+          }}
+          manualBracket={null}
+          onCardClick={() => {}}
+        />
+      </I18nextProvider>,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: instance.t("bracket.showBreakdown") }),
+    );
+    expect(
+      screen.getByText("Dodanie jeszcze 2 karty może pozwolić osiągnąć B4"),
     ).toBeInTheDocument();
   });
 
@@ -209,15 +269,49 @@ describe("BracketAuditPanel", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
-    expect(screen.getByText("Heliod, Sun-Crowned")).toBeInTheDocument();
-    expect(screen.getByText("Walking Ballista")).toBeInTheDocument();
-    expect(screen.getByText(/Wins the game/)).toBeInTheDocument();
-    expect(screen.getByText("Unbounded damage")).toBeInTheDocument();
+    expect(screen.getAllByText("Heliod, Sun-Crowned")).toHaveLength(2);
+    expect(screen.getAllByText("Walking Ballista")).toHaveLength(2);
+    expect(screen.getAllByText(/Wins the game/)).toHaveLength(2);
+    expect(screen.getAllByText("Unbounded damage")).toHaveLength(2);
     expect(
       screen.getByText("Combo data: Commander Spellbook, snapshot 2026-09-01"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Heliod, Sun-Crowned" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Heliod, Sun-Crowned" })[0]);
     expect(onCardClick).toHaveBeenCalledWith("Heliod, Sun-Crowned");
+  });
+
+  it("renders a combo match even when it fires no floor", () => {
+    const combo: ComboMatch = {
+      pieces: [
+        { key: "dramatic-reversal", display: "Dramatic Reversal", zone: "library" },
+        { key: "isochron-scepter", display: "Isochron Scepter", zone: "library" },
+      ],
+      relevance: "contextual",
+      cardinality: "arguably_two_card",
+      assemble_cost: 4,
+      popularity: 20,
+      outcomes: [{ kind: "unbounded", resource: "mana" }],
+      axes: [],
+      source: "combo_pair",
+    };
+    render(
+      <BracketAuditPanel
+        estimate={{
+          ...estimate,
+          combos: [combo],
+          combo_checks: [],
+          combo_coverage: "measured",
+          combo_provenance: null,
+        }}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(screen.getByText("Dramatic Reversal")).toBeInTheDocument();
+    expect(screen.getByText("Isochron Scepter")).toBeInTheDocument();
+    expect(screen.getByText("Unbounded mana")).toBeInTheDocument();
+    expect(screen.getByText("Contextual")).toBeInTheDocument();
   });
 
   it("unmeasured and none-found produce different text", () => {
@@ -282,6 +376,30 @@ describe("BracketAuditPanel", () => {
     expect(
       screen.getByText("Kormus Bell + Urborg, Tomb of Yawgmoth (from the combo table)"),
     ).toBeInTheDocument();
+  });
+
+  it("renders combo pairs on a non-mass-land-denial axis", () => {
+    render(
+      <BracketAuditPanel
+        estimate={{
+          ...estimate,
+          axes: {
+            ...estimate.axes,
+            game_changers: {
+              ...estimate.axes.game_changers,
+              combo_pairs: [["Heliod, Sun-Crowned", "Walking Ballista"]],
+            },
+          },
+        }}
+        manualBracket={null}
+        onCardClick={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /breakdown/i }));
+    expect(
+      screen.getAllByText("Heliod, Sun-Crowned + Walking Ballista (from the combo table)")
+        .length,
+    ).toBeGreaterThan(0);
   });
 
   it("renders the estimated tier chip", () => {

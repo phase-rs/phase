@@ -560,6 +560,25 @@ describe("WasmAdapter", () => {
       await expect(adapter.estimateBracket(request)).rejects.toThrow("card DB error");
       expect(mockWorkerClient.estimateBracketForDeck).not.toHaveBeenCalled();
     });
+
+    it("rejects an invalid worker payload at the shared adapter boundary", async () => {
+      mockWorkerClient.estimateBracketForDeck.mockResolvedValueOnce({ tier: "upgraded" });
+      const request = {
+        deck: {
+          commander: ["Atraxa, Praetors' Voice"],
+          main_deck: ["Forest"],
+          sideboard: [],
+          companion: [],
+          signature_spell: [],
+          combo_declaration: { kind: "undeclared" as const },
+        },
+        declared_tier: null,
+      };
+
+      await expect(adapter.estimateBracket(request)).rejects.toThrow(
+        "estimate_bracket_for_deck returned an invalid bracket estimate",
+      );
+    });
   });
 
   describe("selectAiPod", () => {

@@ -287,7 +287,10 @@
       },
       "check": {
         "fired": "Fuerza B{{tier}} {{label}}",
-        "clear": "Añadir {{remaining}} carta(s) más podría alcanzar B{{tier}}",
+        "clear_one": "Añadir 1 carta más podría alcanzar B{{tier}}",
+        "clear_few": "Añadir {{count}} cartas más podría alcanzar B{{tier}}",
+        "clear_many": "Añadir {{count}} cartas más podría alcanzar B{{tier}}",
+        "clear_other": "Añadir {{count}} cartas más podría alcanzar B{{tier}}",
         "clearMax": "No se puede alcanzar B{{tier}} con coincidencias adicionales"
       },
       "outcome": {

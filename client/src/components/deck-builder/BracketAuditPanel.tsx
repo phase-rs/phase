@@ -13,6 +13,7 @@ import {
   type BarometerAuthority,
   type CommanderBracket,
   type ComboCardinality,
+  type ComboMatch,
   type ComboRelevance,
   type ComboResource,
 } from "../../types/bracket";
@@ -73,6 +74,53 @@ const COMBO_RELEVANCE_I18N_KEY: Record<ComboRelevance, string> = {
   contextual: "bracket.combo.relevance.contextual",
   helper: "bracket.combo.relevance.helper",
 };
+
+interface ComboMatchRowProps {
+  match: ComboMatch;
+  onCardClick: (cardName: string) => void;
+  className?: string;
+}
+
+function ComboMatchRow({ match, onCardClick, className }: ComboMatchRowProps) {
+  const { t } = useTranslation("deck-builder");
+
+  return (
+    <div className={className}>
+      {match.pieces.map((piece, pieceIndex) => (
+        <span key={piece.key}>
+          <button
+            type="button"
+            onClick={() => onCardClick(piece.display)}
+            className="inline-flex min-h-[44px] items-center text-slate-300 underline-offset-2 hover:underline sm:min-h-0"
+          >
+            {piece.display}
+          </button>
+          {pieceIndex === 0 && " + "}
+        </span>
+      ))}
+      <div className="text-[10px] text-slate-400">
+        {match.outcomes.map((outcome, outcomeIndex) => (
+          <span key={`${outcome.kind}-${outcomeIndex}`}>
+            {outcome.kind === "wins"
+              ? t("bracket.combo.outcome.wins")
+              : t("bracket.combo.outcome.unbounded", {
+                  resource: t(COMBO_RESOURCE_I18N_KEY[outcome.resource]),
+                })}
+            {outcomeIndex < match.outcomes.length - 1 && ", "}
+          </span>
+        ))}
+      </div>
+      <div className="mt-0.5 flex flex-wrap gap-1 text-[10px] text-slate-500">
+        <span className="rounded-full border border-white/10 px-1.5 py-0.5">
+          {t(COMBO_CARDINALITY_I18N_KEY[match.cardinality])}
+        </span>
+        <span className="rounded-full border border-white/10 px-1.5 py-0.5">
+          {t(COMBO_RELEVANCE_I18N_KEY[match.relevance])}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyReason }: Props) {
   const { t } = useTranslation("deck-builder");
@@ -217,12 +265,11 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
                       ))}
                     </div>
                   )}
-                  {check.axis === "mass_land_denial" &&
-                    estimate.axes.mass_land_denial.combo_pairs?.map(([first, second]) => (
-                      <div key={`${first}-${second}`} className="text-[10px] text-slate-500">
-                        {t("bracket.combo.pairSourced", { first, second })}
-                      </div>
-                    ))}
+                  {estimate.axes[check.axis].combo_pairs?.map(([first, second]) => (
+                    <div key={`${first}-${second}`} className="text-[10px] text-slate-500">
+                      {t("bracket.combo.pairSourced", { first, second })}
+                    </div>
+                  ))}
                   <div className="mt-1 text-[10px] text-slate-500">
                     <span>{check.official_line} </span>
                     <a
@@ -264,12 +311,11 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
                       {index < reading.contributing.length - 1 && ", "}
                     </span>
                   ))}
-                  {axis === "mass_land_denial" &&
-                    reading.combo_pairs?.map(([first, second]) => (
-                      <div key={`${first}-${second}`} className="text-[10px] text-slate-500">
-                        {t("bracket.combo.pairSourced", { first, second })}
-                      </div>
-                    ))}
+                  {reading.combo_pairs?.map(([first, second]) => (
+                    <div key={`${first}-${second}`} className="text-[10px] text-slate-500">
+                      {t("bracket.combo.pairSourced", { first, second })}
+                    </div>
+                  ))}
                 </dd>
               </div>
             );
@@ -283,105 +329,78 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
                 <div>{t("bracket.combo.unmeasured")}</div>
               ) : (
                 <>
-                  {(estimate.combos?.length ?? 0) === 0 ? (
+                  {(estimate.combos?.length ?? 0) === 0 && (
                     <div>{t("bracket.combo.noneFound")}</div>
-                  ) : (
-                    estimate.combo_checks?.map((check) => {
-                      const triggerLabel =
-                        check.trigger.kind === "standalone_two_card"
-                          ? t("bracket.combo.trigger.standaloneTwoCard")
-                          : t("bracket.combo.trigger.earlyTwoCard", {
-                              ceiling: check.trigger.assemble_ceiling,
-                            });
-                      const outcomeText =
-                        check.outcome.kind === "fired"
-                          ? t("bracket.combo.check.fired", {
+                  )}
+                  {estimate.combos?.map((match, matchIndex) => (
+                    <ComboMatchRow
+                      key={`${match.pieces[0].key}-${match.pieces[1].key}-${matchIndex}`}
+                      match={match}
+                      onCardClick={onCardClick}
+                    />
+                  ))}
+                  {estimate.combo_checks?.map((check) => {
+                    const triggerLabel =
+                      check.trigger.kind === "standalone_two_card"
+                        ? t("bracket.combo.trigger.standaloneTwoCard")
+                        : t("bracket.combo.trigger.earlyTwoCard", {
+                            ceiling: check.trigger.assemble_ceiling,
+                          });
+                    const outcomeText =
+                      check.outcome.kind === "fired"
+                        ? t("bracket.combo.check.fired", {
+                            tier: BRACKET_TIER_NUMERIC[check.floor],
+                            label: BRACKET_LABEL[BRACKET_TIER_NUMERIC[check.floor]],
+                          })
+                        : check.outcome.cards_until_fired !== null
+                          ? t("bracket.combo.check.clear", {
+                              count: check.outcome.cards_until_fired,
                               tier: BRACKET_TIER_NUMERIC[check.floor],
-                              label: BRACKET_LABEL[BRACKET_TIER_NUMERIC[check.floor]],
                             })
-                          : check.outcome.cards_until_fired !== null
-                            ? t("bracket.combo.check.clear", {
-                                remaining: check.outcome.cards_until_fired,
-                                tier: BRACKET_TIER_NUMERIC[check.floor],
-                              })
-                            : t("bracket.combo.check.clearMax", {
-                                tier: BRACKET_TIER_NUMERIC[check.floor],
-                              });
+                          : t("bracket.combo.check.clearMax", {
+                              tier: BRACKET_TIER_NUMERIC[check.floor],
+                            });
 
-                      return (
-                        <div
-                          key={`${check.trigger.kind}-${check.floor}`}
-                          className="grid grid-cols-[180px_1fr] items-start gap-2"
-                        >
-                          <div className="text-slate-300">{triggerLabel}</div>
-                          <div>
-                            <div
-                              className={
-                                check.outcome.kind === "fired" ? "text-amber-300" : undefined
-                              }
+                    return (
+                      <div
+                        key={`${check.trigger.kind}-${check.floor}`}
+                        className="grid grid-cols-[180px_1fr] items-start gap-2"
+                      >
+                        <div className="text-slate-300">{triggerLabel}</div>
+                        <div>
+                          <div
+                            className={
+                              check.outcome.kind === "fired" ? "text-amber-300" : undefined
+                            }
+                          >
+                            {outcomeText}
+                          </div>
+                          {check.evidence.map((match, matchIndex) => (
+                            <ComboMatchRow
+                              key={`${match.pieces[0].key}-${match.pieces[1].key}-${matchIndex}`}
+                              match={match}
+                              onCardClick={onCardClick}
+                              className="mt-1"
+                            />
+                          ))}
+                          <div className="mt-1 text-[10px] text-slate-500">
+                            <span>{check.official_line} </span>
+                            <a
+                              href={check.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="underline-offset-2 hover:underline"
                             >
-                              {outcomeText}
-                            </div>
-                            {check.evidence.map((match, matchIndex) => (
-                              <div
-                                key={`${match.pieces[0].key}-${match.pieces[1].key}-${matchIndex}`}
-                                className="mt-1"
-                              >
-                                {match.pieces.map((piece, pieceIndex) => (
-                                  <span key={piece.key}>
-                                    <button
-                                      type="button"
-                                      onClick={() => onCardClick(piece.display)}
-                                      className="inline-flex min-h-[44px] items-center text-slate-300 underline-offset-2 hover:underline sm:min-h-0"
-                                    >
-                                      {piece.display}
-                                    </button>
-                                    {pieceIndex === 0 && " + "}
-                                  </span>
-                                ))}
-                                <div className="text-[10px] text-slate-400">
-                                  {match.outcomes.map((outcome, outcomeIndex) => (
-                                    <span key={`${outcome.kind}-${outcomeIndex}`}>
-                                      {outcome.kind === "wins"
-                                        ? t("bracket.combo.outcome.wins")
-                                        : t("bracket.combo.outcome.unbounded", {
-                                            resource: t(
-                                              COMBO_RESOURCE_I18N_KEY[outcome.resource],
-                                            ),
-                                          })}
-                                      {outcomeIndex < match.outcomes.length - 1 && ", "}
-                                    </span>
-                                  ))}
-                                </div>
-                                <div className="mt-0.5 flex flex-wrap gap-1 text-[10px] text-slate-500">
-                                  <span className="rounded-full border border-white/10 px-1.5 py-0.5">
-                                    {t(COMBO_CARDINALITY_I18N_KEY[match.cardinality])}
-                                  </span>
-                                  <span className="rounded-full border border-white/10 px-1.5 py-0.5">
-                                    {t(COMBO_RELEVANCE_I18N_KEY[match.relevance])}
-                                  </span>
-                                </div>
-                              </div>
-                            ))}
-                            <div className="mt-1 text-[10px] text-slate-500">
-                              <span>{check.official_line} </span>
-                              <a
-                                href={check.source_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="underline-offset-2 hover:underline"
-                              >
-                                {t("bracket.check.source", {
-                                  document: check.source_document,
-                                  published: check.source_published,
-                                })}
-                              </a>
-                            </div>
+                              {t("bracket.check.source", {
+                                document: check.source_document,
+                                published: check.source_published,
+                              })}
+                            </a>
                           </div>
                         </div>
-                      );
-                    })
-                  )}
+                      </div>
+                    );
+                  })}
                   <div className="text-[10px] text-slate-500">
                     {t("bracket.combo.attribution", {
                       attribution: estimate.combo_provenance?.attribution ?? "",

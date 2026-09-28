@@ -287,7 +287,10 @@
       },
       "check": {
         "fired": "Erzwingt B{{tier}} {{label}}",
-        "clear": "Mit {{remaining}} weiteren Karte(n) wäre B{{tier}} erreichbar",
+        "clear_one": "Mit einer weiteren Karte wäre B{{tier}} erreichbar",
+        "clear_few": "Mit {{count}} weiteren Karten wäre B{{tier}} erreichbar",
+        "clear_many": "Mit {{count}} weiteren Karten wäre B{{tier}} erreichbar",
+        "clear_other": "Mit {{count}} weiteren Karten wäre B{{tier}} erreichbar",
         "clearMax": "B{{tier}} kann durch zusätzliche Treffer nicht erreicht werden"
       },
       "outcome": {

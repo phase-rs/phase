@@ -287,7 +287,10 @@
       },
       "check": {
         "fired": "Impone B{{tier}} {{label}}",
-        "clear": "Aggiungere altre {{remaining}} carte potrebbe permettere di raggiungere B{{tier}}",
+        "clear_one": "Aggiungere un'altra carta potrebbe permettere di raggiungere B{{tier}}",
+        "clear_few": "Aggiungere altre {{count}} carte potrebbe permettere di raggiungere B{{tier}}",
+        "clear_many": "Aggiungere altre {{count}} carte potrebbe permettere di raggiungere B{{tier}}",
+        "clear_other": "Aggiungere altre {{count}} carte potrebbe permettere di raggiungere B{{tier}}",
         "clearMax": "B{{tier}} non è raggiungibile con corrispondenze aggiuntive"
       },
       "outcome": {

@@ -31,7 +31,6 @@ import type {
 } from "./generated/interaction";
 import type {
   BracketDeckRequest,
-  BracketEstimate,
   BracketEstimateRequest,
 } from "../types/bracketEstimate";
 import type { DeckSignals } from "../types/deckSignals";
@@ -550,8 +549,8 @@ export class EngineWorkerClient {
     return this.request<string | null>({ type: "takeLastPanic" });
   }
 
-  async estimateBracketForDeck(request: BracketEstimateRequest): Promise<BracketEstimate | null> {
-    return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", request });
+  async estimateBracketForDeck(request: BracketEstimateRequest): Promise<unknown> {
+    return this.request<unknown>({ type: "estimateBracketForDeck", request });
   }
 
   async selectAiPod(
