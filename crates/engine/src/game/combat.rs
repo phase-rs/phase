@@ -3078,8 +3078,8 @@ fn validate_blockers_core(
         }
     }
 
-    // CR 509.1a + CR 509.1b: Enforce per-blocker limit on how many attackers it can block.
-    // Default is 1; ExtraBlockers { count: Some(n) } allows 1 + n; count: None = unlimited.
+    // CR 509.1a + CR 101.1: Enforce per-blocker limit on how many attackers it can block
+    // (extra_block_limit / block_capacity own the ExtraBlockers arithmetic).
     {
         for (&blocker_id, &num_blocked) in &attackers_per_blocker {
             if num_blocked <= 1 {
@@ -3089,7 +3089,6 @@ fn validate_blockers_core(
                 .objects
                 .get(&blocker_id)
                 .ok_or_else(|| format!("Blocker {:?} not found during limit check", blocker_id))?;
-            // Find the best ExtraBlockers grant on this creature
             let max_allowed = extra_block_limit(state, blocker);
             if num_blocked > max_allowed {
                 return Err(format!(
@@ -7238,6 +7237,7 @@ pub fn build_declare_blockers_waiting_for(
     let blocker_constraints = blocker_constraints_for_player(state, player, &valid_block_targets);
     let must_be_blocked_targets =
         must_be_blocked_targets_for_player(state, player, &valid_block_targets);
+    let block_capacities = block_capacities(state, &valid_block_targets);
     crate::types::game_state::WaitingFor::DeclareBlockers {
         player,
         valid_blocker_ids,
@@ -7245,6 +7245,7 @@ pub fn build_declare_blockers_waiting_for(
         block_requirements,
         blocker_constraints,
         must_be_blocked_targets,
+        block_capacities,
     }
 }
 
@@ -7540,21 +7541,50 @@ fn ring_bearer_unblockable_by_greater_power(
         && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
 }
 
-/// CR 509.1a + CR 509.1b: Compute the maximum number of attackers a creature can block.
-/// Default is 1. ExtraBlockers { count: Some(n) } adds n (so 1+n). count: None = unlimited (u32::MAX).
-/// Multiple ExtraBlockers stack: the best (highest) limit wins.
-fn extra_block_limit(state: &GameState, blocker: &GameObject) -> u32 {
-    let mut max: u32 = 1;
+/// CR 509.1a + CR 101.1: A creature blocks one attacker unless an effect (a
+/// card's text overriding the CR 509.1a default) lets it block more.
+/// `ExtraBlockers { count: Some(n) }` raises the limit by `n`; `count: None`
+/// lets it block any number, so there is no numeric ceiling. The counts of
+/// every active `ExtraBlockers` static are summed; an unlimited one wins.
+/// Single authority for both `extra_block_limit` (the declaration-validator's
+/// numeric form) and `block_capacities` (the prompt's display projection).
+fn block_capacity(state: &GameState, blocker: &GameObject) -> Option<u32> {
+    let mut total: u32 = 1;
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     for sd in super::functioning_abilities::active_static_definitions(state, blocker) {
         if let StaticMode::ExtraBlockers { count } = &sd.mode {
-            match count {
-                None => return u32::MAX, // unlimited
-                Some(n) => max = max.max(1 + n),
-            }
+            let n = (*count)?; // None = any number
+            total = total.saturating_add(n);
         }
     }
-    max
+    Some(total)
+}
+
+/// The numeric form of [`block_capacity`] the declaration checks use:
+/// `u32::MAX` stands in for "any number" so callers can compare without
+/// unwrapping an `Option`.
+fn extra_block_limit(state: &GameState, blocker: &GameObject) -> u32 {
+    block_capacity(state, blocker).unwrap_or(u32::MAX)
+}
+
+/// CR 509.1a + CR 101.1: for each key of `valid_block_targets`, that
+/// creature's block limit — `None` for any number. Display-only: the client
+/// renders it directly as the block-count stepper's ceiling; the declaration
+/// validator's own authority is `extra_block_limit`, computed from the same
+/// [`block_capacity`].
+fn block_capacities(
+    state: &GameState,
+    valid_block_targets: &HashMap<ObjectId, Vec<ObjectId>>,
+) -> HashMap<ObjectId, Option<u32>> {
+    valid_block_targets
+        .keys()
+        .filter_map(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| (*id, block_capacity(state, obj)))
+        })
+        .collect()
 }
 
 /// For each valid blocker, compute which attackers it can legally block.
@@ -17770,6 +17800,98 @@ mod tests {
             ]
         )
         .is_ok());
+    }
+
+    /// CR 509.1a + CR 101.1: `block_capacity` is the single authority
+    /// `extra_block_limit` and `block_capacities` both read; these rows pin
+    /// its `ExtraBlockers` arithmetic directly, independent of the
+    /// declaration validator.
+    #[test]
+    fn block_capacity_with_no_grant_is_one() {
+        let mut state = setup();
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+        assert_eq!(
+            block_capacity(&state, state.objects.get(&blocker).unwrap()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn block_capacity_with_one_extra_is_two() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let blocker = create_creature(&mut state, PlayerId(1), "Foriysian Brigade", 2, 4);
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: Some(1),
+            }));
+        assert_eq!(
+            block_capacity(&state, state.objects.get(&blocker).unwrap()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn block_capacity_with_unlimited_grant_is_none() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let blocker = create_creature(&mut state, PlayerId(1), "Palace Guard", 1, 4);
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: None,
+            }));
+        assert_eq!(
+            block_capacity(&state, state.objects.get(&blocker).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn block_capacity_stacks_multiple_numeric_grants_cumulatively() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let blocker = create_creature(&mut state, PlayerId(1), "Doubly Blessed Wall", 0, 4);
+        let defs = &mut state.objects.get_mut(&blocker).unwrap().static_definitions;
+        defs.push(StaticDefinition::new(StaticMode::ExtraBlockers {
+            count: Some(1),
+        }));
+        defs.push(StaticDefinition::new(StaticMode::ExtraBlockers {
+            count: Some(2),
+        }));
+        assert_eq!(
+            block_capacity(&state, state.objects.get(&blocker).unwrap()),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn block_capacity_unlimited_grant_wins_over_a_numeric_grant() {
+        use crate::types::ability::StaticDefinition;
+
+        let mut state = setup();
+        let blocker = create_creature(&mut state, PlayerId(1), "Doubly Blessed Wall", 0, 4);
+        let defs = &mut state.objects.get_mut(&blocker).unwrap().static_definitions;
+        defs.push(StaticDefinition::new(StaticMode::ExtraBlockers {
+            count: Some(2),
+        }));
+        defs.push(StaticDefinition::new(StaticMode::ExtraBlockers {
+            count: None,
+        }));
+        assert_eq!(
+            block_capacity(&state, state.objects.get(&blocker).unwrap()),
+            None
+        );
     }
 
     #[test]

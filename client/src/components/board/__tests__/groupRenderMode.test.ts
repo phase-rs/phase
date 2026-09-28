@@ -25,7 +25,7 @@ describe("getGroupRenderMode", () => {
   it("keeps one permanent as a single card", () => {
     expect(getGroupRenderMode(group(1), {
       manualExpanded: false,
-      containsCommittedAttackerDuringBlockers: false,
+      containsBlockableAttackerDuringBlockers: false,
     })).toBe("single");
   });
 
@@ -33,7 +33,7 @@ describe("getGroupRenderMode", () => {
     for (const count of [2, 3, 4]) {
       expect(getGroupRenderMode(group(count), {
         manualExpanded: false,
-        containsCommittedAttackerDuringBlockers: false,
+        containsBlockableAttackerDuringBlockers: false,
       })).toBe("staggered");
     }
   });
@@ -42,20 +42,34 @@ describe("getGroupRenderMode", () => {
     for (const count of [5, 8, 20]) {
       expect(getGroupRenderMode(group(count), {
         manualExpanded: false,
-        containsCommittedAttackerDuringBlockers: false,
+        containsBlockableAttackerDuringBlockers: false,
       })).toBe("collapsed");
     }
   });
 
-  it("lets manual expansion and committed attackers win over collapsed mode", () => {
+  it("lets manual expansion win over collapsed mode", () => {
     expect(getGroupRenderMode(group(5), {
       manualExpanded: true,
-      containsCommittedAttackerDuringBlockers: false,
+      containsBlockableAttackerDuringBlockers: false,
     })).toBe("expanded");
-    expect(getGroupRenderMode(group(5), {
-      manualExpanded: false,
-      containsCommittedAttackerDuringBlockers: true,
-    })).toBe("expanded");
+  });
+
+  it("keeps a blockable pile at or above the collapse threshold collapsed", () => {
+    for (const count of [5, 20]) {
+      expect(getGroupRenderMode(group(count), {
+        manualExpanded: false,
+        containsBlockableAttackerDuringBlockers: true,
+      })).toBe("collapsed");
+    }
+  });
+
+  it("expands a blockable group below the collapse threshold", () => {
+    for (const count of [2, 3, 4]) {
+      expect(getGroupRenderMode(group(count), {
+        manualExpanded: false,
+        containsBlockableAttackerDuringBlockers: true,
+      })).toBe("expanded");
+    }
   });
 
   it("reports sizing slots and stagger counts from the render mode", () => {

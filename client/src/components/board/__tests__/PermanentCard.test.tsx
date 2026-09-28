@@ -130,6 +130,7 @@ function renderPermanent(
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds,
+        blockableAttackerIds: new Set(),
         boardChoiceObjectIds,
         committedAttackerIds: new Set(),
         incomingAttackerCounts: new Map(),
@@ -1899,6 +1900,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([39]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2008,6 +2010,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2069,6 +2072,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2120,6 +2124,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2206,6 +2211,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set(),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2267,6 +2273,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([80]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
@@ -2330,6 +2337,7 @@ describe("PermanentCard", () => {
       <BoardInteractionContext.Provider
         value={{
           activatableObjectIds: new Set([81]),
+          blockableAttackerIds: new Set(),
           boardChoiceObjectIds: new Set(),
           committedAttackerIds: new Set(),
           incomingAttackerCounts: new Map(),
