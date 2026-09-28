@@ -7044,6 +7044,85 @@ pub fn spell_cost_is_payable_from_pool(
     })
 }
 
+/// CR 601.2a + CR 110.4: how many OTHER cards in `player`'s graveyard the
+/// per-turn slot announced in `announcement` could still authorize this turn:
+/// the value a cast gives up by spending that slot now. `0` for an unlimited
+/// grant or one that is not on offer. An engine fact for AI consumers.
+pub fn graveyard_slot_demand(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    announcement: &crate::types::game_state::AnnouncedGraveyardPermission,
+) -> u32 {
+    let Some(grant) = graveyard_permission_candidates(state, player, object_id)
+        .into_iter()
+        .find(|candidate| candidate.permission == announcement.permission)
+    else {
+        return 0;
+    };
+    if !grant.is_bounded() {
+        return 0;
+    }
+    let Some(graveyard) = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| &p.graveyard)
+    else {
+        return 0;
+    };
+    graveyard
+        .iter()
+        .copied()
+        .filter(|&other| other != object_id)
+        .filter(|&other| {
+            graveyard_permission_candidates(state, player, other)
+                .iter()
+                .any(|candidate| candidate.permission == announcement.permission)
+                && announcement.slot_type.is_none_or(|slot| {
+                    state
+                        .objects
+                        .get(&other)
+                        .is_some_and(|obj| obj.card_types.core_types.contains(&slot))
+                })
+        })
+        .count() as u32
+}
+
+/// CR 601.2a + CR 601.2f: can some announced way to cast `object_id` from the
+/// graveyard be paid now with automatic mana payment? When several graveyard
+/// permissions could authorize the cast there is no single exact cost
+/// (`effective_spell_cost` is `None` until one is announced), so the cast is
+/// payable when any option of its announcement menu is. `false` off the
+/// graveyard, or with no option.
+pub fn graveyard_cast_payable_by_some_option(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    probe: Option<&PriorityCastProbe>,
+) -> bool {
+    if state
+        .objects
+        .get(&object_id)
+        .is_none_or(|obj| obj.zone != Zone::Graveyard)
+    {
+        return false;
+    }
+    casting_variant_choice_set(state, player, object_id, probe)
+        .options
+        .iter()
+        .any(|option| {
+            option.authority.is_some()
+                && can_pay_cost_after_auto_tap_with_probe(
+                    state,
+                    player,
+                    object_id,
+                    &option.mana_cost,
+                    probe,
+                )
+        })
+}
+
 #[cfg(test)]
 mod pool_payability_tests {
     use std::sync::Arc;
@@ -8471,6 +8550,15 @@ fn prepare_spell_cast_announced(
         return Err(EngineError::ActionNotAllowed(
             "Lands are played, not cast".to_string(),
         ));
+    }
+
+    // CR 601.2a: an announcement naming a grant that shares its source's
+    // per-turn slot with another bounded grant is refused as unsupported (such
+    // grants are never offered; see `graveyard_permission_candidates`).
+    if let Some(announced) = announcement.filter(|_| graveyard_permission_route) {
+        if graveyard_grant_shares_source_slot(state, player, announced.permission) {
+            return Err(GraveyardAuthorityError::SharedSourceSlot.into());
+        }
     }
 
     // The ADMISSION decision itself lives in `castable_from_current_zone`; the bindings
@@ -15313,15 +15401,6 @@ pub fn handle_casting_variant_choice_with_payment_mode(
     let option = options
         .get(index)
         .ok_or_else(|| EngineError::InvalidAction("Invalid cast variant choice".to_string()))?;
-    if !casting_variant_choice_set(state, player, object_id, None)
-        .options
-        .iter()
-        .any(|fresh| fresh == option)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "Chosen cast variant is no longer legal".to_string(),
-        ));
-    }
     let candidate = prepare_casting_variant_on_face(
         state,
         player,
@@ -15334,6 +15413,17 @@ pub fn handle_casting_variant_choice_with_payment_mode(
             .as_ref()
             .map(|authority| &authority.announcement),
     )?;
+    // CR 601.2a: prepared first, so an announcement the resolver refuses
+    // (a stale or shared-slot grant) says why.
+    if !casting_variant_choice_set(state, player, object_id, None)
+        .options
+        .iter()
+        .any(|fresh| fresh == option)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Chosen cast variant is no longer legal".to_string(),
+        ));
+    }
     let fresh = casting_variant_choice_option(player, &candidate, option.face);
     if fresh != *option
         || !can_cast_prepared_now_with_probe(

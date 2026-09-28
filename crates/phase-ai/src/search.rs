@@ -1921,8 +1921,12 @@ pub fn fallback_action(
         WaitingFor::AlternativeCastChoice { .. } => Some(GameAction::ChooseAlternativeCast {
             choice: AlternativeCastDecision::Normal,
         }),
+        // CR 601.2a + CR 601.2b: the first option's method, announced under
+        // the permission that gives up least.
         WaitingFor::CastingVariantChoice { options, .. } => {
-            (!options.is_empty()).then_some(GameAction::ChooseCastingVariant { index: 0 })
+            crate::policies::graveyard_authority::fallback_announcement(state, options).or_else(
+                || (!options.is_empty()).then_some(GameAction::ChooseCastingVariant { index: 0 }),
+            )
         }
         WaitingFor::ChoosePermanentTypeSlot {
             available_slots, ..
@@ -3633,6 +3637,9 @@ pub(crate) fn deterministic_choice(
 ) -> Option<GameAction> {
     if let Some(action) = resolving_effect_mana_choice(state, ai_player, actions)
         .or_else(|| evoke_variant_choice(state, ai_player))
+        .or_else(|| {
+            crate::policies::graveyard_authority::same_method_announcement(state, ai_player)
+        })
     {
         return Some(action);
     }

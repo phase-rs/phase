@@ -13,8 +13,8 @@
 use super::blitz_em_dash_graveyard_cast::{
     add_bears_to_graveyard, add_exploration_broodship, add_mana, add_permission_host,
     add_permission_source, blitz_keyword, caldaia_blitz, cast_from_graveyard, creature_permission,
-    fill_mana, mycosynth_muldrotha_board, pay_offered_costs, sabin_permission_board, BOON_SATYR,
-    BROODSHIP_STATIONED, LEONARDO, LURRUS, MULDROTHA, RIVETEERS_DECOY,
+    fill_mana, mycosynth_muldrotha_board, offered_cast, pay_offered_costs, sabin_permission_board,
+    BOON_SATYR, BROODSHIP_STATIONED, LEONARDO, LURRUS, MULDROTHA, RIVETEERS_DECOY,
 };
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::parser::oracle::parse_oracle_text;
@@ -1019,4 +1019,185 @@ fn an_announced_menu_survives_json() {
         .act(GameAction::ChooseCastingVariant { index })
         .expect("the restored menu is answerable");
     assert!(once_used(&runner, lurrus));
+}
+
+// --- Two bounded grants on one source: unsupported, fails closed ----------
+
+/// A Caldaia Guardian in the graveyard beside `host`, a creature carrying
+/// `statics`, and optionally `granter`, a noncreature permanent carrying a
+/// static that grants creatures a permission.
+fn shared_slot_board(
+    statics: Vec<engine::types::ability::StaticDefinition>,
+    granter: Option<engine::types::ability::StaticDefinition>,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_creature(P0, "Permission Host", 1, 1);
+    for definition in statics {
+        builder.with_static_definition(definition);
+    }
+    let host = builder.id();
+    if let Some(grant) = granter {
+        scenario
+            .add_artifact_from_oracle(P0, "Permission Granter", "")
+            .with_static_definition(grant);
+    }
+    let guardian = scenario
+        .add_creature_to_graveyard(P0, "Caldaia Guardian", 4, 3)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Green],
+        })
+        .with_keyword(caldaia_blitz())
+        .id();
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    fill_mana(&mut runner, ManaType::Green);
+    (runner, host, guardian)
+}
+
+fn once_per_turn(
+    required: Option<engine::types::keywords::KeywordKind>,
+) -> engine::types::ability::StaticDefinition {
+    creature_permission(CastFrequency::OncePerTurn, required, vec![])
+}
+
+/// The open bounded grant B, as the menu offers it when it is the host's
+/// grant at `index` and the only bounded one there.
+fn announced_open_grant(index_filler: bool) -> CastingVariantChoiceOption {
+    let mut statics = Vec::new();
+    if index_filler {
+        statics.push(engine::types::ability::StaticDefinition::continuous());
+    }
+    statics.push(once_per_turn(None));
+    let (runner, host, guardian) = shared_slot_board(statics, None);
+    let options =
+        engine::game::casting::current_casting_variant_choice_options(runner.state(), P0, guardian);
+    options[option_index(&options, Method::Printed, host, None)
+        .expect("a lone bounded grant is offered (reach control)")]
+    .clone()
+}
+
+fn assert_shared_slot_refused(runner: &mut GameRunner, host: ObjectId, guardian: ObjectId) {
+    let options =
+        engine::game::casting::current_casting_variant_choice_options(runner.state(), P0, guardian);
+    assert!(
+        options
+            .iter()
+            .all(|option| announcement(option).is_none_or(|a| a.permission.source != host)),
+        "no grant on a source with two bounded grants is offered, got {options:?}"
+    );
+    assert!(
+        offered_cast(runner, guardian).is_none(),
+        "and no cast through them is a legal action"
+    );
+}
+
+/// CR 601.2a: one source carrying two once-per-turn graveyard permissions (A
+/// requires blitz, B is open) shares one per-turn ledger slot between them,
+/// which the engine can't charge separately. Neither is offered, and a menu
+/// answer naming B is refused as unsupported. (A lone bounded grant is offered:
+/// `announced_open_grant`.)
+#[test]
+fn two_bounded_grants_on_one_source_offer_neither() {
+    let open = announced_open_grant(true);
+    let (mut runner, host, guardian) = shared_slot_board(
+        vec![
+            once_per_turn(Some(engine::types::keywords::KeywordKind::Blitz)),
+            once_per_turn(None),
+        ],
+        None,
+    );
+    assert_shared_slot_refused(&mut runner, host, guardian);
+    let mut option = open;
+    option
+        .authority
+        .as_mut()
+        .unwrap()
+        .announcement
+        .permission
+        .source = host;
+    restore_menu(&mut runner, guardian, vec![option]);
+    let err = runner
+        .act(GameAction::ChooseCastingVariant { index: 0 })
+        .expect_err("a grant sharing its source's slot is refused");
+    assert!(
+        format!("{err:?}").contains("share one source"),
+        "refused as the unsupported shared slot, got {err:?}"
+    );
+    assert_eq!(runner.state().objects[&guardian].zone, Zone::Graveyard);
+}
+
+/// The same when the second bounded grant arrives during the game: a
+/// noncreature permanent grants creatures a once-per-turn permission, and the
+/// host already prints one.
+#[test]
+fn a_granted_second_bounded_grant_offers_neither() {
+    let grant = engine::types::ability::StaticDefinition::continuous()
+        .affected(engine::types::ability::TargetFilter::Typed(
+            engine::types::ability::TypedFilter::creature(),
+        ))
+        .modifications(vec![
+            engine::types::ability::ContinuousModification::GrantStaticAbility {
+                definition: Box::new(once_per_turn(Some(
+                    engine::types::keywords::KeywordKind::Blitz,
+                ))),
+            },
+        ]);
+    let (mut runner, host, guardian) = shared_slot_board(vec![once_per_turn(None)], Some(grant));
+    assert!(
+        runner.state().objects[&host].static_definitions.len() > 1,
+        "reach: the host received the granted permission, statics: {:?}",
+        runner.state().objects[&host].static_definitions
+    );
+    assert_shared_slot_refused(&mut runner, host, guardian);
+}
+
+// --- Affordability without a single exact cost ------------------------------
+
+fn casts(runner: &GameRunner, id: ObjectId) -> bool {
+    engine::ai_support::legal_actions(runner.state())
+        .iter()
+        .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id))
+}
+
+/// CR 601.2a + CR 601.2f: with two permissions there is no exact cost until
+/// one is announced (`effective_spell_cost` keeps its exact contract and says
+/// `None`), yet the cast is payable, so the existential check admits it and
+/// legal actions offer it; dispatch then asks for the announcement.
+#[test]
+fn a_two_permission_cast_is_payable_by_some_option() {
+    let (mut runner, bears) = bears_board(true, true);
+    assert_eq!(
+        engine::game::casting::effective_spell_cost(runner.state(), P0, bears),
+        None,
+        "no single exact cost before the announcement"
+    );
+    assert!(
+        engine::game::casting::graveyard_cast_payable_by_some_option(
+            runner.state(),
+            P0,
+            bears,
+            None
+        )
+    );
+    assert!(casts(&runner, bears));
+    menu(&mut runner, bears, CastPaymentMode::Auto);
+}
+
+/// The zero-option negative: without mana no option is payable, and no cast
+/// is offered.
+#[test]
+fn a_two_permission_cast_with_no_payable_option_is_not_offered() {
+    let (mut runner, bears) = bears_board(true, true);
+    runner.state_mut().players[0].mana_pool = Default::default();
+    assert!(
+        !engine::game::casting::graveyard_cast_payable_by_some_option(
+            runner.state(),
+            P0,
+            bears,
+            None
+        )
+    );
+    assert!(!casts(&runner, bears));
 }
