@@ -5866,6 +5866,9 @@ pub(crate) enum GraveyardAuthorityError {
     /// CR 118.9: the grant's own alternative cost, which a graveyard cast
     /// can't pay yet.
     AlternativeCostUnsupported,
+    /// CR 601.2f: the grant's extra cost is a choice of costs, which a
+    /// graveyard cast can't pay yet.
+    ChoiceCostUnsupported,
     /// A per-type permission with several slots, announced without one.
     SlotRequired,
     /// The announced slot is used, or isn't a type of the spell as cast.
@@ -5895,6 +5898,10 @@ impl From<GraveyardAuthorityError> for EngineError {
             }
             GraveyardAuthorityError::AlternativeCostUnsupported => {
                 "Casting from the graveyard for this permission's alternative cost is unsupported"
+            }
+            GraveyardAuthorityError::ChoiceCostUnsupported => {
+                "Casting from the graveyard for this permission's choice of extra costs is \
+                 unsupported"
             }
             GraveyardAuthorityError::SlotRequired => {
                 "Choose which permanent type this graveyard permission is used for"
@@ -6005,6 +6012,18 @@ fn bind_graveyard_authority(
             GraveyardAuthorityError::AlternativeCostUnsupported
         });
     }
+    // CR 601.2f + CR 601.2h: an extra cost that is a choice (`OneOf`, at any
+    // depth inside a composite) can't be paid on this route: the required-cost
+    // flow splits its mana from the rest only for resolved costs. Refused here,
+    // before any option is built, so the menu never offers a cast payment
+    // then rejects (unsupported and fails closed; coverage marks the shape).
+    if candidate
+        .extra_cost
+        .as_ref()
+        .is_some_and(|extra| cost_contains_choice(&extra.cost))
+    {
+        return Err(GraveyardAuthorityError::ChoiceCostUnsupported);
+    }
     if candidate.frequency != CastFrequency::OncePerTurnPerPermanentType {
         return match slot_type {
             None => Ok(GraveyardAuthorityResolution::Complete(
@@ -6029,6 +6048,16 @@ fn bind_graveyard_authority(
             authority: GraveyardCastAuthority::new(candidate, None),
             available: slots,
         }),
+    }
+}
+
+/// Whether `cost` contains a choice of costs (`AbilityCost::OneOf`) anywhere
+/// inside its composites.
+pub(crate) fn cost_contains_choice(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::OneOf { .. } => true,
+        AbilityCost::Composite { costs } => costs.iter().any(cost_contains_choice),
+        _ => false,
     }
 }
 
@@ -6502,8 +6531,10 @@ pub fn graveyard_lands_playable_by_permission(
 ///
 /// Only grants usable now (filter matches and per-turn slot available) are
 /// considered. Exactly one usable grant admits the land and its slot is spent.
-/// Two or more usable grants that are all unlimited admit it through the first
-/// (none spends a slot, so which is used changes nothing). Two or more usable
+/// Two or more usable grants that are all unlimited admit it through the first,
+/// which changes no land-play frequency accounting (none spends a slot); their
+/// other terms can differ, and announcing which one a land play uses is a
+/// follow-up (the Muldrotha ruling covers multiple effects). Two or more usable
 /// grants with one once-per-turn are a real announcement (spend that slot or
 /// not) with no land-play prompt to make it, so the source is skipped for that
 /// land: unsupported and fails closed. The cast side asks instead (one menu

@@ -1791,3 +1791,94 @@ fn aura_only_mana_pays_an_announced_bestow() {
         );
     }
 }
+
+// --- Extra costs that offer a choice -----------------------------------------
+
+/// Two unlimited creature permissions on separate hosts with Additional extra
+/// costs `first` and `second`, Grizzly Bears in the graveyard, 8 green mana.
+fn extra_cost_board(
+    first: engine::types::ability::AbilityCost,
+    second: engine::types::ability::AbilityCost,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    use engine::types::statics::{CastCostMode, CastExtraCost, StaticMode};
+    let permission = |cost| {
+        let mut permission = creature_permission(CastFrequency::Unlimited, None, vec![]);
+        if let StaticMode::GraveyardCastPermission { extra_cost, .. } = &mut permission.mode {
+            *extra_cost = Some(CastExtraCost {
+                cost,
+                mode: CastCostMode::Additional,
+            });
+        }
+        permission
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first_host = add_permission_host(&mut scenario, "First Permission", permission(first));
+    let second_host = add_permission_host(&mut scenario, "Second Permission", permission(second));
+    let bears = add_bears_to_graveyard(&mut scenario, "Grizzly Bears");
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    add_mana(&mut runner, ManaType::Green, 8);
+    (runner, first_host, second_host, bears)
+}
+
+fn choice_of_five_or_ten_life() -> engine::types::ability::AbilityCost {
+    use engine::types::ability::{AbilityCost, QuantityExpr};
+    AbilityCost::OneOf {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::generic(5),
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 10 },
+            },
+        ],
+    }
+}
+
+fn one_generic() -> engine::types::ability::AbilityCost {
+    engine::types::ability::AbilityCost::Mana {
+        cost: ManaCost::generic(1),
+    }
+}
+
+fn assert_choice_grant_refused_and_mana_grant_casts(first: engine::types::ability::AbilityCost) {
+    let (mut runner, choice_host, mana_host, bears) = extra_cost_board(first, one_generic());
+    let options =
+        engine::game::casting::current_casting_variant_choice_options(runner.state(), P0, bears);
+    assert!(
+        option_index(&options, Method::Printed, choice_host, None).is_none(),
+        "a permission whose extra cost is a choice is not offered: {options:?}"
+    );
+    assert!(option_index(&options, Method::Printed, mana_host, None).is_some());
+    cast_from_graveyard(&mut runner, bears).expect("the {1} permission casts");
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        5,
+        "{{1}}{{G}} plus the permission's {{1}}"
+    );
+}
+
+/// CR 601.2f: the engine can't pay an extra cost that is a choice
+/// (`AbilityCost::OneOf`), so a permission carrying one is unsupported and
+/// fails closed: it is not offered, and a {1} permission beside it is the one
+/// used.
+#[test]
+fn a_choice_extra_cost_permission_is_not_offered() {
+    assert_choice_grant_refused_and_mana_grant_casts(choice_of_five_or_ten_life());
+}
+
+/// The same with the choice inside a composite extra cost.
+#[test]
+fn a_choice_nested_in_a_composite_extra_cost_is_not_offered() {
+    use engine::types::ability::{AbilityCost, QuantityExpr};
+    assert_choice_grant_refused_and_mana_grant_casts(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            choice_of_five_or_ten_life(),
+        ],
+    });
+}

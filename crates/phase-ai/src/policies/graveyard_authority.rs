@@ -105,6 +105,9 @@ fn permission_mana(
             .iter()
             .map(|leg| permission_mana(state, player, object_id, leg))
             .sum(),
+        // Dormant: the engine never offers a graveyard permission whose extra
+        // cost contains a choice (it can't pay one), so no option reaches this
+        // arm. Kept as a conservative estimate should that change.
         AbilityCost::OneOf { costs } => costs
             .iter()
             .map(|leg| permission_mana(state, player, object_id, leg))

@@ -7174,6 +7174,11 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
 /// cast through it is refused. Unsupported and fails closed.
 pub const GRAVEYARD_ALTERNATIVE_COST_GAP: &str = "GraveyardCastPermission:alternative_cost";
 
+/// The coverage label for a graveyard-cast permission whose extra cost is a
+/// choice of costs (CR 601.2f): the graveyard route can't pay it, so the
+/// permission is never offered. Unsupported and fails closed.
+pub const GRAVEYARD_CHOICE_COST_GAP: &str = "GraveyardCastPermission:choice_cost";
+
 /// Two once-per-turn graveyard permissions printed on one face share the
 /// source's per-turn slot (see `SHARED_SOURCE_GRAVEYARD_SLOT_GAP`).
 fn check_shared_source_graveyard_slot(face: &CardFace, missing: &mut Vec<String>) {
@@ -7192,6 +7197,22 @@ fn check_shared_source_graveyard_slot(face: &CardFace, missing: &mut Vec<String>
             .any(|label| label == GRAVEYARD_ALTERNATIVE_COST_GAP)
     {
         missing.push(GRAVEYARD_ALTERNATIVE_COST_GAP.to_string());
+    }
+    let choice = |definition: &StaticDefinition| {
+        matches!(
+            &definition.mode,
+            StaticMode::GraveyardCastPermission {
+                extra_cost: Some(extra),
+                ..
+            } if crate::game::casting::cost_contains_choice(&extra.cost)
+        )
+    };
+    if face.static_abilities.iter().any(choice)
+        && !missing
+            .iter()
+            .any(|label| label == GRAVEYARD_CHOICE_COST_GAP)
+    {
+        missing.push(GRAVEYARD_CHOICE_COST_GAP.to_string());
     }
     if face
         .static_abilities
@@ -16392,6 +16413,35 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let mut face = make_face();
         face.static_abilities.push(definition);
         assert!(card_face_gaps(&face).contains(&GRAVEYARD_ALTERNATIVE_COST_GAP.to_string()));
+    }
+
+    /// A graveyard permission whose extra cost is a choice can't be paid by the
+    /// graveyard route: the face is unsupported with that reason.
+    #[test]
+    fn a_choice_cost_graveyard_permission_is_a_named_gap() {
+        use crate::types::ability::{AbilityCost, QuantityExpr};
+        use crate::types::statics::CastFrequency;
+        let mut definition = graveyard_permission(CastFrequency::Unlimited, None);
+        if let StaticMode::GraveyardCastPermission { extra_cost, .. } = &mut definition.mode {
+            *extra_cost = Some(crate::types::statics::CastExtraCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![AbilityCost::OneOf {
+                        costs: vec![
+                            AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 2 },
+                            },
+                            AbilityCost::Mana {
+                                cost: crate::types::mana::ManaCost::generic(2),
+                            },
+                        ],
+                    }],
+                },
+                mode: crate::types::statics::CastCostMode::Additional,
+            });
+        }
+        let mut face = make_face();
+        face.static_abilities.push(definition);
+        assert!(card_face_gaps(&face).contains(&GRAVEYARD_CHOICE_COST_GAP.to_string()));
     }
 
     /// A face that GRANTS a bounded graveyard permission to another object can
