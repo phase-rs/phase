@@ -456,7 +456,7 @@ fn not_named_under_your_control_reads_the_owner_after_a_stolen_death() {
     assert!(offered(&runner, revenant), "reach: own Hill Giant opens it");
 }
 
-/// CR 201.2: names compare under full Unicode case folding. With only Éowyn,
+/// CR 201.2a: names compare after Unicode lowercasing. With only Éowyn,
 /// Shieldmaiden dead, a "not named Éowyn, Shieldmaiden" gate stays CLOSED. An
 /// ASCII-only compare would miss "É"/"é" and wrongly open it. Reach: a Hill
 /// Giant death opens it.
@@ -484,6 +484,29 @@ fn not_named_gate_compares_non_ascii_names() {
         offered(&runner, revenant),
         "reach: a Hill Giant death opens it"
     );
+}
+
+/// CR 201.2a: the parser's whole-string lowercase form of ΟΣ ends in final
+/// sigma (ος). A character-by-character comparison yields οσ and would wrongly
+/// open a negated named death gate.
+#[test]
+fn not_named_gate_compares_contextual_unicode_lowercase() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let revenant = gated_card_in_graveyard(
+        &mut scenario,
+        P0,
+        "Test Revenant",
+        "a creature not named ΟΣ died this turn",
+    );
+    let excluded = scenario.add_creature(P0, "ΟΣ", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let mut runner = scenario.build();
+
+    dies(&mut runner, excluded);
+    assert!(!offered(&runner, revenant), "only a creature named ΟΣ died");
+    dies(&mut runner, giant);
+    assert!(offered(&runner, revenant), "a Hill Giant death opens it");
 }
 
 /// CR 201.2: the POSITIVE "named <non-ASCII name>" gate opens when that creature
