@@ -15,7 +15,7 @@ Keep earlier accepted checkpoints and phase-chain evidence intact. If synchroniz
 
 ## Ship through the merge queue
 
-When you can push to `phase-rs/phase` (`gh api repos/phase-rs/phase --jq .permissions.push` prints `true`), ship every accepted run with [`/ship-commits`](../ship-commits/SKILL.md) unless the task says local-only. Give it `BASE_SHA..CANDIDATE_SHA`; for a chartered run, the run's base to the last accepted phase. Its cherry-pick onto a fresh `origin/main` in a ship worktree replaces steps 1–2 above. Before it pushes, run steps 3–4 in that worktree at the cherry-picked head, which becomes the PR head, and add the handoff block below to the PR body. A cherry-pick conflict stops the ship; report it. Contributors, who cannot push there, open a PR from their fork as above when the task asks for one.
+When a maintainer, someone who can push to `phase-rs/phase` (`gh api repos/phase-rs/phase --jq .permissions.push` prints `true`), invoked this run directly, ship it with [`/ship-commits`](../ship-commits/SKILL.md) unless the task says local-only. Push permission alone is not consent: a run spawned by another skill, workflow or agent ships only when its task asks. Give it `BASE_SHA..CANDIDATE_SHA`; for a chartered run, the run's base to the last accepted phase. Its cherry-pick onto a fresh `origin/main` in a ship worktree replaces steps 1–2 above. Before it pushes, run steps 3–4 in that worktree at the cherry-picked head, which becomes the PR head, and add the handoff block below to the PR body. A cherry-pick conflict stops the ship; report it. Contributors, who cannot push there, open a PR from their fork as above when the task asks for one.
 
 ## Post-acceptance PR handoff (non-gating)
 

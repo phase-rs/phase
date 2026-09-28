@@ -174,7 +174,7 @@ Spawn a fresh agent to invoke `review-engine-impl` against `BASE_SHA..CANDIDATE_
 
 Accept when the plan is clean or closed by the small-change lane; the review returns no findings, only comment-only corrections applied and proven as Step 6 says, or only residuals the run limits allow, listed; the completion checks pass at the candidate; and `rev-parse HEAD == CANDIDATE_SHA` — the correction commit when one exists. In a chartered run this is per-phase acceptance, with `PHASE_BASE_SHA` substituted; it emits no Final Report snapshot, ship, or PR handoff, which are run-level only.
 
-After final acceptance, if you can push to `phase-rs/phase`, ship the run with `/ship-commits` as [pr-handoff.md](pr-handoff.md#ship-through-the-merge-queue) describes, unless the task says local-only. Otherwise, when the task includes opening a PR, follow [pr-handoff.md](pr-handoff.md).
+After final acceptance of a run a maintainer invoked directly, ship it with `/ship-commits` as [pr-handoff.md](pr-handoff.md#ship-through-the-merge-queue) describes, unless the task says local-only. Otherwise, when the task includes opening a PR, follow [pr-handoff.md](pr-handoff.md).
 
 ## Final Report
 
